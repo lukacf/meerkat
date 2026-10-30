@@ -4,7 +4,7 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Meta authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
 requests with JWTs. Signature and claim validation establishes a principal;
@@ -312,6 +312,12 @@ upgrade. A gateway
 without a durable state directory refuses `meta/console/revoke_sessions`
 (`-32004`) rather than keep a revocation a restart would lose. Revocations
 are kept for as long as the file exists.
+
+A candidate launch (`runtime_options.mob_composition.authority =
+"candidate"`) reads that file when it starts, so it refuses the sessions
+revoked before it. It writes nothing to the file: it refuses
+`meta/console/revoke_sessions` (revoke on the authoritative launch), and it
+lists a principal whose token has no `exp` in its own `meta/status` only.
 
 A revocation is written to that file before it takes effect. On Unix the
 state directory is synced after the file is replaced; when that sync fails,

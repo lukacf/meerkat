@@ -82,6 +82,19 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 const MEERKAT_RESIDENCY_ARM_PREFIXES: &[&str] =
     &["ResolveEmptyResumeRetirement", "ClaimCompositionResidency"];
 
+/// Transition-name prefixes of the `MeerkatMachine` arms that hold a kept
+/// governed input for its controller client and release it, and of the arms
+/// whose guards refuse a held input or its run (`StageForRun`, `MarkApplied`,
+/// `MarkAppliedPendingConsumption`, and `ResumeRun`, which also waits for a
+/// resumed run's destination). Each must name at least one arm.
+const MEERKAT_CONTROLLER_HOLD_ARM_PREFIXES: &[&str] = &[
+    "HoldInputController",
+    "ReleaseInputController",
+    "StageForRun",
+    "MarkApplied",
+    "ResumeRun",
+];
+
 /// Helper-name prefixes of the residency helpers: they take member facts
 /// only, never the lifecycle phase.
 const RESIDENCY_HELPER_PREFIXES: &[&str] = &[
@@ -389,6 +402,41 @@ fn meerkat_residency_arm_guards_never_mix_the_lifecycle_phase() {
     assert!(
         missing.is_empty(),
         "expected MeerkatMachine residency arm families are missing from the DSL: {missing:?}"
+    );
+}
+
+/// The `MeerkatMachine` controller-hold arms, and the arms whose guards read
+/// the holds or a resumed run's destination, follow the same rule: one arm
+/// per lifecycle phase, with no phase read in a guard or a guard call.
+#[test]
+fn meerkat_controller_hold_arm_guards_never_mix_the_lifecycle_phase() {
+    let source = without_line_comments(&dsl_source("meerkat_machine.rs"));
+    let transitions = scanned_transitions(&source);
+    let is_controller_hold_arm = |name: &str| {
+        MEERKAT_CONTROLLER_HOLD_ARM_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    };
+    let violations = phase_mixing_guards(&transitions, is_controller_hold_arm);
+    assert!(
+        violations.is_empty(),
+        "MeerkatMachine controller-hold arms must split per lifecycle phase instead of reading \
+         it in a guard or a guard call (schema lowering strips those):\n{}",
+        violations.join("\n")
+    );
+    let missing: Vec<&str> = MEERKAT_CONTROLLER_HOLD_ARM_PREFIXES
+        .iter()
+        .copied()
+        .filter(|family| {
+            !transitions
+                .iter()
+                .any(|transition| transition.name.starts_with(family))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "expected MeerkatMachine controller-hold arm families are missing from the DSL: \
+         {missing:?}"
     );
 }
 

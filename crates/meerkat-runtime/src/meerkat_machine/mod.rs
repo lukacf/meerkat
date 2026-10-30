@@ -1244,6 +1244,7 @@ pub use admitted_original::{
 };
 mod resumed_run;
 mod retained_resume;
+pub(crate) use retained_resume::SettledRefusedResumes;
 mod runtime_control;
 pub use agent_mandate::{
     AgentBindingUnavailable, AgentMandateError, SessionAgentBinding, SessionAgentMandate,
@@ -1380,17 +1381,29 @@ struct UnregisterTeardownCoordinator {
     /// asked for. `BeginUnregisterSession` records it once; from then on the
     /// generated state and the durable progress own it.
     queued_inputs: UnregisterDisposition,
+    /// The disposition the machine recorded for this unregister, which the
+    /// owned worker reads from the generated state and publishes once the
+    /// machine began the unregister; empty until then. Every observer of
+    /// this coordinator holds it.
+    recorded: UnregisterRecordedDisposition,
 }
+
+/// The disposition `BeginUnregisterSession` recorded for one unregister, as
+/// its owned worker publishes it from the generated state: a read of the
+/// machine's record, set at most once.
+type UnregisterRecordedDisposition = Arc<std::sync::OnceLock<UnregisterDisposition>>;
 
 /// Read-only terminal-result observer for one exact runtime unregister
 /// coordinator. The observer carries no mutation authority and cannot start a
 /// retry; it only retains the coordinator's result channel plus the opaque
-/// registration identity used for its atomic admission.
+/// registration identity used for its atomic admission, and the disposition
+/// the machine recorded for that unregister once it is published.
 #[derive(Clone)]
 pub struct RuntimeSessionUnregisterObserver {
     registration: RuntimeSessionRegistrationWitness,
     coordinator_id: uuid::Uuid,
     result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+    recorded: UnregisterRecordedDisposition,
 }
 
 impl RuntimeSessionUnregisterObserver {
@@ -1398,11 +1411,13 @@ impl RuntimeSessionUnregisterObserver {
         registration: RuntimeSessionRegistrationWitness,
         coordinator_id: uuid::Uuid,
         result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+        recorded: UnregisterRecordedDisposition,
     ) -> Self {
         Self {
             registration,
             coordinator_id,
             result_rx,
+            recorded,
         }
     }
 
@@ -1410,6 +1425,26 @@ impl RuntimeSessionUnregisterObserver {
     #[must_use]
     pub fn registration(&self) -> &RuntimeSessionRegistrationWitness {
         &self.registration
+    }
+
+    /// The disposition the machine recorded for the exact unregister this
+    /// observer follows, for the run in flight and the inputs queued behind
+    /// it: what `BeginUnregisterSession` (or the unserved attachment's begin)
+    /// recorded, which can differ from what any caller asked for (a keep is
+    /// recorded as a stop for a registration that served live work, and an
+    /// unserved attachment's unregister records a stop for a requeue). A call
+    /// that joins an unregister already in progress gets that unregister's,
+    /// whatever it passed. `None` until the unregister's owned worker
+    /// published it, right after the machine began the unregister: once
+    /// [`Self::wait_for_result`] returned `Ok`, it is `Some` unless that
+    /// unregister found the registration already gone. Nothing is polled:
+    /// the worker publishes it to every observer of the unregister.
+    #[must_use]
+    pub fn queued_inputs(&self) -> Option<UnregisterQueuedInputs> {
+        self.recorded
+            .get()
+            .copied()
+            .map(UnregisterDisposition::to_queued_inputs)
     }
 
     /// Return the terminal result when published, without waiting or
@@ -1603,6 +1638,18 @@ impl UnregisterDisposition {
 
     pub(crate) fn dsl_disposition(self) -> (dsl::UnregisterQueuedInputsDisposition, u64) {
         (self.queued_inputs, self.requeue_max_age_ms)
+    }
+
+    /// This disposition as an [`UnregisterQueuedInputs`]: a requeue's max
+    /// age is the whole milliseconds it records.
+    pub(crate) fn to_queued_inputs(self) -> UnregisterQueuedInputs {
+        match self.queued_inputs {
+            dsl::UnregisterQueuedInputsDisposition::Stop => UnregisterQueuedInputs::Stop,
+            dsl::UnregisterQueuedInputsDisposition::Requeue => UnregisterQueuedInputs::Requeue {
+                max_age: std::time::Duration::from_millis(self.requeue_max_age_ms),
+            },
+            dsl::UnregisterQueuedInputsDisposition::Keep => UnregisterQueuedInputs::Keep,
+        }
     }
 }
 
@@ -3934,6 +3981,12 @@ const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
 const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
     "a kept run outlived the stop's max age and was settled instead of resumed";
 
+/// The runtime-termination reason a kept governed input with no way back to
+/// its controller client, or a kept run it is the first input of, carries to
+/// its interaction terminals.
+const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
+    "a kept governed input's controller cannot be supplied again without a fresh authentication";
+
 impl PendingRuntimeExecutorAttachment {
     /// The driver and completion registry of this exact pending (non-serving)
     /// attachment, under its retained mutation guard.
@@ -4366,6 +4419,193 @@ impl PendingRuntimeExecutorAttachment {
             }));
         }
         Ok(expired)
+    }
+
+    /// End, before this attachment can serve, every kept governed input with
+    /// no way back to its controller client: an input this registration
+    /// recovered from the store that was admitted with an authority
+    /// association of its own (a governed prompt, for example), not as a
+    /// resume of retained work, whose host is asked for the client again. A
+    /// controller client never survives the store, and the host contract can
+    /// supply such an input's client again only with a fresh authentication
+    /// of its caller, so it could never run: each run of it would fail before
+    /// the model is called until its attempts ran out, and while it waited
+    /// the whole machine would refuse controller grant changes, credential
+    /// publications and auth lease releases. Each queued one is abandoned
+    /// through the machine's `AbandonInput` as a refused resume
+    /// ([`crate::input_state::InputAbandonReason::ResumeRefused`]), in its own
+    /// durable commit with the runless runtime-termination carrier it is owed.
+    ///
+    /// A run this registration keeps resumable whose first input (the input
+    /// whose client the resumed run executes with) is such an input is settled
+    /// the same way first, as a whole, with its carriers in the same commit,
+    /// instead of stopping the runtime loop when it would resume. Every
+    /// attachment passes here before its serving gate, after the expired
+    /// requeue settlement. Returns the ended inputs.
+    pub(crate) async fn settle_kept_governed_inputs_without_controller(
+        &mut self,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let (driver, completions) = self
+            .exact_pending_driver("kept governed input settlement")
+            .await?;
+        let mut reload_for_run = None;
+        let mut settled_batches = Vec::new();
+        let mut settled_terminal = None;
+        let mut settled_inputs = Vec::new();
+        let ended = {
+            let mut driver = driver.lock().await;
+            let mut ended = Vec::new();
+            let mut settled_run = None;
+            if let Some(run_id) = driver.resumable_run_id()
+                && driver.resumed_run_first_input_lacks_controller(&run_id)
+            {
+                let crate::meerkat_machine::driver::SettledResumableRun {
+                    abandoned,
+                    batches,
+                    terminal,
+                } = driver
+                    .settle_resumable_run_with_terminals(
+                        &run_id,
+                        crate::input_state::InputAbandonReason::ResumeRefused,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                    )
+                    .await?;
+                settled_batches = batches;
+                settled_terminal = terminal;
+                tracing::warn!(
+                    session_id = %self.witness.session_id(),
+                    %run_id,
+                    inputs = abandoned.len(),
+                    "a kept run's first input is kept governed work whose controller cannot be supplied again; settled as a refused resume instead of resumed"
+                );
+                if !abandoned.is_empty() {
+                    // Committed: told once this attachment releases its
+                    // mutation guard.
+                    self.runless_terminal.owe();
+                }
+                ended.extend(abandoned);
+                settled_run = Some(run_id);
+            }
+            let candidates = driver.queued_kept_governed_inputs_without_controller();
+            if !candidates.is_empty() {
+                let runless_terminal = &mut self.runless_terminal;
+                let outcome = driver
+                    .settle_refused_queued_resumes(
+                        &candidates,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        || runless_terminal.owe(),
+                    )
+                    .await;
+                tracing::warn!(
+                    session_id = %self.witness.session_id(),
+                    inputs = outcome.settled.len(),
+                    "kept governed inputs whose controller cannot be supplied again ended as refused resumes before the attachment serves"
+                );
+                ended.extend(outcome.settled.iter().map(|(input_id, _)| input_id.clone()));
+                settled_inputs = outcome.settled;
+                if let Some(error) = outcome.failure {
+                    return Err(error);
+                }
+            }
+            // The settled run never resumes, so its provisional tail is
+            // repaired as an interrupted run's, after the abandonment
+            // committed, as for an expired kept run.
+            if let Some(run_id) = settled_run
+                && driver
+                    .repair_settled_run_tail(self.witness.session_id(), &run_id)
+                    .await
+            {
+                reload_for_run = Some(run_id);
+            }
+            ended
+        };
+        if !ended.is_empty() {
+            // The old input is durably ended; a retry is a new request with a
+            // fresh authentication of its caller.
+            completions.lock().await.fail_inputs(
+                ended.clone(),
+                crate::completion::CompletionWaitError::AttachmentReplaced,
+            );
+        }
+        if let Some(run_id) = reload_for_run {
+            let reason = format!("refused kept run {run_id}'s provisional tail still stands");
+            self.machine
+                .require_session_durability_reload(
+                    self.witness.session_id(),
+                    "refused_kept_run_tail_repair",
+                    reason.clone(),
+                )
+                .await;
+            return Err(RuntimeDriverError::Internal(format!(
+                "{reason}; the session reloads before it serves"
+            )));
+        }
+        // Published detached, through the publisher the attachment already
+        // carries, as an expired kept run's are: the session actor answers a
+        // publication only once this attachment is served.
+        if !settled_batches.is_empty() || settled_terminal.is_some() || !settled_inputs.is_empty() {
+            let publication_handle = self
+                .machine
+                .sessions
+                .read()
+                .await
+                .get(self.witness.session_id())
+                .and_then(RuntimeSessionEntry::publication_handle);
+            let session_id = self.witness.session_id().clone();
+            let driver = Arc::clone(&driver);
+            let completions = Arc::clone(&completions);
+            let deadline =
+                meerkat_core::time_compat::Instant::now() + SETTLED_RUN_TERMINAL_PUBLICATION_BOUND;
+            drop(crate::tokio::spawn(async move {
+                if let Err(error) =
+                    crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        &settled_batches,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        Some(deadline),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "the refused kept run's terminals were not published; their outboxes stay for the next drain"
+                    );
+                }
+                for (input_id, directed_owner) in &settled_inputs {
+                    if let Err(error) =
+                        crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                            &driver,
+                            Some(&completions),
+                            publication_handle.as_deref(),
+                            std::slice::from_ref(input_id),
+                            directed_owner.as_ref(),
+                            KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                            Some(deadline),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            %input_id,
+                            %error,
+                            "a refused kept governed input's terminal was not published; its outbox stays for the next drain"
+                        );
+                    }
+                }
+                if let Some(terminal) = settled_terminal.as_ref() {
+                    crate::control_plane::publish_settled_run_terminal_before(
+                        publication_handle.as_deref(),
+                        terminal,
+                        Some(deadline),
+                    )
+                    .await;
+                }
+            }));
+        }
+        Ok(ended)
     }
 
     /// Settle the session's interrupted-run evidence before serving, in a
@@ -7703,6 +7943,12 @@ impl MeerkatMachine {
     /// waiters that leave after it spawn nothing, since its settlement is
     /// theirs too. Without a cleanup runtime the next ready-gated caller
     /// settles inline instead.
+    ///
+    /// The other callers that leave a degraded session without settling it
+    /// hand off the same way: an input admission whose store write degraded
+    /// the session (past its deadline, or answered with an error), and the
+    /// reload-required discard of a registration whose runtime loop is still
+    /// attached.
     fn hand_off_degraded_gate_settlement(&self, session_id: &SessionId, gate: SessionMutationGate) {
         #[cfg(test)]
         self.test_degraded_gate_settlement_hand_offs
@@ -11610,16 +11856,20 @@ pub struct MeerkatMachineShared {
     /// stores' commit outcome declarations in.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_commit_busy_window: StdMutex<Option<std::time::Duration>>,
-    /// Test probe: how many ready-gated waiters left on the degradation
-    /// signal and handed the degraded settlement to a process-owned task.
+    /// Test probe: how many times a caller that left a degraded session
+    /// without settling it handed the degraded settlement to a process-owned
+    /// task (a ready-gated waiter that left on the degradation signal, an
+    /// input admission whose store write degraded the session, or the
+    /// reload-required discard of a registration whose runtime loop is still
+    /// attached). Counts calls: a call that finds a task already waiting for
+    /// the gate spawns nothing (see `test_degraded_gate_settlement_spawns`).
     #[cfg(test)]
     test_degraded_gate_settlement_hand_offs: std::sync::atomic::AtomicUsize,
     /// The mutation gates, by address, with a degraded settlement task
-    /// waiting to run. A ready-gated waiter that leaves on the degradation
-    /// signal spawns that task only for a gate that has none, so callers that
-    /// keep arriving behind one holder add no tasks. The task keeps its gate
-    /// alive while the gate is listed, so a listed address is never another
-    /// gate's.
+    /// waiting to run. A caller that hands the settlement off spawns that
+    /// task only for a gate that has none, so callers that keep arriving
+    /// behind one holder add no tasks. The task keeps its gate alive while
+    /// the gate is listed, so a listed address is never another gate's.
     pending_degraded_gate_settlements: StdMutex<HashSet<usize>>,
     /// Test probe: how many degraded settlement tasks were spawned.
     #[cfg(test)]
@@ -14614,6 +14864,9 @@ mod durability_gate_wait_tests;
 
 #[cfg(test)]
 mod commit_deadline_tests;
+
+#[cfg(test)]
+mod lost_admission_ack_tests;
 
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;

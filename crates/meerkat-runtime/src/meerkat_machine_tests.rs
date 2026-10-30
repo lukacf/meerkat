@@ -21785,6 +21785,7 @@ mod stop_teardown_coordinator_class {
                 coordinator_id: uuid::Uuid::new_v4(),
                 result_rx,
                 queued_inputs: UnregisterDisposition::STOP,
+                recorded: UnregisterRecordedDisposition::default(),
             });
         }
         drop(held_transaction);

@@ -71,14 +71,18 @@ pub enum GrantRefusal {
     Unavailable,
 }
 
-/// Why a lineage resolution read inside the caller's own enclosing
-/// observation of this owner's publication has no grant. An owner change
-/// published during the resolution stays apart from the owner's refusals:
-/// the enclosing observation is stale too, so the caller classifies it as
-/// a stale read (for an operation, `OperationRefusalKind::ReprepareRequired`)
-/// and may rebuild once, never as unavailability. A standalone resolution
-/// ([`LocalGrantAuthority::resolve_lineage`] and its siblings) reports such
-/// a change as [`GrantRefusal::Unavailable`].
+/// Why an observed lineage resolution has no grant. An owner change
+/// published during the resolution stays apart from the owner's refusals,
+/// and is never unavailability. A caller inside its own enclosing
+/// observation of this owner's publication finds that observation stale
+/// too: it classifies the change as a stale read (for an operation,
+/// `OperationRefusalKind::ReprepareRequired`) and may rebuild once. A caller
+/// with no enclosing observation whose answer can say "ask again"
+/// classifies it as a change of policy (the native runtime's scoped
+/// admission answers `ControllerReadinessFailure::PolicyChanged`). A
+/// standalone resolution ([`LocalGrantAuthority::resolve_lineage`] and its
+/// siblings) reports such a change as [`GrantRefusal::Unavailable`], for a
+/// caller whose answer can say neither.
 ///
 /// Closed by design: a resolution either met a change or the owner refused
 /// it, so a new reason to refuse is a [`GrantRefusal`] variant, never a new
@@ -93,8 +97,10 @@ pub enum LineageResolutionRefusal {
     Refused(GrantRefusal),
 }
 
-/// A standalone caller has no enclosing observation to rebuild: a
-/// concurrent change is "this owner cannot say now".
+/// The standalone forms' answer for a concurrent change, for a caller whose
+/// answer can say neither "stale, rebuild" nor "changed, ask again": "this
+/// owner cannot say now". A caller with no enclosing observation that can
+/// say "ask again" uses the observed forms instead.
 fn standalone_refusal(refusal: LineageResolutionRefusal) -> GrantRefusal {
     match refusal {
         LineageResolutionRefusal::Changed => GrantRefusal::Unavailable,
@@ -989,7 +995,11 @@ impl LocalGrantAuthority {
     ///
     /// For a host commit gated on current native facts (for example a
     /// WorkGraph admission fence). `operation` must not mutate any owner on
-    /// this publication and must not await.
+    /// this publication and must not await. While it runs, a governed step
+    /// of work on this publication refuses to rebuild
+    /// (`OperationRefusalKind::ReprepareRequired`) and the work's
+    /// `owner_change_in_progress` names this hold, so a waiting step waits
+    /// for its end.
     ///
     /// # Errors
     /// [`PublicationError::Unavailable`] when the publication is held,
@@ -1085,11 +1095,13 @@ impl LocalGrantAuthority {
             .map_err(standalone_refusal)
     }
 
-    /// [`resolve_lineage`](Self::resolve_lineage) for a caller inside its
-    /// own enclosing observation of this owner's publication: an owner
-    /// change published during the resolution is
-    /// [`LineageResolutionRefusal::Changed`], which that caller classifies
-    /// as a stale read, not as unavailability.
+    /// [`resolve_lineage`](Self::resolve_lineage) that keeps an owner change
+    /// published during the resolution apart from the owner's refusals
+    /// ([`LineageResolutionRefusal::Changed`]), never as unavailability. A
+    /// caller inside its own enclosing observation of this owner's
+    /// publication classifies it as a stale read; a caller with no enclosing
+    /// observation whose answer can say "ask again" classifies it as a change
+    /// of policy.
     ///
     /// # Errors
     /// [`LineageResolutionRefusal::Changed`] for such a change; otherwise
@@ -1111,8 +1123,8 @@ impl LocalGrantAuthority {
         )
     }
 
-    /// [`resolve_controller_lineage`](Self::resolve_controller_lineage)
-    /// for a caller inside its own enclosing observation; see
+    /// [`resolve_controller_lineage`](Self::resolve_controller_lineage) in
+    /// the observed form; see
     /// [`resolve_lineage_observed`](Self::resolve_lineage_observed).
     ///
     /// # Errors
@@ -1133,8 +1145,8 @@ impl LocalGrantAuthority {
         )
     }
 
-    /// [`resolve_lineage_ceiling`](Self::resolve_lineage_ceiling) for a
-    /// caller inside its own enclosing observation; see
+    /// [`resolve_lineage_ceiling`](Self::resolve_lineage_ceiling) in the
+    /// observed form; see
     /// [`resolve_lineage_observed`](Self::resolve_lineage_observed).
     ///
     /// # Errors

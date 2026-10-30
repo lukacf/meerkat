@@ -520,11 +520,16 @@ pub trait WorkAuthorization: Send + Sync {
     }
 
     /// Passive review material for this exact prepared operation, read once
-    /// after R1 is ruled out and before reviewer transport or human
-    /// presentation. Synchronous and without I/O. A wrapper must forward it.
-    /// Fail closed: an owner that does not implement this is `Unavailable`,
-    /// so R2/R3 review settles as context unavailable. Only an owner that
-    /// knows the material is genuinely inapplicable answers `NotApplicable`.
+    /// per review attempt after R1 is ruled out and before reviewer transport
+    /// or human presentation, and read again whenever a retained human
+    /// consent is re-adjudicated (ADR-001 D9): on an approval read (`get`,
+    /// `list`), a decision, its publication, an attempt or a spend, on the
+    /// caller's thread, outside the approval owner's locks. An owner must
+    /// therefore not take a lock its host holds while reading approvals.
+    /// Synchronous and without I/O. A wrapper must forward it. Fail closed:
+    /// an owner that does not implement this is `Unavailable`, so R2/R3
+    /// review settles as context unavailable. Only an owner that knows the
+    /// material is genuinely inapplicable answers `NotApplicable`.
     fn review_operation_context(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -539,6 +544,14 @@ pub trait WorkAuthorization: Send + Sync {
         None
     }
 
+    /// Decide one exact operation now. Besides every dispatch, a retained
+    /// human consent's decision that is no longer current (an owner
+    /// publication change made it stale, or its own check refuses it) is
+    /// prepared again on an approval read (`get`, `list`), a decision, its
+    /// publication or an attempt (ADR-001 D9), on the caller's thread and
+    /// outside the approval owner's locks, so an owner must not take a lock
+    /// its host holds while reading approvals; each such preparation is
+    /// audited as one.
     fn prepare(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -579,6 +592,15 @@ pub trait WorkAuthorization: Send + Sync {
     /// non-waiting exclusion of authority changes through `operation`.
     /// Wrappers check their own custody and forward; the default is
     /// unavailable. `operation` runs at most once and must not await.
+    ///
+    /// The exclusion is taken without waiting. When another actor holds it
+    /// now, the native work owner refuses to rebuild (`ReprepareRequired`,
+    /// no verdict on the operation) and names the hold through
+    /// [`Self::owner_change_in_progress`] until it ends, so a caller can wait
+    /// for it outside every lock and ask again (the waiting forms of
+    /// `GovernedDispatchOperation` and `EnteredDispatchOperation`). Owners
+    /// that cannot answer at all, a poisoned publication included, are
+    /// `Unavailable`.
     ///
     /// This is the generic composition boundary: the owner that answers is
     /// the context's own authorization chain by construction, and an
@@ -639,7 +661,9 @@ pub trait WorkAuthorization: Send + Sync {
     /// `entered_tier` (the review this dispatch actually entered), and the
     /// grant owner's own reserved issuance with the decision's validity.
     /// The typed outcome is returned boxed. Wrappers check their own custody
-    /// and forward; the default is unavailable and issues nothing.
+    /// and forward; the default is unavailable and issues nothing. A held
+    /// exclusion refuses as for `run_if_current_within`, before anything is
+    /// decided or appended.
     fn issue_child_if_current_within(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -657,10 +681,11 @@ pub trait WorkAuthorization: Send + Sync {
     /// this work's own publication instance and nothing else. A wrapper of a
     /// run's work authorization forwards it. An owner without a publication
     /// answers `None`, and so does a poisoned publication, whose observations
-    /// stay unavailable; a refusal then takes its ordinary path. An owner may
-    /// also name a hold of its publication that has not published until it
-    /// ends (the native work owner names every reservation of its
-    /// publication's writer), so a wait lasts until the holder releases it.
+    /// stay unavailable; a refusal then takes its ordinary path. An owner
+    /// whose non-waiting exclusion refused a step because another actor held
+    /// it names that hold here until it ends, published or not (the native
+    /// work owner names every reservation of its publication's writer), so
+    /// the step's wait lasts until the holder releases it.
     fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
         None
     }

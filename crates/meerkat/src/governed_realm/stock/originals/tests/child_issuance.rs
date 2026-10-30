@@ -1881,3 +1881,95 @@ async fn a_reviewed_decision_on_the_plain_dispatch_paths_is_denied() {
         assert_eq!(f.issued("dispatch-child"), None, "nothing appended");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Waiting issuance: another actor holds the grant publication's writer.
+// ---------------------------------------------------------------------------
+
+/// Another actor holding the grant publication's writer with an exclusion
+/// that never publishes, on its own thread, until released.
+struct HeldExclusion {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl HeldExclusion {
+    /// Returns once the writer is held.
+    fn begin(f: &Fixture) -> Self {
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let grants = Arc::clone(&f.grants);
+        let thread = std::thread::spawn(move || {
+            grants
+                .try_with_owner_changes_excluded(|| {
+                    held.send(()).expect("the hold is reported");
+                    // Released, or the sender dropped: `recv` returns either way.
+                    let _ = released.recv();
+                })
+                .expect("the writer is free");
+        });
+        holding.recv().expect("the writer is held");
+        Self { release, thread }
+    }
+
+    fn release(self) {
+        drop(self.release);
+        self.thread.join().expect("the holder's thread");
+    }
+}
+
+/// A dispatch's own child issuance and a step of its entered operation meet
+/// another actor's held exclusion. The synchronous form answers
+/// `Unavailable` at once, as before; the waiting form meets the hold and
+/// waits for it (its first poll is pending), then issues the child once
+/// the hold ends, and a retried intent recovers it.
+#[tokio::test]
+async fn a_waiting_child_issuance_waits_out_a_held_exclusion_then_issues() {
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    let issuances = [
+        (
+            "dispatch-child",
+            GovernedHelperChildIssuance::from_dispatch(
+                dispatch.call(),
+                &dispatch.context,
+                f.ledger.clone(),
+                retained_originals(&["s"]),
+                f.intent("dispatch-child"),
+            )
+            .expect("the dispatch's own operation builds the issuance"),
+        ),
+        (
+            "entered-child",
+            entered_issuance(&f, &entered, &["s"], "entered-child"),
+        ),
+    ];
+    for (name, issuance) in issuances {
+        let holder = HeldExclusion::begin(&f);
+        assert_eq!(
+            issuance.issue_or_recover(),
+            Err(HelperChildIssuanceRefusal::Unavailable),
+            "{name}: the synchronous form answers at once"
+        );
+        let mut waiting = std::pin::pin!(issuance.issue_or_recover_after_owner_change());
+        assert!(
+            futures::poll!(waiting.as_mut()).is_pending(),
+            "{name}: the waiting form met the hold and waits for it"
+        );
+        holder.release();
+        assert!(
+            matches!(waiting.await, Ok(ChildGrantOutcome::Issued { .. })),
+            "{name}: issued once the hold ended"
+        );
+        assert!(f.issued(name).is_some(), "{name}: the child is retained");
+        assert!(
+            matches!(
+                issuance.issue_or_recover_after_owner_change().await,
+                Ok(ChildGrantOutcome::Recovered { .. })
+            ),
+            "{name}: a retried intent recovers it: nothing was appended twice"
+        );
+    }
+}

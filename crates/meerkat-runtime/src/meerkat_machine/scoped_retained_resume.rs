@@ -34,7 +34,7 @@
 use std::sync::Arc;
 
 use meerkat_authorization::grant_policy::{AdmittedWorkPolicyOwner, OperationPolicyOwner};
-use meerkat_authorization::grants::{GrantRefusal, LocalGrantAuthority};
+use meerkat_authorization::grants::LocalGrantAuthority;
 use meerkat_authorization_contracts::constraints::ResourceDomain;
 use meerkat_authorization_contracts::work_association::{
     InputAuthorityAssociation, OriginalWorkRef, QualifiedIngressNamespace, WorkAuthorityBasis,
@@ -45,7 +45,7 @@ use meerkat_core::{OperationRefusalKind, OperationRefused};
 use super::local_authorization::NativeRetainedResumeCheck;
 use super::scoped_original::{
     AuthenticatedOriginalSource, CustodyClass, ScopedGrantComposition, ScopedInvocation,
-    ScopedMandateOwner, classify_custody, require_contributor_live,
+    ScopedMandateOwner, classify_custody, require_contributor_live, resolve_original_basis,
 };
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
@@ -56,7 +56,13 @@ use crate::retained_work::{RetainedResumeError, RetainedResumeEvidence};
 /// controller client for a retained selection, composed by the embedding.
 /// Any asynchronous client setup has completed before the synchronous resume
 /// authentication asks; `Ok(None)` means no client is available for the
-/// selection, an error that its owner cannot say now.
+/// selection, an error that its owner cannot say now. The check answers
+/// `Ok(None)` as `Readiness(UnsupportedScope)`: a fresh resume stays owed,
+/// while an admitted resume whose client did not survive the store ends as a
+/// refused resume at once. An error makes the runtime hold such a resume,
+/// with its attempts, and ask again once per pause; once 30 seconds have
+/// passed since its first such answer, the next one ends it as a refused
+/// resume (see `NativeWorkAuthorizationHost::authenticate_retained_resume`).
 pub trait RetainedControllerOwner: Send + Sync {
     fn reacquire_controller(
         &self,
@@ -190,24 +196,17 @@ impl ScopedRetainedResume {
         basis: &WorkAuthorityBasis,
         association: &InputAuthorityAssociation,
     ) -> Result<(), RetainedResumeError> {
+        // The same resolution and refusal classes as admission: an owner
+        // change met during the read is a changed policy, never an owner
+        // that cannot say now.
         let claims = association.candidate();
-        for lineage in meerkat_authorization::grant_policy::admission_grant_lineages(basis) {
-            self.grants
-                .resolve_lineage(
-                    lineage,
-                    &claims.logical_executor,
-                    claims.represented_subject.as_ref(),
-                )
-                .map_err(|refusal| match refusal {
-                    GrantRefusal::Denied => refused(OperationRefusalKind::Denied),
-                    GrantRefusal::ControllerInUse
-                    | GrantRefusal::Duplicate
-                    | GrantRefusal::Unavailable => RetainedResumeError::Readiness(
-                        ControllerReadinessFailure::PolicyUnavailable,
-                    ),
-                })?;
-        }
-        Ok(())
+        resolve_original_basis(
+            &self.grants,
+            basis,
+            &claims.logical_executor,
+            claims.represented_subject.as_ref(),
+        )
+        .map_err(admission_error)
     }
 }
 

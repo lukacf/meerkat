@@ -513,6 +513,20 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
         batch: &NativeWorkBatch,
     ) -> Result<WorkAuthorizationContext, NativeWorkContextError>;
 
+    /// Whether every governed input must name the session document's bound
+    /// scoped destination (see `MeerkatMachine::bind_scoped_context`). When
+    /// true, governed work is refused until a destination is bound and,
+    /// after a restart, recovered governed work (a kept resume of retained
+    /// work included, by its canonical original's destination) stays queued
+    /// until the registration owner binds its destination again. A governed
+    /// run left open by a stop or a restart waits, marked, the same way, and
+    /// then resumes under the destination its inputs were staged for. A bind
+    /// does not wake the runtime: wake it after binding on a registration
+    /// whose executor is attached.
+    fn requires_scoped_destination(&self) -> bool {
+        false
+    }
+
     /// Validate a governed resume of retained work: an internal completion
     /// (a fork_off or council outcome) admitted to the runtime that staged
     /// the original run, with no fresh transport authentication. The runtime
@@ -528,15 +542,55 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     /// unavailability `AuthorizationUnavailable`; anything not decidable now
     /// is `Readiness`. The default refuses as unsupported: a host that does
     /// not implement it admits no retained-work resume.
-    /// Whether every governed input must name the session document's bound
-    /// scoped destination (see `MeerkatMachine::bind_scoped_context`). When
-    /// true, governed work is refused until a destination is bound and,
-    /// after a restart, recovered governed work stays queued until the
-    /// registration owner binds its destination again.
-    fn requires_scoped_destination(&self) -> bool {
-        false
-    }
-
+    ///
+    /// The runtime also asks again for an admitted resume whose controller
+    /// client did not survive the store (a graceful requeue stop kept the
+    /// input, or a restart found it). Such a re-ask differs from the fresh
+    /// admission:
+    ///
+    /// - `input` is the stored form: no ingress context and no retained-resume
+    ///   grant survive the store. `evidence` is rebuilt from the input's own
+    ///   row, and its original contributors are not checked against the
+    ///   ledger again before the call, as they are at a fresh admission: the
+    ///   host validates what it needs through its own owners. A destination
+    ///   the session has since superseded is refused before the host is
+    ///   asked.
+    /// - The runtime asks once when the registration recovers the input, then
+    ///   from its runtime loop: once at the loop's next pass while the input
+    ///   is not held, and once per pause of 3 seconds while it is held (an
+    ///   input held at recovery is next asked after the pause). The loop
+    ///   asks while it holds the session's turn boundary, queue authority and
+    ///   driver lock, and recovery while it holds the driver: answer
+    ///   synchronously from the host's own records, without calling back
+    ///   into the runtime. Only a runtime loop asks again, and a registration
+    ///   runs one only once an executor attaches: on a registration with no
+    ///   executor, an input held at recovery is not asked again, its bound
+    ///   below does not end it, and the refusals below last until an
+    ///   executor attaches or the registration ends. A registration that
+    ///   drains for its unregister asks nothing more: it holds every such
+    ///   input instead, and the next registration asks again.
+    /// - `Readiness(UnsupportedScope)` is a definite answer that this host
+    ///   supplies no client for the resume, as are the actual verdicts and a
+    ///   client for another selection: the input ends as a refused resume
+    ///   (`InputAbandonReason::ResumeRefused`), with its runtime-termination
+    ///   receipt, and never runs; a run left open that it is bound to is
+    ///   settled the same way.
+    /// - Every other `Readiness` means the host cannot say now. The machine
+    ///   holds the input: it is not staged and keeps its attempts, later work
+    ///   goes first, and a run left open that it is bound to does not resume
+    ///   (nor does any other run of the session start before that run
+    ///   settles). Once 30 seconds have passed since its first such answer in
+    ///   the registration (the bound a resumed run's admission has), the next
+    ///   such answer ends it as refused. Answer `Readiness` only while the
+    ///   host cannot say now (a contended or unavailable owner).
+    /// - While an input waits without its client, the machine refuses
+    ///   controller grant mutations, credential publications and auth lease
+    ///   releases and replacements on every session it serves, so a host
+    ///   whose answer waits on a credential publication must answer
+    ///   definitely instead.
+    ///
+    /// At a fresh admission `Readiness(UnsupportedScope)` stays retryable, as
+    /// every `Readiness`.
     fn authenticate_retained_resume(
         &self,
         runtime_id: &LogicalRuntimeId,

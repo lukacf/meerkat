@@ -1987,7 +1987,10 @@ serves consent.
 
 Each recorded transition arrives as an `approval/consent_notice` notification
 (`ConsentNoticeParams`): `kind` is `requested`, `approved`, `denied`, `used` or
-`withdrawn`. An approval executes nothing by itself.
+`withdrawn`. An approval executes nothing by itself. The pipe keeps answering
+for its operator on an approved approval until it is used or withdrawn: only
+the pipe's end revokes the operator, so an approved consent whose spend comes
+after the pipe ended is withdrawn as `authority_changed`, with zero entry.
 
 A `requested` notice carries the approval's `presentation`
 (`ConsentPresentationParams`), projected from the approval owner's own record

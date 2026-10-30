@@ -1801,6 +1801,7 @@ impl MeerkatMachine {
                 ),
                 coordinator.coordinator_id,
                 coordinator.result_rx.clone(),
+                Arc::clone(&coordinator.recorded),
             )
         })
     }
@@ -5033,12 +5034,19 @@ impl MeerkatMachine {
                         // durable fact mean "recoverable" or "permanently
                         // unusable" purely by who owned the caller.
                         //
-                        // Two states are deliberately still refused, because
-                        // disposal would park rather than converge: a runtime
-                        // loop that has not yet handed its executor back may
-                        // run arbitrarily long before publishing, and a
-                        // handoff mid-claim by another cleanup owner is not
-                        // this caller's to consume.
+                        // Two states are still refused rather than rerouted.
+                        // A runtime loop that has not yet handed its
+                        // executor back would make this caller wait for the
+                        // loop's exit: the reload-required discard no longer
+                        // parks on such a loop (it hands off the session's
+                        // degraded settlement, which detaches the loop and
+                        // hard-cancels its exact current run), but
+                        // registration answers at once instead of waiting
+                        // for that settlement. The typed refusal leaves the
+                        // reload to the caller, and a registration retried
+                        // once the loop handed its executor back reloads
+                        // here. A handoff mid-claim by another cleanup owner
+                        // is not this caller's to consume.
                         // A registration no runtime loop holds has no
                         // executor to hand back: its disposal takes the
                         // mutation fence itself.
@@ -5928,8 +5936,9 @@ impl MeerkatMachine {
             Err(required) => {
                 // Another holder keeps M, so the cleanup below, which takes
                 // M, refuses as well. Release the parked loop first, without
-                // M, or it waits on its serving release for good and the
-                // reload-required discard waits for it.
+                // M: otherwise it waits on its serving release until a
+                // degraded settlement can take M and detach it, and the
+                // reload-required discard waits for it as long.
                 self.release_unserved_runtime_loop(&witness, &registration_gate)
                     .await;
                 let mut refusal = degraded_gate_wait_refusal(required);
@@ -6022,6 +6031,15 @@ impl MeerkatMachine {
         // its stop's max age before anything can serve it.
         pending
             .settle_expired_stop_requeued_inputs(chrono::Utc::now())
+            .await?;
+        // And kept governed work with no way back to its controller client
+        // (its client did not survive the store, and only a fresh
+        // authentication of its caller could supply it again) ends as a
+        // refused resume before anything can serve it, with a kept run whose
+        // first input it is. A kept resume of retained work is not ended
+        // here: the runtime loop asks its host for the client again.
+        pending
+            .settle_kept_governed_inputs_without_controller()
             .await?;
         Ok(EnsureRuntimeExecutorAttachment::Pending(pending))
     }
@@ -6645,12 +6663,17 @@ impl MeerkatMachine {
     /// Quiesce and discard only the exact process-local registration whose
     /// persistent shell has entered `ReloadRequired`.
     ///
-    /// This is recovery disposal, not lifecycle retirement. It does not route
-    /// through cancel, hard-cancel, Stop, Retire, input abandonment, or a live
-    /// lifecycle persistence write. The durable RuntimeStore remains the sole
-    /// source for the next cold registration. Admission takes the stable
-    /// registration transaction before the witness's opaque mutation gate, so
-    /// an old witness cannot remove a same-SessionId successor.
+    /// This is recovery disposal, not lifecycle retirement: it persists no
+    /// stop, retirement, input abandonment or live lifecycle write, and the
+    /// durable RuntimeStore remains the sole source for the next cold
+    /// registration. A runtime loop that is still attached is detached
+    /// through the session's degraded gate settlement, as a ready-gated
+    /// caller that meets the degraded session detaches it: once the mutation
+    /// gate is free, the settlement drops the attachment and hard-cancels the
+    /// loop's exact current run, and the discard then claims the loop's
+    /// teardown handoff. Admission takes the stable registration transaction
+    /// before the witness's opaque mutation gate, so an old witness cannot
+    /// remove a same-SessionId successor.
     pub async fn recover_or_discard_reload_required_registration_if_current(
         &self,
         witness: &RuntimeSessionRegistrationWitness,
@@ -6842,6 +6865,27 @@ impl MeerkatMachine {
                             witness.session_id()
                         ),
                     });
+                }
+                // The discard waits for the runtime loop to publish that
+                // handoff, and a loop that is still attached publishes it
+                // only once the session's degraded settlement detaches it. A
+                // ready-gated caller runs that settlement, but none may come:
+                // a failed durable write that degraded the session can return
+                // without it, and an unregister refuses at its first durable
+                // write, before it detaches the loop. Hand the settlement off
+                // here, so the discard never waits for a loop nobody
+                // detaches. Its task takes M before it changes anything, so
+                // this admission stays read-only apart from the coordinator
+                // it publishes.
+                if teardown_slot
+                    .as_ref()
+                    .is_some_and(|slot| !slot.exit_handoff_is_settled())
+                    && !matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                {
+                    self.hand_off_degraded_gate_settlement(
+                        witness.session_id(),
+                        entry.mutation_gate.clone(),
+                    );
                 }
                 let coordinator_id = uuid::Uuid::new_v4();
                 let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
@@ -8321,6 +8365,43 @@ impl MeerkatMachine {
         .require_completed()
     }
 
+    /// [`Self::unregister_session_registration_until_terminal_with_queued_inputs_if_current`]
+    /// that also answers, once the unregister reached terminal completion,
+    /// the disposition the machine recorded for it
+    /// ([`RuntimeSessionUnregisterObserver::queued_inputs`]): for the
+    /// unregister this call started, or the one already in progress that it
+    /// joined, whatever `queued_inputs` asked for. Nothing is polled: the
+    /// unregister's owned worker publishes the recorded disposition to this
+    /// call as soon as the machine began the unregister. `Ok(None)` where
+    /// that method answers `Ok(false)` (the registration is stale or absent,
+    /// and nothing was started or joined), and when the unregister found the
+    /// registration already gone, so that the machine recorded nothing for
+    /// it.
+    pub async fn unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+        &self,
+        registration: &RuntimeSessionRegistrationWitness,
+        queued_inputs: UnregisterQueuedInputs,
+    ) -> Result<Option<UnregisterQueuedInputs>, RuntimeDriverError> {
+        match self
+            .observe_unregister_session_registration_with_queued_inputs_if_current(
+                registration,
+                queued_inputs,
+            )
+            .await?
+        {
+            RuntimeSessionUnregisterAdmission::NotCurrent => Ok(None),
+            RuntimeSessionUnregisterAdmission::Pending(mut observer) => {
+                observer.wait_for_result().await?;
+                Ok(observer.queued_inputs())
+            }
+            // Only the runtime loop's own teardown watcher is answered from a
+            // completed result; an explicit admission starts or joins.
+            RuntimeSessionUnregisterAdmission::Completed => Err(RuntimeDriverError::Internal(
+                "an explicit unregister admission answered a completed watcher result".to_string(),
+            )),
+        }
+    }
+
     /// Close one exact current registration while it is quiescent, or finish
     /// its orphaned drain, then await its owned teardown to terminal completion.
     ///
@@ -8514,6 +8595,7 @@ impl MeerkatMachine {
                 coordinator_id,
                 result_rx: result_rx.clone(),
                 queued_inputs: UnregisterDisposition::STOP,
+                recorded: UnregisterRecordedDisposition::default(),
             });
             (
                 epoch_id,
@@ -9980,6 +10062,8 @@ impl MeerkatMachine {
             Join {
                 coordinator_id: uuid::Uuid,
                 result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+                /// The joined unregister's recorded disposition, once published.
+                recorded: UnregisterRecordedDisposition,
             },
             Start {
                 epoch_id: meerkat_core::RuntimeEpochId,
@@ -9987,6 +10071,8 @@ impl MeerkatMachine {
                 result_tx: crate::tokio::sync::watch::Sender<Option<UnregisterTeardownResult>>,
                 result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
                 teardown_slot: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
+                /// The started unregister's recorded disposition, once published.
+                recorded: UnregisterRecordedDisposition,
             },
             AlreadyAbsent,
             EpochChanged,
@@ -10124,6 +10210,7 @@ impl MeerkatMachine {
                                 CoordinatorDecision::Join {
                                     coordinator_id: coordinator.coordinator_id,
                                     result_rx: coordinator.result_rx.clone(),
+                                    recorded: Arc::clone(&coordinator.recorded),
                                 }
                             } else {
                                 return Err(RuntimeDriverError::Internal(format!(
@@ -10156,11 +10243,13 @@ impl MeerkatMachine {
                             let epoch_id = entry.epoch_id.clone();
                             let coordinator_id = uuid::Uuid::new_v4();
                             let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
+                            let recorded = UnregisterRecordedDisposition::default();
                             entry.unregister_coordinator = Some(UnregisterTeardownCoordinator {
                                 epoch_id: epoch_id.clone(),
                                 coordinator_id,
                                 result_rx: result_rx.clone(),
                                 queued_inputs,
+                                recorded: Arc::clone(&recorded),
                             });
                             CoordinatorDecision::Start {
                                 epoch_id,
@@ -10168,6 +10257,7 @@ impl MeerkatMachine {
                                 result_tx,
                                 result_rx,
                                 teardown_slot: entry.runtime_loop_teardown.clone(),
+                                recorded,
                             }
                         }
                     }
@@ -10199,13 +10289,17 @@ impl MeerkatMachine {
         // incarnation, so release this admission fence before joining/spawning.
         drop(exact_mutation_guard);
 
-        let (result_rx, coordinator_id) = match decision {
+        // The started or joined unregister's recorded disposition, which its
+        // owned worker publishes once the machine began it: a joiner gets
+        // that unregister's, whatever this call passed.
+        let (result_rx, coordinator_id, recorded) = match decision {
             CoordinatorDecision::Join {
                 coordinator_id,
                 result_rx,
+                recorded,
             } => {
                 drop(registration_transaction_guard.take());
-                (result_rx, coordinator_id)
+                (result_rx, coordinator_id, recorded)
             }
             CoordinatorDecision::AlreadyAbsent
             | CoordinatorDecision::EpochChanged
@@ -10237,6 +10331,7 @@ impl MeerkatMachine {
                 result_tx,
                 result_rx,
                 teardown_slot,
+                recorded,
             } => {
                 let registration_transaction_guard = registration_transaction_guard
                     .take()
@@ -10253,7 +10348,7 @@ impl MeerkatMachine {
                     teardown_slot,
                     OwnedUnregisterStart::Admitted(registration_transaction_guard),
                 );
-                (result_rx, coordinator_id)
+                (result_rx, coordinator_id, recorded)
             }
         };
 
@@ -10267,7 +10362,12 @@ impl MeerkatMachine {
                 ))
             })?;
             return Ok(UnregisterTeardownWaitOutcome::Pending(
-                RuntimeSessionUnregisterObserver::new(registration, coordinator_id, result_rx),
+                RuntimeSessionUnregisterObserver::new(
+                    registration,
+                    coordinator_id,
+                    result_rx,
+                    recorded,
+                ),
             ));
         }
 
@@ -10424,6 +10524,44 @@ impl MeerkatMachine {
         if should_clear {
             entry.unregister_coordinator = None;
         }
+    }
+
+    /// Publish to every observer of the exact coordinator `coordinator_id`
+    /// the disposition the machine recorded for its unregister, read from
+    /// the generated state once the machine began that unregister
+    /// ([`RuntimeSessionUnregisterObserver::queued_inputs`]). Only a read of
+    /// the machine's record: whatever `BeginUnregisterSession` (or the
+    /// unserved attachment's begin) recorded, never a caller's request.
+    async fn publish_recorded_unregister_disposition(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        coordinator_id: uuid::Uuid,
+    ) {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return;
+        };
+        let Some(coordinator) = entry.unregister_coordinator.as_ref().filter(|coordinator| {
+            entry.epoch_id == *epoch_id
+                && coordinator.epoch_id == *epoch_id
+                && coordinator.coordinator_id == coordinator_id
+        }) else {
+            return;
+        };
+        let recorded = {
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            UnregisterDisposition {
+                queued_inputs: state.unregister_queued_inputs,
+                requeue_max_age_ms: state.unregister_requeue_max_age_ms,
+            }
+        };
+        // Set once: the machine records one disposition per unregister.
+        let _ = coordinator.recorded.set(recorded);
     }
 
     async fn run_owned_unregister_teardown(
@@ -11467,6 +11605,13 @@ impl MeerkatMachine {
                     ),
                 });
             }
+            // The machine recorded this unregister's disposition when an
+            // earlier attempt began it, and the final transition keeps it:
+            // publish it to every observer of this coordinator.
+            crate::stack_relief::box_in_own_frame(|| {
+                self.publish_recorded_unregister_disposition(session_id, epoch_id, coordinator_id)
+            })
+            .await;
             // Pending finalization has already closed handle issuance and
             // retired every operation producer. Release M before the
             // idempotent store transaction; coordinator + pending witness
@@ -11581,6 +11726,13 @@ ControlFlow::Break(()) => return Ok(()),
                 }
             }
         }
+        // The machine began this unregister, here or before this saga:
+        // publish the disposition it recorded to every observer of this
+        // coordinator.
+        crate::stack_relief::box_in_own_frame(|| {
+            self.publish_recorded_unregister_disposition(session_id, epoch_id, coordinator_id)
+        })
+        .await;
         // Also re-persist on an already-Draining retry. A prior live feedback
         // transition may have succeeded while its store write failed; this
         // closes that durability gap before any cleanup is attempted again.

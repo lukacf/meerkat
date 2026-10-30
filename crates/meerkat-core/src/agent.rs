@@ -1007,6 +1007,14 @@ impl ReviewedEntryTicket {
 /// continues with further governed steps after its single consuming entry
 /// uses the entry's typed witness instead ([`Self::into_entered`],
 /// [`EnteredDispatchOperation`]).
+///
+/// Each step is synchronous and decided once. A step that another actor's
+/// hold of the work owners' exclusion refused to rebuild may succeed once
+/// that hold ends: the waiting forms
+/// ([`Self::run_if_current_within_after_owner_change`],
+/// [`Self::issue_child_if_current_within_after_owner_change`]) wait for it
+/// within the call's remaining tool time and try again, with nothing held
+/// across the wait.
 #[derive(Debug, Clone)]
 pub struct GovernedDispatchOperation {
     context: ToolDispatchContext,
@@ -1059,7 +1067,10 @@ impl GovernedDispatchOperation {
     ///
     /// # Errors
     /// A refused, unavailable or no longer current operation; `operation`
-    /// did not run.
+    /// did not run. A refusal to rebuild (`ReprepareRequired`) is no verdict:
+    /// the native work owner also answers it while another actor holds its
+    /// exclusion, and [`Self::run_if_current_within_after_owner_change`]
+    /// waits for such a hold and tries again.
     pub fn run_if_current_within(
         &self,
         further: &(dyn std::any::Any + Send + Sync),
@@ -1078,6 +1089,59 @@ impl GovernedDispatchOperation {
                 operation,
             )
             .map_err(crate::ToolError::from)
+    }
+
+    /// [`Self::run_if_current_within`], waiting out what refused it to
+    /// rebuild: an owner change in progress on the work's own publication,
+    /// or another actor's hold of the work owners' exclusion (the native
+    /// work owner refuses such contention as `ReprepareRequired` and names
+    /// the hold through `WorkAuthorization::owner_change_in_progress`). After
+    /// each such refusal it waits for the change to complete, within the
+    /// bounds of [`crate::authorization::OwnerChangeChurn`] and never past
+    /// this call's remaining tool time
+    /// ([`ToolDispatchContext::remaining_tool_time`]), then tries again; with
+    /// no change in progress at that read (the holder may have finished in
+    /// between) it pauses one backoff step and tries again. Every retry is
+    /// one of the step's free rebuilds, all within one deadline set at its
+    /// first wait. Each wait is traced at site `tool_step` and reported as
+    /// this call's to the host's operation refusal observer. A streaming
+    /// tool's inactivity window is not part of the remaining tool time:
+    /// inside a streaming tool, a wait longer than the window left ends as
+    /// the tool's inactivity timeout, as the execution policy gate's staging
+    /// wait does.
+    ///
+    /// Each attempt is the synchronous step itself, decided afresh, and it
+    /// releases every guard, lock and custody read before it returns:
+    /// nothing is held across a wait. `operation` runs at most once, inside
+    /// the attempt that answers `Ok`, under the owners' exclusion, and must
+    /// not await. Nothing is spent: as on the synchronous step, only an R1
+    /// operation runs here. Shell synchronization only: no machine input.
+    ///
+    /// # Errors
+    /// As [`Self::run_if_current_within`], once the bounds are spent: the
+    /// last attempt's answer, `ReprepareRequired` included; `operation` did
+    /// not run.
+    pub async fn run_if_current_within_after_owner_change(
+        &self,
+        further: &(dyn std::any::Any + Send + Sync),
+        operation: impl FnOnce(),
+    ) -> Result<(), crate::ToolError> {
+        let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_step");
+        let mut operation = Some(operation);
+        loop {
+            let answer = self.run_if_current_within(further, &mut || {
+                if let Some(run) = operation.take() {
+                    run();
+                }
+            });
+            // An attempt whose operation ran is the step's answer, whatever
+            // it says: the operation never runs twice.
+            let rebuild = operation.is_some() && refuses_to_rebuild(&answer);
+            if rebuild && wait.again().await {
+                continue;
+            }
+            return answer;
+        }
     }
 
     /// Issue (or recover) a child grant for `intent` as this dispatch's
@@ -1102,7 +1166,11 @@ impl GovernedDispatchOperation {
     ///
     /// # Errors
     /// A refused, unavailable or no longer current operation, or an entry
-    /// this dispatch cannot make; nothing was issued.
+    /// this dispatch cannot make; nothing was issued. A refusal to rebuild
+    /// (`ReprepareRequired`) is no verdict: the native work owner also
+    /// answers it while another actor holds its exclusion, and
+    /// [`Self::issue_child_if_current_within_after_owner_change`] waits for
+    /// such a hold and tries again without spending again.
     pub fn issue_child_if_current_within(
         &self,
         further: &(dyn std::any::Any + Send + Sync),
@@ -1140,6 +1208,101 @@ impl GovernedDispatchOperation {
                 check.review_tier(),
             )
             .map_err(crate::ToolError::from)
+    }
+
+    /// [`Self::issue_child_if_current_within`], waiting out what refused it
+    /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
+    /// does (site `tool_child_issuance`). The work owner validates `further`
+    /// and `intent` first. Then THIS dispatch's single consuming entry is
+    /// made once, its staging waiting out an owner change in progress within
+    /// the dispatch attempt's own bounds (site `tool_entry`). That staging
+    /// shares the attempt's waiting state with the attempt's other stagings
+    /// and its review's post-verdict check, so whatever they spent of its
+    /// deadline and free rebuilds is spent here too. Unlike the dispatch's
+    /// root staging, it never reviews again: at R2 an owner change it meets
+    /// supersedes the reviewed decision, so once the change completes the
+    /// call answers `ReviewUnsatisfied` (`ContextChanged`), as a later
+    /// synchronous call would. R1 goes on, and so does an R3 consent, which
+    /// its spend re-adjudicates.
+    ///
+    /// The child is then issued once under the entry just made, exactly as
+    /// the synchronous form issues it: with the entering decision and no
+    /// step admission, so another holder of the review owner (an approval
+    /// read, another dispatch's admission) cannot refuse it after the spend.
+    /// Only after a refusal to rebuild does it wait and issue again, through
+    /// the entry's witness
+    /// ([`EnteredDispatchOperation::issue_child_if_current_within_after_owner_change`]),
+    /// whose attempts never spend and are each admitted by the review owner,
+    /// since the dispatch may have ended meanwhile. An R2 review or an R3
+    /// consent is spent exactly once, however often the issuance waits. As
+    /// for the synchronous form, this is the dispatch's single consuming
+    /// entry: for R2 and R3 a second call finds the review spent. Nothing is
+    /// held across a wait. The returned box carries the grant owner's typed
+    /// outcome, which callers must keep: an outer `Ok` is no receipt.
+    ///
+    /// # Errors
+    /// As [`Self::issue_child_if_current_within`], once the bounds are
+    /// spent; nothing was issued. A refusal after a wait is the witness
+    /// step's, with no not-dispatched certificate.
+    pub async fn issue_child_if_current_within_after_owner_change(
+        &self,
+        further: &(dyn std::any::Any + Send + Sync),
+        intent: &(dyn std::any::Any + Send + Sync),
+    ) -> Result<Box<dyn std::any::Any + Send>, crate::ToolError> {
+        let prepared = self
+            .context
+            .prepared_authorization
+            .as_ref()
+            .ok_or_else(governed_malformed)?;
+        let (call, plan) = prepared
+            .tool_dispatch_parts()
+            .ok_or_else(governed_malformed)?;
+        // Validate the typed inputs before spending this dispatch's review: a
+        // malformed call must leave the entry spendable.
+        self.work
+            .authorization()
+            .validate_child_issuance(further, intent)
+            .map_err(crate::ToolError::from)?;
+        // The single consuming entry, made once.
+        let (entering, custody) = self
+            .context
+            .enter_reviewed_effect_held_after_owner_change(call, Some(plan))
+            .await?;
+        // The first issuance is the synchronous form's own, under the entry
+        // just made and with its custody held: the entering decision, and no
+        // step admission that a holder of the review owner could refuse.
+        let first = {
+            let entered = entering.as_ref().unwrap_or(&self.context);
+            let check = entered
+                .prepared_authorization
+                .as_ref()
+                .ok_or_else(governed_malformed)?;
+            self.work
+                .authorization()
+                .issue_child_if_current_within(
+                    check.binding(),
+                    check.validity().as_ref(),
+                    further,
+                    intent,
+                    check.review_tier(),
+                )
+                .map_err(crate::ToolError::from)
+        };
+        let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_child_issuance");
+        if !refuses_to_rebuild(&first) || !wait.again().await {
+            return first;
+        }
+        // Only a refusal to rebuild goes on, through the entry's witness:
+        // its attempts never spend, and each is admitted by the review owner,
+        // since the dispatch may have ended during the wait.
+        let operation = match entering {
+            Some(entering) => entering.governed_operation(call)?,
+            None => self.clone(),
+        };
+        operation
+            .into_entered(custody)?
+            .issue_child_waiting(&mut wait, further, intent)
+            .await
     }
 
     /// The governed work context this operation was prepared in.
@@ -1673,8 +1836,10 @@ impl ToolDispatchContext {
     }
 
     /// A fresh owner-change waiting state for a delegate operation of this
-    /// dispatch's own call, such as a helper's model request (see
-    /// [`crate::authorization::OwnerChangeChurn`]). Its waits are reported as
+    /// dispatch's own call, such as a helper's model request, or for one of
+    /// its waiting governed steps (see [`crate::authorization::OwnerChangeChurn`]
+    /// and [`GovernedDispatchOperation::run_if_current_within_after_owner_change`]).
+    /// Its waits are reported as
     /// this call's to the operation refusal observer of the host that
     /// composed the agent, when one is installed.
     #[must_use]
@@ -1976,6 +2141,39 @@ impl ToolDispatchContext {
             plan,
             crate::authorization::OperationEntryBoundary::ToolEffect,
         )?;
+        self.spend_review_entry(entering)
+    }
+
+    /// [`Self::enter_reviewed_effect_held`] whose staging waits out an owner
+    /// change in progress on the work's own publication within the dispatch
+    /// attempt's own bounds, as the root staging does
+    /// ([`Self::stage_tool_entry_after_owner_change`]). Nothing is spent
+    /// before or during a wait: the review is spent once, after the staging.
+    async fn enter_reviewed_effect_held_after_owner_change(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
+    {
+        let entering = self
+            .stage_tool_entry_after_owner_change(
+                call,
+                plan,
+                crate::authorization::OperationEntryBoundary::ToolEffect,
+            )
+            .await
+            .map_err(crate::approval::review::ReviewAdmissionRefusal::into_settled)?;
+        self.spend_review_entry(entering)
+    }
+
+    /// Spend this dispatch's retained review once for the decision staging
+    /// returned (`entering`, or this context's own when staging refreshed
+    /// nothing). R1 and ungoverned entries spend nothing.
+    fn spend_review_entry(
+        &self,
+        entering: Option<Self>,
+    ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
+    {
         let current = entering.as_ref().unwrap_or(self);
         let custody = match (self.review_entry.as_ref(), current.prepared_authorization()) {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
@@ -3099,6 +3297,78 @@ fn staging_wait_site(boundary: crate::authorization::OperationEntryBoundary) -> 
     }
 }
 
+/// Whether a governed step answered a refusal to rebuild
+/// (`ReprepareRequired`): the one answer a waiting step waits after.
+fn refuses_to_rebuild<T>(answer: &Result<T, crate::ToolError>) -> bool {
+    matches!(
+        answer,
+        Err(crate::ToolError::AuthorizationRefused { refusal })
+            if refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
+    )
+}
+
+/// The owner-change waiting state of one waiting step of a dispatch's
+/// governed operation (the `_after_owner_change` forms of
+/// [`GovernedDispatchOperation`] and [`EnteredDispatchOperation`]): a fresh
+/// [`crate::authorization::OwnerChangeChurn`] reporting as the call's
+/// ([`ToolDispatchContext::owner_change_churn`]), whose one deadline is set
+/// at the step's first wait, bounded by the call's remaining tool time read
+/// then, and whose free rebuilds bound every retry of the step.
+///
+/// It is asked only after a synchronous attempt returned, so nothing that
+/// attempt took (the work owners' exclusion, an owner lock, a run-custody
+/// read, a review step's admission) is held across a wait, and no wait runs
+/// inside a work owner's exclusion. Shell synchronization only: it waits
+/// and asks again, and every attempt is decided afresh by the owners.
+struct StepOwnerChangeWait<'a> {
+    context: &'a ToolDispatchContext,
+    work: &'a crate::WorkAuthorizationContext,
+    site: &'static str,
+    churn: crate::authorization::OwnerChangeChurn,
+}
+
+impl<'a> StepOwnerChangeWait<'a> {
+    fn new(
+        context: &'a ToolDispatchContext,
+        work: &'a crate::WorkAuthorizationContext,
+        site: &'static str,
+    ) -> Self {
+        Self {
+            context,
+            work,
+            site,
+            churn: context.owner_change_churn(),
+        }
+    }
+
+    /// After an attempt that refused to rebuild ([`refuses_to_rebuild`]):
+    /// whether to make it again. The attempt ran nothing, so it takes the
+    /// wait after a stale read
+    /// ([`crate::authorization::OwnerChangeChurn::wait_after_stale_read`]).
+    /// While the work reports an owner change in progress (a held
+    /// reservation of the native owner's writer included), wait for it
+    /// within the bounds; with none at that read (the holder may have
+    /// finished between the attempt and the read), pause one backoff step
+    /// first. Again only after a settled wait, one of the step's free
+    /// rebuilds; never after an unsettled one, past the deadline or once the
+    /// free rebuilds are spent.
+    async fn again(&mut self) -> bool {
+        let context = self.context;
+        let operation = context
+            .prepared_authorization()
+            .map(|prepared| &prepared.binding().facts().operation_id);
+        self.churn
+            .wait_after_stale_read(
+                self.work.authorization().as_ref(),
+                context.remaining_tool_time(),
+                self.site,
+                operation,
+            )
+            .await
+            .settled()
+    }
+}
+
 /// Dispatch a plan only through the exact root allocation and exact canonical
 /// call identity used during resolution. Under governed work a comms or
 /// memory plan without a target of its owner's kind is refused first (see
@@ -3114,7 +3384,10 @@ fn staging_wait_site(boundary: crate::authorization::OperationEntryBoundary) -> 
 /// such values, 9 free rebuilds and 6 s of waits. Each asks the dispatch
 /// context's work authorization, the run's own, which reports such a change
 /// through every wrapper; an exact-control work reports none, so its refusal
-/// takes the ordinary path.
+/// takes the ordinary path. A tool body's own waits (a delegate operation's,
+/// or a waiting governed step's: `run_if_current_within_after_owner_change`
+/// and its siblings) take a waiting state of their own from the dispatch
+/// context, each bounded by the call's remaining tool time.
 ///
 /// An operation refusal met before the dispatcher is invoked is certified
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] at this entry's
@@ -3308,17 +3581,22 @@ async fn fenced_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
 /// that identity: a hybrid tool that selects another mode after the rebuild
 /// is a mismatch. A resolution that is not ready yet (the tool not published
 /// again, or its owner unavailable now) refuses here with zero entry and
-/// leaves the consent spendable; a run's own attempt then counts as not
-/// made, and the run's next boundary attempts it again.
+/// leaves the consent spendable, as does an admission or a spend the
+/// approval owner could not settle now (`owner_unavailable`, the consent
+/// kept); a run's own attempt then counts as not made, and the run's next
+/// boundary attempts it again. The admission settles the held decision
+/// first (ADR-001 D9): one that is not current is decided afresh by its
+/// owners, and the attempt goes on only with a current one, while a related
+/// change or their refusal withdraws the consent and refuses the attempt
+/// with zero entry.
 pub async fn dispatch_retained_consent_attempt<T: AgentToolDispatcher + ?Sized + 'static>(
     dispatcher: &Arc<T>,
     context: &ToolDispatchContext,
     approval_id: &crate::ApprovalId,
 ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
-    let (result, retained_call, _not_ready) =
-        attempt_retained_consent(dispatcher, context, approval_id).await;
-    observe_retained_consent_refusal(context, &result, retained_call);
-    result
+    let ended = attempt_retained_consent(dispatcher, context, approval_id).await;
+    observe_retained_consent_refusal(context, &ended.result, ended.trace.call);
+    ended.result
 }
 
 /// How one run's retained consent attempt ended.
@@ -3326,51 +3604,85 @@ pub(crate) enum RetainedConsentAttempt {
     /// It ran to its outcome: the dispatcher's own result, or a refusal with
     /// zero entry.
     Settled(Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>),
-    /// The session's rebuilt agent could not resolve the retained call yet:
-    /// nothing entered, the consent stays spendable, and the attempt counts
-    /// as not made.
+    /// The session's rebuilt agent could not resolve the retained call yet,
+    /// or the approval owner could not settle the attempt now and kept the
+    /// consent (`owner_unavailable`: held, or the decision or the approver's
+    /// eligibility not current and not settled for this attempt) while the
+    /// attempt spent nothing: nothing entered, the consent stays spendable,
+    /// and the attempt counts as not made.
     NotReady,
 }
 
 /// [`dispatch_retained_consent_attempt`] for a run's own attempt, which
-/// tells a resolution that is not ready yet apart from a refusal.
+/// tells a resolution or a spend that is not ready yet apart from a refusal.
+/// An `owner_unavailable` answer counts as not made only when the attempt's
+/// own review entry spent nothing (or it was refused at its admission,
+/// before it had one): an entered effect's own result is its outcome,
+/// whatever its kind.
 pub(crate) async fn dispatch_retained_consent_in_run<T: AgentToolDispatcher + ?Sized + 'static>(
     dispatcher: &Arc<T>,
     context: &ToolDispatchContext,
     approval_id: &crate::ApprovalId,
 ) -> RetainedConsentAttempt {
-    let (result, retained_call, not_ready) =
-        attempt_retained_consent(dispatcher, context, approval_id).await;
-    if not_ready && result.is_err() {
+    let ended = attempt_retained_consent(dispatcher, context, approval_id).await;
+    let owner_unavailable = matches!(
+        ended.result,
+        Err(crate::error::ToolError::ReviewUnavailable {
+            kind: crate::approval::review::ReviewUnavailableKind::OwnerUnavailable,
+        })
+    );
+    if ended.result.is_err()
+        && (ended.trace.not_ready || (owner_unavailable && ended.spent_nothing))
+    {
         return RetainedConsentAttempt::NotReady;
     }
-    observe_retained_consent_refusal(context, &result, retained_call);
-    RetainedConsentAttempt::Settled(result)
+    observe_retained_consent_refusal(context, &ended.result, ended.trace.call);
+    RetainedConsentAttempt::Settled(ended.result)
 }
 
-/// One retained attempt through its certification boundary, with the
-/// retained call it resolved and whether it found its resolution not ready.
+/// What one retained attempt learned on its way to its outcome.
+#[derive(Default)]
+struct RetainedAttemptTrace {
+    /// The retained call's id and operation id, once the candidate resolved:
+    /// the call the attempt's refusal is reported for.
+    call: Option<(String, crate::OperationId)>,
+    /// The rebuilt agent could not resolve the retained call yet.
+    not_ready: bool,
+    /// The review entry the attempt was admitted with, once it had one.
+    entry: Option<crate::approval::review::ReviewEntry>,
+}
+
+/// One retained attempt through its certification boundary.
+struct RetainedAttemptEnd {
+    result: Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>,
+    trace: RetainedAttemptTrace,
+    /// No spend of the attempt's own review entry committed (or it never had
+    /// one), read once its dispatch ended.
+    spent_nothing: bool,
+}
+
+/// One retained attempt through its certification boundary, with what it
+/// learned on its way.
 async fn attempt_retained_consent<T: AgentToolDispatcher + ?Sized + 'static>(
     dispatcher: &Arc<T>,
     context: &ToolDispatchContext,
     approval_id: &crate::ApprovalId,
-) -> (
-    Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>,
-    Option<(String, crate::OperationId)>,
-    bool,
-) {
-    let mut retained_call = None;
-    let mut not_ready = false;
-    let result = retained_consent_dispatch(
-        dispatcher,
-        context,
-        approval_id,
-        &mut retained_call,
-        &mut not_ready,
-    )
-    .await
-    .unwrap_or_else(|refused| Err(refused.not_dispatched()));
-    (result, retained_call, not_ready)
+) -> RetainedAttemptEnd {
+    let mut trace = RetainedAttemptTrace::default();
+    let result = retained_consent_dispatch(dispatcher, context, approval_id, &mut trace)
+        .await
+        .unwrap_or_else(|refused| Err(refused.not_dispatched()));
+    // The entry is read, not kept, once its dispatch ended.
+    let spent_nothing = trace
+        .entry
+        .take()
+        .as_ref()
+        .is_none_or(crate::approval::review::ReviewEntry::spent_nothing);
+    RetainedAttemptEnd {
+        result,
+        trace,
+        spent_nothing,
+    }
 }
 
 /// Report a retained attempt's refusal to the host's refusal observer.
@@ -3385,16 +3697,16 @@ fn observe_retained_consent_refusal(
 }
 
 /// [`dispatch_retained_consent_attempt`] before its certification boundary
-/// ([`FencedOutcome`]). Once the retained candidate resolves, its call id and
-/// operation id are left in `retained_call`, for the attempt's refusal
-/// report; `not_ready` is set when it refuses because the rebuilt agent
-/// could not resolve the retained call yet.
+/// ([`FencedOutcome`]), leaving what it learned in `trace`: once the retained
+/// candidate resolves (even when its admission then refuses), its call id
+/// and operation id, for the attempt's refusal report; whether it refuses
+/// because the rebuilt agent could not resolve the retained call yet; and
+/// the review entry it is admitted with.
 async fn retained_consent_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
     dispatcher: &Arc<T>,
     context: &ToolDispatchContext,
     approval_id: &crate::ApprovalId,
-    retained_call: &mut Option<(String, crate::OperationId)>,
-    not_ready: &mut bool,
+    trace: &mut RetainedAttemptTrace,
 ) -> FencedOutcome {
     let malformed = || crate::ToolError::AuthorizationRefused {
         refusal: crate::authorization::OperationRefused::new(
@@ -3404,40 +3716,29 @@ async fn retained_consent_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
     let Some(work) = context.work_authorization() else {
         return Err(malformed());
     };
-    let (mut review_entry, mut retained) = crate::approval::review::admit_consent_attempt(
-        context.operation_review(),
-        approval_id,
-        work,
-        context.run_id(),
-    )?;
-    let (call, plan) = retained.tool_dispatch_parts().ok_or_else(malformed)?;
-    *retained_call = Some((
-        call.id.to_owned(),
-        retained.binding().facts().operation_id.clone(),
-    ));
+    let (mut review_entry, mut retained) =
+        admit_retained_consent(context, work, approval_id, trace)?;
     // This process rebuilt the session's agent after the retained plan was
     // resolved: its root allocation is gone, and only a fresh resolution the
     // approval owner accepts as the same durable execution goes on.
+    let (call, plan) = retained.tool_dispatch_parts().ok_or_else(malformed)?;
     if matches!(
         plan.validate_root_dispatch(dispatcher, call),
         Err(crate::ToolExecutionResolutionError::RootDispatcherChanged { .. })
     ) {
         match rebind_retained_consent(dispatcher, context, work, approval_id, &retained) {
             RetainedRebind::Rebound => {
-                (review_entry, retained) = crate::approval::review::admit_consent_attempt(
-                    context.operation_review(),
-                    approval_id,
-                    work,
-                    context.run_id(),
-                )?;
+                (review_entry, retained) =
+                    admit_retained_consent(context, work, approval_id, trace)?;
             }
             RetainedRebind::NotReady(error) => {
-                *not_ready = true;
+                trace.not_ready = true;
                 return Err(error);
             }
             RetainedRebind::Refused(error) => return Err(error),
         }
     }
+    trace.entry = Some(review_entry.clone());
     let (call, plan) = retained.tool_dispatch_parts().ok_or_else(malformed)?;
     if dispatcher.review_entry_support(call.name)
         != crate::approval::review::ReviewEntrySupport::ConsumesAtEntry
@@ -3478,6 +3779,45 @@ async fn retained_consent_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
     }
 }
 
+/// Admit a fresh attempt of the retained candidate `approval_id` for
+/// `context`. Once the candidate first resolves (even when its admission
+/// then refuses: its held decision could not be settled), its call id and
+/// operation id are left in `trace`, for the attempt's refusal report.
+fn admit_retained_consent(
+    context: &ToolDispatchContext,
+    work: &crate::WorkAuthorizationContext,
+    approval_id: &crate::ApprovalId,
+    trace: &mut RetainedAttemptTrace,
+) -> Result<
+    (
+        crate::approval::review::ReviewEntry,
+        crate::authorization::PreparedOperationCheck,
+    ),
+    crate::error::ToolError,
+> {
+    let retained_call = |retained: &crate::authorization::PreparedOperationCheck| {
+        retained.tool_dispatch_parts().map(|(call, _)| {
+            (
+                call.id.to_owned(),
+                retained.binding().facts().operation_id.clone(),
+            )
+        })
+    };
+    let admitted = crate::approval::review::admit_consent_attempt_reporting(
+        context.operation_review(),
+        approval_id,
+        work,
+        context.run_id(),
+    );
+    if trace.call.is_none() {
+        trace.call = match &admitted {
+            Ok((_, retained)) => retained_call(retained),
+            Err(refused) => refused.retained.as_ref().and_then(retained_call),
+        };
+    }
+    admitted.map_err(|refused| refused.error)
+}
+
 /// What re-resolving a retained consent attempt for a rebuilt agent did.
 enum RetainedRebind {
     /// The approval owner rebound the custody to the fresh plan.
@@ -3495,8 +3835,9 @@ enum RetainedRebind {
 /// ([`AgentToolDispatcher::validate_resolved_execution_plan`]: the caller's
 /// deadline chain, the tool published and callable, its mode within the live
 /// catalog contract). A tool the rebuilt agent has not published yet, or one
-/// unavailable now, is not ready, as is an approval owner that is held now;
-/// any other resolution or validation failure refuses.
+/// unavailable now, is not ready, as is an approval owner that is held now
+/// or a fresh decision its owners cannot make now (unavailable, or an owner
+/// change in progress); any other resolution or validation failure refuses.
 fn rebind_retained_consent<T: AgentToolDispatcher + ?Sized + 'static>(
     dispatcher: &Arc<T>,
     context: &ToolDispatchContext,
@@ -4826,16 +5167,29 @@ impl RunLifecyclePublication {
 /// notice inputs moved into it, and which of it the run already attempted.
 /// Scheduling and notice suppression only: at most one in-run attempt per
 /// decision per run (an attempt the session's rebuilt agent could not
-/// resolve yet does not count), and only the run's own requests and the
-/// consent moved into it are examined. Spend and withdrawal authority stays
-/// with the approval owner. Reset with each work-authorized run scope.
+/// resolve yet does not count), only the run's own requests and the
+/// consent moved into it are examined, and the consent left parked for a
+/// resumed run is moved again at most once per boundary. Spend and
+/// withdrawal authority stays with the approval owner. Reset with each
+/// work-authorized run scope.
 #[derive(Debug, Default)]
 pub(crate) struct RunConsentAttempts {
     requested: BTreeSet<crate::ApprovalId>,
     attempted: BTreeSet<crate::ApprovalId>,
+    /// The run's model operation sequence at the boundary that last tried
+    /// again to move the consent left parked for this run.
+    moves_retried_at: Option<u64>,
 }
 
 impl RunConsentAttempts {
+    /// Whether this is the first poll of the boundary after the run's model
+    /// operation `sequence`, recording it: only that poll tries again to
+    /// move the consent left parked for this run (ADR-001 D9), and a repoll
+    /// of the same boundary while a gate defers calls no owner again.
+    pub(crate) fn first_poll_of_boundary(&mut self, sequence: u64) -> bool {
+        self.moves_retried_at.replace(sequence) != Some(sequence)
+    }
+
     /// The run's own dispatch committed a consent request for one call.
     pub(crate) fn requested(&mut self, approval_id: &crate::ApprovalId) {
         self.requested.insert(approval_id.clone());

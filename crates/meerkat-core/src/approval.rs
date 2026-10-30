@@ -637,7 +637,11 @@ pub enum ApprovalError {
     InvalidMetadata(#[from] crate::SurfaceMetadataError),
     /// The store committed nothing (unavailable, contended or failed before
     /// any write). An explicitly attempted retry through fresh checks is
-    /// valid; nothing is resent automatically.
+    /// valid; nothing is resent automatically. Also the answer of a consent
+    /// approval that recorded nothing because its candidate's authorization
+    /// or its approver's eligibility could not be settled now (an owner
+    /// change in progress, owners that are unavailable, or a publication
+    /// that kept changing; ADR-001 D9): the same retry is valid.
     #[error("approval store unavailable: {0}")]
     StoreUnavailable(String),
     /// Another owner of the backing changed the row first. Nothing of this
@@ -1812,6 +1816,28 @@ impl ApprovalService {
         self
     }
 
+    /// Test-only: whether a writer holds the owner's state now (a review
+    /// input under its reservation, or a decision).
+    #[cfg(test)]
+    pub(crate) fn state_write_held(&self) -> bool {
+        self.state.is_locked_exclusive()
+    }
+
+    /// Test-only: read the owner's state as a concurrent approval read
+    /// (`get`, `list`) does, on the calling thread: report the read through
+    /// `held` once it holds it, and hold it until `release` answers or its
+    /// sender is dropped.
+    #[cfg(test)]
+    pub(crate) fn read_state_until(
+        &self,
+        held: &std::sync::mpsc::Sender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
+    ) {
+        let _read = self.state.read();
+        let _ = held.send(());
+        let _ = release.recv();
+    }
+
     /// Issue a fresh, never-reused attempt bound to the exact operation and
     /// its original admitted work, through the same non-blocking reservation:
     /// a held owner refuses locally (`Contended`) at once with no attempt
@@ -2079,6 +2105,13 @@ impl ApprovalService {
     }
 
     fn refresh_expiry(&self, approval_id: &ApprovalId) -> Result<(), ApprovalError> {
+        // A live consent candidate whose decision an owner publication change
+        // made stale is re-adjudicated first, outside the reservation, on
+        // this caller's thread (ADR-001 D9). One its own check refuses, or
+        // answers that its owners are unavailable, is left for an approval
+        // or an attempt: a polling read never calls its owners for it. A
+        // read reports what it left.
+        let _ = self.readjudicate_consent(approval_id, consent::ReadjudicationStep::Read);
         let now = self.now();
         let mut state = self.state.write();
         let result = self.refresh_expiry_locked(&mut state, approval_id, now);
@@ -2111,11 +2144,13 @@ impl ApprovalService {
         // here: it is reconciled through the owner before reuse.
         self.record_pending_withdrawals_locked(state);
         state.ensure_reconciled(approval_id)?;
-        // Backstop for a run that closed without its eager withdrawal: a
-        // live candidate whose retained decision is no longer current is
-        // withdrawn here (callback-free check under the reservation). A
-        // withdrawal that could not be recorded stops this read: nothing is
-        // derived from the old record and the retired machine state.
+        // An approved parked candidate past its deadline is withdrawn here
+        // (callback-free, under the reservation). A live candidate whose
+        // decision is no longer current was re-adjudicated before this
+        // reservation as its caller's step allows (ADR-001 D9), and its
+        // owners' refusal withdrew it there. A withdrawal that could not be
+        // recorded stops this read: nothing is derived from the old record
+        // and the retired machine state.
         self.withdraw_stale_consent_locked(state, approval_id);
         state.ensure_reconciled(approval_id)?;
         let Some(record) = state.records.get(approval_id).cloned() else {

@@ -55,6 +55,12 @@ struct ToolPolicyOwner {
     /// under the owner publication.
     review_material: Mutex<ReviewMaterial>,
     review_context_calls: AtomicUsize,
+    /// The window of a tool allowance: 0 for the fixed expiry (2000 ms on
+    /// the owner's clock), or this many milliseconds from each
+    /// preparation's own time, as an owner whose allowance slides with
+    /// every preparation (ordinary host work) grants it. Changed only under
+    /// the owner publication.
+    allowance_window_ms: AtomicU64,
 }
 
 /// What the fixture owner holds as review material.
@@ -112,7 +118,7 @@ impl LocalWorkPolicy for ToolPolicyOwner {
         &self,
         association: &InputAuthorityAssociation,
         binding: &PreparedAuthorizationBinding,
-        _now_ms: u64,
+        now_ms: u64,
     ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if association != self.admitted.as_ref()
@@ -169,10 +175,14 @@ impl LocalWorkPolicy for ToolPolicyOwner {
         } else {
             meerkat_core::authorization::OperationReviewTier::R1
         };
+        let expires_at_ms = match self.allowance_window_ms.load(Ordering::Relaxed) {
+            0 => 2_000,
+            window_ms => now_ms + window_ms,
+        };
         Ok(LocalPolicyAllowance {
             operation_values: vec![actual],
             restrictions: ExecutionRestrictions::unrestricted(),
-            expires_at_ms: 2_000,
+            expires_at_ms,
             review_tier,
         })
     }
@@ -182,6 +192,8 @@ struct ToolWork {
     context: WorkAuthorizationContext,
     owner: Arc<ToolPolicyOwner>,
     publication: LocalAuthorizationPublication,
+    /// The owner's clock, which a test moves on with no owner change.
+    clock: Arc<FixtureClock>,
 }
 
 impl ToolWork {
@@ -210,19 +222,47 @@ impl ToolWork {
             calls: AtomicUsize::new(0),
             review_material: Mutex::new(ReviewMaterial::NotApplicable),
             review_context_calls: AtomicUsize::new(0),
+            allowance_window_ms: AtomicU64::new(0),
         });
         let publication = LocalAuthorizationPublication::new();
+        let clock = Arc::new(FixtureClock::new());
         let authorization = Arc::new(LocalWorkAuthorization::new(
             admitted,
             owner.clone(),
             publication.clone(),
-            Arc::new(FixtureClock::new()),
+            clock.clone(),
         ));
         Self {
             context: WorkAuthorizationContext::new(authorization, native_scope),
             owner,
             publication,
+            clock,
         }
+    }
+
+    /// Time passes on the owner's clock (wall and monotonic alike), with no
+    /// owner change.
+    fn advance_clock(&self, by: Duration) {
+        let by_ms = u64::try_from(by.as_millis()).expect("millis");
+        self.clock.set(
+            self.clock.unix_ms.load(Ordering::Relaxed) + by_ms,
+            self.clock.elapsed_ms.load(Ordering::Relaxed) + by_ms,
+        );
+    }
+
+    /// The owner grants tool allowances that slide with every preparation:
+    /// `window` from the preparation's own time. Published as an owner
+    /// change.
+    fn slide_allowance(&self, window: Duration) {
+        let publication = self
+            .publication
+            .begin_owner_change()
+            .expect("owner publication");
+        self.owner.allowance_window_ms.store(
+            u64::try_from(window.as_millis()).expect("millis"),
+            Ordering::Relaxed,
+        );
+        drop(publication);
     }
 
     fn revoke(&self) {

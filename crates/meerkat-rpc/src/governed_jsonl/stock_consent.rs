@@ -18,7 +18,10 @@
 //! the assurance the rule accepts and the expiry). An approval is issued
 //! only while the pipe is open with its notices attached, a pending,
 //! unexpired record is all it presents, and a decision on the pipe is
-//! eligible only for an approval this pipe presented.
+//! eligible only for an approval this pipe presented. The pipe answers for
+//! its operator on an approval until a terminal transition (denied, used or
+//! withdrawn) or its retirement: an approved consent is spent later, when
+//! the approval owner may ask again whether its approver was revoked.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -60,8 +63,11 @@ pub struct StdioConsentSurface {
     scope: HostAuthenticationScope,
     open: AtomicBool,
     notices: std::sync::Mutex<Option<NotificationSink>>,
-    /// The undecided approvals this pipe presented to its operator: the only
-    /// ones a decision on it may decide.
+    /// The approvals this pipe presented to its operator, from their
+    /// `requested` notice until a terminal one (denied, used or withdrawn):
+    /// the only ones a decision on it may decide, and, once its operator
+    /// approved one, the one the pipe keeps answering for (its operator was
+    /// not revoked) until it is spent, withdrawn or the pipe retires.
     presented: std::sync::Mutex<HashSet<ApprovalId>>,
 }
 
@@ -283,8 +289,11 @@ impl StockConsentSurface for StdioConsentSurface {
     }
 
     /// A closed pipe shows nothing more. A `requested` notice carries the
-    /// approval's presentation; any later transition ends what the pipe may
-    /// decide on it.
+    /// approval's presentation. An approval stays the pipe's to answer for
+    /// through its approval: the approval owner asks again, before the
+    /// consent is spent, whether its approver was revoked since deciding,
+    /// and only the pipe's retirement revokes its operator. A terminal
+    /// transition (denied, used or withdrawn) ends it.
     fn notice(&self, notice: ConsentNotice) {
         let Some(sink) = self.open_sink() else {
             return;
@@ -293,7 +302,12 @@ impl StockConsentSurface for StdioConsentSurface {
             self.present_requested(&sink, &notice);
             return;
         }
-        self.presented().remove(&notice.approval_id);
+        if matches!(
+            notice.kind,
+            ConsentNoticeKind::Denied | ConsentNoticeKind::Used | ConsentNoticeKind::Withdrawn
+        ) {
+            self.presented().remove(&notice.approval_id);
+        }
         sink.emit_notification(
             CONSENT_NOTICE_NOTIFICATION,
             &ConsentNoticeParams::from(&notice),
@@ -505,7 +519,7 @@ mod tests {
     /// A `requested` notice carries the issuer's own record of the approval
     /// (the action, the risk, the owners' account and mandate, the accepted
     /// assurance and the expiry). Only that presentation makes the approval
-    /// decidable on the pipe, and a later transition ends it.
+    /// decidable on the pipe, and a terminal transition ends it.
     #[test]
     fn a_requested_notice_presents_the_issuers_record_before_any_decision() {
         let stock = stock();
@@ -546,8 +560,42 @@ mod tests {
         assert_eq!(
             pipe.approver_login(&own, &approval),
             None,
-            "a later transition ends what the pipe may decide"
+            "a terminal transition ends what the pipe answers for"
         );
+    }
+
+    /// An approval stays the pipe's to answer for through its approval: the
+    /// consent is spent later, and the approval owner may ask again then
+    /// whether its operator was revoked. Only a terminal transition (used,
+    /// withdrawn or denied) or the pipe's retirement ends it.
+    #[test]
+    fn an_approved_approval_is_answered_for_until_it_ends_or_the_pipe_retires() {
+        for end in ["used", "withdrawn", "denied", "retired"] {
+            let stock = stock();
+            let issuer = ApprovalService::new();
+            let approval = issue(&issuer);
+            let pipe = StdioConsentSurface::new(&stock, issuer).expect("pipe");
+            let own = pipe.approver().expect("approver");
+            let mut shown = present_on(&pipe, &approval);
+            let _requested = shown.try_recv().expect("the requested notice");
+            if end != "denied" {
+                pipe.notice(notice(&approval, ConsentNoticeKind::Approved));
+                let params = notice_params(&shown.try_recv().expect("the approved notice"));
+                assert_eq!(params.kind, meerkat_contracts::ConsentNoticeKind::Approved);
+                assert_eq!(
+                    pipe.approver_login(&own, &approval),
+                    Some(StockLoginLifetime::UntilRetired),
+                    "approved, its operator is still answered for"
+                );
+            }
+            match end {
+                "used" => pipe.notice(notice(&approval, ConsentNoticeKind::Used)),
+                "withdrawn" => pipe.notice(notice(&approval, ConsentNoticeKind::Withdrawn)),
+                "denied" => pipe.notice(notice(&approval, ConsentNoticeKind::Denied)),
+                _ => pipe.retire(),
+            }
+            assert_eq!(pipe.approver_login(&own, &approval), None, "{end}");
+        }
     }
 
     /// A pipe without its notices attached can show nothing, so no approval

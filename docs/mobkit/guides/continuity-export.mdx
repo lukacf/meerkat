@@ -4,7 +4,7 @@ description: "Before a 0.9.3 deployment that kept continuity behind an SDK conti
 icon: "file-export"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Meta 0.9.4 keeps session and identity truth in Core's local stores. The 0.9.3
 SDK continuity provider (`continuity_store` on the Python builder,
@@ -316,3 +316,16 @@ same way. Either script checks the header, the count, length and SHA-256 of
 the entries, and every entry, prints the summary again, and exits with status 4
 when the file fails a check. Keep the file unchanged until 0.9.4 has imported
 it.
+
+## Importing into a host store realm
+
+A host that keeps its Meta realm in its own database through Core's host
+store SPI (see "Keeping a Meta realm in your own database" in the unified
+runtime guide) imports the file with a library call instead of
+`storage-migrate-native`, since its host store lives in its own process:
+`storage_migrate_native::import_continuity_export_into_host_store`, before
+the realm's first start, with the same blob store the runtime will be given.
+It reads and checks the file as `storage-migrate-native` does, refuses a
+realm a runtime has used or another export's import began, and is safe to run
+again: a rerun with the same file finds each imported session kept and
+continues.

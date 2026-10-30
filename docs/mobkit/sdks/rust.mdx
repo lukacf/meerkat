@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.5"
+meerkat-meta = "0.9.7"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -343,25 +343,58 @@ later ones, such as a reset's fresh session. The default keeps the composed
 customizer, and a gateway without a roster provider never asks.
 
 A wrapper delegates `after_create` as well as `customize_build`. The gateway
-calls `after_create` once after each build of a live member that ran
-`customize_build`, with the session the build created or resumed,
-best-effort: an error is logged and the build stands. It calls it with no lock
-of the identity held, so once the init has settled an `after_create` can call
-back into the gateway for the same identity; during the roster bootstrap the
-gateway still answers `init_in_progress`. The call can come after the
-operation that built the member has answered. The context's `model` is the
-build's model, else the model of the profile when the mob definition declares
-it inline; it is empty for a realm-bound profile the build sets no model for.
+calls them at these points:
+
+- `customize_build` runs once when an identity is seated and Core held no
+  member for it (a new identity, an identity a first-boot manifest row brings
+  in, a hosted identity its host creates), when a reset or a delete starts
+  the identity's fresh life, and when a declared role migration moves it to
+  its new role. That call publishes the identity's customizer tools and
+  records the customized spawn spec in the seat or rotation. It builds
+  nothing, except where the seat step builds the member from it: a seat
+  that revives the archived session of a member Core retired after it was
+  built (a respawn, for example), and a declared role migration's restamp
+  of the member onto its session. `meta/identity/resolved_tools`, which
+  reports the tools a build actually resolved, answers `no_build_recorded`
+  until the member's first build. Each of
+  these calls gets the runtime's real context: every registered identity as
+  `active_peers`, the roster's managed edges, and the runtime services. It
+  also runs at every build of the member (each wake Core makes), right
+  before the build. A start over identities Core already holds calls it for
+  none of them until they are built.
+- `after_create` is called once after each seat, fresh life or migration that
+  ran `customize_build`, with the session the identity is bound to, as at an
+  identity's creation. A wake's build never calls it.
+
+A respawn of a built member calls `customize_build` once and `after_create`
+once, with the session the respawn keeps, and Core builds the member once,
+with that call's tools: Core keeps the retired member's session archived, so
+the respawn's seat revives the member on it, and Core's wake then finds the
+member live. The same holds for a materialization, a warm or a delivery
+whose seat step builds the member: the member stays live for it. The roster
+pass asks Core to release a member its seat step built, so that identity is
+then like a lazily seated one. A lazily seated identity (one seated with
+nothing built yet) gets two `customize_build` calls before its first run:
+its seat's, then its first build's. A respawn of a member that was never
+built does the same: its seat calls `customize_build`, and its build calls
+it again.
+
+`after_create` is best-effort: an error is logged and the seat or build
+stands. The gateway calls it with no lock of the identity held, so once the
+init has settled an `after_create` can call back into the gateway for the
+same identity; during the roster bootstrap the gateway still answers
+`init_in_progress`. The call can come after the operation that seated the
+identity has answered. The context's `model` is the build's model, else the
+model of the profile when the mob definition declares it inline; it is empty
+for a realm-bound profile the build sets no model for.
 `AgentCustomizer::after_create` has a no-op default, so a wrapper that
 overrides only `customize_build` silently drops the SDK's `after_create`
-callback. A member Core rebuilds on its own (its restore at a restart, a
-delivery-time repair) calls neither: the identity's customizer tools stay
-attached through its tool dispatcher.
+callback.
 
 The hook can wrap the composed customizer, but it cannot add one. Whether a
 customizer is composed is settled before the hook runs, because the registry
 that keeps each member's `customize_build` tools across rebuilds (a restart,
-a respawn, a delivery-time repair) exists only when one is composed. A
+a respawn, each wake) exists only when one is composed. A
 customizer added later would lose its tools at the first rebuild. So:
 
 - When the init registers no SDK agent customizer and configures no agent
@@ -390,6 +423,27 @@ same. A host that needs a customizer and is offered `None` answers
 identity bootstrap instead of starting members without their surface. The
 init failure (`-32603`) carries the variant's text, which tells the operator
 to configure the SDK agent customizer and that a pass-through is enough.
+
+### Member restore
+
+Every roster identity is a member of the mob from ready, and is materialized
+when work reaches it. `member_restore` sets what the mob materializes when it
+starts (the values are in the `runtime_options` row `member_restore` of the
+[configuration reference](/mobkit/reference/configuration)):
+
+```rust
+use meerkat_meta::{MemberRestore, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .member_restore(MemberRestore::OnDemandVerified)
+    .build()
+    .await?;
+```
+
+Unset, `MemberRestore::OnDemand` applies. The builder also applies it to a
+supplied `mob_spec(...)`; a spec you build yourself takes
+`MobBootstrapSpec::with_member_restore`.
 
 ### Fork instruction policy
 
@@ -427,6 +481,61 @@ key's `key_state` with `read_member_instruction_activations` first for the
 detached member forks) is refused with `MobError::ForkInstructionRefused`
 instead. See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
 for what a fork copies and what `ReactivateInherited` trusts.
+
+### Provider credential store
+
+By default every agent factory keeps provider credentials (persisted API keys
+and the OAuth tokens a login saved) in Meerkat's process default store,
+`<config dir>/meerkat/credentials`, which every runtime and process of the OS
+user shares (see [Provider credentials](/mobkit/reference/configuration#provider-credentials)).
+A host serving several users opens a store per user and hands it to the
+builder:
+
+```rust
+use meerkat::TokenStoreBackend;
+use meerkat_meta::UnifiedRuntime;
+
+let credentials = TokenStoreBackend::File {
+    root: user_root.join("credentials"),
+}
+.open_with_refresh_authority()?;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(user_root.join("state"))
+    .provider_auth_persistence(credentials)
+    .build()
+    .await?;
+```
+
+The builder attaches a clone of the store to every agent factory it owns, for
+persistent, scratch and temp-dir launches, before anything clones the
+factory: the members and the agents they create, live sessions and the agent
+memory engines all resolve and persist provider credentials there, with one
+refresh authority. Pass the same root again whenever you reopen that user's
+state. A builder given an already-built `mob_spec(...)` refuses the store
+with `UnifiedRuntimeBuilderError::ConflictingConfiguration`, and the public
+`MobBootstrapSpec` constructors take none: a host that builds its own spec
+attaches the store to its own agent factory with
+`AgentFactory::with_provider_auth_persistence`, passes a session service built
+on that factory to `MobBootstrapSpec::new`, and gives memory engines it
+assembles itself the same store with
+`memory_wiring::attach_memory_engines_with_provider_auth`.
+
+A host deploy's `rkat mob run` process cannot carry the store, so a runtime
+built with it refuses `meta/mobpacks/deploy` with `execute: true` on its RPC
+and its Flow Editor (`-32004`, `data.kind =
+"provider_credentials_not_carried"`). A host that attached the store to its
+own spec's factory records it with
+`runtime.set_explicit_provider_credentials(true)` before it builds routers.
+
+A host composing the stdio gateway answers
+`GatewayHostComposition::provider_auth_persistence`. The gateway asks once per
+launch, before any agent factory is built, and attaches the store to its
+member factory before `compose_member_factory` is offered it, so the
+construction's host auth service and realm MCP installation use it too.
+`Ok(None)` (the default) keeps the process default, `Err` refuses init, and
+`runtime_options.provider_credentials_root` is refused under a native host.
 
 ### Session hooks and mob operator authority
 

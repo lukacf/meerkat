@@ -2484,10 +2484,14 @@ pub enum InputAbandonReason {
     /// found it older than that stop's max age, so it ended without running.
     /// Resolves to the public `Abandoned` class.
     RequeueExpired,
-    /// The input's run was resumable after a restart, and its resume was
-    /// refused: the host's resume gate answered that the run was superseded,
-    /// or kept failing, so the run ended without continuing. Resolves to the
-    /// public `Abandoned` class.
+    /// The input's resume was refused, so it ended without running: the run
+    /// it was bound to was resumable after a restart and the host's resume
+    /// gate answered that the run was superseded, or kept failing; or the
+    /// input was kept governed work whose host supplied no controller client
+    /// for it again after the restart (a definite refusal, or no answer
+    /// within its budget), or a kept governed input the host has no way to
+    /// supply a controller client for again. Resolves to the public
+    /// `Abandoned` class.
     ResumeRefused,
 }
 
@@ -4124,6 +4128,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             // until Resume releases the hold. The current run, its turn
             // start, steer joins, cancels and terminals are unaffected.
             run_start_holds: Set<Enum<RunStartHoldReason>>,
+            // Kept governed work waiting for its controller. A resume of
+            // retained work that a graceful requeue stop kept, or that a
+            // restart found, in the store comes back without its controller
+            // client (a client never survives the store), and its host is
+            // asked for it again. While the host cannot say yet whether it
+            // supplies one, the input is held here: it is never selected or
+            // staged (it stays queued, with its attempts), and the run marked
+            // resumable that it is bound to does not resume. The host
+            // supplying the client releases the hold (ReleaseInputController,
+            // which wakes the runtime). A definite refusal, or a wait past its
+            // budget, ends the input as a refused resume, and every
+            // transition that ends an input, or settles or releases its run,
+            // drops its hold. Live only: never persisted, every registration
+            // holds its recovered inputs again from their first answer.
+            input_controller_holds: Set<String>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
             // Whether the registration served live work: an input admitted
             // live (QueueAccepted, SteerAccepted), a resubmission
@@ -4876,6 +4895,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_live_boundary_join_phase = EmptyMap,
             run_stop_requested = None,
             run_start_holds = EmptySet,
+            input_controller_holds = EmptySet,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -7299,6 +7319,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Option<Generation>,
             },
+            // A kept governed input whose host cannot say yet whether it
+            // supplies the input's controller client again is held
+            // (`input_controller_holds`); the host supplying the client
+            // releases it.
+            HoldInputController { input_id: String },
+            ReleaseInputController { input_id: String },
         }
 
         surface_only [
@@ -8671,6 +8697,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // or KeepServing (the registration stays; a mob member, once
             // loaded, stays loaded).
             EmptyResumeRetirementResolved { verdict: Enum<EmptyResumeRetirementVerdict> },
+            // A kept governed input's controller hold was released: the
+            // runtime plans again, and the input may stage, or the run it is
+            // bound to resume.
+            InputControllerReleased,
         }
 
         // =====================================================================
@@ -8950,6 +8980,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition ResumableRunReleased => local seam NoOwnerRealization,
         disposition ResumableRunSettled => local seam NoOwnerRealization,
         disposition RunSuspendedForStop => local seam NoOwnerRealization,
+        // The runtime loop that releases a kept input's controller hold
+        // reads the wake from its own transition and plans again.
+        disposition InputControllerReleased => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Helpers
@@ -10350,6 +10383,30 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.input_run_associations.contains_key(input_id))
         }
 
+        // A held input is kept governed work waiting unstaged for its
+        // controller: an input the registration recovered (a resume of
+        // retained work its host is asked about again), bound to a governed
+        // association, with no live-boundary delivery, and either queued in
+        // a lane or bound, Staged or Applied, to the run marked resumable,
+        // which does not resume while it is held: exactly what
+        // HoldInputController requires. Every transition that ends an input,
+        // or settles or releases its run, drops its hold.
+        invariant input_controller_holds_are_kept_unstaged_governed_inputs {
+            for_all(input_id in self.input_controller_holds,
+                self.recovered_admitted_inputs.contains(input_id)
+                && self.input_authority_bindings.contains_key(input_id)
+                && !self.input_live_boundary_delivery.contains_key(input_id)
+                && !self.input_live_boundary_join_run.contains_key(input_id)
+                && ((self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                        && self.input_lane.contains_key(input_id))
+                    || (self.resumable_run_id != None
+                        && self.input_run_associations.get_cloned(input_id) == self.resumable_run_id
+                        && (self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                            || self.input_phases.get_cloned(input_id) == Some(InputPhase::Applied)
+                            || self.input_phases.get_cloned(input_id)
+                                == Some(InputPhase::AppliedPendingConsumption)))))
+        }
+
         // Durable in-turn Steer delivery. The tracked delivery class exists
         // only while its input still awaits a live boundary in the Steer lane.
         invariant live_boundary_delivery_only_for_queued_steer {
@@ -11562,14 +11619,63 @@ macro_rules! meerkat_catalog_machine_dsl {
         // then, under the same authority lock, applies ResumeRun: the run is
         // current again and stops being resumable. Its batch is exactly the
         // inputs bound to it, which stay Staged or Applied; nothing is staged
-        // again.
+        // again. The run then runs under the destination and the authority
+        // batch its inputs were staged for, as a staged run does
+        // (StageForRun): the inputs bound to one run share its authority
+        // batch, whose key includes the exact destination, so the context
+        // target and batch key of any of them are the first one's. An input
+        // bound to the run is one associated with it in a bound phase (Staged,
+        // Applied or AppliedPendingConsumption), as the resumed-run plan
+        // selects them: an association can outlive the binding (a discarded
+        // live join returns to its lane, and recovery restores a queued
+        // input's last run), and such an input is not the run's.
         transition ResumeRun {
             per_phase [Running]
             on input ResumeRun { run_id }
             guard "run_is_current" { self.current_run_id == Some(run_id) }
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            // A run whose kept input still waits for its controller client
+            // does not resume (the resumed-run plan refuses it too).
+            guard "run_inputs_not_controller_held" {
+                for_all(held_input_id in self.input_controller_holds,
+                    self.input_run_associations.get_cloned(held_input_id) != Some(run_id))
+            }
+            // A governed run on a document that requires a destination
+            // resumes only once one is bound again (or was bound, and then
+            // retired), as `scoped_context_attached` stages recovered
+            // governed work; the resumed-run plan waits the same way.
+            guard "resumed_run_destination_attached" {
+                self.scoped_context_required == false
+                || self.scoped_context_binding != None
+                || self.scoped_context_generation != 0
+                || for_all(bound_input_id in self.input_run_associations.keys(),
+                    self.input_run_associations.get_cloned(bound_input_id) != Some(run_id)
+                    || !self.input_authority_bindings.contains_key(bound_input_id)
+                    || (self.input_phases.get_cloned(bound_input_id) != Some(InputPhase::Staged)
+                        && self.input_phases.get_cloned(bound_input_id)
+                            != Some(InputPhase::Applied)
+                        && self.input_phases.get_cloned(bound_input_id)
+                            != Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
                 self.resumable_run_id = None;
+                self.authority_staged_run = Some(run_id);
+                self.run_context_binding = None;
+                self.authority_staged_batch = None;
+                for bound_input_id in self.input_run_associations.keys() {
+                    if self.input_run_associations.get_cloned(bound_input_id) == Some(run_id)
+                        && (self.input_phases.get_cloned(bound_input_id) == Some(InputPhase::Staged)
+                            || self.input_phases.get_cloned(bound_input_id)
+                                == Some(InputPhase::Applied)
+                            || self.input_phases.get_cloned(bound_input_id)
+                                == Some(InputPhase::AppliedPendingConsumption))
+                    {
+                        self.run_context_binding =
+                            self.input_context_targets.get_cloned(bound_input_id);
+                        self.authority_staged_batch =
+                            self.input_authority_batch_keys.get_cloned(bound_input_id);
+                    }
+                }
             }
             to Running
             emit ResumedRunAuthorized { run_id: run_id }
@@ -11584,6 +11690,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
             update {
                 self.resumable_run_id = None;
+                // Its held inputs stop waiting with it: they requeue as
+                // inputs of no run, and the runtime asks their host again for
+                // a controller client they still miss.
+                for held_input_id in self.input_controller_holds {
+                    if self.input_run_associations.get_cloned(held_input_id) == Some(run_id) {
+                        self.input_controller_holds.remove(held_input_id);
+                    }
+                }
             }
             to Idle
             emit ResumableRunReleased { run_id: run_id }
@@ -11592,11 +11706,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The marked run ends without resuming: a refused resume, a stop
         // that cancels, an expired requeue mark, or a retire, destroy or
         // reset before ResumeRun. The mark clears and the run is recorded
-        // terminal. This transition changes no input: the shell then abandons
-        // the run's bound inputs with `reason` (a settle, which also discards
-        // the run's provisional tail), or leaves them to the lifecycle path's
-        // own sweep (retire, destroy, reset). A graceful requeue stop does not
-        // settle: it keeps the run resumable.
+        // terminal. This transition changes no input's lifecycle (it only
+        // drops the controller holds of the inputs bound to the run, which
+        // end with it): the shell then abandons the run's bound inputs with
+        // `reason` (a settle, which also discards the run's provisional
+        // tail), or leaves them to the lifecycle path's own sweep (retire,
+        // destroy, reset). A graceful requeue stop does not settle: it keeps
+        // the run resumable.
         transition SettleResumableRun {
             per_phase [Initializing, Idle, Attached, Retired, Stopped]
             on input SettleResumableRun { run_id, reason }
@@ -11604,6 +11720,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.resumable_run_id = None;
                 self.turn_terminal_run_id = Some(run_id);
+                // Its held inputs stop waiting with it; the shell then ends
+                // them with the run.
+                for held_input_id in self.input_controller_holds {
+                    if self.input_run_associations.get_cloned(held_input_id) == Some(run_id) {
+                        self.input_controller_holds.remove(held_input_id);
+                    }
+                }
             }
             to Idle
             emit ResumableRunSettled { run_id: run_id, reason: reason }
@@ -25296,6 +25419,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, phase);
+                // A controller hold is live only: the registration holds the
+                // recovered input again from its own answer.
+                self.input_controller_holds.remove(input_id);
                 // Live-boundary delivery classes and joins are never recovered:
                 // a recovered input only ever takes the queued path.
                 self.input_live_boundary_delivery.remove(input_id);
@@ -25606,6 +25732,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.scoped_context_generation != 0
                 || !self.input_authority_bindings.contains_key(input_id)
             }
+            // A kept governed input waiting for its host to supply its
+            // controller client again is held: it stays queued, with its
+            // attempts, until the hold is released or the input ends.
+            guard "input_controller_not_held" {
+                !self.input_controller_holds.contains(input_id)
+            }
             // Destination homogeneity follows from `homogeneous_run_authority`:
             // the batch key includes the exact target.
             update {
@@ -25752,6 +25884,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
@@ -25798,6 +25931,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
@@ -25879,6 +26013,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // it: the run this input last contributed to stays readable as
                 // a terminal witness (`terminal_status::evaluate_run`).
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
@@ -25909,6 +26044,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_live_boundary_join_phase.get_cloned(input_id)
                     != Some(LiveBoundaryJoinPhase::Published)
             }
+            // A held input never runs, so it is never applied.
+            guard "input_controller_not_held" {
+                !self.input_controller_holds.contains(input_id)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Applied);
                 self.input_live_boundary_delivery.remove(input_id);
@@ -25928,6 +26067,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "live_boundary_join_not_published" {
                 self.input_live_boundary_join_phase.get_cloned(input_id)
                     != Some(LiveBoundaryJoinPhase::Published)
+            }
+            guard "input_controller_not_held" {
+                !self.input_controller_holds.contains(input_id)
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::AppliedPendingConsumption);
@@ -26246,6 +26388,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "attempt_count_tracked" { self.input_attempt_counts.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
@@ -26278,6 +26421,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
@@ -26332,6 +26476,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
@@ -26368,6 +26513,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Superseded);
@@ -26403,6 +26549,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Coalesced);
@@ -26433,6 +26580,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
@@ -26602,6 +26750,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.recovered_admitted_inputs.remove(input_id);
+                self.input_controller_holds.remove(input_id);
                 self.recovered_admitted_lanes.remove(input_id);
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.input_live_boundary_delivery.remove(input_id);
@@ -39804,6 +39953,61 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requeue_max_age_ms: 0
             }
         }
+
+        // Kept governed work waiting for its controller. A resume of
+        // retained work that a graceful requeue stop kept, or that a restart
+        // found, in the store comes back without its controller client, and
+        // its host is asked for the client again. While the host cannot say
+        // yet whether it supplies one, the runtime holds the input: held, it
+        // is neither selected nor staged (StageForRun, MarkApplied and the
+        // batch and stage plans refuse it), so it keeps its attempts, and the
+        // run marked resumable that it is bound to does not resume (ResumeRun
+        // and the resumed-run plan refuse it). Only a kept governed input
+        // that waits unstaged, queued in a lane or bound to the resumable
+        // run, can be held, and never one with a live-boundary delivery.
+        // Holding an input already held changes nothing.
+        transition HoldInputController {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input HoldInputController { input_id }
+            guard "kept_governed_input" {
+                self.recovered_admitted_inputs.contains(input_id)
+                && self.input_authority_bindings.contains_key(input_id)
+            }
+            guard "input_waits_unstaged" {
+                (self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                    && self.input_lane.contains_key(input_id))
+                || (self.resumable_run_id != None
+                    && self.input_run_associations.get_cloned(input_id) == self.resumable_run_id
+                    && (self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                        || self.input_phases.get_cloned(input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
+            guard "no_live_boundary_delivery" {
+                !self.input_live_boundary_delivery.contains_key(input_id)
+                && !self.input_live_boundary_join_run.contains_key(input_id)
+            }
+            update {
+                self.input_controller_holds.insert(input_id);
+            }
+            to Idle
+        }
+
+        // The host supplied the held input's controller client: the hold is
+        // released, and the runtime plans again (InputControllerReleased),
+        // so the input may stage, or the run it is bound to resume. The hold
+        // of an input that ends goes with it instead (every terminal
+        // transition, and a settled or released run, drops it).
+        transition ReleaseInputController {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReleaseInputController { input_id }
+            guard "input_controller_held" { self.input_controller_holds.contains(input_id) }
+            update {
+                self.input_controller_holds.remove(input_id);
+            }
+            to Idle
+            emit InputControllerReleased
+        }
     }
         }
 
@@ -39966,13 +40170,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// The marked run and exactly the inputs bound to it (staged
                 /// or applied, associated with the run), in admission order.
                 /// `None` unless `run_id` is the marked resumable run, no run
-                /// is current, and at least one input is bound to it.
+                /// is current, at least one input is bound to it, no input
+                /// bound to it is held for its controller (mirrors the
+                /// `ResumeRun` guard `run_inputs_not_controller_held`), and
+                /// its destination is attached
+                /// (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
                     state: &MeerkatMachineState,
                     run_id: &RunId,
                 ) -> Option<ResumedRunPlan> {
                     if state.resumable_run_id.as_ref() != Some(run_id) || state.current_run_id.is_some() {
+                        return None;
+                    }
+                    if state
+                        .input_controller_holds
+                        .iter()
+                        .any(|held| state.input_run_associations.get(held) == Some(run_id))
+                    {
+                        return None;
+                    }
+                    if !resumed_run_destination_attached(state, run_id) {
                         return None;
                     }
                     let mut input_ids: Vec<String> = state
@@ -40011,7 +40229,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             ) -> Option<RuntimeLoopBatchPlan> {
                 let ordered: Vec<String> = ordered_queued_lane_inputs(state, lane)?
                     .into_iter()
-                    .filter(|input_id| scoped_context_stageable(state, input_id))
+                    .filter(|input_id| {
+                        scoped_context_stageable(state, input_id)
+                            && controller_stageable(state, input_id)
+                    })
                     .collect();
                 let first = ordered.first()?;
                 // AppendContentAndRun owns exactly one SystemNotice per run.
@@ -40067,6 +40288,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !scoped_context_stageable(state, input_id) {
                         return None;
                     }
+                    if !controller_stageable(state, input_id) {
+                        return None;
+                    }
                     if state.input_phases.get(input_id) != Some(&InputPhase::Queued) {
                         return None;
                     }
@@ -40098,6 +40322,50 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || state.scoped_context_binding.is_some()
                     || state.scoped_context_generation != 0
                     || !state.input_authority_bindings.contains_key(input_id)
+            }
+
+            // Mirrors the StageForRun `input_controller_not_held` guard: a
+            // kept governed input waiting for its host to supply its
+            // controller client again is held (queued, with its attempts),
+            // and later work of its lane goes first.
+            fn controller_stageable(state: &MeerkatMachineState, input_id: &String) -> bool {
+                !state.input_controller_holds.contains(input_id)
+            }
+
+            /// Whether the run `run_id` marked resumable may resume under the
+            /// session document's destination: the document requires none,
+            /// one is bound (or was bound, and then retired), or no governed
+            /// input is bound to the run (associated with it in a bound
+            /// phase: Staged, Applied or AppliedPendingConsumption, as the
+            /// plan selects them; an input that only still names the run is
+            /// not bound to it). Mirrors the `ResumeRun` guard
+            /// `resumed_run_destination_attached`, as `scoped_context_stageable`
+            /// mirrors the `StageForRun` guard: a governed run left open waits,
+            /// marked, until the registration owner binds its destination
+            /// again.
+            #[must_use]
+            pub(crate) fn resumed_run_destination_attached(
+                state: &MeerkatMachineState,
+                run_id: &RunId,
+            ) -> bool {
+                !state.scoped_context_required
+                    || state.scoped_context_binding.is_some()
+                    || state.scoped_context_generation != 0
+                    || !state
+                        .input_run_associations
+                        .iter()
+                        .any(|(input_id, associated)| {
+                            associated == run_id
+                                && matches!(
+                                    state.input_phases.get(input_id),
+                                    Some(
+                                        InputPhase::Staged
+                                            | InputPhase::Applied
+                                            | InputPhase::AppliedPendingConsumption
+                                    )
+                                )
+                                && state.input_authority_bindings.contains_key(input_id)
+                        })
             }
 
             fn ordered_queued_lane_inputs(

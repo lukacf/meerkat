@@ -151,6 +151,10 @@ Map typed errors before rendering text:
   `ControllerReadinessFailure::PolicyChanged`, a review read refuses as stale
   instead of reporting an unavailable review context, and a configured MCP
   attachment's per-agent grant check answers `McpAttachmentRefusal::NotCurrent`.
+  Native admission of a scoped original (its own grant-lineage mandate and each
+  named contributor's liveness) and a retained resume report a change they meet
+  as `ControllerReadinessFailure::PolicyChanged` too, and so does
+  `require_source_original_live` called outside an exclusion of owner changes.
   A governed helper's admission fence and a helper child issuance answer
   `Unavailable` rather than `Denied` when their check refuses to rebuild. A
   poisoned publication, failed durable grant custody and a clock failure still
@@ -256,6 +260,44 @@ no change is in progress. Past the bounds the refusal takes its ordinary path
 budget runs out while waiting ends with the time-budget terminal, not a refusal.
 Waiting never weakens a check: the rebuild still needs a coherent observation
 and every current check.
+
+A governed step of a tool dispatch, a further step of an entered operation or
+a dispatch's own child issuance, takes its work owners' exclusion without
+waiting. When another actor holds that exclusion (an issuance with its
+acknowledged append, another dispatch's final entry, a host's owner change or
+held exclusion), the native work owner answers the step with a refusal to
+rebuild (`ReprepareRequired`: nothing ran and nothing was appended) and names
+the hold through `owner_change_in_progress` until it ends, published or not.
+The waiting forms wait for that hold outside every lock, with the bounds above
+and never past the call's remaining tool time, then take the step again; with
+no change in progress at that read (the holder may have finished in between)
+they pause 1 ms and take it again. Every retry is one of the three free
+rebuilds, within one deadline. They are
+`GovernedDispatchOperation::run_if_current_within_after_owner_change` and
+`issue_child_if_current_within_after_owner_change`, the same two on
+`EnteredDispatchOperation`, and
+`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`. A
+dispatch's issuance makes its single consuming entry once, its staging waiting
+within the dispatch attempt's own bounds (site `tool_entry`; it shares the
+attempt's deadline and free rebuilds with the attempt's other stagings), then
+issues once under that entry as the synchronous form does, and only after a
+refusal to rebuild waits and issues again through the entry's witness. An R2
+review or an R3 consent is spent exactly once, and no approval read or other
+holder of the review owner can refuse the first issuance after the spend.
+That staging never reviews again: at R2 a change it meets supersedes the
+reviewed decision, so the call answers `review_unsatisfied`
+(`context_changed`) once the change completes, as a later synchronous call
+would; R1 and an R3 consent go on.
+Past the bounds the step's typed refusal is returned (a helper issuance
+answers `Unavailable`; after a dispatch-path spend at R2 or R3, issuing again
+on that path answers `Denied`, so a caller that may retry enters once and
+issues through `GovernedHelperChildIssuance::from_entered`). Inside a
+streaming tool a wait longer than the inactivity window left ends as the
+tool's inactivity timeout. The synchronous steps, the helper admission fence
+(which runs inside the WorkGraph store callback) and the host-facing entries
+that never wait answer at once, as before, and a poisoned publication is
+`Unavailable` and is never waited for. This is shell synchronization: no
+machine input or owner fact changes.
 
 A custom `WorkAuthorization` reports a change in progress through
 `owner_change_in_progress` (provided; default `None`), a waiting hint that is
@@ -477,7 +519,68 @@ the retained action, replay it, or change its requester.
 On a later explicit attempt, resolve the retained candidate and complete host
 validation, preparation, and cancellation checks before consumption. Recheck
 current authorization and conditionally consume consent at the physical-entry
-boundary. Changed or lost bindings need fresh consent. A retained call that a
+boundary. Changed or lost bindings need fresh consent. An owner change that
+leaves the candidate unchanged does not, and neither does the end of a
+decision's own validity window (an owner may grant a decision only a minute,
+and a human often takes longer): the consent's own owners decide the same
+operation again, outside every owner lock, and their answer is taken as is.
+A fresh decision carries the owners' own window; nothing of the old one is
+carried forward, so past a fixed owner deadline the fresh preparation refuses.
+The consent, pending or approved, stands while that decision keeps the binding,
+the review tier and the material the approval presented. Approval reads
+(`get`, `list`), an approval and its publication, and an attempt's admission
+apply this one rule. Reads decide afresh only a decision that an owner
+publication change made stale, so polling never calls the owners for one whose
+own check refuses it, and nothing calls them while that check answers that
+they are unavailable. An attempt is handed only a current decision and spends
+the consent once with it. A changed tier or material withdraws the consent as
+`ContextChanged`; owners that now refuse the operation or its review material
+withdraw it as `AuthorityChanged`; at an attempt's admission either one also
+refuses the attempt, with zero entry. A consent that moves into a resumed run
+keeps the action account its approval presented: the resumed run's owners'
+review material is taken over at the move for that account only (its mandate
+may name the run's own requester), another account withdraws it as
+`ContextChanged`, their denial of the operation or of its material withdraws
+it as `AuthorityChanged`, and owners that cannot answer now (unavailable, or
+an owner change in progress) leave it parked: the resumed run's boundaries
+move it afresh, without waiting, and its close withdraws what never moved. A
+rebind for an agent this process rebuilt that meets an owner change in
+progress is not ready, and the run's next boundary rebinds it afresh. An
+owner change still in progress, owners that are unavailable, or a
+publication that keeps changing through three re-adjudications in a row
+decide nothing: reads return the consent unchanged, an approval records
+nothing and answers a retryable `StoreUnavailable`, and an attempt refuses as
+`owner_unavailable` and keeps the consent. A decline stands on no retained
+decision: it is recorded whatever that decision's currentness, though like an
+approval it answers `StoreUnavailable` while the eligibility owner cannot say
+now. The approver's eligibility evidence is kept
+with the approved consent and checked again at the spend. Evidence that an
+owner change made stale (related or not) is resolved again for the same
+approver and the approval as they decided it, and the question is then only
+whether that approver was revoked, or whether policy came to forbid them,
+since deciding: a natural expiry of the login they decided in is no
+revocation, and the consent keeps its own expiry. Only a refusal withdraws the
+consent (`AuthorityChanged`, zero entry): a revoked approver, or a
+self-approval the host's policy no longer permits, never enters. A route whose
+eligibility owner can be mid-change implements
+`HumanConsentRoute::eligibility_answer` (over a local publication,
+`PublishedConsentEligibility::observe_answer`): an owner that cannot say now
+(`ConsentEligibilityAnswer::Unsettled`) decides nothing, so a decision answers
+`StoreUnavailable` and a spend keeps the consent. A route that resolves
+eligibility with `PublishedConsentEligibility::observe` and keeps the default
+`eligibility_answer` answers such a change as a refusal, which withdraws an
+approved consent at its spend. Nothing enters on a decision
+that is not current: an attempt whose decision or eligibility evidence went
+stale after its own staging refuses as `owner_unavailable` and keeps the
+consent for a retry, and a run's own attempt then counts as not made, unless
+it spent the consent (an entered effect's own result is its outcome). A change
+during the spend's own store write still consumes the consent, with zero
+effect. Approval reads and decisions therefore run the host's `prepare` and
+`review_operation_context` (and, at a decision, a publication or a spend, the
+route's eligibility) on the caller's thread, outside the approval owner's
+locks: a host must not hold a lock its owners take while it reads or decides
+approvals, and each re-preparation is audited as a preparation. A
+retained call that a
 dispatcher this process rebuilt resolves again keeps its consent only as the same
 durable execution: the same call, tool declaration, execution mode, operation
 targets and R3 decision. A failure known to precede the consumption commit leaves
@@ -510,7 +613,12 @@ for it. A spent, withdrawn or denied row keeps its usual outcome. That says only
 custody for the approval. It does not report that another owner is live or
 that the issuing process stopped, and it does not mean a remote decision path
 exists. It is not transient in that service, so a host should request fresh
-consent rather than retry.
+consent rather than retry. Through the issuing owner, `OwnerUnavailable` also
+answers an attempt or a spend that owner could not settle now (it was held,
+the held decision could not be decided afresh, the attempt's decision or the
+approver's eligibility evidence went stale after the attempt's staging, or
+the eligibility owner could not say): the consent is kept, and a retry
+decides afresh.
 
 A consent approval issued in a run that the runtime staged on a store with
 cross-process hosting claims records a passive owner scope: the store's
@@ -548,7 +656,11 @@ the approval and the decision. The adapter passes it with an
   scope. The host must refuse an event from a revoked login even while another
   login of the same person is live. Revoking a login must advance the
   publication that the returned evidence checks, so a decision already in
-  flight from that login is refused at commit.
+  flight from that login is refused at commit. After the decision, the route
+  is asked again, for the approval as decided, whenever that evidence went
+  stale: answer then whether the login was revoked (logged out, replaced or
+  retired) or the approver is forbidden since, not whether the login is still
+  within its own expiry.
 - The constructors of the approver and the event authenticate nobody. They
   record what the host adapter established, and the adapter supplies the
   current login scope and eligibility, including logout and revocation.
@@ -566,7 +678,11 @@ Withdrawn notice is admitted as a resume of the run that issued the consent,
 and the approval records its receipt: `Admitted` for the input that carries
 it, or `Failed` for a notice that can never be admitted. Approved consent
 parked at that run's close moves into the resumed run its notice starts, and
-that run can spend it once; a `Failed` notice withdraws it. The governed
+that run can spend it once; a `Failed` notice withdraws it. A consent notice
+waits in the session's queue for its next turn, so a graceful requeue stop of
+the session (`UnregisterQueuedInputs::Requeue`) no longer ends it; whether the
+run it resumes after the next start can take the consent over follows the
+resume rules below. The governed
 composition admits a resume only through its retained-resume owner: the stock
 governed composition installs one, and a custom composition supplies its own
 (`ScopedGrantComposition::with_retained_resume`). Without one, no notice is
@@ -578,6 +694,60 @@ prompt, whichever controller it used, the notice fails visibly. After the
 session is closed and reopened in the same process, the notice stays owed
 until the session's destination is next bound, and then fails visibly. The
 stock servers compose no notice delivery of their own.
+
+A notice, or any other admitted resume of retained work, that a graceful
+requeue stop kept, or that a restart found in the store, comes back without
+its controller client: a client never survives the store. The runtime asks the
+host for it again through
+`NativeWorkAuthorizationHost::authenticate_retained_resume` (on a scoped
+composition, through `RetainedControllerOwner::reacquire_controller`):
+
+- The call gets the stored input, with no ingress context and no
+  retained-resume grant, and the runtime does not check the original
+  contributors against its ledger again first: validate what the answer needs
+  through your own owners. A resume whose destination its session has since
+  superseded is refused before the host is asked.
+- It is asked once when the registration recovers the input, then from the
+  runtime loop: once at the loop's next pass while the input is not held, and
+  once per pause of 3 seconds while the runtime machine holds it (an input
+  held at recovery is next asked after the pause). The loop asks while it
+  holds the session's turn boundary, queue authority and driver lock, and
+  recovery while it holds the driver: answer from the host's own records,
+  without calling back into the runtime or waiting on a credential
+  publication. Only a runtime loop asks again, and a registration runs one
+  only once an executor attaches: until then, a held input is not asked
+  again, its bound does not end it, and the refusals below last.
+- Supply the client to run the resume. Answer `Readiness(UnsupportedScope)`
+  (a controller owner: `Ok(None)`), or an actual verdict, when you will never
+  supply it: the input ends at once as a refused resume
+  (`Abandoned { ResumeRefused }`) with its runtime-termination receipt, a run
+  left open that it is bound to is settled the same way, and a consent the
+  notice carries is withdrawn.
+- Any other `Readiness` answer says you cannot say now. The machine holds the
+  input: it keeps its attempts, later queued work runs first, and a run left
+  open that it is bound to does not resume, which holds every other run of the
+  session too. Once 30 seconds have passed since its first such answer, the
+  next such answer ends it as a refused resume.
+- While such an input waits without its client, the runtime refuses
+  controller grant changes, credential publications (logins and token
+  commits) and auth lease releases and replacements on every session it
+  serves.
+- On a host that requires scoped destinations, a kept resume also waits until
+  the registration owner binds its destination again, and so does a run left
+  open that it is bound to: that run then resumes under the destination its
+  inputs were staged for. A bind does not wake the runtime: after binding on
+  a registration whose executor is already attached, wake it
+  (`MeerkatMachine::wake_runtime_if_active_inputs`), as for any recovered
+  governed work that waits for its destination.
+
+The stock governed composition's controller pins do not outlive their
+registration, so a kept notice there cannot run after a registration change:
+it ends refused at once, and its consent is withdrawn.
+
+A governed prompt that a requeue stop kept, or that a restart found, cannot
+run again: only a fresh authentication of its caller could supply its client.
+Each attachment ends such an input as a refused resume, with its
+runtime-termination receipt, before it serves; submit the prompt again.
 
 Reusable consent applies only to a requirement that owner policy explicitly
 makes reusable, with a defined scope, use limits where bounded, expiry or an

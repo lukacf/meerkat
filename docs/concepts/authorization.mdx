@@ -195,8 +195,12 @@ authenticated eligible approver decides on a retained candidate, account,
 recipient, and expiry. Approval is not execution. A later explicit attempt
 rechecks current permissions and consumes consent once at the real entry
 boundary. Decline, expiry, cancellation, or a changed candidate gives local
-feedback. A gate agent's approval is not human consent, and neither can override
-a nonoverridable permission ceiling.
+feedback; an authorization change that leaves the candidate's binding, review
+tier and presented material unchanged keeps the consent, as does the end of a
+decision's own validity window, while an approver who was revoked, or whom
+policy came to forbid, since deciding never spends it (a natural expiry of the
+login they decided in is no revocation). A gate agent's approval is not human
+consent, and neither can override a nonoverridable permission ceiling.
 
 Audit keeps decision, consent consumption, entry attempt, returned result, and
 uncertainty distinct. Pending observations join existing native commits; an

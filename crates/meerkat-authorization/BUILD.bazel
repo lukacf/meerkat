@@ -292,6 +292,7 @@ rust_test(
         "tests/native_governed_loop/entered_consent_steps.rs",
         "tests/native_governed_loop/observation_deferred_siblings.rs",
         "tests/native_governed_loop/owner_change_wait.rs",
+        "tests/native_governed_loop/owner_contention_steps.rs",
         "tests/native_governed_loop/s1_scoped_original.rs",
         "tests/native_governed_loop/s3_scoped_context.rs",
     ],

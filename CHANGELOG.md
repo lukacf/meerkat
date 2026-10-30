@@ -35,7 +35,460 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-core` human consent
+  (R3): a route's `HumanConsentRoute::eligibility` is now also asked after
+  the decision, for the same approver and the approval as decided, when
+  the evidence an approved consent holds went stale (an owner change,
+  related or not): before its allowance is published and before a spend.
+  The question is then only whether the approver was revoked, or is
+  forbidden by policy, since deciding: a natural expiry of the login they
+  decided in is no revocation, and the consent keeps its own expiry. A
+  route that answers only for logins within their own expiry must keep
+  answering for a login through an approval decided in it, until that
+  login is logged out, replaced or retired; a refusal withdraws the
+  approved consent as `AuthorityChanged`, with zero entry. The stock route
+  does so: `StockConsentSurface::approver_login` states a login past its
+  own deadline with that deadline, and returns `None` only for a login
+  logged out, replaced, retired or no longer permitted.
+
+- Behaviour-only (not measured by the gate): `meerkat-core` approval reads
+  and decisions run host code. `ApprovalService::get` and `list` call the
+  host's authorization `prepare` and `review_operation_context` for a live
+  consent whose retained decision an owner publication change made stale,
+  and `decide_consent` does so for an approval also when that decision's
+  own check refuses it; a decision, an allowance's publication and a spend
+  ask the route's eligibility. All of it runs on the caller's thread,
+  outside the approval owner's locks: a host must not hold a lock its
+  owners take while it reads or decides approvals, and each re-preparation
+  is audited as a preparation.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`:
+  `ApprovalService::decide_consent` can answer a retryable
+  `ApprovalError::StoreUnavailable`, with nothing recorded: for an approval
+  whose retained decision cannot be settled now (an owner change in
+  progress, unavailable owners, or a publication that keeps changing), and
+  for any decision while the eligibility owner cannot say. A decline is
+  recorded whatever the retained decision's currentness.
+
+- Behaviour-only (not measured by the gate): `meerkat-core` consent
+  withdrawal reasons. Owners that refuse the operation when asked afresh
+  (at a read, a decision, an attempt's admission or a spend) withdraw the
+  consent as `AuthorityChanged`; with an owner change this was
+  `context_changed`. An attempt whose held decision they change or refuse
+  is refused at its admission, and the consent withdrawn there. A consent
+  moving into a resumed run whose owners state another action account is
+  withdrawn at the move as `ContextChanged`. A denial of the operation or
+  of its review material is the owners' refusal, at the move as in a run:
+  the consent is withdrawn as `AuthorityChanged` (facts they cannot read
+  withdraw it as `ContextChanged`).
+
+- Behaviour-only (not measured by the gate): `meerkat-session`: the summary
+  request `DefaultCompactor` builds names each image or video in a user row
+  or tool result as `[image (<media type>) omitted from this summary request]`
+  or `[video (<media type>) omitted from this summary request]`, where it
+  wrote `[image: <media type>]` and `[video: <media type>]` before, and
+  `DefaultCompactor::compaction_prompt` gains a paragraph saying that these
+  placeholders stand for content omitted from the request and say nothing
+  about what the agent could see. A client or test that reads the
+  placeholder text must match the new form; the prompt still contains
+  `CONTEXT COMPACTION`.
+
+- `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
+  the runtime machine (`MeerkatMachine`) holds kept governed work that waits
+  for its host to supply its controller client again (see Fixed).
+  `MeerkatMachineState` and the kernel `State` gain `input_controller_holds`.
+  `MeerkatMachineInput` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineInputVariant`, `MeerkatMachineRuntimeInternalInput` and the
+  kernel `generated::meerkat` `Input` and `InputKind` gain
+  `HoldInputController { input_id }` and `ReleaseInputController { input_id }`.
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` and the kernel
+  `Effect` and `EffectKind` gain `InputControllerReleased`. The kernel
+  `generated::meerkat::TransitionId` gains `HoldInputControllerIdle`,
+  `HoldInputControllerAttached`, `HoldInputControllerRunning`,
+  `HoldInputControllerRetired`, `HoldInputControllerStopped`,
+  `ReleaseInputControllerIdle`, `ReleaseInputControllerAttached`,
+  `ReleaseInputControllerRunning`, `ReleaseInputControllerRetired` and
+  `ReleaseInputControllerStopped`. Every new variant is appended last, so no
+  existing variant's implicit discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm; a `MeerkatMachineState` literal that ends with
+  `..Default::default()` keeps compiling.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `NativeWorkAuthorizationHost::authenticate_retained_resume`, and through it
+  the scoped composition's `RetainedControllerOwner::reacquire_controller`,
+  are now also called for an admitted resume of retained work whose
+  controller client did not survive the store, with its stored input (no
+  ingress context, no retained-resume grant): once at registration recovery,
+  then from the runtime loop, once at its next pass while the input is not
+  held and once per pause of 3 seconds while it is held (an input held at
+  recovery is next asked after the pause). There
+  `Readiness(UnsupportedScope)` (and `Ok(None)` from the controller owner)
+  ends the input as `Abandoned { ResumeRefused }`, and every other readiness
+  answer holds the input, with its attempts, for up to 30 seconds from its
+  first such answer. A run left open that a kept resume is bound to now
+  resumes under the destination its inputs were staged for, and on a host
+  that requires scoped destinations it waits, marked, until the
+  registration owner binds one again.
+  Before, each staging of such an input failed until it ended
+  `Abandoned { MaxAttemptsExhausted }`. `InputAbandonReason::ResumeRefused`
+  now also ends a single queued input that belongs to no run, and a kept
+  governed input admitted under its own authority association, which an
+  attachment ends before it serves (see Known limitations).
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`: the
+  native work owner's operation-time steps (`LocalWorkAuthorization`'s
+  `WorkAuthorization::run_if_current_within`,
+  `run_entered_if_current_within` and `issue_child_if_current_within`)
+  answer another actor's hold of the work's authorization publication
+  writer (an issuance with its acknowledged append, another operation's
+  final entry, a host's owner change or held exclusion) as a refusal to
+  rebuild, `Refused(ReprepareRequired)`, where they answered `Unavailable`.
+  Nothing ran and nothing was appended, as before, and a poisoned, retired
+  or exhausted publication stays `Unavailable`. In `meerkat-core` the
+  dispatch steps (`GovernedDispatchOperation::run_if_current_within` and
+  `issue_child_if_current_within`,
+  `EnteredDispatchOperation::run_if_current_within` and
+  `issue_child_if_current_within`) then answer `AuthorizationRefused`
+  (`ReprepareRequired`) where they answered
+  `OperationAuthorizationUnavailable`. The native work owner's
+  `owner_change_in_progress` names such a hold until it ends, published or
+  not, as in 0.9.8, so a consent re-adjudication refused to rebuild while
+  one is held decides nothing now, as during a published change: a read
+  keeps the consent unchanged, a decision answers the retryable
+  `StoreUnavailable`, and a fresh attempt of a consented candidate is
+  refused at once as `ReviewUnavailable` (`OwnerUnavailable`), with the
+  consent kept and a run's own attempt counted as not made, where it
+  re-adjudicated again within its bound. The spend at entry is unchanged.
+  The governed helper fence and child issuance still answer `Unavailable`
+  for the hold, and the host-facing entries that never wait
+  (`LocalGrantAuthority::try_with_owner_changes_excluded`,
+  `issue_or_recover_child_under_exclusion`, `revoke`,
+  `LocalAuthorizationPublication::try_begin_owner_change`) still answer
+  `Unavailable`. A host that matched the unavailable answer for this
+  contention matches the refusal to rebuild instead, or uses the waiting
+  forms (see Added).
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: the
+  reload-required discard of a durability-degraded registration whose
+  runtime loop is still attached
+  (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`) now detaches
+  that loop itself, and so does an input admission whose failed store
+  write degraded the session. Both hand off the session's degraded gate
+  settlement: once the session's mutation gate is free, it detaches the
+  runtime loop and hard-cancels the loop's exact current run through the
+  executor's interrupt handle, as a ready-gated caller on a degraded
+  session already did. Through 0.9.7 the discard waited for the loop to
+  hand its executor back on its own (a run in flight first reached its
+  refused commit, and an idle loop never did), and a failed admission left
+  the loop attached until such a caller came. After the detach,
+  `current_executor_attachment_witness` answers `None` and
+  `session_attachment_state` reports `ReloadRequired` without an
+  attachment, so the attachment witness of an executor that is not
+  machine-managed no longer names the registration
+  (`reload_required_registration_until_settled_if_current` answers
+  `NotCurrent` for it). This supersedes the 0.9.4 note that the discard
+  waits for an attached loop's handoff.
+
+### Added
+
+- `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
+  admits a completion notice under the handling its producer declares,
+  with the same notice record as `PromptInput::detached_job_completed`.
+
+- `meerkat-runtime`: a caller reads the disposition the machine recorded
+  for an unregister. A call that joins an unregister already in progress
+  keeps the disposition that unregister began with, whatever it passed.
+  The machine can also record another disposition than any caller asked
+  for: a keep is recorded as a stop for a registration that served live
+  work, and an unserved attachment's unregister records a stop for a
+  requeue. The until-terminal unregister answers only whether it
+  unregistered. The caller that starts or joins an unregister now reads
+  the recorded disposition from its own answer, without polling: the
+  unregister's owned worker publishes it to every observer as soon as the
+  machine began the unregister.
+  `RuntimeSessionUnregisterObserver::queued_inputs` reads it (`None` until
+  then), and
+  `MeerkatMachine::unregister_session_registration_until_terminal_reporting_queued_inputs_if_current`
+  is the until-terminal unregister with queued inputs answering it on
+  completion (`None` where that answers `false`, or when the unregister
+  found the registration already gone).
+  `MachineUnregisterProgressSnapshot::requeue_max_age_ms` and
+  `MachineUnregisterProgressSnapshot::keeps_recovered_inputs` are now
+  public too: they read the recorded disposition from the session
+  runtime's lifecycle row while the unregister is in progress
+  (`RuntimeStore::observe_machine_lifecycle`, then
+  `DecodedMachineLifecycleObservation::unregister_progress`).
+
+- `meerkat-core`: `ConsentEligibilityAnswer` and the provided
+  `HumanConsentRoute::eligibility_answer` tell an eligibility owner's
+  refusal (`Refused`) apart from an owner that cannot say now
+  (`Unsettled`: an owner change in progress, or one published during the
+  read). The approval owner asks it at a decision, at the allowance's
+  publication and before a spend, and an unsettled answer decides
+  nothing: a decision answers a retryable `StoreUnavailable`, a
+  publication asks again within its bound, and a spend keeps the consent
+  (`owner_unavailable`). The default maps `eligibility`.
+  `meerkat-authorization`: `PublishedConsentEligibility::observe_answer`
+  answers it from one coherent observation of a local publication. A host
+  route that resolves eligibility with `PublishedConsentEligibility::observe`
+  and keeps the default `eligibility_answer` answers an owner change in
+  progress as a refusal, which withdraws an approved consent at its spend:
+  such a route should override `eligibility_answer` with `observe_answer`.
+
+- `meerkat-core`: waiting forms of the governed dispatch steps,
+  `GovernedDispatchOperation::run_if_current_within_after_owner_change` and
+  `issue_child_if_current_within_after_owner_change`, and the same two on
+  `EnteredDispatchOperation` (async). After a step refused to rebuild (an
+  owner change in progress on the work's own publication, or another actor's
+  hold of the work owners' exclusion), they wait for the change to complete
+  with `OwnerChangeChurn` (2 s and three free rebuilds, never past the
+  call's `ToolDispatchContext::remaining_tool_time`), outside every lock, and
+  take the step again; with no change in progress at that read (the holder
+  may have finished in between) they pause 1 ms and take it again. Every
+  retry is one of the three free rebuilds, within one deadline. Past the
+  bounds they return the step's typed refusal. An attempt whose operation
+  ran is the step's answer. Each wait is traced at site `tool_step` or
+  `tool_child_issuance` and reported as the call's to the operation refusal
+  observer. The dispatch issuance makes its single consuming entry once,
+  its staging waiting within the dispatch attempt's own bounds (traced at
+  site `tool_entry`). It then issues once under that entry, as the
+  synchronous form does, and only after a refusal to rebuild waits and
+  issues again through the entry's witness, so an R2 review or an R3
+  consent is spent exactly once and no other holder of the review owner can
+  refuse the first issuance after the spend. `meerkat`:
+  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
+  the same way on the dispatch and entered paths, and answers `Unavailable`
+  only past the bounds; its prepared path does not wait.
+
 ### Fixed
+
+- `meerkat-core`: a pending or approved human consent (R3) is now kept
+  across unrelated authorization changes and past the end of its decision's
+  own validity window, and withdrawn only when its binding, review tier or
+  presented material changes (`ContextChanged`), when its owners refuse the
+  operation or its approver is revoked or forbidden by policy since
+  deciding (`AuthorityChanged`), when it expires (`DeadlineExpired`), when
+  its run closes with no resumed run to take it over (`RunEnded`), or when
+  the notice input that carries it into a resumed run ends
+  (`NoticeInputEnded`). Before, any owner
+  publication change on the work's authorization made the consent's
+  retained decision stale, and the consent was withdrawn as
+  `context_changed` at the next approval read (`get`, `list`), at its
+  decision or at its spend, even when nothing about the operation had
+  changed; a pending consent was withdrawn as `authority_changed` once its
+  decision's validity window ended, often before a human decides; an
+  unrelated change of the eligibility facts refused or withdrew an eligible
+  approval; and an approval outlived its approver's eligibility. The
+  consent's own owners now decide such a decision afresh, outside every
+  owner lock, and their answer is taken as is: a fresh decision carries
+  their own window, nothing of the old one is carried forward, and past a
+  fixed owner deadline the fresh preparation refuses. The consent stands
+  while that decision keeps the binding, the review tier and the material
+  the approval presented. An attempt is handed only a current decision:
+  its admission has the owners decide a held decision that is not current
+  afresh, the attempt spends the consent once with the decision they find
+  unchanged, and a change they find or their refusal withdraws the consent
+  and refuses the attempt, with zero entry. A changed tier or material, or
+  another operation's decision, withdraws it as before (`ContextChanged`);
+  owners that now refuse the operation withdraw it as `AuthorityChanged` (a
+  refusal that came with an owner change was `context_changed` before). A
+  consent that moves into a resumed run keeps the action account its
+  approval presented: the resumed run's owners' review material is taken
+  over at the move for that account only, and another account withdraws
+  it. A move into a resumed run, or a rebind for an agent this process
+  rebuilt, that meets an owner change in progress (as ordinary traffic on
+  a shared publication produces) no longer withdraws the consent as
+  `context_changed`: the consent stays parked, or spendable, and the
+  resumed run's boundaries move or rebind it afresh, without waiting; what
+  never moves is withdrawn at that run's close (`RunEnded`), as before.
+  The approver's eligibility evidence is kept with the approved consent
+  and checked at the spend: evidence an owner change made stale, related
+  or not, is resolved again for the same approver and the approval as
+  they decided it, and they stay eligible unless revoked or forbidden by
+  policy since deciding (a natural expiry of the login they decided in is
+  no revocation); only that refusal withdraws the consent
+  (`AuthorityChanged`, zero entry). An owner change still in progress,
+  unavailable owners, an eligibility owner that cannot say now, or a
+  publication that keeps changing through three re-adjudications in a row
+  decide nothing: reads return the consent unchanged, an approval records
+  nothing and answers a retryable `StoreUnavailable` (so does a decline
+  while the eligibility owner cannot say, though it is recorded whatever
+  the retained decision's currentness), and an attempt refuses as
+  `owner_unavailable` and keeps the consent. Reads decide afresh only a
+  decision an owner publication change made stale, and nothing calls
+  the owners while a decision's own check answers that they are
+  unavailable. Nothing enters on a decision that is
+  not current: a spend whose decision or eligibility evidence went stale
+  after its own staging refuses as `review_unavailable`
+  (`owner_unavailable`) and keeps the consent, and a run's own attempt
+  then counts as not made and is attempted again at the run's next
+  boundary, unless it spent the consent (an entered effect's own result is
+  its outcome). A change during the
+  spend's own store write still consumes the consent with zero effect, as
+  before. Approval reads and decisions now run the host's authorization
+  `prepare` and `review_operation_context` (and, at a decision or spend,
+  the route's `eligibility` for stale evidence) on the caller's thread,
+  outside the approval owner's locks: a host must not hold a lock its
+  owners take while it reads or decides approvals, and each re-preparation
+  is audited as a preparation.
+
+- `meerkat`: a consent notice keeps the queue handling its delivery
+  declares. Before, it was admitted with steer handling, like a detached
+  job's completion record, so a graceful requeue stop of its session
+  (`UnregisterQueuedInputs::Requeue`) ended it as stopped, and the parked
+  approval it carried was then withdrawn as `NoticeInputEnded`. The notice
+  now waits in the queue lane for the session's next turn, and a requeue
+  stop no longer ends it. Whether the run it resumes after the next start
+  can take the approval over follows the rules for a kept resume of retained
+  work in the `meerkat-runtime` entry below: the next registration asks the
+  installed host for the notice's controller client again, a definite
+  refusal ends the notice as a refused resume and withdraws the approval,
+  and a host that cannot say yet holds it for a bounded time. On a stock
+  governed realm a kept notice still cannot run after a registration change
+  and now ends refused at once (see also the 0.9.7 known limitation below).
+  Every other notice (fork_off and council outcomes, and any other
+  producer's) keeps steering. A consent notice an earlier version admitted
+  with steer handling is still recognized as its delivery's admission, so an
+  upgrade that finds its admission reserved neither conflicts nor retries it.
+
+- `meerkat-session`: the compaction summary request no longer presents
+  omitted media in a form a summarizer reads as the agent having been unable
+  to see it. The summary request replaces each image or video in a user row
+  or tool result with a bracketed placeholder. It used to name only the
+  media type, and summarizing models read it as the agent having been unable
+  to see the media: in a long run with many screenshot tool results the
+  summaries said so and told the resumed work to stop, and the resumed
+  context inherited the claim. The placeholder now says only that the
+  content is omitted from the summary request, and the compaction prompt
+  says that such a placeholder tells nothing about what the agent could see
+  and must not be used to infer it. The rows a compaction keeps carry their
+  media unchanged, as before. Summaries written before this fix keep their
+  wording: an earlier summary is part of the next summary request, so what
+  it says can carry into later summaries.
+
+- `meerkat-runtime`: an admitted governed resume of retained work (for
+  example a consent notice) that a graceful requeue stop kept, or that a
+  restart found in the store, now runs on the session's next registration.
+  Before, its controller client did not survive the store and nothing asked
+  the installed host for it again, so every run of it failed before the model
+  was called, it ended `Abandoned { MaxAttemptsExhausted }` after three
+  attempts, and a consent waiting on it was withdrawn. Now the registration's
+  recovery asks the host for the client again, and then the runtime loop
+  asks: once at its next pass while the input is not held, and once per
+  pause of 3 seconds while it is held (an input held at recovery is next
+  asked after the pause).
+  - A definite answer that the host supplies no client for the resume
+    (`Readiness(UnsupportedScope)`, an actual refusal, a client for another
+    selection), or a destination the session has since superseded, ends the
+    input at once as a refused resume, `Abandoned { ResumeRefused }`, with
+    its runtime-termination receipt, without staging it or using an attempt;
+    a consent waiting on it is withdrawn as before. A run left open by the
+    stop or the restart that such an input is bound to is settled as a
+    refused resume. On the stock governed realm, whose controller pins do
+    not outlive their registration, a kept resume still cannot run after a
+    restart and now ends this way at once.
+  - An answer that the host cannot say now (any other `Readiness`, for
+    example a contended or unavailable owner) makes the runtime machine hold
+    the input: it keeps its attempts, later queued work goes first, and a run
+    left open that it is bound to does not resume, which also holds every
+    other run of the session until that run settles. The runtime asks again
+    once per pause of 3 seconds. Once 30 seconds have passed since the
+    input's first such answer (the bound a resumed run's admission has), the
+    next such answer ends it as a refused resume. While such an input waits
+    without its client, the machine refuses controller grant changes,
+    credential publications (logins and token commits) and auth lease
+    releases and replacements on every session it serves, so that wait is
+    bounded too.
+  - A recovered resume waits for its destination as a recovered governed
+    prompt does: on a host that requires scoped destinations it is not
+    selected until the registration owner binds its destination again, so its
+    run never stages on an unbound document, where every destination-scoped
+    operation of the run would be refused. A run left open that such a resume
+    is bound to waits the same way, marked, and then resumes under the
+    destination its inputs were staged for, so its destination-scoped
+    operations and its scoped reply run under that destination.
+
+- `meerkat-core`, `meerkat-authorization`, `meerkat`: a governed tool step
+  taken through the new waiting forms (see Added) no longer fails on
+  transient contention with a concurrent actor on the same authorization
+  publication. While one actor briefly held the publication's writer (an
+  issuance with its fsync'd append, a dispatch's final entry, a held
+  exclusion or an owner change), another actor's step (a child issuance, a
+  further step of an entered operation) failed at once: as temporarily
+  unavailable while the hold had not published (the step's reservation
+  never waits), and as a refusal to rebuild that nothing waited out once
+  it had published. The step now refuses to rebuild for
+  both, the native work owner names the hold as a change in progress until
+  it ends, and the waiting forms wait for it within the existing
+  owner-change bound and the call's remaining tool time, outside every
+  lock, and take the step again. The synchronous steps still answer at
+  once, now as a refusal to rebuild for both, and the governed helper
+  fence, which runs inside a synchronous WorkGraph store callback, never
+  waits. The synchronous helper child issuance
+  (`GovernedHelperChildIssuance::issue_or_recover`) keeps answering
+  `Unavailable` at once for such a hold until a host switches to
+  `issue_or_recover_after_owner_change`. Core's existing owner-change waits (dispatch preparation, entry
+  staging, the review's post-verdict check, model requests, compaction
+  summaries, the delegated web search) also wait out an unpublished hold
+  they meet after a refusal to rebuild. This is shell synchronization only:
+  no machine input, generated authority or owner fact changed, and the
+  review spend stays single and machine-owned.
+
+- `meerkat-runtime`: native admission of a scoped original no longer
+  reports an owner change it meets as an unavailable policy. The scoped
+  original check (`ScopedOriginalIngress`) resolved the admitted
+  original's own grant-lineage mandate, and the liveness of each
+  contributor it names, with the standalone lineage resolution, which
+  reports an owner change published on the grant publication during the
+  read (a grant issuance or revocation, or a source owner's custody
+  change) as an unavailable grant authority. The admission was then
+  refused as `RuntimeDriverError::ControllerReadinessUnavailable` with
+  `ControllerReadinessFailure::PolicyUnavailable` (wire kind
+  `policy_unavailable`), an owner that cannot say now, although
+  controller admission of the same input has answered such a change as
+  `PolicyChanged` since 0.9.4. Both reads now answer it as
+  `ControllerReadinessFailure::PolicyChanged` (wire kind
+  `policy_changed`): a change of policy, after which asking again may
+  succeed. The retained-resume check (`ScopedRetainedResume`) answers the
+  same two reads the same way, and so does `require_source_original_live`
+  when it is called outside an exclusion of owner changes. A poisoned or
+  retired publication still answers `PolicyUnavailable`. So do failed
+  durable grant custody and a clock failure, except, as since 0.9.4, one
+  that a read meets while an owner change is publishing: that read answers
+  `PolicyChanged` with the change, and the next attempt answers
+  `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
+  returned at once, as before.
+
+- `meerkat-runtime`, `meerkat-mob`: the reload of a session whose input
+  admission lost its commit acknowledgement no longer waits forever. An
+  admission whose store committed the admission and then answered an error
+  (a lost acknowledgement, for example) degrades the session to need a
+  reload (`admission_commit`) and refuses typed, as before, but its error
+  path did not run the session's degraded gate settlement, and nothing else
+  did: a retry can be refused before it reaches the runtime, and an
+  unregister refuses at its first durable write. The idle runtime loop then
+  stayed attached and never handed its executor off, so the reload-required
+  discard (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`, and the mob
+  member reload that awaits it) waited for that handoff without bound: a mob
+  member's reload answered `MemberReloadTimedOut` at its deadline and kept
+  the member's admission lane. An admission whose failed store write
+  degraded the session now hands the degraded settlement off as it leaves,
+  as an admission past its commit deadline already does, and a reload hands
+  it off itself for a registration whose runtime loop is still attached,
+  whatever degraded it: once the session's mutation gate is free, the
+  settlement detaches the loop and hard-cancels the exact current run, and
+  the reload proceeds (see Breaking). The committed input stays durably
+  admitted and pending in the cold successor, and a resubmission with the
+  same idempotency key is deduplicated against it.
 
 - `meerkat-runtime`: the threads of the crate's two process-wide Tokio
   runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
@@ -51,6 +504,36 @@ them.
   take once it is unset. The host binaries' own workers and main future keep
   the 8 MiB budget. The added size is virtual address space; pages are
   committed only when touched.
+
+### Known limitations
+
+- `meerkat-runtime`: a governed input admitted under its own authority
+  association (a governed prompt, for example) that a graceful requeue stop
+  keeps, or that a restart finds in the store, cannot run on the next
+  registration: its controller client does not survive the store, and the
+  host contract can supply it again only with a fresh authentication of its
+  caller. Each attachment now ends such a queued input before it serves, as a
+  refused resume (`Abandoned { ResumeRefused }`) with its runtime-termination
+  receipt, and settles a run left open whose first input is such an input
+  the same way, instead of stopping the runtime loop when that run would
+  resume. Before, it ended `Abandoned { MaxAttemptsExhausted }` after three
+  failed runs, and while it waited controller grant changes and credential
+  publications were refused. Submit such a prompt again, with a fresh
+  authentication of its caller.
+
+- `meerkat-runtime`: queued work admitted after a kept resume whose host
+  cannot say yet whether it supplies its controller client runs first. When
+  that work binds a newer generation of the resume's destination, the resume
+  then ends as a refused resume (its destination was superseded) instead of
+  running once its host answers.
+
+- `meerkat-runtime`: only a runtime loop asks a kept resume's host again,
+  and a registration runs one only once an executor attaches. A registration
+  with no executor attached asks only at its recovery: a kept resume held
+  there is not asked again and its 30-second bound does not end it, so the
+  machine-wide refusals of controller grant changes, credential
+  publications and auth lease releases and replacements last until an
+  executor attaches or the registration ends.
 
 ## [0.9.8] - 2026-10-30
 

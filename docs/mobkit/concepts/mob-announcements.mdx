@@ -4,7 +4,7 @@ description: "Announce a development to a mob and deliver it, in bounded batches
 icon: "bullhorn"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Mob announcements carry developments to the members that asked for them. The
 host, or a member through its tools, announces a development to a mob. Every
@@ -113,7 +113,9 @@ A subscription ends, with a typed reason, only on a final fact:
 
 A member that is not registered, or not served where its deliveries go, ends
 nothing: it may be registered or served again. Neither does a member that
-left this gateway, is governed, or has no live incarnation. Its deliveries
+left this gateway, is governed, or is no member of its mob now (it left the
+roster; a dormant member is still a member and is materialized for its
+deliveries). Its deliveries
 wait, and the subscription's `marker` says why and on what evidence (a
 verified signed answer, an unverified one, or this gateway's own fact). Its
 owed batches expire after the retention window, and `subscriptions/cancel`

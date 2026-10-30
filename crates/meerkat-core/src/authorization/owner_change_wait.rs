@@ -16,12 +16,18 @@
 //! that change published, often after it completed. Such a read waits with
 //! [`OwnerChangeChurn::wait_after_stale_read`], which with no change in
 //! progress as it starts pauses one backoff step first; a settled wait is one
-//! of the free rebuilds either way. The native work owner also names a held
-//! reservation of its publication's writer that has not published (an owner
-//! change still being prepared, such as an issuance before its acknowledged
-//! append publishes) as a change in progress, so every wait here lasts until
-//! the holder releases the writer. This is shell synchronization: no machine
-//! input changes.
+//! of the free rebuilds either way.
+//!
+//! A governed step of a tool dispatch takes the work owners' exclusion
+//! without waiting. When another actor holds it (an owner change still being
+//! prepared, a held exclusion or another operation's final entry), the
+//! native work owner refuses to rebuild and reports that hold as a change in
+//! progress until it ends, so the step's waiting form waits here too, only
+//! after the step returned and released everything it took. A step refused
+//! to rebuild ran nothing, so it takes the same wait as a stale read: a hold
+//! that ended before the step read it is no ordinary refusal there, and the
+//! step pauses one backoff step and rebuilds, as one of its free rebuilds.
+//! This is shell synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};
 #[cfg(target_arch = "wasm32")]

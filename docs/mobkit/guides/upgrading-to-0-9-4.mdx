@@ -4,7 +4,7 @@ description: "What changes when a Meta 0.9.3 deployment moves to 0.9.4: the one-
 icon: "arrow-up"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Meta 0.9.4 keeps sessions and identities in Meerkat Core's own stores. Meta no
 longer keeps a continuity copy of a member's transcript and no longer holds
@@ -431,6 +431,13 @@ the directory; after that the copy ages out like the other backups.
   helper or fork child the host made on the mob and retired, since the
   identity's wake resumes only a member the identity runtime spawned. The
   file is rewritten as rows are carried out and removed after the last one.
+  From 0.9.6 on, a roster compile carries its rows out
+  `META_IDENTITY_RESTORE_CONCURRENCY` at a time (16 by default) and rewrites
+  the file once, after its last row; a single wake that carries a row out
+  rewrites it at once. Until that rewrite, a reset, delete, wake or delivery
+  of an identity whose row the compile carried out rewrites the file first.
+  A row a boot carried out before it stopped, still in the file, reads as
+  done at the next start and is settled then.
 - The bootstrap status (`meta/status_identity_bootstrap` and
   `meta/wait_identity_bootstrap`, the SDKs' `identity_bootstrap_status()`
   and `wait_identity_bootstrap()`) lists the pending rows as
@@ -440,7 +447,7 @@ the directory; after that the copy ages out like the other backups.
   `meta/status_identity_bootstrap`, `meta/wait_identity_bootstrap` and
   `meta/member_instruction_activations` are served there, and the console
   does not serve them. Serving them read-only on the console is planned for
-  0.9.6.
+  a later release.
 - `reset`, `delete_identity` and the delivery verbs of an identity whose row
   is pending are refused (`-32014`, `first_boot_row_pending`, retryable). The
   refusal's `remedy` says what to do: `add_to_roster` when no roster lists the

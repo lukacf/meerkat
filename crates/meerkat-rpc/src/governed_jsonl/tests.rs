@@ -345,6 +345,19 @@ struct Receiver {
     second_request: Notify,
     finish: Notify,
     authorized_requests: AtomicUsize,
+    /// Answers taken in order, before any other answer, one per request.
+    #[cfg(feature = "mcp")]
+    script: Mutex<std::collections::VecDeque<ScriptedAnswer>>,
+}
+
+/// One scripted model answer: a call of `tool` as `call_id`. A held answer
+/// first notifies `second_request`, and is given only once `finish` is
+/// notified.
+#[cfg(feature = "mcp")]
+struct ScriptedAnswer {
+    call_id: &'static str,
+    tool: &'static str,
+    held: bool,
 }
 
 struct Server {
@@ -428,9 +441,12 @@ fn sibling_response() -> String {
 }
 const SINGLE_CALL: &str = "toolu_single";
 fn single_tool_call_response(name: &str) -> String {
+    tool_call_response(SINGLE_CALL, name)
+}
+fn tool_call_response(call_id: &str, name: &str) -> String {
     sse(vec![
         start_message(),
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":SINGLE_CALL,"name":name,"input":{}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":call_id,"name":name,"input":{}}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"message_delta","usage":{"output_tokens":2},"delta":{"stop_reason":"tool_use"}}),
@@ -467,6 +483,21 @@ async fn receive(
             [("content-type", "application/json")],
             "missing fixture authorization".into(),
         );
+    }
+    #[cfg(feature = "mcp")]
+    {
+        let scripted = receiver.script.lock().unwrap().pop_front();
+        if let Some(answer) = scripted {
+            if answer.held {
+                receiver.second_request.notify_one();
+                receiver.finish.notified().await;
+            }
+            return (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                tool_call_response(answer.call_id, answer.tool),
+            );
+        }
     }
     if receiver.hold_next.swap(false, Ordering::SeqCst) {
         receiver.second_request.notify_one();
@@ -4386,6 +4417,8 @@ struct R3Realm {
     /// route, so every host on the realm reuses it (each fixture client
     /// carries its own auth binding, and with it its own route).
     client: Arc<dyn LlmClient>,
+    /// The grant the agent's selection names for the granted server.
+    installation_grant: Option<GrantLineageRef>,
 }
 
 /// One running stock host of an [`R3Realm`]: its pipe and the session it
@@ -4433,7 +4466,7 @@ impl R3Realm {
         let granted =
             r3_granted_server(&calls, account, issuer.as_ref().map(|issuer| issuer.base()));
         let realm = RealmId::parse(R3_REALM).unwrap();
-        let this = Self {
+        let mut this = Self {
             root: tempfile::tempdir().unwrap(),
             principals: StockPrincipals::for_user(&realm, 4243).unwrap(),
             realm,
@@ -4443,6 +4476,7 @@ impl R3Realm {
             issuer,
             assurance: assurance.to_owned(),
             client: http_client_in(http, R3_REALM),
+            installation_grant: None,
         };
         drop(this.open(RealmGovernance::Ungoverned).await.unwrap());
         meerkat_core::McpRealmPersistTarget::new(&this.config_runtime())
@@ -4486,7 +4520,7 @@ impl R3Realm {
                 operations: McpOperations::Exact(["read".to_string()].into()),
             },
         ] {
-            grant_stock_agent(
+            let issued = grant_stock_agent(
                 this.root.path(),
                 R3_REALM,
                 &this.principals,
@@ -4497,7 +4531,10 @@ impl R3Realm {
                 },
             )
             .await
-            .expect("issued and selected");
+            .expect("issued and selected")
+            .issued;
+            // The last grant is the granted server's.
+            this.installation_grant = Some(issued);
         }
         this
     }
@@ -5069,6 +5106,232 @@ async fn stock_r3_consent_is_decided_by_the_pipes_device_trusted_operator() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stock_r3_consent_requiring_a_person_refuses_the_pipes_device_trust() {
     stock_r3_declared_none_scenario("person_authenticated").await;
+}
+
+/// The `read` calls the granted R3 server received.
+#[cfg(feature = "mcp")]
+fn granted_calls(calls: &std::path::Path) -> usize {
+    std::fs::read_to_string(calls).map_or(0, |calls| calls.lines().count())
+}
+
+/// An approved R3 consent spent by the run that requested it, at that run's
+/// next boundary after the decision (ADR-001 D9). The model calls the
+/// granted `read`, which requests consent; the run's next model request is
+/// held while the pipe's operator approves it (its approved notice reaches
+/// the pipe) and `after_the_decision` runs on the host. The held answer
+/// calls a tool the agent does not have, so the run reaches another
+/// boundary, which spends the decided consent before its next request.
+/// Returns the approval's record once the turn completed.
+#[cfg(feature = "mcp")]
+async fn stock_r3_spend_in_the_requesting_run(
+    http: &Server,
+    host: &mut R3Host,
+    after_the_decision: impl FnOnce(&R3Host),
+) -> meerkat_core::ApprovalRecord {
+    host.begin_session().await;
+    http.receiver.script.lock().unwrap().extend([
+        ScriptedAnswer {
+            call_id: SINGLE_CALL,
+            tool: "read",
+            held: false,
+        },
+        ScriptedAnswer {
+            call_id: "toolu_unpublished",
+            tool: "unpublished_tool",
+            held: true,
+        },
+    ]);
+    send(
+        &mut host.w,
+        json!({"jsonrpc":"2.0","id":4,"method":"turn/start","params":{
+            "session_id":host.sid, "prompt":"call read"
+        }}),
+    )
+    .await;
+    let (approval_id, pending) = host.requested().await;
+    assert_eq!(pending.status, meerkat_core::ApprovalStatus::Pending);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        http.receiver.second_request.notified(),
+    )
+    .await
+    .expect("the run's next request is held while its consent is pending");
+    let decided = host
+        .decide_in_pipe_scope(&approval_id)
+        .expect("approved in the pipe's scope while the run is open");
+    assert_eq!(decided.status, meerkat_core::ApprovalStatus::Approved);
+    wait_for_consent_notice(&mut host.r, &mut host.notices, |notice| {
+        notice["kind"] == "approved" && notice["approval_id"] == approval_id.as_str()
+    })
+    .await;
+    after_the_decision(&*host);
+    http.receiver.finish.notify_one();
+    let finished = host.response(4).await;
+    assert!(finished.get("error").is_none(), "{finished}");
+    host.issuer
+        .get(&approval_id.parse().unwrap())
+        .expect("the approval")
+}
+
+/// ADR-001 D9 on the stdio stock host: an approved consent outlives an
+/// unrelated owner change on the composition's publication between its
+/// decision and its spend (as another turn, or a host's change of its
+/// callers' facts, publishes one). The spend asks the route again whether
+/// the pipe's operator was revoked since deciding; the pipe still answers
+/// for them through the approval, so `read` enters exactly once.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_r3_an_approved_consent_enters_once_after_an_unrelated_owner_change() {
+    let mut http = Server::start().await;
+    let realm = R3Realm::new(&http, R3Account::DeclaredNone, "device_trusted").await;
+    let mut host = realm.start_host(&http).await;
+    let outcome = r3_bounded(async {
+        let record = stock_r3_spend_in_the_requesting_run(&http, &mut host, |host| {
+            host.governance.apply_host_change(|| ());
+        })
+        .await;
+        assert!(
+            record.consent.as_ref().is_some_and(
+                |consent| consent.consumed_at.is_some() && consent.withdrawal.is_none()
+            ),
+            "{record:?}"
+        );
+        assert_eq!(granted_calls(&realm.calls), 1, "read entered exactly once");
+        wait_for_consent_notice(&mut host.r, &mut host.notices, |notice| {
+            notice["kind"] == "used"
+        })
+        .await;
+    })
+    .await;
+    let mut failures = host.close().await;
+    http.join_receiver(&mut failures).await;
+    finish_scenario(outcome, failures);
+}
+
+/// ADR-001 D9 on the stdio stock host: the pipe's retirement (its close)
+/// revokes its operator. Approved, then retired before the spend, the
+/// consent is withdrawn as `AuthorityChanged` at the spend, with zero entry.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_r3_an_approved_consent_never_enters_once_its_pipe_retired() {
+    let mut http = Server::start().await;
+    let realm = R3Realm::new(&http, R3Account::DeclaredNone, "device_trusted").await;
+    let mut host = realm.start_host(&http).await;
+    let outcome = r3_bounded(async {
+        let record = stock_r3_spend_in_the_requesting_run(&http, &mut host, |host| {
+            host.consent.retire();
+        })
+        .await;
+        assert_eq!(record.status, meerkat_core::ApprovalStatus::Approved);
+        assert_eq!(
+            record
+                .consent
+                .as_ref()
+                .and_then(|consent| consent.withdrawal.as_ref())
+                .map(|withdrawal| withdrawal.reason.clone()),
+            Some(meerkat_core::approval::ApprovalConsentWithdrawalReason::AuthorityChanged),
+            "{record:?}"
+        );
+        assert!(
+            record
+                .consent
+                .as_ref()
+                .is_some_and(|consent| consent.consumed_at.is_none()),
+            "nothing spent"
+        );
+        assert!(!realm.calls.exists(), "zero entry");
+    })
+    .await;
+    let mut failures = host.close().await;
+    http.join_receiver(&mut failures).await;
+    finish_scenario(outcome, failures);
+}
+
+/// No controller work holds the grant a test revokes live.
+#[cfg(feature = "mcp")]
+struct NoControllerWork;
+
+#[cfg(feature = "mcp")]
+impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody
+    for NoControllerWork
+{
+    fn with_unreferenced_controller_grant<T, E>(
+        &mut self,
+        _: &GrantLineageRef,
+        mutate: impl FnOnce() -> Result<T, E>,
+    ) -> Result<
+        Result<T, E>,
+        meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal,
+    > {
+        Ok(mutate())
+    }
+}
+
+/// ADR-001 D9 on the stdio stock host: a policy change between the decision
+/// and the spend withdraws the approved consent. The operator revokes the
+/// granted server's grant on the open composition's own grant owner; the
+/// spend's owners, asked afresh, refuse the operation, so the consent is
+/// withdrawn as `AuthorityChanged`, with zero entry.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_r3_an_approved_consent_never_enters_once_its_grant_is_revoked() {
+    let mut http = Server::start().await;
+    let realm = R3Realm::new(&http, R3Account::DeclaredNone, "device_trusted").await;
+    let grant = realm
+        .installation_grant
+        .clone()
+        .expect("the granted server's grant");
+    let operator = realm.principals.operator.clone();
+    let mut host = realm.start_host(&http).await;
+    let outcome = r3_bounded(async {
+        let record = stock_r3_spend_in_the_requesting_run(&http, &mut host, |host| {
+            let grants = host
+                .governance
+                .composed_grant_owner_for_test()
+                .expect("the open composition's grant owner");
+            // The revocation never waits: it answers `Unavailable` while
+            // another operation holds the owner's lock or its publication
+            // (the host's own traffic). Ask again until it is free, within
+            // a few seconds, without holding the publication meanwhile.
+            tokio::task::block_in_place(|| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    match grants.revoke(&operator, &grant, &mut NoControllerWork) {
+                        Ok(()) => break,
+                        Err(meerkat_authorization::grants::GrantRefusal::Unavailable)
+                            if std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(refusal) => panic!("revoked while the realm is open: {refusal}"),
+                    }
+                }
+            });
+        })
+        .await;
+        assert_eq!(record.status, meerkat_core::ApprovalStatus::Approved);
+        assert_eq!(
+            record
+                .consent
+                .as_ref()
+                .and_then(|consent| consent.withdrawal.as_ref())
+                .map(|withdrawal| withdrawal.reason.clone()),
+            Some(meerkat_core::approval::ApprovalConsentWithdrawalReason::AuthorityChanged),
+            "{record:?}"
+        );
+        assert!(
+            record
+                .consent
+                .as_ref()
+                .is_some_and(|consent| consent.consumed_at.is_none()),
+            "nothing spent"
+        );
+        assert!(!realm.calls.exists(), "zero entry");
+    })
+    .await;
+    let mut failures = host.close().await;
+    http.join_receiver(&mut failures).await;
+    finish_scenario(outcome, failures);
 }
 
 /// A connector-bound installation states its binding's issuer-verified

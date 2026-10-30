@@ -13,7 +13,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 const INVALID: u64 = u64::MAX;
 
@@ -28,9 +28,8 @@ struct PublicationInner {
     /// released the writer, so the count is never zero while a guard exists.
     /// The writer is also held uncounted: briefly, between taking it and
     /// building the guard, and by [`LocalAuthorizationPublication::retire`],
-    /// which never counts. A wait that reads no hold then answers as with no
-    /// change in progress; a wait after a stale read pauses one backoff step
-    /// and reads again, as one of its free rebuilds.
+    /// which never counts. A step refused then may read no hold; its waiting
+    /// form then pauses and rebuilds, as one of its free rebuilds.
     reservations: AtomicUsize,
 }
 
@@ -170,15 +169,27 @@ impl LocalAuthorizationPublication {
 
     /// Reserve without waiting while native custody remains held. Contention
     /// or poison returns before mutation and leaves publication unchanged.
+    ///
+    /// The refusal keeps the two apart for an operation-time step, which
+    /// answers contention as a refusal to rebuild and poison as
+    /// unavailability. Every host-facing caller answers both as
+    /// [`PublicationError::Unavailable`] (the `From` conversion).
     pub(crate) fn try_reserve_owner_change(
         &self,
-    ) -> Result<LocalPublicationGuard<'_>, PublicationError> {
-        let writer = self
-            .inner
-            .writer
-            .try_lock()
-            .map_err(|_| PublicationError::Unavailable)?;
+    ) -> Result<LocalPublicationGuard<'_>, TryReserveRefusal> {
+        let writer = match self.inner.writer.try_lock() {
+            Ok(writer) => writer,
+            // Another reservation holds the writer of a publication that is
+            // still healthy: it is released without waiting on this caller.
+            Err(TryLockError::WouldBlock)
+                if self.inner.sequence.load(Ordering::Acquire) != INVALID =>
+            {
+                return Err(TryReserveRefusal::Busy);
+            }
+            Err(_) => return Err(TryReserveRefusal::Unavailable),
+        };
         self.reservation_with_writer(writer)
+            .map_err(|_| TryReserveRefusal::Unavailable)
     }
 
     fn reservation_with_writer<'a>(
@@ -233,8 +244,8 @@ impl LocalAuthorizationPublication {
     /// held now that has not published: an owner change still being
     /// prepared (an issuance before its acknowledged append publishes), a
     /// held exclusion (`try_with_owner_changes_excluded`) or another
-    /// operation's own final entry. The native work owner's waiting hint, so
-    /// that a wait for an owner change in progress also waits for the
+    /// operation's own final entry. The waiting hint for an operation-time
+    /// step refused because the writer was held, so that it waits for the
     /// holder's release. Such a reservation is named by the odd sequence it
     /// would publish at, so consecutive unpublished reservations share one
     /// token. A hint only, never a permission and never an observation:
@@ -476,6 +487,14 @@ impl PublishedConsentEligibility {
     /// without I/O. An ineligible approver, or an owner change during the
     /// observation, yields no evidence.
     ///
+    /// The two are one error here. A host route that resolves eligibility
+    /// with this and keeps the default
+    /// [`meerkat_core::approval::consent::HumanConsentRoute::eligibility_answer`]
+    /// therefore answers an owner change in progress (or one published
+    /// during the read) as a refusal, which withdraws an approved consent at
+    /// its spend: such a route overrides `eligibility_answer` with
+    /// [`Self::observe_answer`].
+    ///
     /// # Errors
     /// [`meerkat_core::approval::consent::ConsentIneligible`] when there is
     /// no current evidence of eligibility.
@@ -489,6 +508,29 @@ impl PublishedConsentEligibility {
         match publication.observe(eligible) {
             Ok((true, stamp)) => Ok(Arc::new(Self { stamp })),
             Ok((false, _)) | Err(_) => Err(meerkat_core::approval::consent::ConsentIneligible),
+        }
+    }
+
+    /// [`Self::observe`] as the eligibility owner's answer, for
+    /// [`meerkat_core::approval::consent::HumanConsentRoute::eligibility_answer`]:
+    /// `Eligible` with this evidence when `eligible` reads the owner's facts
+    /// as eligible, `Refused` when it reads them as not eligible, and
+    /// `Unsettled` when there is no coherent read of them now (an owner
+    /// change in progress, or one published during the observation, or a
+    /// poisoned publication, which stays so until its owners are
+    /// reconstructed). Nothing is decided on an unsettled answer: the
+    /// approval owner asks again.
+    pub fn observe_answer(
+        publication: &LocalAuthorizationPublication,
+        eligible: impl FnOnce() -> bool,
+    ) -> meerkat_core::approval::consent::ConsentEligibilityAnswer {
+        use meerkat_core::approval::consent::ConsentEligibilityAnswer;
+        match publication.observe(eligible) {
+            Ok((true, stamp)) => ConsentEligibilityAnswer::Eligible(Arc::new(Self { stamp })),
+            Ok((false, _)) => ConsentEligibilityAnswer::Refused,
+            Err(PublicationError::Changed | PublicationError::Unavailable) => {
+                ConsentEligibilityAnswer::Unsettled
+            }
         }
     }
 }
@@ -514,6 +556,27 @@ pub enum PublicationError {
     Changed,
     #[error("local authorization facts are unavailable")]
     Unavailable,
+}
+
+/// Why [`LocalAuthorizationPublication::try_reserve_owner_change`] took no
+/// reservation. Nothing changed either way. Crate-private: every public
+/// non-waiting entry answers both as [`PublicationError::Unavailable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TryReserveRefusal {
+    /// Another reservation holds the writer of this healthy publication now
+    /// (an owner change, published or not, a held exclusion or another
+    /// operation's final entry). It is released without waiting on the
+    /// caller, and [`LocalAuthorizationPublication::change_or_reservation_in_progress`]
+    /// names it until then.
+    Busy,
+    /// Poisoned, retired or exhausted, as [`PublicationError::Unavailable`].
+    Unavailable,
+}
+
+impl From<TryReserveRefusal> for PublicationError {
+    fn from(_: TryReserveRefusal) -> Self {
+        Self::Unavailable
+    }
 }
 
 #[cfg(test)]
@@ -977,7 +1040,46 @@ mod tests {
         assert_eq!(publication.change_in_progress(), None);
     }
 
-    /// RED at v0.9.7: no reservation was named before it published.
+    #[test]
+    fn a_held_writer_is_busy_inside_the_crate_and_poison_stays_unavailable() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        let held = publication
+            .try_reserve_owner_change()
+            .expect("the writer is free");
+        assert!(
+            matches!(
+                publication.try_reserve_owner_change(),
+                Err(TryReserveRefusal::Busy)
+            ),
+            "another reservation holds the writer: contention, not poison"
+        );
+        assert!(
+            matches!(
+                publication.try_begin_owner_change(),
+                Err(PublicationError::Unavailable)
+            ),
+            "the public non-waiting entry keeps one answer for both"
+        );
+        assert_eq!(stamp.check_current(), Ok(()), "nothing changed");
+        publication.poison();
+        assert!(
+            matches!(
+                publication.try_reserve_owner_change(),
+                Err(TryReserveRefusal::Unavailable)
+            ),
+            "a poisoned publication is unavailable even while its writer is held"
+        );
+        drop(held);
+        assert!(
+            matches!(
+                publication.try_reserve_owner_change(),
+                Err(TryReserveRefusal::Unavailable)
+            ),
+            "and after its release"
+        );
+    }
+
     #[test]
     fn a_reservation_is_named_in_progress_until_released_and_only_a_published_one_otherwise() {
         let publication = LocalAuthorizationPublication::new();
@@ -1029,5 +1131,51 @@ mod tests {
         );
         drop(held);
         assert_eq!(publication.change_or_reservation_in_progress(), None);
+    }
+
+    #[test]
+    fn an_eligibility_answer_tells_a_refusal_from_an_owner_that_cannot_say() {
+        use meerkat_core::approval::consent::ConsentEligibilityAnswer;
+        let publication = LocalAuthorizationPublication::new();
+        let evidence = match PublishedConsentEligibility::observe_answer(&publication, || true) {
+            ConsentEligibilityAnswer::Eligible(evidence) => Some(evidence),
+            _ => None,
+        }
+        .expect("eligible facts answer with evidence");
+        assert!(evidence.check_current().is_ok());
+        assert!(matches!(
+            PublishedConsentEligibility::observe_answer(&publication, || false),
+            ConsentEligibilityAnswer::Refused
+        ));
+
+        // An owner change in progress: no coherent read, so no answer
+        // either way.
+        let change = publication.begin_owner_change().expect("owner change");
+        assert!(matches!(
+            PublishedConsentEligibility::observe_answer(&publication, || true),
+            ConsentEligibilityAnswer::Unsettled
+        ));
+        assert!(matches!(
+            PublishedConsentEligibility::observe_answer(&publication, || false),
+            ConsentEligibilityAnswer::Unsettled
+        ));
+        drop(change);
+        assert!(
+            evidence.check_current().is_err(),
+            "the completed change made the earlier evidence stale"
+        );
+
+        // A change published during the observation.
+        let answer = PublishedConsentEligibility::observe_answer(&publication, || {
+            drop(publication.begin_owner_change().expect("owner change"));
+            true
+        });
+        assert!(matches!(answer, ConsentEligibilityAnswer::Unsettled));
+
+        publication.poison();
+        assert!(matches!(
+            PublishedConsentEligibility::observe_answer(&publication, || true),
+            ConsentEligibilityAnswer::Unsettled
+        ));
     }
 }

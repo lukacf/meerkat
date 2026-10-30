@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -77,6 +77,31 @@ default applies. The setting applies to every fork of the gateway's mob and
 cannot be chosen per fork. See
 [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
 for what each value does and what `reactivate_inherited` trusts.
+
+## Member restore
+
+Every roster identity is a member of the gateway's mob from ready, and is
+materialized when work reaches it. `memberRestore` sets what the mob
+materializes when it starts; it is sent as `runtime_options.member_restore`:
+
+```typescript
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .roster(roster)
+  .memberRestore("on_demand_verified")
+  .build();
+```
+
+`"on_demand"` (the gateway default when unset) materializes only the members
+that hold work; `"on_demand_verified"` also checks every other member once,
+read-only, before ready, so a member whose session cannot be resumed reads
+broken at ready; `"eager"` materializes every member. Another value throws
+`RangeError`. A read never materializes a member:
+`rt.mobHandle().identityResolvedToolsDetail(identity)` answers a member that
+is not materialized from its last recorded build (`toolsSource` says which),
+and `rt.mobHandle().identityWarm(identity)` builds a member without a turn
+and records its tools. A tool record's `recordRevision` counts its writes
+and is not the identity's generation.
 
 ## Waiting for a turn
 
@@ -533,6 +558,10 @@ The builder forwards `consoleConfig(path)` as `runtime_options.console_config_pa
 The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.0.0:8080")`, `allowRemote()` and `httpPublicBaseUrl(url)` are the exposure knobs (`runtime_options.http_listen`, `allow_remote`, `http_public_base_url`): a non-loopback bind is refused at init unless `auth(...)` enforces console auth or `allowRemote()` acknowledges the exposure, and the advertised base is read back as `runtime.rustHttpPublicBaseUrl` while `runtime.rustHttpBaseUrl` stays the same-host form the SDK itself dials. See [Deployment](/mobkit/guides/deployment).
 
 `meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
+
+`providerCredentialsRoot(path)` forwards a provider credentials directory as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. The path is absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init rather than falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/mobkit/reference/configuration#provider-credentials).
+
+`nativeRealm({realmId, contextRoot, stateRoot, userConfigRoot})` forwards a native realm as `runtime_options.native_realm`: the gateway reads that realm's effective configuration once at init with Meerkat's own native reader, copying and writing nothing, and every agent it builds starts from it in place of `meerkatConfig(path)` (the two are refused together). Each root is an absolute path; a realm the state root does not hold, or a configuration that cannot be read or does not validate, refuses init, never falling back to the default configuration, and the realm's whole configuration applies to every member. `memberAuthBinding({realm, binding, profile?, origin?})` forwards the binding every member is built with as `runtime_options.member_auth_binding`; `origin` is absent or `"configured"`. The gateway refuses at init a binding the members' configuration does not define, a definition profile the binding does not serve, and an automatic spawn policy, a model fallback target off the binding, image generation or the agent memory engines, in the definition, a realm profile it references or a stored child mob, and an identity declaration an earlier launch adopted that was sealed with no binding or another one; every member it builds then uses exactly this binding, or its build is refused (roster members, helpers and forks, later spawns, respawns and resets, members rebuilt after a restart, child mobs' members), never a default one, and a member Meerkat rebuilds from its own records (a fork seated before the launch named the binding) that recorded another binding or none is refused at its rebuild and must be re-created; a spawn that names another binding, an agent's child mob that would leave it, identity adoption, and an attach of a session whose live actor runs another binding are refused, and a running gateway is never rebound. `nativeRealm` requires `memberAuthBinding`. The Python twins are `.native_realm(...)` and `.member_auth_binding(AuthBindingRef(...))`. See [Native realm and member auth binding](/mobkit/reference/configuration#native-realm-and-member-auth-binding).
 
 ## Storage durability declarations
 

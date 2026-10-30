@@ -385,6 +385,9 @@ export const FEATURE_UNIT_SUITES = [
   { package: "meerkat-openai", id: "realtime", features: ["realtime"] },
   { package: "meerkat-live", id: "webrtc", features: ["webrtc"] },
   { package: "meerkat-session", id: "live", features: ["live", "session-store"] },
+  // DefaultCompactor (compactor.rs) is behind `session-compaction`, which
+  // neither the default features nor the `live` suite enable.
+  { package: "meerkat-session", id: "compaction", features: ["session-compaction"] },
   { package: "meerkat-auth-core", id: "cloud", features: ["aws-sigv4", "gcp-auth", "azure-ad"] },
   { package: "meerkat-anthropic", id: "cloud", features: ["bedrock", "vertex", "foundry"] },
   { package: "meerkat-mob", id: "openai-live", features: ["experimental-gpt-live", "schema"] },

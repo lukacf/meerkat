@@ -166,9 +166,12 @@ pub enum ContinuationBody {
         content: meerkat_core::types::ContentInput,
     },
     /// A durable system notice, admitted exactly as a detached job's
-    /// completion record (`PromptInput::detached_job_completed`): fork_off
-    /// and council outcomes keep the transcript they always had. It holds
-    /// what the admitted append carries (kind, body, blocks) and no
+    /// completion record (`PromptInput::detached_job_completed`): every
+    /// notice but a consent notice (fork_off and council outcomes, and any
+    /// other producer's) keeps the transcript it always had, and steers. A
+    /// consent notice is the same record under the handling its delivery
+    /// declares (`Queue`), so a graceful requeue stop no longer ends it. It
+    /// holds what the admitted append carries (kind, body, blocks) and no
     /// timestamp, so the same outcome is the same body however often it is
     /// submitted ([`ContinuationBody::notice`]).
     Notice {
@@ -2421,7 +2424,8 @@ async fn verify_committed_job(
 
 /// The exact input a continuation row is admitted as, under `admission_key`
 /// with `input_id`: a durable content input, or a notice admitted exactly as a
-/// detached job's completion record.
+/// detached job's completion record (a consent notice under the handling its
+/// delivery declares, every other notice steering).
 fn continuation_prompt(
     delivery: &ContinuationDelivery,
     admission_key: &str,
@@ -2443,18 +2447,75 @@ fn continuation_prompt(
             body,
             blocks,
         } => {
-            let mut prompt = meerkat_runtime::PromptInput::detached_job_completed(
-                admission_key.to_string(),
-                meerkat_core::types::SystemNoticeMessage::with_blocks(
-                    *notice_kind,
-                    body.clone(),
-                    blocks.clone(),
-                ),
+            let notice = meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *notice_kind,
+                body.clone(),
+                blocks.clone(),
             );
+            let mut prompt = if is_consent_notice(delivery) {
+                // A consent notice keeps the handling its delivery declares
+                // (`Queue`): it waits for the owner's next turn in the queue
+                // lane, where a graceful requeue stop no longer ends it.
+                meerkat_runtime::PromptInput::detached_job_completed_with_handling(
+                    admission_key.to_string(),
+                    notice,
+                    handling,
+                )
+            } else {
+                // Every other notice (a fork_off or council outcome, or any
+                // other producer's) is a detached job's completion record,
+                // which steers.
+                meerkat_runtime::PromptInput::detached_job_completed(
+                    admission_key.to_string(),
+                    notice,
+                )
+            };
             prompt.header.id = input_id;
             prompt
         }
     }
+}
+
+/// Whether `delivery` is a consent notice: its producer is the namespace in
+/// which the issuing approval owner answers for its consent notices.
+fn is_consent_notice(delivery: &ContinuationDelivery) -> bool {
+    matches!(
+        &delivery.result.producer,
+        ContinuationProducer::Host { namespace }
+            if namespace.as_str() == meerkat_core::approval::consent::CONSENT_DELIVERY_NAMESPACE
+    )
+}
+
+/// The input a consent notice was admitted as before it kept the handling
+/// its delivery declares: a detached job's completion record, which steers.
+/// An earlier version's admission in that form is still this delivery's
+/// (its admission index entry may still be reserved at an upgrade). `None`
+/// for any other delivery.
+fn steering_consent_notice_input(
+    delivery: &ContinuationDelivery,
+    admission_key: &str,
+) -> Option<meerkat_runtime::Input> {
+    let ContinuationBody::Notice {
+        notice_kind,
+        body,
+        blocks,
+    } = &delivery.body
+    else {
+        return None;
+    };
+    if !is_consent_notice(delivery) {
+        return None;
+    }
+    Some(meerkat_runtime::Input::Prompt(
+        meerkat_runtime::PromptInput::detached_job_completed(
+            admission_key.to_string(),
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *notice_kind,
+                body.clone(),
+                blocks.clone(),
+            ),
+        ),
+    ))
 }
 
 /// Where a governed host original's refusal came from, for operators: the
@@ -3171,19 +3232,28 @@ async fn exact_admission(
     let Some(row) = sink.admitted_input(session_id, admission_key).await? else {
         return Ok(None);
     };
-    match retained_work {
+    let verify = |expected: &meerkat_runtime::Input| match retained_work {
         Some(identity) => {
-            meerkat_runtime::verify_exact_resume_replay(&row.state, &expected, identity)
+            meerkat_runtime::verify_exact_resume_replay(&row.state, expected, identity)
         }
-        None => meerkat_runtime::verify_exact_replay(&row.state, &expected),
-    }
-    .map_err(|error| {
-        format!(
-            "session {session_id} holds input {} under continuation admission key \
+        None => meerkat_runtime::verify_exact_replay(&row.state, expected),
+    };
+    verify(&expected)
+        .or_else(|error| {
+            // A consent notice an earlier version admitted as a steering
+            // completion record is still this delivery's admission.
+            match steering_consent_notice_input(delivery, admission_key) {
+                Some(steering) => verify(&steering).map_err(|_| error),
+                None => Err(error),
+            }
+        })
+        .map_err(|error| {
+            format!(
+                "session {session_id} holds input {} under continuation admission key \
              {admission_key} that is not this delivery: {error}",
-            row.state.input_id
-        )
-    })?;
+                row.state.input_id
+            )
+        })?;
     Ok(Some(row.state.input_id))
 }
 

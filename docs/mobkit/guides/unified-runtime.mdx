@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with Meta modules into a single managed runt
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -90,13 +90,16 @@ captured after its configured MCP servers connect or fail: its construction
 waits for each configured MCP server, profile-injected or document-bound, up
 to its connect timeout (`connect_timeout_secs`) plus at most 0.25 s (plus the
 TERM grace for a server that ignores SIGTERM), and its first turn starts
-after that. For an eager roster the construction is the runtime's start,
-which restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a time (4 by
-default; 1 serializes them), so servers that never answer add about that
-timeout times ceil(members / concurrency) to it; a lazy member waits at its
-first wake. A failed connection completes the wait without making its tools
-available, and the member's session holds a typed setup-failure notice for
-it.
+after that. A member is constructed when the mob builds it. At the runtime's
+start the mob builds only the members `member_restore` names: under the
+default `on_demand`, the members that hold work, owe a kickoff, have a
+network transport endpoint or a host requirement; under `eager`, every
+member. The start restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a
+time (16 by default, at most 16; 1 serializes them), so servers that never
+answer add about that timeout times ceil(built members / concurrency) to it.
+Every other member waits at its first wake. A failed connection completes
+the wait without making its tools available, and the member's session holds
+a typed setup-failure notice for it.
 
 The configured storage provider must support durable extension documents.
 The disk provider supplies this capability. No factory means no extension
@@ -220,6 +223,226 @@ versions declared in the repository manifests. Applications using the Meta Git
 dependency should pin the reviewed revision and resolve their committed
 lockfile against those packages.
 
+## Keeping a Meta realm in your own database
+
+A host that keeps its data in its own database can keep the whole Meta realm
+there, through Meerkat Core's host store SPI: the host implements Core's
+`HostStore` trait over its database (see Core's host store reference), and
+`HostStoreMetaStorageProvider` puts the realm on it. The provider opens the
+realm's one `SpiRealm` (the fence, its lease and every scope) and hands that
+one handle to every store the runtime composes. Nothing else in the process
+opens the host store.
+
+| Slot | Where it lives |
+|------|----------------|
+| Sessions and runtime state | The realm's runtime scopes (Core's `SpiRuntimeStore`) |
+| Mob roster, event log, identity bindings, flow runs | The realm's mob storage `root` (Core's `SpiMobStoreHost`): every member spawn and wiring change is one batch over the mob and identity scopes |
+| Identity continuity | Core's mob identity authority in that mob storage |
+| Single writer | The realm's fence, renewed at the host's `FenceTiming` |
+| Realm record, composition manifest, first-boot rows, held-completion marks, structural-events cursor, idle-retirement opt-ins | Meta's own record family in the realm (scope tag `mx`) |
+| Schedules, work graph, blobs | The host's stores, declared in `HostStoreMetaStores` |
+| Detached jobs, console timeline, agent memory, event log | The host's stores when supplied; otherwise a declared default: a process-local job store, a process-local console timeline, no agent memory, no event log |
+
+The local directory is a per-host cache: `scratch_dir()` when set, else a
+temporary directory the runtime owns. It holds the agent factory's files and
+engine state only.
+
+**Comms identities.** Each member's comms identity (its key pair, one
+directory per session) is in neither the realm nor the cache: it lives under
+the session comms identity root, by default
+`$XDG_STATE_HOME/meerkat/session_comms_identity` on Linux (else
+`~/.local/state/meerkat/session_comms_identity`) and
+`~/Library/Application Support/meerkat/session_comms_identity` on macOS. A
+restored member's comms endpoint must match the one the realm recorded for
+it, so a start without that directory brings every restored member up broken,
+and the storage census (`comms_identity`) and the startup log name the
+directory, its path and the members. Keep it on storage that survives a
+restart and moves with the realm, such as a persistent volume, and point the
+runtime at it with the builder's `session_identity_config_root(root)`, which
+keeps the keys under `<root>/.rkat/session_comms_identity`, as the gateway's
+`runtime_options.session_identity_config_root` does. With that, a start on
+another host with an empty cache recovers exactly as a restart on the same
+host does. The first start after an import needs no keys: each imported
+member gets a new key pair. Turning the setting on, or changing it, for
+members whose keys already live elsewhere marks every one of them broken at
+the next start: copy their per-session key directories into
+`<root>/.rkat/session_comms_identity` first, or set the root from the first
+start after an import, as for a cutover. The same root is also the agent
+factory's user-global convention root, which Core consults when it resolves
+skill repositories, as with the gateway's setting. An empty root is refused.
+
+Open the provider before the build. A second process on the same realm
+meets `HostStoreOpenError::Held`, with what remains of the holder's lease;
+wait it out and open again, or open with `AcquireMode::Takeover` once the
+holder is known to be gone:
+
+```rust
+use std::sync::Arc;
+use meerkat_meta::host_store::{
+    HostStore, HostStoreMetaStorageProvider, HostStoreMetaStores, HostStoreOpenError,
+    SpiRealmConfig,
+};
+
+async fn open_realm(
+    host: Arc<dyn HostStore>,
+    stores: impl Fn() -> HostStoreMetaStores,
+) -> Result<HostStoreMetaStorageProvider, HostStoreOpenError> {
+    loop {
+        let opened = HostStoreMetaStorageProvider::open(
+            "my-database",
+            Arc::clone(&host),
+            SpiRealmConfig::default(),
+            stores(),
+        )
+        .await;
+        match opened {
+            // Another process holds the realm, or a stopped one's lease has
+            // not lapsed yet.
+            Err(HostStoreOpenError::Held { remaining, .. }) => {
+                tokio::time::sleep(remaining).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+let provider = Arc::new(open_realm(host, make_stores).await?);
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .storage_provider(provider.clone())
+    .roster_provider(roster)
+    // A directory on a volume that survives restarts and moves with the realm.
+    .session_identity_config_root("/var/lib/my-app/meta")
+    .build()
+    .await?;
+```
+
+A provider serves one build: a second build over it refuses. Run one Meta
+process per realm; several replicas need several realms.
+
+**Readiness.** A batch that fails poisons the scopes it touched, and a lost
+fence poisons the whole realm; either refuses until the process opens the
+realm again, so the host restarts it. Poll `provider.readiness()` from your
+readiness probe: `is_ready()` is false while the realm or a scope is
+poisoned, and after a start that found restored members without their comms
+identity on this host (`comms_identity_degraded`) or members Core restored
+broken (`broken_members`): those members serve nothing until they are
+repaired.
+
+**Restart wait.** The SPI has no fence release: after a stop, the next open
+waits at most the lease the host declared in its `FenceTiming` (30 seconds by
+default). A shorter lease shortens the wait.
+
+**Event log.** The builder's `event_log(config)` works over a host store
+realm when `HostStoreMetaStores::event_log_store` is `None`: the builder's
+config, store and settings are used. A store in `event_log_store` and no
+`event_log()` ingests with the default settings. Supplying both refuses with
+`ConflictingConfiguration`, naming the event log.
+
+**Cost of a round.** A host store realm keeps each session's document whole
+(WholeBlob): every round commit writes the whole document, so a tool round
+writes about twice its size, and a long tool-heavy run writes bytes that grow
+with the square of its rounds. Bound the document size with the builder's
+`compaction()` policy.
+
+**Limits on a host store realm.** The storage census (`meta/status`,
+`meta/capabilities`) lists the process-bound and per-host slots:
+
+- Agent-created child mobs (`mob_create`, delegate's implicit mob) and
+  temporary councils are process-bound: they work, and they do not survive a
+  restart. A durable child mob storage is refused. Members of the realm's
+  root mob do survive a restart, including the ones agents spawn into it: a
+  long-lived member an agent creates on a host store realm is spawned into
+  its own mob (`mob_spawn_member` or the member tool `spawn_member`, from a
+  `durable = true` profile), not into a child mob (see
+  [Long-lived members an agent creates](/mobkit/concepts/roster#long-lived-members-an-agent-creates)).
+- The builtin task tools and the file memory tool keep their files under the
+  agent factory's store path, the per-host cache.
+- Each member's comms key pair is in the per-host comms identity directory
+  (see Comms identities above).
+- An OAuth login in progress does not survive a restart (completed
+  credentials do).
+- `persistent_state()`, `mob_storage()`, `continuity_from_state_dir()` and the
+  per-slot store seams the provider supplies are refused, as are a
+  `topology_control()` mode other than Disabled (a `TopologyProvider`'s
+  desired topology works: it is reconciled against the mob's wiring, which the
+  realm keeps), `persistent_agent_memory_stack()` without a provider memory,
+  and extension documents.
+- One root mob per realm, in the mob storage named `root`; the mob keeps the
+  id its definition gives it.
+- The builder is the only entry: `meta_gateway` and `rpc_gateway` do not open
+  a host store in this release.
+
+**Mob announcements.** `mob_announcements()` works over a host store realm:
+the announcement store keeps its tables in the realm, and the storage census
+lists `mob_announcements` there. The process works on an in-memory copy of
+the tables, loaded whole at the start, and every call that changes the store
+is one batch of the realm, settled before the call answers. A collector
+step's items, their captures, the cursor and the step's receipt land together
+or not at all.
+
+- **Your scheduler runs the collectors.** Meta schedules no source runner on
+  a host store realm. A declared source with a runner is accepted, and
+  `sources/get` reports `runner_scheduled_here: false`. Your own scheduler
+  fires each source's collector at its `runner.every_seconds`, read from
+  `runtime.mob_announcements()?.sources(...)`, and hands each step to
+  `advance_source` with a new operation id. A retry of a step reuses its
+  operation id, and its original result answers again, marked replayed.
+- **Latency.** Calls run one at a time, and reads wait behind a commit in
+  flight, so the store takes about one change per host commit latency. A
+  collector step of up to 100 items with all its captures is one commit; a
+  delivered batch takes a few commits as it moves from sealed to handled. A
+  handling read that finds the turn still pending and an escalation pass that
+  only moves its mark wait in the copy for the next commit, or a flush within
+  60 seconds. Nothing flushes them at shutdown, so a graceful stop loses them
+  just as a crash does, and at most them: a lost read falls due at once at
+  the next start.
+- **Starts and rewrites.** The call that takes the store's journal to 400
+  rows writes the store whole again, in one batch (and its chunks first), and
+  waits for it; a start reads that image and fewer than 400 rows after it. The
+  whole store is held in memory while the process runs, and while a rewrite
+  runs the process holds about three more copies of it (the image, its encoded
+  rows and the packed chunk).
+- **The start read.** `build()` waits for the store's start read, which runs
+  after the identity bootstrap: with entries of up to 256 KiB it takes at most
+  27 read calls of your host store, plus one per 16 MiB of the store's image.
+  Until it is done, the member tools answer that mob announcements are not
+  ready on this gateway.
+- **Failures.** A batch the host refuses, or whose outcome stays unknown,
+  poisons the announcement store: every later call refuses, and
+  `provider.readiness()` turns false, until the process opens the realm again.
+- **The lease.** Every announcement call, reads included, first makes sure
+  the realm's lease is live. While the lease can be neither renewed nor taken
+  again (a host outage longer than the self-fence window), announcement calls
+  refuse, reads included; they serve again on their own once a renew or a
+  re-acquire succeeds.
+- **No import.** Announcement state in a state directory is not moved into a
+  realm. A new realm's store starts empty: declarations make their sources and
+  subscriptions again, and each source onboards from no cursor.
+
+**Moving a 0.9.3 deployment in.** Before the realm's first start, import the
+continuity export (see the continuity export guide) with
+`storage_migrate_native::import_continuity_export_into_host_store`. A dry run
+reports each session and writes no session, document or row; an apply
+creates each session's document in the realm and the first-boot rows the
+first start carries out, and a rerun with the same export continues an
+import that stopped part way. Both take the realm's fence like any open and
+hold it until its lease lapses, so a runtime started right after either
+waits up to that lease.
+Until the import is done, opening the realm refuses with
+`HostStoreOpenError::ImportIncomplete`. Moving a 0.9.4 or 0.9.5 state
+directory into a host store realm is not covered in this release.
+
+**No downgrade.** An earlier Meta, or a provider of your own, over a host
+store realm ignores Meta's records in it and would compose a different mob
+storage: do not run one on a realm this release wrote.
+
+A `storage_provider()` whose backend keeps the sessions but runs over a
+`scratch_dir()` keeps its mob storage in memory unless `mob_storage()`
+supplies one, so after a restart every identity starts on a fresh session
+while its old one remains. The storage census and the log warn about it; keep
+such a realm in a host store instead.
+
 ## Bootstrap sequence
 
 <Steps>
@@ -313,60 +536,57 @@ retires at its saved `DeliveryScope` instead (see
 let scope = identity_runtime.capture_delivery_scope(&identity).await?;
 // ... persist the scope, deliver against it ...
 match identity_runtime.retire_at_scope_tracked(&identity, &scope).await {
-    Ok(_fencing_token) => { /* retired */ }
-    Err(ScopedRetireError::StaleScope { mismatch, .. }) => { /* the scope's member is not retired */ }
+    Ok(_fencing_token) => { /* released: the member stays seated */ }
+    Err(ScopedRetireError::StaleScope { mismatch, .. }) => { /* nothing was released */ }
     Err(other) => return Err(other.into()),
 }
 ```
 
-Core decides. Under the identity's lifecycle lock, Meta reads Core's live
-member scope: when it is the member the scope names, the ordinary retire's
-memory hooks run first (the pre-retire distillation of the outgoing session,
-then the exit-interview note); when it is not, no hooks run. Then meerkat's
-`MobHandle::retire_at_scope` retires exactly the member incarnation the scope
-names, with retire's process-tree semantics: the member's `spawned_by`
-descendants, then the member, then the descendants again. Each step
-re-checks the scope inside the actor command that retires it, so a successor
-minted after the capture (a respawn, a reset, a wake after a retire) is never
-retired through the old scope. Meta holds no lease for the call and writes
-no continuity record; scoped dispatch compares the same Core facts.
+A scoped retire is a release, as `retire` is. Under the identity's lifecycle
+lock, Meta reads Core's live member scope and compares it with the saved
+one. When the scope names the live member, Core releases that member's live
+materialization: the identity stays a member of Core's mob, on the same
+session at the same generation, so the saved scope, and every scope saved for
+that incarnation, stays valid, and the next delivery materializes the member
+again. A release is no retirement, so no memory hook runs (no distillation
+of the session, no exit-interview note), and a release Core refuses changes
+nothing. Nothing else is touched: no `spawned_by` descendant of the member is
+retired (earlier releases retired them with retire's process-tree
+semantics), and a successor minted after the capture (a reset, a delete, a
+respawn) is never released through the old scope. The host's retirement hook
+hears of the registration the release ended, with the unchanged generation.
+Meta holds no lease for the call and writes no continuity record; scoped
+dispatch compares the same Core facts.
 
-It returns the Core fence of the incarnation the scope names. `Ok` is
-meerkat's terminal barrier: that incarnation is retired, or no incarnation of
-the identity is current and none is still retiring, so a retry after a lost
-reply converges to `Ok`, as does a first call for an identity that is already
-retired. Core keeps the retired member's history and session,
-and a later wake resumes it at the next generation.
+It returns the Core fence of the incarnation the scope names. `Ok` also
+answers a scope no incarnation of the identity is current at, and a call for
+an identity Core holds no member for, releasing nothing, so a retry after a
+lost reply converges to `Ok`.
 
-A refusal does not retire the scope's member:
+A refusal releases nothing:
 
 - `Unsupported`: the bridge has no scoped seam, or the identity is externally
   bound.
 - `Rejected`: a scope of another identity, or one wrapped around another
   identity's member; a runtime that no longer admits identity operations (it
-  is shutting down, or its mob is closed); a mob that is not running; Core's
-  live member scope could not be read; the mob's actor stopped while the
-  call ran; or a denied control scope.
+  is shutting down, or its mob is closed); or Core's live member scope could
+  not be read.
 - `Refused(IdentityHostAdopted)`: Core holds an identity intent row for the
   identity, so the host owns it. `Refused(IdentityHistoryUnavailable)`: Core
   cannot read that row.
-- `StaleScope { mismatch }`: the scope is stale for good; capture it again.
-  `RuntimeId`: another incarnation is current under another runtime id
-  (after a reset, a respawn, or a retire then a wake at Core's next
-  generation). `LeaseFencingToken`: Core's fence moved; the slot keeps its
-  0.9.3 name and carries Core's fence. `MemberBinding`: the scope's
-  incarnation is current but bound to another session, or the scope was
-  captured at another incarnation of the mob (destroyed and created again
-  under its id). A successor minted while the call runs can show as either
-  of the first two.
+- `StaleScope { mismatch }`: another incarnation of the identity is current,
+  so the scope is stale for good; capture it again. `RuntimeId`: it runs
+  under another runtime id (after a reset, a delete or a respawn).
+  `LeaseFencingToken`: the runtime id is the same but Core's fence or the
+  scope's binding moved; the slot keeps its 0.9.3 name and carries Core's
+  fence.
 
-Because Core re-checks the scope at each step, a `StaleScope` or `Rejected`
-answer can come after the first pass over the descendants: the descendants
-retired before it stay retired, and the scope's member is not retired.
-
-`Retire` is a failure: meerkat's retirement failed or is stuck, or the
-tracked operation ended without a result. Read the identity's status to see
-whether it was retired.
+`Retire` is Core's release failing. `Retire(IdentityWakeRetryable)` means
+Core does not release the member now because it is being woken or has work
+in flight: nothing was interrupted, and the same call succeeds once the
+member is quiescent. Any other `Retire` error is a failed release, or the
+tracked operation ending without a result; read the identity's status to see
+where it stands.
 
 ### Adding one held member to a running roster
 
@@ -510,7 +730,7 @@ Key routes in the reference app include:
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/healthz` | GET | Runtime health summary |
+| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_members` names each) |
 | `/console` | GET | Admin console HTML |
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |
@@ -660,8 +880,8 @@ let runtime = UnifiedRuntime::builder()
 | `actor_loop_terminated` | `detail`, `stall_id?` | the probe observed the actor's command or reply channel closing; the actor is gone |
 | `host_loop_crash` | `member_id`, `error` | a member run failed (`run_failed` during event drain); a run that ended cancelled, by an interrupt, a stop or a shutdown, does not fire it |
 | `rediscover_failure` | `error` | `rediscover` failed |
-| `event_log_flush_failure` | `error` | the operational event log could not flush |
-| `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | identity-first hydration skipped a member |
+| `event_log_flush_failure` | `error` | the operational event log could not flush: the batch is kept and retried, and past 4,096 kept events the oldest are dropped and counted in `error`. Also fired once when the log's flush task has ended (its store or filter panicked): the events it had buffered, the batch it was writing and every later event are lost |
+| `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | a materialization an operator or a background warm asked for failed (`operation` `materialize_all` or the background warm's); nothing is throttled, and the next request asks Core again. `initiator` is no longer set: Meta no longer materializes a member's peers |
 | `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | not produced since MobKit 0.8.46 (meerkat 0.8.51's Stop no longer refuses on runtime-attach readiness); kept for wire compatibility |
 | `retired_member_release_failed` | `identity`, `agent_runtime_id`, `session_id?`, `cause`, `error` | a gateway host's retirement hook (`GatewayHostComposition::identity_member_retired`) answered an error for a retired incarnation. The retirement stands and is not retried; `cause` is `unlisted`, `retire` or `scoped` |
 | `mob_announcement_escalated` | `escalation`, `event`, `renotify_count`, `cursor` | a mob announcement escalation was raised (`event` `raised`) or notified again while it stays open (`renotified`); `escalation` is the record as it stood at that event, and `cursor` its event cursor (see [Mob announcement health](/mobkit/api/rpc#mob-announcement-health)) |

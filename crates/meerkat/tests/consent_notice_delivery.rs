@@ -468,14 +468,36 @@ impl Fixture {
         Self::with_sink(approvals, domain, GovernedSink::admitting_into)
     }
 
+    /// [`Self::admitting`] on a persistent host runtime: a session's
+    /// graceful requeue stop keeps its eligible queued inputs for the
+    /// session's next registration.
+    fn admitting_persistent(approvals: ApprovalService, domain: HostingDomainRef) -> Self {
+        Self::on_runtime(
+            approvals,
+            domain,
+            MeerkatMachine::persistent_without_blobs(Arc::new(InMemoryRuntimeStore::new()))
+                .expect("persistent runtime"),
+            GovernedSink::admitting_into,
+        )
+    }
+
     fn with_sink(
         approvals: ApprovalService,
         domain: HostingDomainRef,
         sink: impl FnOnce(Arc<MeerkatMachine>) -> GovernedSink,
     ) -> Self {
+        Self::on_runtime(approvals, domain, MeerkatMachine::ephemeral(), sink)
+    }
+
+    fn on_runtime(
+        approvals: ApprovalService,
+        domain: HostingDomainRef,
+        runtime: MeerkatMachine,
+        sink: impl FnOnce(Arc<MeerkatMachine>) -> GovernedSink,
+    ) -> Self {
         let approvals = Arc::new(approvals);
         let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
-        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let runtime = Arc::new(runtime);
         let continuations = Arc::new(ContinuationOwnerService::new(
             inbox.clone(),
             Arc::new(SessionAddressResolver),
@@ -2017,6 +2039,156 @@ async fn an_approved_parked_consent_moves_once_into_the_resumed_run_its_notice_s
     assert!(
         held.len() == 2 && held.contains(&notice_input) && held.contains(&twin_input),
         "the runtime holds each notice's one input: {held:?}"
+    );
+}
+
+/// An approved parked consent's notice survives a graceful requeue stop of
+/// its session. The notice keeps the queue handling its delivery declares,
+/// so the session's requeue unregister keeps the queued notice input
+/// durably for the next start instead of ending it. The session's next
+/// registration in the same process holds the input still queued; the next
+/// delivery owner's arming round reads it and withdraws nothing (an ended
+/// notice input would withdraw the consent as `NoticeInputEnded`); and the
+/// resumed run the notice starts takes the consent over and spends it once.
+///
+/// Real here: the parked custody, through the approval owner's own paths;
+/// the notice admitted into a persistent host runtime as a real input; the
+/// runtime's requeue unregister and the session's next registration; the
+/// delivery owner's round that reads the input's terminal. As in the other
+/// parked-consent rows, no executor serves the session, and the governed
+/// sink admits through the runtime's direct admission.
+#[tokio::test]
+async fn a_requeue_stop_keeps_an_approved_consents_notice_and_its_consent() {
+    let here = domain("realm-a/hosting");
+    let session = SessionId::new();
+    let origin = origin_work("runtime-a");
+    let fixture = Fixture::admitting_persistent(
+        ApprovalService::with_store(store_with(&[])).expect("service"),
+        here.clone(),
+    );
+    fixture
+        .runtime
+        .register_session(session.clone())
+        .await
+        .expect("register the destination session");
+    let scope = ApprovalConsentScope {
+        domain: here,
+        session_id: session.clone(),
+    };
+    let consent = ParkedRoutedConsent::park(&fixture.approvals, scope, origin)
+        .await
+        .expect("the consent is parked through the owner's paths");
+    let approval_id = consent.approval_id().clone();
+
+    let first = fixture
+        .owner()
+        .arm(fixture.host())
+        .expect("arm the first owner");
+    let mut passes = first.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, async {
+        while !matches!(
+            fixture.status(&session, &approval_id).await,
+            ContinuationStatus::Applied { .. }
+        ) {
+            passes.changed().await.expect("owner pass channel open");
+        }
+    })
+    .await
+    .expect("the arming round admitted the approved notice");
+    let notice_input = match fixture.status(&session, &approval_id).await {
+        ContinuationStatus::Applied { input, .. } => input,
+        other => panic!("the approved notice was not admitted: {other:?}"),
+    };
+    assert_eq!(
+        delivery_state(
+            &fixture.approvals,
+            &approval_id,
+            ApprovalConsentTransition::Approved
+        ),
+        Some(ApprovalConsentDeliveryState::Admitted {
+            session_id: session.clone(),
+            input_id: notice_input.to_string(),
+        }),
+        "the receipt names the admitted input"
+    );
+    let _stopped = first
+        .retire()
+        .join(EVENT_GUARD)
+        .await
+        .expect("the first owner stops");
+
+    // The session's graceful requeue stop, then its next registration in
+    // this process.
+    let registration = fixture
+        .runtime
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the session is registered");
+    assert!(
+        fixture
+            .runtime
+            .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                &registration,
+                meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                    max_age: Duration::from_secs(600),
+                },
+            )
+            .await
+            .expect("the requeue stop completes"),
+        "the exact registration is torn down"
+    );
+    fixture
+        .runtime
+        .register_session(session.clone())
+        .await
+        .expect("the session registers again");
+    assert_eq!(
+        native_terminal(&fixture.runtime, &session, &notice_input).await,
+        None,
+        "the requeue stop kept the notice input queued for the next start"
+    );
+
+    // The next owner's arming round reads the input and withdraws nothing.
+    let next = fixture
+        .owner()
+        .arm(fixture.host())
+        .expect("arm the next owner");
+    let mut passes = next.subscribe_passes();
+    let armed = wait_for_pass(&mut passes, "the arming round", |pass| pass.generation >= 1).await;
+    assert!(armed.failures.is_empty(), "{armed:?}");
+    assert_eq!(
+        fixture
+            .approvals
+            .get(&approval_id)
+            .expect("row")
+            .consent
+            .and_then(|consent| consent.withdrawal),
+        None,
+        "nothing withdrew the consent"
+    );
+    assert_eq!(
+        custody(&fixture.approvals, &approval_id),
+        Some(ApprovalConsentCustody::Parked)
+    );
+
+    // The resumed run its notice starts takes the consent over and spends
+    // it once.
+    let run = consent.open_resumed_run(std::slice::from_ref(&notice_input));
+    assert_eq!(
+        custody(&fixture.approvals, &approval_id),
+        Some(ApprovalConsentCustody::Transferred {
+            input_id: notice_input.to_string(),
+        }),
+        "the consent moved into the run staged with its notice's input"
+    );
+    assert_eq!(consent.spend_in(&run), Ok(()), "spent in the resumed run");
+    assert_eq!(
+        consent.spend_in(&run),
+        Err(meerkat_core::ToolError::ReviewUnsatisfied {
+            kind: meerkat_core::ReviewUnsatisfiedKind::AlreadyConsumed,
+            approval_id: None,
+        }),
+        "a second spend is refused"
     );
 }
 

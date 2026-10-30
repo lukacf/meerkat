@@ -5549,7 +5549,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     target?: MetaDockTarget | null;
   }) {
     const target = panel.target as MetaDockTarget | null;
-    if (!target) return <div className="console-panel">No panel target</div>;
+    if (!target) return (
+      <PanelShell>
+        <EmptyState kind="unavailable" title="Nothing to show here" body="This pane has no panel. Pick one from the sidebar." />
+      </PanelShell>
+    );
     if (target.kind === "custom/panel") return <ConsoleCustomPanel target={target} focused={dock.viewState.focusedPanelId === panel.id} />;
     if (target.kind === "agent-chat") return renderChatPanel(panel);
     if (target.kind === "operator-panel") {
@@ -5565,9 +5569,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       !hasMobControlSurface
     ) {
       return (
-        <div className="console-panel">
-          This view requires a mob runtime control surface.
-        </div>
+        <PanelShell>
+          <EmptyState
+            kind="unavailable"
+            title="Not available on this runtime"
+            body="This view needs a runtime that manages a team of agents."
+          />
+        </PanelShell>
       );
     }
     if (target.kind === "routing") return <RoutingPanel data={routingData} />;
@@ -5764,7 +5772,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     }
-    return <div className="console-panel">Unsupported panel</div>;
+    return (
+      <PanelShell>
+        <EmptyState kind="unavailable" title="This panel isn't available in this console" />
+      </PanelShell>
+    );
   }
 
   return (

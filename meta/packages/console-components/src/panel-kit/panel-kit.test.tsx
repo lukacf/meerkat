@@ -163,10 +163,12 @@ describe("agent names", () => {
     expect(agentDisplayName("identity:research", directory)).toBe("Research Analyst");
   });
 
-  it("falls back to the key without its kind prefix and never invents capitals", () => {
-    expect(agentDisplayName("identity:support-triage", directory)).toBe("support-triage");
-    expect(agentDisplayName("agent:nightly-monitor")).toBe("nightly-monitor");
-    expect(agentDisplayName("household-agent")).toBe("household-agent");
+  it("names an unknown key with the one naming function, without its kind prefix", () => {
+    expect(agentDisplayName("identity:support-triage", directory)).toBe("Support triage");
+    expect(agentDisplayName("agent:nightly-monitor")).toBe("Nightly monitor");
+    expect(agentDisplayName("member:release-manager")).toBe("Release manager");
+    expect(agentDisplayName("household-agent")).toBe("Household agent");
+    expect(agentDisplayName("agent:01HXYZ8Q9ABCDEF")).toBe("Agent abcdef");
     expect(agentDisplayName("", directory)).toBe("");
     expect(agentDisplayName(undefined, directory)).toBe("");
     expect(stripAgentKeyPrefix("identity:agent:x")).toBe("x");
@@ -191,7 +193,7 @@ describe("agent names", () => {
     expect(named.getAttribute("title")).toBe("identity:coordinator");
     expect(named.querySelector(".cc-agent__avatar")?.getAttribute("aria-hidden")).toBe("true");
     const fallback = view.getByTestId("fallback");
-    expect(fallback.textContent).toBe("unknown-agent");
+    expect(fallback.textContent).toBe("Unknown agent");
     expect(fallback.getAttribute("title")).toBe("identity:unknown-agent");
   });
 });

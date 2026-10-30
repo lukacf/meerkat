@@ -5,7 +5,7 @@ import {
   normalizeUnobservedFacts,
 } from "@console-core";
 import type { ConsoleAgent, ConsoleExperience, ConsoleExperienceAgentSnapshotRow } from "../types";
-import { agentDisplayTitle } from "./agent-title";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 
 /// Alias to canonical identity for one roster. Built once per roster change
 /// and consulted per frame; the per-frame path used to rebuild a four-entry
@@ -77,9 +77,9 @@ export function normalizeLastActivityMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-// The naming helpers live in a module without @console-core imports, so
-// lib/adapters.ts (bundled without that alias in some test lanes) can use them.
-export { agentDisplayTitle, agentKindLabel } from "./agent-title";
+// The one naming function lives in console-core (no runtime imports), so
+// every surface and every test bundle shares it.
+export { agentDisplayTitle, agentKindLabel } from "../../../packages/console-core/src/agent-title";
 
 /**
  * An agent's entry in the panels' name directory, named the way the sidebar

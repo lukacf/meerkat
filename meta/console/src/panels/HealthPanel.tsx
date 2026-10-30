@@ -12,7 +12,9 @@ import {
   StatusDot,
   joinMeta,
   plural,
+  useAgentDirectory,
 } from "../../../packages/console-components/src/panel-kit";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import { agentStatusChip, reachabilityWords } from "./AgentDetailsPanel";
 
 /**
@@ -33,6 +35,10 @@ export function HealthPanel({
    * not buttons. */
   canOpen?: (identity: string) => boolean;
 }): React.JSX.Element {
+  const directory = useAgentDirectory();
+  // Named the way every other surface names the agent; the identity is the tooltip.
+  const titleOf = (row: IdentityStatusRow) => directory.lookup(row.identity)?.label
+    || agentDisplayTitle({ label: row.display_name || "", identity: row.identity, role: row.role });
   const rows = identities.map((row) => ({ row, status: agentStatusChip(stateLabel(row), row.progress?.health) }));
   const count = (label: string) => rows.filter((entry) => entry.status.label === label).length;
   const healthy = count("Healthy");
@@ -64,7 +70,7 @@ export function HealthPanel({
                   testId={`health-identity:${row.identity}`}
                   onActivate={onOpen && (canOpen ? canOpen(row.identity) : true) ? () => onOpen(row.identity) : undefined}
                   lead={<StatusDot tone={status.tone} />}
-                  title={row.display_name || row.identity}
+                  title={titleOf(row)}
                   titleAttr={row.identity}
                   subtitle={reachabilityWords(row.addressability)}
                   meta={

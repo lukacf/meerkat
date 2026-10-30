@@ -2,7 +2,7 @@ import type { ComponentPropsWithRef, ReactNode } from "react";
 
 import { cx } from "./cx";
 
-export type ButtonVariant = "default" | "primary" | "danger" | "ghost";
+export type ButtonVariant = "default" | "primary" | "positive" | "danger" | "ghost";
 export type ButtonSize = "md" | "sm";
 
 export type ButtonProps = ComponentPropsWithRef<"button"> & {

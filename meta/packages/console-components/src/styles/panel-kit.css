@@ -430,6 +430,17 @@ textarea.cc-input {
   border-color: color-mix(in srgb, var(--_cc-member-accent) 85%, var(--_cc-foreground));
   background: color-mix(in srgb, var(--_cc-member-accent) 85%, var(--_cc-foreground));
 }
+/* An affirming action (Approve): positive-toned text and border, never the
+   accent fill, so it does not read as a second red next to Reject. */
+.cc-btn--positive {
+  color: var(--_cc-positive-ink);
+  border-color: color-mix(in srgb, var(--_cc-positive) 45%, var(--_cc-border-soft));
+}
+.cc-btn--positive:hover:not(:disabled) {
+  color: var(--_cc-positive-ink);
+  border-color: var(--_cc-positive);
+  background: color-mix(in oklch, var(--_cc-positive) 8%, transparent);
+}
 .cc-btn--danger {
   color: var(--_cc-negative-ink);
   border-color: color-mix(in srgb, var(--_cc-negative) 40%, var(--_cc-border-soft));

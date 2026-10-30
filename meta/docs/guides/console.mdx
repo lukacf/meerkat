@@ -384,8 +384,11 @@ reload it. Read-only consoles cannot submit decisions.
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
 
-Audit tiers display the recorded `r0`, `r1`, `r2`, or `r3`; missing or unrecognized
-tiers display as unknown. The current Meta R2 path normally allows with audit.
+Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
+R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and
+an audit row reads "Risk: High (R3)". A missing tier reads "Unknown"; an
+unrecognized one reads "Unknown" followed by the recorded value. The current Meta
+R2 path normally allows with audit.
 It does not run the proposed native model reviewer. An approval record does not
 confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/concepts/gating) for

@@ -52,7 +52,7 @@ import {
   parseStreamingConversationRichBlocks,
 } from "@console-core";
 import type { ConsoleAgent, ConsoleFrame } from "../types";
-import { agentDisplayTitle } from "./agent-title";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import { createConsoleId } from "./id";
 import { formatWorkGraphTimestamp } from "./workgraph-time";
 
@@ -356,7 +356,7 @@ export function buildSidebarViewState(args: {
       const watchFields = normalizeSidebarWatchFields(agent);
       return {
         id: agent.member_id,
-        title: agent.label,
+        title: agentDisplayTitle(agent),
         subtitle: agent.identity || agent.member_id,
         selected: agent.member_id === selectedMemberId,
         pinned: isPinned,
@@ -6116,7 +6116,7 @@ export function buildActivityRailViewState(args: {
         : "";
       return {
         id: `event:${frame.id || index}`,
-        title: agent?.label || frameIdentity || frame.event || "event",
+        title: agent ? agentDisplayTitle(agent) : frameIdentity ? agentDisplayTitle({ label: frameIdentity, identity: frameIdentity }) : frame.event || "event",
         line: summarizeFrameData(frame.data).slice(0, 120) || frame.event,
         meta: `${frame.event}${ts ? ` · ${ts}` : ""}`,
         ...(agent ? { focusId: agent.member_id } : {}),

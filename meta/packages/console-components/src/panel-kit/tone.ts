@@ -113,6 +113,18 @@ export function priorityTone(priority: string | null | undefined): Tone | null {
 
 /** The tone of a risk level (approvals): high critical, medium warning, low
  * neutral. Unknown levels are neutral. */
+/** Risk tiers in words: R0 Minimal, R1 Low, R2 Elevated, R3 High. Null for
+ * anything else, which callers show as recorded. */
+export function riskTierWord(tier: string | null | undefined): string | null {
+  switch ((tier ?? "").trim().toLowerCase()) {
+    case "r0": return "Minimal";
+    case "r1": return "Low";
+    case "r2": return "Elevated";
+    case "r3": return "High";
+    default: return null;
+  }
+}
+
 export function riskTone(risk: string | null | undefined): Tone {
   const word = normalizeStatusWord(risk);
   if (word === "high" || word === "critical" || word === "r3" || word === "r4") return "crit";

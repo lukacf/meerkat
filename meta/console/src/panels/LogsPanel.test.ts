@@ -100,9 +100,9 @@ test("the identity column names agents by display name and console events as Sys
   ]);
   assert.equal(logIdentityLabel("identity:support-triage", directory), "Support Triage");
   assert.equal(logIdentityLabel("member-support", directory), "Support Triage");
-  // Unknown keys drop their kind prefix and keep their own spelling.
-  assert.equal(logIdentityLabel("identity:incident-commander", directory), "incident-commander");
-  assert.equal(logIdentityLabel("scribe"), "scribe");
+  // Unknown keys read as the one naming function names them.
+  assert.equal(logIdentityLabel("identity:incident-commander", directory), "Incident commander");
+  assert.equal(logIdentityLabel("scribe"), "Scribe");
   assert.equal(logIdentityLabel("_system", directory), "System");
   assert.equal(logIdentityLabel(undefined), "System");
   assert.equal(logIdentityLabel("  "), "System");

@@ -141,7 +141,7 @@ describe("RosterPanel", () => {
     const { view, onSelect } = renderRoster([coordinator, analyst]);
     fireEvent.click(view.getByTestId("roster-row:identity:coordinator"));
     const detail = view.getByTestId("roster-detail:identity:coordinator");
-    expect(detail.textContent?.includes("unknown-peer")).toBe(true);
+    expect(detail.textContent?.includes("Unknown peer")).toBe(true);
     expect(detail.textContent?.includes("identity:unknown-peer")).toBe(false);
     const peer = within(detail).getByRole("button", { name: "Research Analyst" });
     expect(peer.getAttribute("title")).toBe("identity:analyst");

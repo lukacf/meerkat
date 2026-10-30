@@ -11,7 +11,7 @@ import type {
 import type { ConsoleAgent } from "../types";
 import type { MetaDockTarget } from "../lib/adapters";
 import { buildControlTarget, buildDockTarget } from "../lib/adapters";
-import { agentDisplayTitle } from "../lib/agent-title";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import type { NavKind } from "./Sidebar";
 
 interface MetaDockProps {

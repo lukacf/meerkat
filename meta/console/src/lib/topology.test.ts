@@ -100,6 +100,22 @@ function query(overrides: Record<string, unknown> = {}) {
   };
 }
 
+test("topology nodes name a nameless agent the way every surface does", () => {
+  const base = query();
+  const nodes = [
+    ...(base.nodes as Array<Record<string, unknown>>),
+    { endpoint: { identity: "router:main" }, role: "router", labels: {}, affordances: { can_connect: false, can_disconnect: false, can_reconnect: false, can_bulk: false, can_cross_authority: false } },
+  ];
+  const normalized = normalizeConsoleTopologyQuery(query({ nodes }), {
+    capabilities: editableCapabilities,
+    agents: [{ agent_id: "incident-commander", member_id: "member-commander", label: "Incident Commander", kind: "agent" }],
+  });
+  assert.ok(normalized);
+  const label = (identity: string) => normalized.nodes.find((node) => node.ref?.identity === identity)?.label;
+  assert.equal(label("router:main"), "Router main");
+  assert.equal(label("incident-commander"), "Incident Commander");
+});
+
 test("topology query maps authoritative edges and intersects both endpoint grants", () => {
   const normalized = normalizeConsoleTopologyQuery(query(), {
     capabilities: editableCapabilities,

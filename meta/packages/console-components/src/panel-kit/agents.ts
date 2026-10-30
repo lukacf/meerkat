@@ -1,7 +1,14 @@
 // Agent names for panels. Panels receive identity, member and session keys
 // from the runtime; people read display names. A directory maps every key
 // an agent is known by to its label. Pure module (no React), so panels whose
-// test bundles cannot resolve React can still resolve names.
+// test bundles cannot resolve React can still resolve names. Keys outside
+// the directory are named by console-core's agentDisplayTitle, the one
+// naming function every surface shares (a relative import, so bundles
+// without the @console-core alias resolve it).
+
+import { agentDisplayTitle, stripAgentKeyPrefix } from "../../../console-core/src/agent-title";
+
+export { stripAgentKeyPrefix };
 
 export interface AgentDirectoryEntry {
   /** The canonical key, normally the identity. */
@@ -17,25 +24,6 @@ export interface AgentDirectoryEntry {
 export interface AgentDirectory {
   lookup(key: string | null | undefined): AgentDirectoryEntry | undefined;
   readonly size: number;
-}
-
-const KEY_PREFIXES = ["identity:", "agent:", "member:"];
-
-/** A key without its kind prefix: "identity:support-triage" reads
- * "support-triage". Capitals are never invented. */
-export function stripAgentKeyPrefix(key: string): string {
-  let current = key.trim();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const prefix of KEY_PREFIXES) {
-      if (current.toLowerCase().startsWith(prefix) && current.length > prefix.length) {
-        current = current.slice(prefix.length);
-        changed = true;
-      }
-    }
-  }
-  return current;
 }
 
 export function createAgentDirectory(entries: readonly AgentDirectoryEntry[]): AgentDirectory {
@@ -69,8 +57,9 @@ export function createAgentDirectory(entries: readonly AgentDirectoryEntry[]): A
 
 export const EMPTY_AGENT_DIRECTORY: AgentDirectory = createAgentDirectory([]);
 
-/** The display name for a key: the directory label, else the key without its
- * kind prefix, else the empty string. */
+/** The display name for a key: the directory label, else the name
+ * agentDisplayTitle gives the key ("identity:support-triage" reads "Support
+ * triage"), else the empty string. */
 export function agentDisplayName(
   key: string | null | undefined,
   directory: AgentDirectory = EMPTY_AGENT_DIRECTORY,
@@ -78,7 +67,7 @@ export function agentDisplayName(
   if (typeof key !== "string" || !key.trim()) return "";
   const entry = directory.lookup(key);
   if (entry) return entry.label.trim();
-  return stripAgentKeyPrefix(key);
+  return agentDisplayTitle({ label: key.trim(), identity: key.trim() });
 }
 
 /** One letter or digit for an avatar; "?" when the name has none. */

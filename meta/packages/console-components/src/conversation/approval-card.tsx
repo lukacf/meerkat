@@ -10,6 +10,7 @@ import {
   TechnicalId,
   formatDuration,
   humanizeEnum,
+  riskTierWord,
   riskTone,
   useNow,
 } from "../panel-kit";
@@ -17,7 +18,7 @@ import type { ButtonVariant, Tone } from "../panel-kit";
 import { RowDetails } from "./presentation-policy";
 
 const labels: Record<ApprovalAction, string> = { approve: "Approve", reject: "Reject", escalate: "Escalate" };
-const variants: Record<ApprovalAction, ButtonVariant> = { approve: "primary", reject: "danger", escalate: "default" };
+const variants: Record<ApprovalAction, ButtonVariant> = { approve: "positive", reject: "danger", escalate: "default" };
 export interface ApprovalCardProps {
   request: PendingApproval;
   resourceStatus: PendingApprovalSnapshot["status"];
@@ -38,9 +39,12 @@ const STATE_WORDS: Record<ApprovalCardState, { text: string; tone: Tone }> = {
   settled: { text: "Resolved", tone: "ok" },
 };
 
-/** Risk tiers read as recorded, with the tier codes in capitals ("R3"). */
-function riskLabel(tier: string): string {
-  return /^r\d$/i.test(tier) ? tier.toUpperCase() : tier;
+/** A risk tier for people: "High risk", with "Risk tier R3" as the tooltip.
+ * A tier outside R0 to R3 reads as recorded. */
+function riskChip(tier: string): { text: string; title: string } {
+  const word = riskTierWord(tier);
+  const code = /^r\d$/i.test(tier) ? tier.toUpperCase() : tier;
+  return { text: word ? `${word} risk` : code, title: `Risk tier ${code}` };
 }
 
 /** The same request and decision owner can feed an inbox and several panes. */
@@ -80,7 +84,7 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
           request.riskTier ? {
             key: "risk",
             label: "Risk",
-            value: <Chip tone={riskTone(request.riskTier)}>{riskLabel(request.riskTier)}</Chip>,
+            value: <Chip tone={riskTone(request.riskTier)} title={riskChip(request.riskTier).title}>{riskChip(request.riskTier).text}</Chip>,
           } : null,
           request.approvalRecipient ? { key: "recipient", label: "Notification recipient", value: request.approvalRecipient } : null,
           request.approvalChannel ? { key: "channel", label: "Notification channel", value: request.approvalChannel } : null,

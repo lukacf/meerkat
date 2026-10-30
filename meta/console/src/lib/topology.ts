@@ -1,4 +1,5 @@
 import { collectConsoleDockPanelIds, topologyEdgeKey } from "@console-core";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import type {
   ConsoleDockAction,
   ConsoleDockNode,
@@ -451,7 +452,15 @@ export function normalizeConsoleTopologyQuery(
     return {
       identity,
       ref: { id: identity, authority, identity: runtimeIdentity },
-      label: fallback?.label || agent?.label || runtimeIdentity,
+      label: agentDisplayTitle({
+        label: fallback?.label || agent?.label || runtimeIdentity,
+        identity: runtimeIdentity,
+        member_id: agent?.member_id,
+        agent_id: agent?.agent_id,
+        labels: agent?.labels,
+        role: node.role || fallback?.role || agent?.role,
+        group: fallback?.group || agent?.group,
+      }),
       role: node.role || fallback?.role || agent?.role,
       state: fallback?.state || agent?.state,
       wired_to: Array.from(actualPeers.get(identity) || []).sort(),

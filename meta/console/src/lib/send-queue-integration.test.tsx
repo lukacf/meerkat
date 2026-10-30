@@ -268,10 +268,10 @@ describe("stock durable queue integration", () => {
     render(<ConsoleApp baseUrl="" transport={fake} />);
     const pane = await screen.findByTestId(`chat-pane:${identity}`);
     const head = pane.querySelector(".conv__title");
-    expect(head?.textContent).toBe("Identity queue agent");
+    expect(head?.textContent).toBe("Queue agent");
     expect(head?.getAttribute("title")).toBe(identity);
     const paneTitle = document.querySelector(".pane__title-text");
-    expect(paneTitle?.textContent).toBe("Identity queue agent");
+    expect(paneTitle?.textContent).toBe("Queue agent");
     expect(paneTitle?.getAttribute("title")).toBe(identity);
     expect(document.querySelector(".pane__bar")?.textContent?.includes(identity)).toBe(false);
   });

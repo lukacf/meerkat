@@ -1,3 +1,4 @@
+import { agentDisplayTitle } from "./agent-title";
 import { operationFeedbackFromFrame } from "./operation-feedback";
 import { mcpAppEntryFromFrame } from "./mcp-app-projection";
 import { assistantPresentationEntries, conversationPresentationRows } from "./assistant-presentation";
@@ -176,7 +177,7 @@ export function buildDockTarget(agent: ConsoleAgent): AgentChatTarget {
     addressingMode: "identity",
     memberId: agent.member_id,
     identity,
-    title: agent.label,
+    title: agentDisplayTitle(agent),
     subtitle,
     iconName: "i-team",
   };
@@ -188,7 +189,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
     kind: "identity-inspect",
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
-    title: `${agent.label} Details`,
+    title: `${agentDisplayTitle(agent)} Details`,
     subtitle: agent.identity || agent.member_id,
     iconName: "i-terminal",
   };
@@ -305,7 +306,7 @@ export function buildSidebarViewState(args: {
       const watchFields = normalizeSidebarWatchFields(agent);
       return {
         id: agent.member_id,
-        title: agent.label,
+        title: agentDisplayTitle(agent),
         subtitle: agent.identity || agent.member_id,
         selected: agent.member_id === selectedMemberId,
         pinned: isPinned,
@@ -385,7 +386,7 @@ const USER_IDENTITY: ConversationIdentity = {
 function agentIdentity(agent: ConsoleAgent | null): ConversationIdentity {
   return {
     id: agent?.member_id || "agent",
-    label: agent?.label || "Agent",
+    label: agent ? agentDisplayTitle(agent) : "Agent",
     role: "assistant",
   };
 }
@@ -4756,7 +4757,7 @@ export function buildActivityRailViewState(args: {
         : "";
       return {
         id: `event:${frame.id || index}`,
-        title: agent?.label || frameIdentity || frame.event || "event",
+        title: agent ? agentDisplayTitle(agent) : frameIdentity ? agentDisplayTitle({ label: frameIdentity, identity: frameIdentity }) : frame.event || "event",
         line: summarizeFrameData(frame.data).slice(0, 120) || frame.event,
         meta: `${frame.event}${ts ? ` · ${ts}` : ""}`,
         ...(agent ? { focusId: agent.member_id } : {}),

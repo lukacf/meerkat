@@ -79,10 +79,10 @@ describe("GatingInboxPanel recorded audit", () => {
   };
 
   it.each([
-    { risk_tier: "r0", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral" },
-    { risk_tier: "r1", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral" },
-    { risk_tier: "r2", outcome: "allowed_with_audit", outcomeWords: "Allowed with audit", tone: "warn" },
-  ])("shows the recorded $risk_tier automatic allowance without inventing a risk scale", ({ risk_tier, outcome, outcomeWords, tone }) => {
+    { risk_tier: "r0", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral", riskWords: "Minimal (R0)" },
+    { risk_tier: "r1", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral", riskWords: "Low (R1)" },
+    { risk_tier: "r2", outcome: "allowed_with_audit", outcomeWords: "Allowed with audit", tone: "warn", riskWords: "Elevated (R2)" },
+  ])("shows the recorded $risk_tier automatic allowance with its risk in words", ({ risk_tier, outcome, outcomeWords, tone, riskWords }) => {
     const view = render(<GatingInboxPanel pending={[]} audit={[{ ...evaluated, risk_tier, outcome }]} onDecide={vi.fn()} />);
     fireEvent.click(view.getByTestId("gating-tab:auto"));
     // The raw action id is the title's tooltip; the title reads the action.
@@ -90,8 +90,8 @@ describe("GatingInboxPanel recorded audit", () => {
     expect(row.querySelector(".cc-row__title")?.textContent).toBe("Send message");
     expect(row.getAttribute("data-risk")).toBe(risk_tier);
     expect(row.querySelector(".gitem__risk")?.getAttribute("data-tone")).toBe(tone);
-    expect(within(row).getByText(`Tier: ${risk_tier.toUpperCase()}`)).toBeTruthy();
-    expect(within(row).getByText("Actor: household-agent")).toBeTruthy();
+    expect(within(row).getByText(`Risk: ${riskWords}`)).toBeTruthy();
+    expect(within(row).getByText("Actor: Household agent")).toBeTruthy();
     expect(within(row).getByText(`Outcome: ${outcomeWords}`)).toBeTruthy();
     expect(within(row).getByText("Decision: Not recorded")).toBeTruthy();
     expect(within(row).getByText("Allowed automatically")).toBeTruthy();
@@ -105,17 +105,19 @@ describe("GatingInboxPanel recorded audit", () => {
     { event_type: "rejection_decided", decision: "reject", outcome: "safe_draft", decisionWords: "Reject", outcomeWords: "Kept as a draft", verdict: "Rejected" },
     { event_type: "escalation_decided", decision: "escalate", outcome: "pending_approval", decisionWords: "Escalate", outcomeWords: "Waiting for approval", verdict: "Escalated" },
   ])("shows the R3 human $decision decision and its recorded outcome", ({ event_type, decision, outcome, decisionWords, outcomeWords, verdict }) => {
-    const audit = [{ ...evaluated, audit_id: "human-decision", pending_id: "pending-1", event_type, risk_tier: "r3", outcome, timestamp_ms: Date.now() - 2 * 60 * 60 * 1000, detail: { approver_id: "luka", decision } }];
+    const audit = [{ ...evaluated, audit_id: "human-decision", pending_id: "pending-1", event_type, risk_tier: "r3", outcome, timestamp_ms: Date.now() - 2 * 60 * 60 * 1000, detail: { approver_id: "duty-approver", decision } }];
     const onDecide = vi.fn();
     const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={onDecide} />);
     fireEvent.click(view.getByTestId("gating-tab:audit"));
     const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
     expect(row.getAttribute("data-risk")).toBe("r3");
     expect(row.querySelector(".gitem__risk")?.getAttribute("data-tone")).toBe("crit");
-    expect(within(row).getByText("Tier: R3")).toBeTruthy();
-    expect(within(row).getByText("Actor: household-agent")).toBeTruthy();
-    expect(within(row).getByText("Approver: luka")).toBeTruthy();
-    expect(within(row).getByText(`Decision: ${decisionWords}`)).toBeTruthy();
+    expect(within(row).getByText("Risk: High (R3)")).toBeTruthy();
+    expect(within(row).getByText("Actor: Household agent")).toBeTruthy();
+    expect(within(row).getByText("Approver: Duty approver")).toBeTruthy();
+    // The verdict chip carries the decision; the facts do not repeat it.
+    expect(within(row).queryByText(`Decision: ${decisionWords}`)).toBeNull();
+    expect(row.textContent?.includes("Decision:")).toBe(false);
     expect(within(row).getByText(`Outcome: ${outcomeWords}`)).toBeTruthy();
     expect(within(row).getByText(verdict)).toBeTruthy();
     expect(within(row).getByText("2h ago").tagName).toBe("TIME");
@@ -142,7 +144,7 @@ describe("GatingInboxPanel recorded audit", () => {
     fireEvent.click(view.getByTestId("gating-tab:audit"));
     const row = view.container.querySelector<HTMLElement>(".gitem")!;
     expect(row.getAttribute("data-risk")).toBe("unknown");
-    expect(within(row).getByText(`Tier: ${label}`)).toBeTruthy();
+    expect(within(row).getByText(`Risk: ${label}`)).toBeTruthy();
     expect(within(row).getByText("Actor: Not recorded")).toBeTruthy();
     expect(within(row).getByText("Outcome: Not recorded")).toBeTruthy();
     expect(within(row).getByText("Decision: Not recorded")).toBeTruthy();
@@ -198,8 +200,8 @@ describe("GatingInboxPanel frame and requests without the shared resource", () =
     const row = view.getByTestId("gating-pending:pending-7");
     expect(row.classList.contains("gitem")).toBe(true);
     expect(row.querySelector(".cc-row__title")?.textContent).toBe("Deploy release");
-    expect(within(row).getByText("Tier: R3")).toBeTruthy();
-    expect(within(row).getByText("Actor: release-manager")).toBeTruthy();
+    expect(within(row).getByText("Risk: High (R3)")).toBeTruthy();
+    expect(within(row).getByText("Actor: Release manager")).toBeTruthy();
     expect(within(row).getByText("Waiting 18 min")).toBeTruthy();
     fireEvent.click(view.getByTestId("gating-action:pending-7:approve"));
     expect(onDecide).toHaveBeenCalledWith("pending-7", "approve");

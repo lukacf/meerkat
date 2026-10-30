@@ -19,6 +19,7 @@
 
 import React from "react";
 import {
+  agentDisplayTitle,
   topologyEdgeKey,
   type ResponsePhase,
   type TopologyEndpointRef,
@@ -385,7 +386,16 @@ export function buildGraph(
     const agent: TopoAgent = {
       id,
       ref: n.ref ? { ...n.ref, id } : { id },
-      label: (n.label || registry?.label || labels.display_name || id).trim(),
+      // One name for the agent on every surface; the raw key stays in tooltips.
+      label: agentDisplayTitle({
+        label: (n.label || registry?.label || labels.display_name || n.ref?.identity || n.identity || id).trim(),
+        identity: n.ref?.identity || n.identity || id,
+        member_id: registry?.member_id,
+        agent_id: registry?.agent_id,
+        labels,
+        role: n.role || registry?.role || labels.role,
+        group,
+      }),
       role: (n.role || registry?.role || labels.role || "agent").trim(),
       state: (n.state || registry?.state || "").toLowerCase(),
       wiredTo: (n.wired_to || []).map((s) => s.trim()).filter(Boolean),

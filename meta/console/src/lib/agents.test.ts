@@ -460,6 +460,15 @@ test("agentDisplayTitle keeps a display name and gives an agent without one a hu
   assert.equal(agentKindLabel({ role: "", group: "domain_agents" }), "Domain agents");
 });
 
+test("agentDisplayTitle drops the identity:, agent: and member: prefixes before wording", () => {
+  const nameless = (key: string) => ({ agent_id: key, member_id: key, identity: key, label: key });
+  assert.equal(agentDisplayTitle(nameless("identity:queue-agent")), "Queue agent");
+  assert.equal(agentDisplayTitle(nameless("member:release-manager")), "Release manager");
+  assert.equal(agentDisplayTitle(nameless("agent:router:main")), "Router main");
+  assert.equal(agentDisplayTitle({ ...nameless("agent:01HXYZ8Q9ABCDEF"), role: "reviewer" }), "Reviewer abcdef");
+  assert.equal(agentDisplayTitle({ ...nameless("identity:queue-agent"), label: "Front Desk" }), "Front Desk");
+});
+
 test("the panels' name directory names an agent the way the sidebar does", () => {
   const unnamed = { agent_id: "router:main", member_id: "router:main", identity: "router:main", session_id: "session-1", label: "router:main", role: "router" };
   assert.deepEqual(agentDirectoryEntry(unnamed), {

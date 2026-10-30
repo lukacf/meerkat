@@ -490,3 +490,5 @@ export * from "./context-record";
 export * from "./context-edit";
 
 export * from "./tool-completion";
+
+export { agentDisplayTitle, agentKindLabel, stripAgentKeyPrefix, type AgentTitleSource } from "./agent-title";

@@ -105,6 +105,18 @@ test("topology graph uses topology node labels over registry fallback", () => {
   assert.equal(graph.byId.get("node-a")?.group, "Projected");
 });
 
+test("topology graph names a nameless agent the way every surface does", () => {
+  const nodes: ConsoleTopologyNode[] = [
+    { identity: "router:main", role: "router", state: "active", wired_to: [], labels: {} },
+    { identity: "mk1|ops|identity:queue-agent", ref: { id: "mk1|ops|identity:queue-agent", authority: "ops", identity: "identity:queue-agent" }, role: "worker", state: "active", wired_to: [], labels: {} },
+  ];
+  const graph = buildGraph(nodes, []);
+  assert.equal(graph.byId.get("router:main")?.label, "Router main");
+  assert.equal(graph.byId.get("mk1|ops|identity:queue-agent")?.label, "Queue agent");
+  const named = buildGraph([{ ...nodes[0]!, label: "Front Desk" }], []);
+  assert.equal(named.byId.get("router:main")?.label, "Front Desk");
+});
+
 test("edge sampling is deterministic and bounded", () => {
   const edges = Array.from({ length: 10 }, (_, i) => ({ from: `a${i}`, to: `b${i}` }));
   assert.deepEqual(sampleEdges(edges, 3), [

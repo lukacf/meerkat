@@ -170,6 +170,14 @@ describe("HealthPanel", () => {
     expect(onOpen.mock.calls[0]?.[0]).toBe("identity:writer");
   });
 
+  it("titles a nameless agent's Health row the way every surface names it", () => {
+    const nameless = { identity: "router:main", state: "active", addressability: "addressable" } as IdentityStatusRow;
+    const view = render(<HealthPanel identities={[nameless]} stateLabel={identityStateLabel} />);
+    const row = view.getByTestId("health-identity:router:main");
+    expect(row.querySelector(".cc-row__title")?.textContent).toBe("Router main");
+    expect(row.querySelector(".cc-row__title")?.getAttribute("title")).toBe("router:main");
+  });
+
   it("makes a row a button only when its agent's details can open", () => {
     const view = render(
       <HealthPanel

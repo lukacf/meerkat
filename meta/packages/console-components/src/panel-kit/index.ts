@@ -17,7 +17,7 @@ export {
   toEpochMs,
 } from "./format";
 export type { TimeInput } from "./format";
-export { normalizeStatusWord, priorityTone, riskTone, statusTone } from "./tone";
+export { normalizeStatusWord, priorityTone, riskTierWord, riskTone, statusTone } from "./tone";
 export type { Tone } from "./tone";
 export {
   EMPTY_AGENT_DIRECTORY,

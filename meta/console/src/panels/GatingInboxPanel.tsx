@@ -25,6 +25,7 @@ import {
   formatAbsoluteTime,
   formatDuration,
   humanizeEnum,
+  riskTierWord,
   riskTone,
   toEpochMs,
   useAgentDirectory,
@@ -98,6 +99,8 @@ function outcomeWords(outcome: string | undefined): string {
 
 /// The headline status of a recorded event: the human decision when there
 /// was one, else what happened, else the outcome.
+const DECISION_VERDICTS = new Set(["approve", "reject", "escalate"]);
+
 function recordVerdict(record: GatingAuditEntryView): { label: string; tone: Tone } | null {
   if (record.decision === "approve") return { label: "Approved", tone: "ok" };
   if (record.decision === "reject") return { label: "Rejected", tone: "crit" };
@@ -116,10 +119,15 @@ function recordVerdict(record: GatingAuditEntryView): { label: string; tone: Ton
   return record.eventType ? { label: humanizeEnum(record.eventType), tone: "neutral" } : null;
 }
 
-function tierLabel(record: GatingAuditEntryView): string {
-  return record.riskTier === "unknown"
-    ? `Unknown${record.recordedRiskTier ? ` (${record.recordedRiskTier})` : ""}`
-    : record.riskTier.toUpperCase();
+/// The risk in words with its tier code: "High (R3)"; a missing tier reads
+/// "Unknown", an unrecognized one "Unknown (as recorded)".
+function riskWords(record: GatingAuditEntryView): string {
+  if (record.riskTier === "unknown") {
+    return `Unknown${record.recordedRiskTier ? ` (${record.recordedRiskTier})` : ""}`;
+  }
+  const word = riskTierWord(record.riskTier);
+  const code = record.riskTier.toUpperCase();
+  return word ? `${word} (${code})` : code;
 }
 
 /// The recorded facts of a row, each one "Label: value" string. People read
@@ -131,11 +139,15 @@ function recordFacts(
   withDecision: boolean,
 ): string[] {
   const facts = [
-    `Tier: ${tierLabel(record)}`,
+    `Risk: ${riskWords(record)}`,
     `Actor: ${actor ? agentDisplayName(actor, directory) : "Not recorded"}`,
   ];
   if (withDecision) {
-    facts.push(`Decision: ${record.decision ? humanizeEnum(record.decision) : "Not recorded"}`);
+    // A recorded human decision is the row's chip (Approved, Rejected,
+    // Escalated); the facts do not repeat it.
+    if (!record.decision || !DECISION_VERDICTS.has(record.decision)) {
+      facts.push(`Decision: ${record.decision ? humanizeEnum(record.decision) : "Not recorded"}`);
+    }
     if (record.approverId) facts.push(`Approver: ${agentDisplayName(record.approverId, directory)}`);
     facts.push(`Outcome: ${outcomeWords(record.outcome) || "Not recorded"}`);
   }

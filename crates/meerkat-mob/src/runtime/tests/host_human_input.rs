@@ -4973,6 +4973,227 @@ async fn a_crash_mid_drain_leaves_the_queued_input_for_the_restarted_mob() {
     );
 }
 
+/// The runtime a host ran its mob on stops in the middle of a member's turn
+/// (the model call held), with a second input queued behind it, and the
+/// process keeps running.
+///
+/// The member's session task ran on the host's runtime and ended with it,
+/// but its runtime loop runs on a runtime the process owns, which outlives
+/// the host's. A runtime stop is crash-equivalent: within a bound the loop
+/// stops serving the session without writing anything for it (no failed
+/// run, no replay, no stop terminal), and leaves the session's registration
+/// to a cold reload. Both rows and the event log read as they did at the
+/// stop. A new host, on another runtime of the same process, then opens the
+/// mob over the same store: the interrupted input runs to completion once
+/// and the queued one after it, and a same-key replay of each answers its
+/// result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_runtime_that_stops_mid_turn_leaves_the_run_for_the_next_start() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let (_root, root_path) = stop_root();
+    let client = ScriptedClient::new(true);
+    // The first host runs the mob on a runtime of its own, so stopping it
+    // drops every task the host spawned: the mob actor, the member's session
+    // task and its turn.
+    let incarnation = CrashableMobIncarnation::new();
+    let (host, member, requests_before, inputs) = {
+        let root_path = root_path.clone();
+        let client = client.clone();
+        incarnation
+            .install(async move {
+                let host = open_stop_host(&root_path, &client, Some("runtime-stop")).await;
+                let (identity, session_id, entry) = spawn_stop_member(&host).await;
+                let comms = host
+                    .service
+                    .comms_runtime(&session_id)
+                    .await
+                    .map(|runtime| Arc::downgrade(&runtime))
+                    .expect("the member's comms runtime");
+                client.block();
+                let requests_before = client.requests().len();
+                let mut inputs = Vec::new();
+                for (label, text) in [
+                    ("runtime-stop-running", HUMAN),
+                    ("runtime-stop-queued", QUEUED_HUMAN),
+                ] {
+                    let key = delivery(label);
+                    let spec = WorkSpec::new(text, WorkOrigin::External);
+                    let waiter = host
+                        .handle
+                        .start_host_human_input_bounded(
+                            entry.agent_runtime_id.clone(),
+                            entry.fence_token,
+                            spec.clone(),
+                            HandlingMode::Queue,
+                            key.clone(),
+                            deadline(),
+                        )
+                        .await
+                        .expect("human admission");
+                    if inputs.is_empty() {
+                        client.wait_for_requests(requests_before + 1).await;
+                    }
+                    let input_id = admitted_input_id(&host.runtime_store, &session_id, &key).await;
+                    inputs.push((key, input_id, spec, waiter));
+                }
+                (host, (identity, session_id, comms), requests_before, inputs)
+            })
+            .await
+    };
+    let (identity, session_id, comms) = member;
+    let mut at_stop = Vec::new();
+    for (key, input_id, _, _) in &inputs {
+        at_stop.push(stop_row(&host.runtime_store, &session_id, key, input_id).await);
+    }
+    let requests_at_stop = client.requests().len() - requests_before;
+    let events_at_stop = stop_events(&root_path, &session_id).await.len();
+
+    incarnation.crash().await;
+    let StopHost {
+        handle,
+        runtime_store,
+        adapter,
+        service,
+    } = host;
+    let actor_gone = handle.command_tx.is_closed();
+    // The member's runtime loop outlives the host's runtime. It stops serving
+    // the session within the bound, and the session's registration waits for
+    // a cold reload from the store instead of a terminal.
+    let loop_ended = tokio::time::timeout(WAIT, async {
+        while adapter
+            .session_has_live_executor_attachment(&session_id)
+            .await
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let reload_required = adapter
+        .durability_reload_required(&session_id)
+        .await
+        .is_some();
+    let inputs: Vec<_> = inputs
+        .into_iter()
+        .map(|(key, input_id, spec, waiter)| {
+            drop(waiter);
+            (key, input_id, spec)
+        })
+        .collect();
+    let mut unchanged_since_stop = Vec::new();
+    for (index, (key, input_id, _)) in inputs.iter().enumerate() {
+        let row = stop_row(&runtime_store, &session_id, key, input_id).await;
+        unchanged_since_stop.push(row.digest == at_stop[index].digest);
+    }
+    unchanged_since_stop.push(stop_events(&root_path, &session_id).await.len() == events_at_stop);
+    // A process exit frees the member's comms name. This process keeps the
+    // stopped host's in-memory session state, so the route is retired here
+    // for the next host, as the crash rows do.
+    if let Some(runtime) = comms.upgrade() {
+        runtime.retire_inproc_route();
+    }
+    let mob_id = handle.mob_id().clone();
+    drop((handle, adapter, service, runtime_store));
+    await_supervisor_route_release(&mob_id).await;
+
+    let restarted_client = ScriptedClient::new(true);
+    let restarted = open_stop_host(&root_path, &restarted_client, None).await;
+    tokio::time::timeout(WAIT, restarted.handle.ensure_member_live(&identity))
+        .await
+        .expect("the member's wake finishes")
+        .expect("wake the member on the new host");
+    let entry = restarted
+        .handle
+        .get_member(&identity)
+        .await
+        .expect("roster read")
+        .expect("the member survives the stop");
+    let mut replays = Vec::new();
+    for (key, _, spec) in &inputs {
+        let replay = restarted
+            .handle
+            .start_host_human_input_bounded(
+                entry.agent_runtime_id.clone(),
+                entry.fence_token,
+                spec.clone(),
+                HandlingMode::Queue,
+                key.clone(),
+                deadline(),
+            )
+            .await
+            .expect("same-key replay admission");
+        replays.push(drained_answer(replay).await.0);
+    }
+    // The log is complete once the shutdown returns (see the crash row).
+    tokio::time::timeout(WAIT, restarted.handle.shutdown())
+        .await
+        .expect("mob shutdown finishes")
+        .expect("mob shutdown");
+    let events = stop_events(&root_path, &session_id).await;
+    let mut across = Vec::new();
+    for (index, (key, input_id, _)) in inputs.iter().enumerate() {
+        let after = stop_row(&restarted.runtime_store, &session_id, key, input_id).await;
+        let runs = runs_started_for(&events, interaction(key));
+        across.push((
+            at_stop[index].stored.seed.phase,
+            replays[index].clone(),
+            after.stored.seed.phase,
+            runs.len(),
+            runs.iter()
+                .map(|run| runs_completed(&events, run))
+                .sum::<usize>(),
+            runs.iter()
+                .map(|run| run_failures(&events, run).len())
+                .sum::<usize>(),
+        ));
+    }
+    let requests: Vec<_> = restarted_client
+        .requests()
+        .iter()
+        .map(|request| {
+            (
+                requests_carrying(std::slice::from_ref(request), HUMAN),
+                requests_carrying(std::slice::from_ref(request), QUEUED_HUMAN),
+            )
+        })
+        .collect();
+    assert_eq!(
+        (
+            (actor_gone, requests_at_stop),
+            (loop_ended, reload_required, unchanged_since_stop),
+            across,
+            requests,
+        ),
+        (
+            (true, 1),
+            (true, true, vec![true, true, true]),
+            vec![
+                (
+                    InputLifecycleState::Staged,
+                    StopAnswer::Succeeded,
+                    InputLifecycleState::Consumed,
+                    2,
+                    1,
+                    0,
+                ),
+                (
+                    InputLifecycleState::Queued,
+                    StopAnswer::Succeeded,
+                    InputLifecycleState::Consumed,
+                    1,
+                    1,
+                    0,
+                ),
+            ],
+            vec![(1, 0), (1, 1)],
+        ),
+        "a host runtime that stops mid-turn is a crash for its member: the surviving runtime \
+         loop ends without writing, and the next host runs the interrupted input once and the \
+         queued one after it"
+    );
+}
+
 /// A plain Stop, without `StopOptions::leave_runs_running`, still cancels an
 /// autonomous member's in-flight turn at its next boundary and waits for it
 /// to end: the default Stop is unchanged. The Stop dispatches its cancel

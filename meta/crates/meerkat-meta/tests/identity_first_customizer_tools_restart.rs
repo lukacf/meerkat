@@ -3340,7 +3340,7 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
     assert!(offers_tool(request), "the turn offers the customizer tool");
     assert_eq!(
         *served.lock().unwrap(),
-        [woken.tag.clone()],
+        std::slice::from_ref(&woken.tag),
         "the call reaches the handler of the wake's customize_build, never an earlier build's"
     );
     assert_eq!(

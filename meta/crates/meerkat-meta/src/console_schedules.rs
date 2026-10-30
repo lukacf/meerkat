@@ -794,7 +794,7 @@ mod tests {
                 .unwrap_err();
             assert!(elsewhere.contains("no longer trusts"), "{elsewhere}");
         }
-        let mut google = signed_in.clone();
+        let mut google = signed_in;
         google.auth.default_provider = crate::AuthProvider::GoogleOAuth;
         let other_provider = sender()
             .admitted_now(&google, &fences, defined_at)
@@ -1101,7 +1101,7 @@ mod tests {
             .dispatch(call("meerkat_schedule_pause", &missing))
             .await
         {
-            Ok(outcome) => outcome.result.text_content().to_string(),
+            Ok(outcome) => outcome.result.text_content(),
             Err(error) => error.to_string(),
         };
         assert!(!answer.contains("cannot be read"), "{answer}");

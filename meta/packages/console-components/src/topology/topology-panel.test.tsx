@@ -88,6 +88,21 @@ describe("TopologyPanel", () => {
     expect(screen.queryByTestId("topology-selection")).toBeNull();
   });
 
+  test("lets a host select an agent from the role view, and marks the pressed view", () => {
+    window.localStorage.setItem("meta-console-topology-view", "roles");
+    const onSelectAgent = vi.fn();
+
+    render(<TopologyPanel activity={[]} agents={[]} nodes={NODES} onSelectAgent={onSelectAgent} />);
+
+    const node = screen.getByTestId("topology-node:commander");
+    expect(node.tagName).toBe("BUTTON");
+    fireEvent.click(node);
+    expect(onSelectAgent.mock.calls[0]?.[0]).toBe("commander");
+    expect(screen.getByTestId("topology-view:roles").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("topology-view:graph").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("group", { name: "View" }).classList.contains("topo__viewbar")).toBe(true);
+  });
+
   test("does not treat a mutation callback as authority", () => {
     render(
       <TopologyPanel

@@ -5594,6 +5594,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onConnectionSourceChange={setTopologyConnectionSourceId}
           onRequestMutation={(intent) => onTopologyMutation(intent)}
           onRetryOperation={(receipt) => onRetryTopologyOperation(receipt)}
+          onSelectAgent={(id) => {
+            const agent = agents.find((candidate) => candidate.identity === id || candidate.member_id === id || candidate.agent_id === id);
+            if (agent) openAgentChat(agent);
+          }}
         />
       );
     if (target.kind === "health")

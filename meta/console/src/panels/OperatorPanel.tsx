@@ -1,6 +1,7 @@
 import React from "react";
 import { operatorPanelPath } from "../lib/adapters";
 import type { ConsoleSidebarButtonConfig } from "../types";
+import { EmptyState, PanelShell } from "../../../packages/console-components/src/panel-kit";
 
 /**
  * A docked operator panel configured in console.toml. It is trusted operator
@@ -16,7 +17,15 @@ export function OperatorPanel({ buttonId, buttons }: {
   const button = (buttons || []).find((candidate) => candidate.id === buttonId);
   const path = operatorPanelPath(button?.panel);
   if (!button || !path) {
-    return <div className="console-panel" data-testid={`operator-panel-missing:${buttonId}`}>This operator panel is not configured.</div>;
+    return (
+      <PanelShell testId={`operator-panel-missing:${buttonId}`}>
+        <EmptyState
+          kind="not-configured"
+          title="This panel isn't configured"
+          body="No page is set for this button in the console configuration."
+        />
+      </PanelShell>
+    );
   }
   return (
     <div className="console-panel console-operator-panel" data-testid={`operator-panel:${buttonId}`}>

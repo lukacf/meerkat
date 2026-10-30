@@ -28,24 +28,33 @@
   min-height: 0;
   display: flex; flex-direction: column;
 }
+/* The header follows the panel kit's header: 15 px title over a sans
+   subtitle, segmented view controls on the right. */
 .topo__head {
-  padding: 10px 18px;
+  padding: 14px 20px 10px;
   border-bottom: 1px solid var(--line);
-  display: flex; align-items: center; gap: 14px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
   min-width: 0;
   background: var(--bg-elev-1);
   position: relative; z-index: 2;
   flex: none;
 }
+.topo__head-text {
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1 1 14ch;
+  min-width: 0;
+}
 .topo__head h2 {
-  margin: 0; font-size: 13px; font-weight: 600;
-  letter-spacing: -0.008em; color: var(--ink);
+  margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3;
+  letter-spacing: -0.01em; color: var(--ink);
   font-family: var(--disp);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .topo__head-meta {
-  font-size: 11px;
-  color: var(--ink-dim);
-  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--disp);
+  font-variant-numeric: tabular-nums;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -74,13 +83,16 @@
   overflow: hidden;
 }
 .topo__viewbtn {
-  padding: 4px 12px;
-  font-family: var(--mono);
-  font-size: 11px;
+  height: 26px;
+  padding: 0 10px;
+  font-family: var(--disp);
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--ink-muted);
   background: transparent;
   border: none;
   border-right: 1px solid var(--line);
+  white-space: nowrap;
   cursor: pointer;
   transition: color 120ms ease, background 120ms ease;
 }
@@ -88,7 +100,8 @@
 .topo__viewbtn:hover { color: var(--ink); background: var(--bg-elev-2); }
 .topo__viewbtn.is-active {
   color: var(--ink);
-  background: var(--bg);
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 .topo__body {
   flex: 1;
@@ -597,10 +610,13 @@
   text-align: center;
 }
 .topo-edit button:focus-visible,
-.topo__reset:focus-visible,
-.topo__viewbtn:focus-visible {
-  outline: 2px solid var(--focus);
+.topo__reset:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
+}
+.topo__viewbtn:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
 }
 
 @media (max-width: 680px) {
@@ -687,6 +703,16 @@
   border-radius: var(--r-sm);
   background: var(--bg);
   transition: background 120ms ease, border-color 120ms ease;
+}
+button.topo-roletree__agent {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button.topo-roletree__agent:hover { border-color: var(--line-strong, var(--_cc-border-strong)); background: var(--bg-elev-2); }
+button.topo-roletree__agent:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
 }
 .topo-roletree__agent.is-hot {
   border-color: var(--ok);

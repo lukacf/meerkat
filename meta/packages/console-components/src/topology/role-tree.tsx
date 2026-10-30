@@ -19,6 +19,8 @@ interface RoleTreeProps {
   nodes: ConsoleTopologyNode[];
   agents: ConsoleAgent[];
   activity: ConsoleFrame[];
+  /** When given, agent chips are buttons that select the agent. */
+  onSelectAgent?: (agentId: string) => void;
 }
 
 const STATE_COLOUR: Record<string, string> = {
@@ -40,6 +42,7 @@ export function RoleTree({
   nodes,
   agents,
   activity,
+  onSelectAgent,
 }: RoleTreeProps): React.JSX.Element {
   const graph = React.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
   const roleIndex = React.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
@@ -126,19 +129,37 @@ export function RoleTree({
                 {list.map((agent) => {
                   const isHot = !!live.active[agent.id];
                   const isBusy = !!live.busy[agent.id];
-                  return (
-                    <div
-                      key={agent.id}
-                      className={`topo-roletree__agent ${isHot ? "is-hot" : ""}${isBusy ? " is-busy" : ""}`}
-                      data-testid={`topology-node:${agent.id}`}
-                      title={`${agent.id}${agent.state ? " · " + agent.state : ""}${isBusy ? " · working" : ""}`}
-                    >
+                  const chip = (
+                    <>
                       <span
                         className="topo-roletree__agent-dot"
                         style={{ background: stateColour(agent.state) }}
                       />
                       <span className="topo-roletree__agent-label">{agent.label || agent.id}</span>
                       {isBusy && <span className="topo-roletree__busy" aria-label="working" />}
+                    </>
+                  );
+                  const chipClass = `topo-roletree__agent ${isHot ? "is-hot" : ""}${isBusy ? " is-busy" : ""}`;
+                  const chipTitle = `${agent.id}${agent.state ? " · " + agent.state : ""}${isBusy ? " · working" : ""}`;
+                  return onSelectAgent ? (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      className={`${chipClass} is-interactive`}
+                      data-testid={`topology-node:${agent.id}`}
+                      title={chipTitle}
+                      onClick={() => onSelectAgent(agent.id)}
+                    >
+                      {chip}
+                    </button>
+                  ) : (
+                    <div
+                      key={agent.id}
+                      className={chipClass}
+                      data-testid={`topology-node:${agent.id}`}
+                      title={chipTitle}
+                    >
+                      {chip}
                     </div>
                   );
                 })}

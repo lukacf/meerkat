@@ -50,6 +50,8 @@ export interface TopologyPanelProps {
   onRetryOperation?: (receipt: TopologyOperationReceipt) => void | Promise<void>;
   bulkActions?: readonly TopologyBoundedAction[];
   onRequestBulkAction?: (action: TopologyBoundedAction) => void | Promise<void>;
+  /** Select an agent from the role view (the host opens its chat or details). */
+  onSelectAgent?: (agentId: string) => void;
 }
 
 type EdgeMode = "all" | "focus";
@@ -84,6 +86,7 @@ export function TopologyPanel({
   onRetryOperation,
   bulkActions,
   onRequestBulkAction,
+  onSelectAgent,
 }: TopologyPanelProps): React.JSX.Element {
   const hasConnectionView = Boolean(management && management.policy.mode !== "disabled");
   const [uncontrolledView, setUncontrolledView] = React.useState<TopologyPanelView>(() => {
@@ -182,13 +185,15 @@ export function TopologyPanel({
       data-management-mode={management?.policy.mode || "unavailable"}
     >
       <div className="topo__head">
-        <h2>{title}</h2>
-        <span className="topo__head-meta">
-          {graph.agents.length} agents · {graph.edges.length} links
-          {busyCount > 0 ? ` · ${busyCount} working` : ""}
-          {liveCount > 0 && busyCount === 0 ? ` · ${liveCount} live` : ""}
-          {management?.policy.mode === "read_only" ? " · read-only" : ""}
-        </span>
+        <div className="topo__head-text">
+          <h2>{title}</h2>
+          <span className="topo__head-meta">
+            {graph.agents.length} {graph.agents.length === 1 ? "agent" : "agents"} · {graph.edges.length} {graph.edges.length === 1 ? "link" : "links"}
+            {busyCount > 0 ? ` · ${busyCount} working` : ""}
+            {liveCount > 0 && busyCount === 0 ? ` · ${liveCount} live` : ""}
+            {management?.policy.mode === "read_only" ? " · read-only" : ""}
+          </span>
+        </div>
         {view === "graph" ? (
           <div className="topo__viewbar topo__viewbar--labels" role="group" aria-label="Edges">
             <span className="topo__viewbar-tag">Edges</span>
@@ -197,6 +202,7 @@ export function TopologyPanel({
                 key={mode.id}
                 type="button"
                 className={`topo__viewbtn ${edgeMode === mode.id ? "is-active" : ""}`}
+                aria-pressed={edgeMode === mode.id}
                 onClick={() => pickEdgeMode(mode.id)}
                 title={mode.help}
                 data-testid={`topology-edges:${mode.id}`}
@@ -206,12 +212,13 @@ export function TopologyPanel({
             ))}
           </div>
         ) : null}
-        <div className="topo__viewbar">
+        <div className="topo__viewbar" role="group" aria-label="View">
           {VIEWS.filter((candidate) => candidate.id !== "connections" || hasConnectionView).map((candidate) => (
             <button
               key={candidate.id}
               type="button"
               className={`topo__viewbtn ${view === candidate.id ? "is-active" : ""}`}
+              aria-pressed={view === candidate.id}
               onClick={() => pickView(candidate.id)}
               title={candidate.help}
               data-testid={`topology-view:${candidate.id}`}
@@ -238,6 +245,7 @@ export function TopologyPanel({
             nodes={nodes}
             agents={agents}
             activity={activity}
+            onSelectAgent={onSelectAgent}
           />
         ) : null}
         {view === "connections" && management ? (

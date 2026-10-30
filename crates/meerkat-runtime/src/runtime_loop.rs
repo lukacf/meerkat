@@ -15415,37 +15415,53 @@ mod tests {
         /// does nothing, so a run of ignored tests stays harmless.
         const STACK_PROBE_RUNTIME_ENV: &str = "MEERKAT_TEST_PROCESS_RUNTIME_STACK_PROBE";
 
-        /// The probe's frame: more than the 8 MiB default stack, less than
-        /// the 32 MiB the raised cases give.
+        /// The size in bytes of the frame the child probes:
+        /// [`STACK_PROBE_FRAME_BYTES`] or [`STACK_PROBE_RAISED_FRAME_BYTES`].
+        const STACK_PROBE_FRAME_ENV: &str = "MEERKAT_TEST_PROCESS_RUNTIME_STACK_PROBE_FRAME";
+
+        /// The default case's frame: more than the 8 MiB host worker budget,
+        /// less than the 16 MiB these runtimes take when neither knob is set.
         const STACK_PROBE_FRAME_BYTES: usize = 12 * 1024 * 1024;
+
+        /// The raised cases' frame: more than the 16 MiB default, less than
+        /// the 32 MiB the raised cases give.
+        const STACK_PROBE_RAISED_FRAME_BYTES: usize = 24 * 1024 * 1024;
 
         /// The stack the raised cases ask for, in bytes: 32 MiB.
         const STACK_PROBE_RAISED_BYTES: &str = "33554432";
 
-        /// Reserve and touch a [`STACK_PROBE_FRAME_BYTES`] frame on the
-        /// calling thread's stack; `black_box` keeps the array in any build
-        /// profile.
+        /// Reserve and touch a `BYTES` frame on the calling thread's stack;
+        /// `black_box` keeps the array in any build profile.
         #[inline(never)]
         #[allow(clippy::large_stack_arrays)]
-        fn touch_stack_probe_frame() -> u8 {
-            let mut frame = [0_u8; STACK_PROBE_FRAME_BYTES];
+        fn touch_stack_probe_frame<const BYTES: usize>() -> u8 {
+            let mut frame = [0_u8; BYTES];
             std::hint::black_box(&mut frame);
-            frame[STACK_PROBE_FRAME_BYTES - 1]
+            frame[BYTES - 1]
         }
 
-        /// The child process of
-        /// [`process_owned_runtimes_size_their_threads_from_the_host_stack_knobs`]:
-        /// runs the probe frame on one process-owned runtime and checks that
-        /// it ran there.
+        /// The child process of the tests below: runs a frame of the size
+        /// [`STACK_PROBE_FRAME_ENV`] names on one process-owned runtime and
+        /// checks that it ran there.
         #[test]
-        #[ignore = "child-process fixture of the process-owned runtime stack test"]
+        #[ignore = "child-process fixture of the process-owned runtime stack tests"]
         fn process_owned_runtime_stack_probe_child() {
             let Some(runtime) = std::env::var_os(STACK_PROBE_RUNTIME_ENV) else {
                 return;
             };
+            let frame_bytes = std::env::var(STACK_PROBE_FRAME_ENV)
+                .ok()
+                .and_then(|bytes| bytes.parse::<usize>().ok());
+            let touch_frame: fn() -> u8 = match frame_bytes {
+                Some(STACK_PROBE_FRAME_BYTES) => touch_stack_probe_frame::<STACK_PROBE_FRAME_BYTES>,
+                Some(STACK_PROBE_RAISED_FRAME_BYTES) => {
+                    touch_stack_probe_frame::<STACK_PROBE_RAISED_FRAME_BYTES>
+                }
+                other => panic!("unknown probe frame size {other:?}"),
+            };
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let probe = async move {
-                let touched = touch_stack_probe_frame();
+                let touched = touch_frame();
                 let thread = std::thread::current()
                     .name()
                     .unwrap_or("<unnamed>")
@@ -15484,12 +15500,14 @@ mod tests {
             format!("{module}::process_owned_runtime_stack_probe_child")
         }
 
-        /// Run [`process_owned_runtime_stack_probe_child`] for `runtime` in
-        /// a child process whose only stack settings are `stack_override`
-        /// (`RKAT_WORKER_STACK_BYTES`) and `min_stack` (`RUST_MIN_STACK`).
+        /// Run [`process_owned_runtime_stack_probe_child`] for `runtime`,
+        /// with a `frame_bytes` frame, in a child process whose only stack
+        /// settings are `stack_override` (`RKAT_WORKER_STACK_BYTES`) and
+        /// `min_stack` (`RUST_MIN_STACK`).
         #[allow(clippy::disallowed_methods)] // the test binary's own child process
         fn run_stack_probe_child(
             runtime: &str,
+            frame_bytes: usize,
             stack_override: Option<&str>,
             min_stack: Option<&str>,
         ) -> (std::process::ExitStatus, String) {
@@ -15505,6 +15523,7 @@ mod tests {
                     "--test-threads=1",
                 ])
                 .env(STACK_PROBE_RUNTIME_ENV, runtime)
+                .env(STACK_PROBE_FRAME_ENV, frame_bytes.to_string())
                 .env_remove(HOST_WORKER_STACK_ENV)
                 .env_remove("RUST_MIN_STACK")
                 .stdin(std::process::Stdio::null());
@@ -15535,14 +15554,47 @@ mod tests {
             lines[lines.len().saturating_sub(40)..].join("\n")
         }
 
+        /// With neither stack knob set, the two process-owned runtimes fit a
+        /// frame deeper than the 8 MiB host worker budget: their default is
+        /// 16 MiB. The machine cleanup runtime polls the turns of
+        /// runtime-backed mob members, with the tools an embedding host
+        /// gives them and whatever those spawn, so its threads must not have
+        /// less stack than the host's own workers. With the 8 MiB budget as
+        /// their default, an embedding host whose workers run 16 MiB ran its
+        /// member work on half that, and aborted with a stack overflow on
+        /// `meerkat-machine-cleanup` once that work needed more than 8 MiB.
+        #[test]
+        fn process_owned_runtimes_default_to_more_stack_than_the_host_worker_budget() {
+            let mut refused = Vec::new();
+            for (runtime, thread) in [
+                ("cleanup", "meerkat-machine-cleanup"),
+                ("serving", "meerkat-runtime-serving"),
+            ] {
+                let (status, output) =
+                    run_stack_probe_child(runtime, STACK_PROBE_FRAME_BYTES, None, None);
+                let passed = status.success() && output.contains("test result: ok. 1 passed");
+                if !passed {
+                    let overflowed = reports_stack_overflow(&output, thread);
+                    refused.push(format!(
+                        "{thread} must fit a {STACK_PROBE_FRAME_BYTES}-byte frame with neither \
+                         {HOST_WORKER_STACK_ENV} nor RUST_MIN_STACK set; the child exited with \
+                         {status} (stack overflow on {thread}: {overflowed})\n{}",
+                        output_tail(&output)
+                    ));
+                }
+            }
+            assert!(refused.is_empty(), "{}", refused.join("\n\n"));
+        }
+
         /// The two process-owned runtimes size their threads from the host
-        /// stack knobs: `RKAT_WORKER_STACK_BYTES` exactly, otherwise the
-        /// 8 MiB budget raised to `RUST_MIN_STACK`. A probe that needs a
-        /// 12 MiB frame fits 32 MiB from either variable, and overflows the
+        /// stack knobs: `RKAT_WORKER_STACK_BYTES` exactly, otherwise their
+        /// 16 MiB default raised to `RUST_MIN_STACK`. A probe that needs a
+        /// 24 MiB frame fits 32 MiB from either variable, and overflows the
         /// default: the control, without which the raised cases prove
-        /// nothing. With an explicit 8 MiB that neither variable reached, an
-        /// embedding's debug build whose mob member work needed more aborted
-        /// on `meerkat-machine-cleanup` however it set `RUST_MIN_STACK`.
+        /// nothing. When these threads had an explicit size that neither
+        /// variable reached, an embedding whose mob member work needed more
+        /// aborted on `meerkat-machine-cleanup` however it set
+        /// `RUST_MIN_STACK`.
         #[test]
         fn process_owned_runtimes_size_their_threads_from_the_host_stack_knobs() {
             for (runtime, thread) in [
@@ -15553,20 +15605,26 @@ mod tests {
                     ("RUST_MIN_STACK", None, Some(STACK_PROBE_RAISED_BYTES)),
                     (HOST_WORKER_STACK_ENV, Some(STACK_PROBE_RAISED_BYTES), None),
                 ] {
-                    let (status, output) =
-                        run_stack_probe_child(runtime, stack_override, min_stack);
+                    let (status, output) = run_stack_probe_child(
+                        runtime,
+                        STACK_PROBE_RAISED_FRAME_BYTES,
+                        stack_override,
+                        min_stack,
+                    );
                     assert!(
                         status.success() && output.contains("test result: ok. 1 passed"),
-                        "{thread} must fit a {STACK_PROBE_FRAME_BYTES}-byte frame with \
+                        "{thread} must fit a {STACK_PROBE_RAISED_FRAME_BYTES}-byte frame with \
                          {variable}={STACK_PROBE_RAISED_BYTES}; the child exited with {status}\n{}",
                         output_tail(&output)
                     );
                 }
-                let (status, output) = run_stack_probe_child(runtime, None, None);
+                let (status, output) =
+                    run_stack_probe_child(runtime, STACK_PROBE_RAISED_FRAME_BYTES, None, None);
                 assert!(
                     !status.success() && reports_stack_overflow(&output, thread),
-                    "the default stack must not fit the probe on {thread}, or the raised \
-                     cases prove nothing; the child exited with {status}\n{}",
+                    "the default stack must not fit the {STACK_PROBE_RAISED_FRAME_BYTES}-byte \
+                     probe on {thread}, or the raised cases prove nothing; the child exited \
+                     with {status}\n{}",
                     output_tail(&output)
                 );
             }

@@ -467,7 +467,9 @@ async function main() {
       : commanderPanel.getByTestId("conv-action:inspect");
     await inspectAction.evaluate((button) => button.click());
     await page.getByTestId("inspect-panel:incident-commander").waitFor();
-    await waitForText(page.getByTestId("inspect-panel:incident-commander"), "addressable");
+    // Agent details say reachability in words; the raw "addressable" moved
+    // out of the visible copy.
+    await waitForText(page.getByTestId("inspect-panel:incident-commander"), "Can receive messages");
 
     console.log("smoke:split");
     await selectSidebarItem(page, "Incident Commander");

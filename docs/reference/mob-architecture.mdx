@@ -79,8 +79,11 @@ peer-only member), role, continuity intent and a `MemberBindingState`: `Live`,
 `Retired` (retired, or ended by a mob reset). `MemberIdentityManagement` is
 `CommandDriven` (lifecycle commands alone drive the identity), `IntentManaged`
 (Core's identity reconciler drives it, so lifecycle commands from another
-caller would make a second driver) or `IntentUnreadable` (an intent row this
-build cannot read; do not drive the identity).
+caller would make a second driver), `IntentUnreadable` (an intent row this
+build cannot read; do not drive the identity) or, since 0.9.9, `CreatedEntry`
+(a created identity entry's row: MobMachine drives the identity, and neither
+the identity reconciler nor a host's identity-first verbs act on it; see
+[Identity entries](#identity-entries)).
 
 The reads are store reads: they never wait behind the mob actor, need
 `ControlScope::List` (`MobError::ScopeDenied` otherwise), and a failed read is
@@ -202,13 +205,53 @@ refuses it (an entry answers `AlreadyAnEntry` in any phase), and it needs
 keeps changing while its binding history is read answers the retryable
 `MobError::LifecycleOperationPending`.
 
+An entry has one of two origins (`IdentityEntryOrigin`): `Declared`, an
+entry a host declared (a spawn or seat with entry custody, the declared
+apply, a legacy adoption), or, since 0.9.9, `Created`, an entry Core keeps as
+a created entry row of its own in the identity store (schema version 2,
+beside the host-adopted identity intents). A start reads every created entry
+row into MobMachine (`RecoverCreatedIdentityEntry`), after the journal replay
+and before the start's member plan, and MobMachine decides each row from its
+presence and the replayed facts:
+
+- A present row of a seated local member records the member a `Created`
+  entry.
+- A present row whose identity the replay left without a member (a build
+  that predates created entries retired it) records the entry unseated, owed
+  its seat (`SeatOwed`), with the session its member was last bound to as its
+  revival record. Once the mob runs (after the start, or the lift of a
+  stopped mob), Core seats it again, Dormant, on that session, from its
+  member's last spawn row. An entry it cannot seat stays owed its seat, and
+  the failure is logged.
+- A row pending its host's preparation records the entry unseated
+  (`TemplatePreparation`), and no dormant seat takes it.
+- A removed entry's row reserves the name as removed: it is never an entry
+  or a member again.
+- A row this build cannot read (a later build's format, a field it does not
+  know, a broken seal), or one the journal contradicts (a declared entry of
+  the name, a member where the row records none, a placed member), reserves
+  the name as unreadable: nothing acts on it.
+
+A store read that fails fails the start: a name the store may reserve is
+never read as free. A member row whose stored origin this build does not know
+is kept as stored, and its name is reserved as unreadable rather than
+replayed as a worker's. No spawn or dormant seat takes a reserved name, and a
+custody of one origin never takes an entry of the other: both are refused
+`MobError::IdentityMember` before anything is created. A worker reconcile
+neither spawns nor retires a reserved name, the declared apply refuses a
+created, removed or unreadable name for that identity alone (see
+[The declared apply](#the-declared-apply)), the legacy adoption answers
+`NotAdoptable` for any of them, and the agent lane refuses an unreadable
+member as an identity member. A mob reset keeps the reserved names, which
+the identity store holds; the destroy clears them.
+
 The reads need no actor command and never wake a member:
 
 | Read | Answers |
 |------|---------|
-| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, and the target of a rotation of it in flight (`RotationTarget`), if any; or `NotAnEntry` with the worker that holds the identity, if any. |
-| `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. |
-| `identity_census()` | The entries declared, seated, retiring, unseated by cause (`UnseatedEntryCounts`), Broken, with host preparation pending and with a rotation in flight. |
+| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, and the target of a rotation of it in flight (`RotationTarget`), if any; `NotAnEntry` with the worker that holds the identity, if any; `Unreadable`, with the standing of the member that holds the name, if any, for a name whose entry this build cannot read; or `Removed` for a removed created entry's name. |
+| `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. The page's unreadable names are listed apart (`IdentityEntryPage::unreadable`), in identity order, and count toward its limit. |
+| `identity_census()` | The entries declared and created, seated, retiring, unseated by cause (`UnseatedEntryCounts`), Broken, with host preparation pending and with a rotation in flight, and the removed and unreadable names. While a name is unreadable the census is incomplete (`IdentityCensus::is_complete`): its other counts cannot include what this build cannot read. |
 | `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records, and the `HistoryUnavailable` notice of a seat on a fresh session whose archived session was gone), legacy adoptions, retirement starts (with the target of the rotation a start belongs to, and the cause `Unlisted` when the declared apply's seal started it), retirements, member resets and mob resets. |
 | `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
 
@@ -255,6 +298,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | Held creation, never created | Awaits its held creation (`AwaitingHeldCreation`): the host's held protocol creates it. The host's current hold policy decides on every apply; nothing is kept of an earlier one. |
 | Spawn, wake or retirement in flight | Deferred to the next apply (`Deferred`). |
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
+| A created entry holds the name, or the name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`, `NameUnreadable`): the apply never declares over a created entry or a reserved name. |
 | Any, in a candidate composition | Refused `NonAuthoritative`: a candidate declares nothing and writes nothing. |
 
 A legacy member listed under its own name is adopted first
@@ -263,7 +307,8 @@ dormant seat never takes an identity hosted on its first use or awaiting its
 held creation (`MobError::WiringError`).
 
 A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
-every Declared entry it does not list is unlisted. Its member, when one is
+every Declared entry it does not list is unlisted (never a created entry, nor
+a name this build cannot read). Its member, when one is
 seated, is retired; the retirement's start row records the cause `Unlisted`
 (`MemberLifecycleEvent::RetirementStarted::cause`), and the end of the
 retirement ends the entry. An unlisted entry no member holds is removed at
@@ -324,7 +369,9 @@ The roster vocabulary keeps the residency words: a seated member is Dormant
 until its first delivery wakes it, whether the apply or a seat seated it; a
 held member is Dormant and refuses its wakes; an unseated entry is no member
 at all (`EntryStanding::Unseated`, with its `UnseatedEntryCause`: `SeatOwed`,
-`HostedOnFirstUse` or `HeldCreation`) and is listed by the entry reads only.
+`HostedOnFirstUse`, `HeldCreation` or, for a created entry its host's
+preparation holds, `TemplatePreparation`) and is listed by the entry reads
+only.
 
 The apply's types are `#[non_exhaustive]`, and the apply is Rust-only: the
 wire contracts do not carry it.

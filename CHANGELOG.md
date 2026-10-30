@@ -238,6 +238,56 @@ them.
   must add it. The runtime's `meerkat_runtime::RunStartHoldReason` and the
   mob's `meerkat_mob::HostRunStartHoldReason` gain it too; both are
   `#[non_exhaustive]`.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine recovers created identity entries (see Added). `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `State` gain the public fields `identity_entry_tombstones`,
+  `identity_entry_unreadable` and `spawn_exec_created_custody`, so code that
+  builds either struct literally must set them. The `MobMachineInput`
+  variants `BeginSpawnExec` and `ProbeMemberAdmission` (meerkat-machine-schema
+  and meerkat-mob) and the kernel `generated::mob::inputs` structs
+  `BeginSpawnExec` and `ProbeMemberAdmission` gain the public field
+  `created_custody: bool`, so code that builds them literally must set it
+  (`false` keeps the previous behaviour), and a serialized kernel input
+  without the field no longer deserializes. `MobMachineSignal` and its
+  variant enum and the kernel `Signal` and `SignalKind` gain
+  `RecoverCreatedIdentityEntry { agent_identity, presence, last_session }`,
+  and `MemberAdmissionVerdictKind` gains `IdentityMemberOfAnotherOrigin` and
+  `IdentityNameReserved`; each appended last. The machine enum
+  `RecoveredPresence` (`Present`, `PresentUnseated`, `Tombstone`,
+  `Unreadable`) is new, and the machine enums new in this release gain
+  variants: `IdentityEntryOrigin` gains `Created`, `UnseatedEntryCause`
+  `TemplatePreparation`, `IdentityEntryVerdict` `RefusedNameOwnedByCreated`,
+  `RefusedNameTombstoned` and `RefusedNameUnreadable`, and
+  `AgentLaneMemberAdmissionKind` `UnreadableName`. The kernel
+  `generated::mob::TransitionId` gains, appended last,
+  `ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning`,
+  `ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped`,
+  `ProbeMemberAdmissionIdentityMemberOfAnotherOriginCompleted`,
+  `ProbeMemberAdmissionIdentityMemberOfAnotherOriginDestroyed`,
+  `ProbeMemberAdmissionIdentityNameReservedRunning`,
+  `ProbeMemberAdmissionIdentityNameReservedStopped`,
+  `ProbeMemberAdmissionIdentityNameReservedCompleted`,
+  `ProbeMemberAdmissionIdentityNameReservedDestroyed`,
+  `DeclareIdentityEntryRefusedNameOwnedByCreated`,
+  `DeclareIdentityEntryRefusedNameTombstoned`,
+  `DeclareIdentityEntryRefusedNameUnreadable`,
+  `AdoptLegacyIdentityEntryOtherCustody`,
+  `ResolveAgentLaneMemberAdmissionUnreadableNameRunning`,
+  `ResolveAgentLaneMemberAdmissionUnreadableNameStopped`,
+  `ResolveAgentLaneMemberAdmissionUnreadableNameCompleted`,
+  `ResolveAgentLaneMemberAdmissionUnreadableNameDestroyed`,
+  `RecoverCreatedIdentityEntrySeatedRunning`,
+  `RecoverCreatedIdentityEntrySeatedStopped`,
+  `RecoverCreatedIdentityEntryRetiredRunning`,
+  `RecoverCreatedIdentityEntryRetiredStopped`,
+  `RecoverCreatedIdentityEntryPendingRunning`,
+  `RecoverCreatedIdentityEntryPendingStopped`,
+  `RecoverCreatedIdentityEntryTombstoneRunning`,
+  `RecoverCreatedIdentityEntryTombstoneStopped`,
+  `RecoverCreatedIdentityEntryUnreadableRunning` and
+  `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
 
 - `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
   token: `OpenAiAuthMethod::GitHubCopilotToken`,
@@ -486,6 +536,43 @@ them.
   The roster types are `#[non_exhaustive]`. Rust-only; the wire contracts do
   not carry it.
 
+- `meerkat-mob`: created identity entries, read and recovered. An identity
+  entry's origin (`IdentityEntryOrigin`) can be `Created`: an entry Core
+  keeps as a row of its own in the identity store, a `CreatedIdentityRecord`
+  (schema version `CREATED_IDENTITY_SCHEMA_VERSION`, 2, beside the
+  host-adopted identity intents of version 1): the identity, its spec
+  revision, its presence (`CreatedIdentityPresence`: present, pending its
+  host's preparation, or removed) and its creation's provenance
+  (`CreatedIdentityProvenance`), sealed in an authority digest of its own
+  domain. `classify_created_identity_row` reads one stored row
+  (`CreatedIdentityObservation`), and every built-in store reads the
+  created rows (`store::MobIdentityStore::scan_created_identities_page`,
+  paged, `store::CreatedIdentityScanPage`; its default reads none, for a
+  custom storage that never holds one). A start reads every created entry
+  row into MobMachine after the journal replay, and MobMachine decides each
+  from its presence and the replayed facts: a seated member's row records it
+  a created entry; a row whose member a build that predates created entries
+  retired records the entry owed its seat, and once the mob runs Core seats
+  it again, Dormant, on the session its member was last bound to; a pending
+  row records the entry unseated (`UnseatedEntryCause::TemplatePreparation`);
+  a removed entry's row reserves its name as removed; and a row this build
+  cannot read, or one the journal contradicts, reserves the name as
+  unreadable. A member row whose stored origin this build does not know
+  reserves its name as unreadable too. No spawn or dormant seat takes a
+  reserved name, and a custody of one origin never takes an entry of the
+  other (`MobError::IdentityMember`); a worker reconcile neither spawns nor
+  retires one; the declared apply refuses a created, removed or unreadable
+  name for that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`,
+  `NameTombstoned`, `NameUnreadable`); the legacy adoption answers
+  `NotAdoptable`; and the agent lane refuses an unreadable member as an
+  identity member. The reads: `IdentityEntryRead::Unreadable { member }` and
+  `Removed`, `IdentityEntryPage::unreadable`,
+  `UnseatedEntryCounts::template_preparation`, and `IdentityCensus::created`,
+  `tombstoned`, `unreadable` and `is_complete`. The member binding history
+  answers `MemberIdentityManagement::CreatedEntry` for a created entry's
+  identity. A mob that holds no created entry row behaves as before.
+  Rust-only; the wire contracts do not carry it.
+
 - `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
   credential value its caller re-reads from a source (an environment
   variable, a command, an external resolver) only when the AuthMachine says
@@ -583,6 +670,15 @@ them.
   roster, is the new pure admission input `AdmitReset`: every guard of
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
+- `meerkat-mob`: a mob storage on the host store SPI reads its identity
+  intents one entry at a time. A created entry's row is kept as one; an
+  entry whose row this build cannot decode is kept as stored, read as
+  unreadable for its identity alone and written back untouched on every
+  rewrite of the group; and an entry whose key cannot be read is kept by
+  name. Every identity-first mutation (an adoption, a member tool
+  declaration, a convergence resolution) refuses an identity whose row is a
+  created entry's or unreadable. Before, one entry a later build wrote failed
+  the whole mob's open.
 
 ### Fixed
 

@@ -23043,6 +23043,43 @@ function formatCount(value) {
   return new Intl.NumberFormat("en-US").format(Number(value) || 0);
 }
 
+// ../packages/console-core/src/agent-title.ts
+var KEY_PREFIXES = ["identity:", "agent:", "member:"];
+function stripAgentKeyPrefix(key) {
+  let current = key.trim();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of KEY_PREFIXES) {
+      if (current.toLowerCase().startsWith(prefix) && current.length > prefix.length) {
+        current = current.slice(prefix.length);
+        changed = true;
+      }
+    }
+  }
+  return current;
+}
+function agentKindLabel(agent) {
+  const kind = (agent.role || agent.group || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return kind ? kind[0].toUpperCase() + kind.slice(1) : "";
+}
+function isOpaqueIdPart(part) {
+  return part.length >= 8 && /\d/.test(part) && !/^\p{L}+\d{1,4}$/u.test(part);
+}
+function agentDisplayTitle(agent) {
+  const label = (agent.label || "").trim();
+  const ids = [agent.identity, agent.member_id, agent.agent_id, agent.labels?.agent_identity].map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean);
+  if (label && !ids.includes(label)) return label;
+  const id = label || ids[0] || "";
+  const parts = stripAgentKeyPrefix(id).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (parts.length === 0) return id || "Agent";
+  if (parts.some(isOpaqueIdPart)) {
+    return "".concat(agentKindLabel(agent) || "Agent", " ").concat(parts.join("").slice(-6).toLowerCase());
+  }
+  const words2 = parts.join(" ");
+  return words2[0].toUpperCase() + words2.slice(1);
+}
+
 // ../packages/console-core/src/operation-feedback.ts
 function record4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -26599,6 +26636,20 @@ function priorityTone(priority) {
   if (word === "low") return "neutral";
   return null;
 }
+function riskTierWord(tier) {
+  switch ((tier ?? "").trim().toLowerCase()) {
+    case "r0":
+      return "Minimal";
+    case "r1":
+      return "Low";
+    case "r2":
+      return "Elevated";
+    case "r3":
+      return "High";
+    default:
+      return null;
+  }
+}
 function riskTone(risk) {
   const word = normalizeStatusWord(risk);
   if (word === "high" || word === "critical" || word === "r3" || word === "r4") return "crit";
@@ -26607,21 +26658,6 @@ function riskTone(risk) {
 }
 
 // ../packages/console-components/src/panel-kit/agents.ts
-var KEY_PREFIXES = ["identity:", "agent:", "member:"];
-function stripAgentKeyPrefix(key) {
-  let current = key.trim();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const prefix of KEY_PREFIXES) {
-      if (current.toLowerCase().startsWith(prefix) && current.length > prefix.length) {
-        current = current.slice(prefix.length);
-        changed = true;
-      }
-    }
-  }
-  return current;
-}
 function createAgentDirectory(entries) {
   const byKey = /* @__PURE__ */ new Map();
   const add = (key, entry) => {
@@ -26654,7 +26690,7 @@ function agentDisplayName(key, directory = EMPTY_AGENT_DIRECTORY) {
   if (typeof key !== "string" || !key.trim()) return "";
   const entry = directory.lookup(key);
   if (entry) return entry.label.trim();
-  return stripAgentKeyPrefix(key);
+  return agentDisplayTitle({ label: key.trim(), identity: key.trim() });
 }
 function agentInitial(label) {
   const match = (label ?? "").match(/[\p{L}\p{N}]/u);
@@ -26850,6 +26886,7 @@ function KeyValueList({
 }
 
 // ../packages/console-components/src/panel-kit/list-row.tsx
+var import_react6 = require("react");
 var import_jsx_runtime15 = require("react/jsx-runtime");
 function ListRow({
   lead,
@@ -26869,6 +26906,7 @@ function ListRow({
   children,
   dataAttributes
 }) {
+  const partId = (0, import_react6.useId)();
   const classes = cx(
     "cc-row",
     !lead && "cc-row--no-lead",
@@ -26877,16 +26915,14 @@ function ListRow({
     selected && "is-selected",
     className
   );
-  const body = /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
-    lead ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__lead", children: lead }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "cc-row__main", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__title", title: titleAttr, children: title }),
-      subtitle ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__sub", children: subtitle }) : null
-    ] }),
-    meta3 ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__meta", children: meta3 }) : null,
-    actions ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__actions", onClick: (event) => event.stopPropagation(), onKeyDown: (event) => event.stopPropagation(), children: actions }) : null,
-    children ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "cc-row__extra", children }) : null
-  ] });
+  const split = Boolean(onActivate && (actions || children));
+  const partIds = split ? { sub: "".concat(partId, "-sub"), meta: "".concat(partId, "-meta"), extra: "".concat(partId, "-extra") } : { sub: void 0, meta: void 0, extra: void 0 };
+  const titleNode = /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__title", title: titleAttr, children: title });
+  const leadNode = lead ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__lead", children: lead }) : null;
+  const subNode = subtitle ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__sub", id: partIds.sub, children: subtitle }) : null;
+  const metaNode = meta3 ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__meta", id: partIds.meta, children: meta3 }) : null;
+  const actionsNode = actions ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "cc-row__actions", onClick: (event) => event.stopPropagation(), onKeyDown: (event) => event.stopPropagation(), children: actions }) : null;
+  const extraNode = children ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "cc-row__extra", id: partIds.extra, children }) : null;
   const common = {
     className: classes,
     "data-testid": testId,
@@ -26894,8 +26930,8 @@ function ListRow({
     "aria-label": ariaLabel,
     ...dataAttributes
   };
-  if (onActivate && !actions && !children) {
-    return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+  if (onActivate && !split) {
+    return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(
       "button",
       {
         type: "button",
@@ -26903,39 +26939,67 @@ function ListRow({
         "aria-current": selected ? "true" : void 0,
         "aria-expanded": ariaExpanded,
         onClick: onActivate,
-        children: body
+        children: [
+          leadNode,
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "cc-row__main", children: [
+            titleNode,
+            subNode
+          ] }),
+          metaNode
+        ]
       }
     );
   }
   if (onActivate) {
-    const onKeyDown = (event) => {
-      if (event.target !== event.currentTarget) return;
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onActivate();
-      }
-    };
+    const describedBy = [subNode && partIds.sub, metaNode && partIds.meta, extraNode && partIds.extra].filter(Boolean).join(" ");
     const onClick = (event) => {
       const target = event.target;
-      const control = target?.closest?.("a, button, input, select, textarea, summary, [role='button']");
-      if (control && control !== event.currentTarget) return;
+      if (target?.closest?.("a, button, input, select, textarea, summary, [role='button']")) return;
       onActivate();
     };
-    return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(
       "div",
       {
-        role: "button",
-        tabIndex: 0,
-        ...common,
-        "aria-current": selected ? "true" : void 0,
-        "aria-expanded": ariaExpanded,
+        className: cx(classes, "cc-row--split"),
+        "data-testid": testId,
+        "data-tone": tone,
+        ...dataAttributes,
         onClick,
-        onKeyDown,
-        children: body
+        children: [
+          leadNode,
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "cc-row__main", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+              "button",
+              {
+                type: "button",
+                className: "cc-row__hit",
+                "aria-label": ariaLabel,
+                "aria-describedby": describedBy || void 0,
+                "aria-current": selected ? "true" : void 0,
+                "aria-expanded": ariaExpanded,
+                onClick: onActivate,
+                children: titleNode
+              }
+            ),
+            subNode
+          ] }),
+          metaNode,
+          actionsNode,
+          extraNode
+        ]
       }
     );
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { ...common, children: body });
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { ...common, children: [
+    leadNode,
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "cc-row__main", children: [
+      titleNode,
+      subNode
+    ] }),
+    metaNode,
+    actionsNode,
+    extraNode
+  ] });
 }
 function RowList({
   className,
@@ -26975,10 +27039,10 @@ function Meter({
 }
 
 // ../packages/console-components/src/panel-kit/panel.tsx
-var import_react7 = require("react");
+var import_react8 = require("react");
 
 // ../packages/console-components/src/panel-kit/relative-time.tsx
-var import_react6 = require("react");
+var import_react7 = require("react");
 var import_jsx_runtime17 = require("react/jsx-runtime");
 var TICK_MS = 15e3;
 var tickNow = Date.now();
@@ -27009,7 +27073,7 @@ function getSnapshot() {
   return tickNow;
 }
 function useNow() {
-  return (0, import_react6.useSyncExternalStore)(subscribe, getSnapshot, getSnapshot);
+  return (0, import_react7.useSyncExternalStore)(subscribe, getSnapshot, getSnapshot);
 }
 function RelativeTime({
   value,
@@ -27045,12 +27109,36 @@ function PanelShell({
 }) {
   return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("section", { className: cx("cc-panel", className), "data-testid": testId, "aria-label": ariaLabel, children });
 }
+function panelTabIds(idBase, tab2) {
+  const key = tab2.replace(/\s+/g, "-");
+  return { tabId: "".concat(idBase, "-tab-").concat(key), panelId: "".concat(idBase, "-panel-").concat(key) };
+}
+function PanelTabPanel({
+  idBase,
+  tab: tab2,
+  ...rest
+}) {
+  const ids = panelTabIds(idBase, tab2);
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { ...rest, role: "tabpanel", id: ids.panelId, "aria-labelledby": ids.tabId });
+}
 function PanelBody({
   className,
   testId,
+  tabPanel,
   children
 }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: cx("cc-panel__body", className), "data-testid": testId, children });
+  const ids = tabPanel ? panelTabIds(tabPanel.idBase, tabPanel.tab) : null;
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+    "div",
+    {
+      className: cx("cc-panel__body", className),
+      "data-testid": testId,
+      role: ids ? "tabpanel" : void 0,
+      id: ids?.panelId,
+      "aria-labelledby": ids?.tabId,
+      children
+    }
+  );
 }
 function PanelHeader({
   title,
@@ -27077,11 +27165,12 @@ function PanelTabs({
   active,
   onSelect,
   ariaLabel,
+  idBase,
   className,
   tabClassName,
   testId
 }) {
-  const listRef = (0, import_react7.useRef)(null);
+  const listRef = (0, import_react8.useRef)(null);
   const onKeyDown = (event) => {
     const keys2 = ["ArrowRight", "ArrowLeft", "Home", "End"];
     if (!keys2.includes(event.key)) return;
@@ -27103,11 +27192,14 @@ function PanelTabs({
       "data-testid": testId,
       children: tabs.map((tab2) => {
         const selected = tab2.id === active;
+        const ids = idBase ? panelTabIds(idBase, tab2.id) : null;
         return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(
           "button",
           {
             type: "button",
             role: "tab",
+            id: ids?.tabId,
+            "aria-controls": ids?.panelId,
             "aria-selected": selected,
             "aria-label": tab2.ariaLabel,
             tabIndex: selected ? 0 : -1,
@@ -27176,7 +27268,14 @@ function PanelSection({
 }
 
 // ../packages/console-components/src/panel-kit/split-detail.tsx
+var import_react9 = require("react");
 var import_jsx_runtime19 = require("react/jsx-runtime");
+var FOCUSABLE = "button, a[href], input, select, textarea, summary, [tabindex]";
+function focusTarget(element3) {
+  if (!element3) return null;
+  if (element3.matches(FOCUSABLE)) return element3;
+  return element3.querySelector(FOCUSABLE);
+}
 function SplitDetail({
   list: list4,
   detail,
@@ -27187,9 +27286,38 @@ function SplitDetail({
   className,
   testId
 }) {
+  const listRef = (0, import_react9.useRef)(null);
+  const detailRef = (0, import_react9.useRef)(null);
+  const wasOpen = (0, import_react9.useRef)(detailOpen);
+  const opener = (0, import_react9.useRef)(null);
+  (0, import_react9.useLayoutEffect)(() => {
+    const changed = wasOpen.current !== detailOpen;
+    wasOpen.current = detailOpen;
+    const listEl = listRef.current;
+    const detailEl = detailRef.current;
+    if (!changed || !listEl || !detailEl) return;
+    const doc = listEl.ownerDocument;
+    const active = doc.activeElement;
+    const focusLost = !active || active === doc.body;
+    if (detailOpen) {
+      opener.current = active && listEl.contains(active) ? { element: active, testId: (active.closest(".cc-row") ?? active).getAttribute("data-testid") } : null;
+      const listHidden = doc.defaultView?.getComputedStyle(listEl).visibility === "hidden";
+      if (!listHidden || !(focusLost || listEl.contains(active))) return;
+      const heading3 = detailEl.querySelector("h1, h2, h3, h4, h5, h6");
+      if (heading3 && !heading3.hasAttribute("tabindex")) heading3.setAttribute("tabindex", "-1");
+      (heading3 ?? detailEl).focus();
+      return;
+    }
+    if (!(focusLost || detailEl.contains(active))) return;
+    const saved = opener.current;
+    const selectedRow = focusTarget(listEl.querySelector('[aria-current="true"]'));
+    const openerRow = saved && saved.element.isConnected && listEl.contains(saved.element) ? saved.element : null;
+    const target = selectedRow ?? openerRow ?? (saved?.testId ? focusTarget(Array.from(listEl.querySelectorAll("[data-testid]")).find((element3) => element3.getAttribute("data-testid") === saved.testId) ?? null) : null);
+    target?.focus();
+  }, [detailOpen]);
   return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: cx("cc-split", detailOpen && "has-detail", className), "data-testid": testId, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "cc-split__list", children: list4 }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "cc-split__detail", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "cc-split__list", ref: listRef, children: list4 }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "cc-split__detail", ref: detailRef, tabIndex: -1, children: [
       detailOpen && onBack ? /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("button", { type: "button", className: "cc-split__back", onClick: onBack, children: [
         /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "cc-split__back-mark", "aria-hidden": "true" }),
         backLabel
@@ -27272,6 +27400,7 @@ function Notice({
 }
 
 // ../packages/console-components/src/panel-kit/stat-tile.tsx
+var import_react10 = require("react");
 var import_jsx_runtime21 = require("react/jsx-runtime");
 function StatTile({
   label,
@@ -27286,6 +27415,7 @@ function StatTile({
   testId,
   dataAttributes
 }) {
+  const partId = (0, import_react10.useId)();
   const content3 = /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(import_jsx_runtime21.Fragment, { children: [
     /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "cc-tile__head", children: [
       /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "cc-tile__label", children: label }),
@@ -27298,34 +27428,28 @@ function StatTile({
     return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", className: classes, "data-tone": tone, title: help, "data-testid": testId, onClick: onActivate, ...dataAttributes, children: content3 });
   }
   if (onActivate) {
-    const onKeyDown = (event) => {
-      if (event.target !== event.currentTarget) return;
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onActivate();
-      }
-    };
     const onClick = (event) => {
       const target = event.target;
-      const control = target?.closest?.("a, button, input, select, textarea, summary, [role='button']");
-      if (control && control !== event.currentTarget) return;
+      if (target?.closest?.("a, button, input, select, textarea, summary, [role='button']")) return;
       onActivate();
     };
+    const describedBy = [status && "".concat(partId, "-status"), summary && "".concat(partId, "-summary"), "".concat(partId, "-links")].filter(Boolean).join(" ");
     return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(
       "div",
       {
-        role: "button",
-        tabIndex: 0,
-        className: classes,
+        className: cx(classes, "cc-tile--split"),
         "data-tone": tone,
         title: help,
         "data-testid": testId,
         onClick,
-        onKeyDown,
         ...dataAttributes,
         children: [
-          content3,
-          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "cc-tile__links", children })
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "cc-tile__head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", className: "cc-tile__hit", "aria-describedby": describedBy, onClick: onActivate, children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "cc-tile__label", children: label }) }),
+            status ? /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "cc-tile__status", id: "".concat(partId, "-status"), children: status }) : null
+          ] }),
+          summary ? /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "cc-tile__summary", id: "".concat(partId, "-summary"), children: summary }) : null,
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "cc-tile__links", id: "".concat(partId, "-links"), children })
         ]
       }
     );
@@ -27414,7 +27538,7 @@ function TechnicalDetails({
 }
 
 // ../packages/console-components/src/panel-kit/toolbar.tsx
-var import_react8 = require("react");
+var import_react11 = require("react");
 var import_jsx_runtime24 = require("react/jsx-runtime");
 function Toolbar({
   className,
@@ -27435,7 +27559,7 @@ function SearchField({
   testId,
   ...rest
 }) {
-  const id = (0, import_react8.useId)();
+  const id = (0, import_react11.useId)();
   return /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: cx("cc-field", "cc-search", className), children: [
     /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("label", { htmlFor: id, className: showLabel ? "cc-field__label" : "cc-visually-hidden", children: label }),
     /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { className: "cc-search__box", children: [
@@ -27468,7 +27592,7 @@ function SelectField({
   ariaLabel,
   ...rest
 }) {
-  const id = (0, import_react8.useId)();
+  const id = (0, import_react11.useId)();
   return /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: cx("cc-field", className), children: [
     /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("label", { htmlFor: id, className: showLabel ? "cc-field__label" : "cc-visually-hidden", children: label }),
     /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { className: "cc-select", children: [
@@ -27522,7 +27646,7 @@ function SegmentedControl({
 }
 
 // ../packages/console-components/src/conversation/presentation-policy.tsx
-var import_react9 = require("react");
+var import_react12 = require("react");
 var import_jsx_runtime25 = require("react/jsx-runtime");
 function explicitDisplayLabel(id, labels2) {
   return labels2?.get(id)?.trim() || id;
@@ -27567,16 +27691,16 @@ function rememberRowState(store, key, value) {
   store.set(key, value);
   if (store.size > ROW_STATE_LIMIT) store.delete(store.keys().next().value);
 }
-var PresentationContext = (0, import_react9.createContext)(null);
-var RowScopeContext = (0, import_react9.createContext)(null);
+var PresentationContext = (0, import_react12.createContext)(null);
+var RowScopeContext = (0, import_react12.createContext)(null);
 function ConversationRowStateScope({ rowId, children }) {
   return /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(RowScopeContext.Provider, { value: rowId, children });
 }
 function useRowState(part, initial) {
-  const context = (0, import_react9.useContext)(PresentationContext);
-  const row = (0, import_react9.useContext)(RowScopeContext);
-  const [, rerender] = (0, import_react9.useReducer)((count2) => count2 + 1, 0);
-  const local = (0, import_react9.useRef)(null);
+  const context = (0, import_react12.useContext)(PresentationContext);
+  const row = (0, import_react12.useContext)(RowScopeContext);
+  const [, rerender] = (0, import_react12.useReducer)((count2) => count2 + 1, 0);
+  const local = (0, import_react12.useRef)(null);
   const store = context?.disclosures;
   const key = store && row !== null ? JSON.stringify(["row", row, part]) : null;
   let value;
@@ -27587,34 +27711,34 @@ function useRowState(part, initial) {
     if (!local.current) local.current = { value: initial() };
     value = local.current.value;
   }
-  const set2 = (0, import_react9.useCallback)((next) => {
+  const set2 = (0, import_react12.useCallback)((next) => {
     if (store && key !== null) rememberRowState(store, key, next);
     else local.current = { value: next };
     rerender();
   }, [store, key]);
   return [value, set2];
 }
-var FoldedToolsContext = (0, import_react9.createContext)(false);
+var FoldedToolsContext = (0, import_react12.createContext)(false);
 function useInsideCompletedToolDisclosure() {
-  return (0, import_react9.useContext)(FoldedToolsContext);
+  return (0, import_react12.useContext)(FoldedToolsContext);
 }
 function ConversationPresentationProvider({ labels: labels2, viewportKey, autoFold = true, children }) {
-  const local = (0, import_react9.useRef)(/* @__PURE__ */ new Map());
-  const oldAuthority = (0, import_react9.useRef)(viewportKey?.authority);
+  const local = (0, import_react12.useRef)(/* @__PURE__ */ new Map());
+  const oldAuthority = (0, import_react12.useRef)(viewportKey?.authority);
   const key = viewportKey ? JSON.stringify([viewportKey.authority, viewportKey.identity, viewportKey.conversation, viewportKey.pane]) : null;
-  const disclosures = (0, import_react9.useMemo)(() => key ? scopeState(key) : local.current, [key]);
-  (0, import_react9.useEffect)(() => {
+  const disclosures = (0, import_react12.useMemo)(() => key ? scopeState(key) : local.current, [key]);
+  (0, import_react12.useEffect)(() => {
     if (oldAuthority.current !== viewportKey?.authority) {
       for (const existing of scopes.keys()) if (JSON.parse(existing)[0] === oldAuthority.current) scopes.delete(existing);
       local.current.clear();
       oldAuthority.current = viewportKey?.authority;
     }
   }, [viewportKey?.authority]);
-  const value = (0, import_react9.useMemo)(() => ({ labels: labels2, disclosures, autoFold }), [labels2, disclosures, autoFold]);
+  const value = (0, import_react12.useMemo)(() => ({ labels: labels2, disclosures, autoFold }), [labels2, disclosures, autoFold]);
   return /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(PresentationContext.Provider, { value, children });
 }
 function useConversationDisplayLabels() {
-  return (0, import_react9.useContext)(PresentationContext)?.labels;
+  return (0, import_react12.useContext)(PresentationContext)?.labels;
 }
 function RowDetails({ part, initiallyOpen = false, children, ...props }) {
   const [open, setOpen] = useRowState(part, () => initiallyOpen);
@@ -27623,13 +27747,13 @@ function RowDetails({ part, initiallyOpen = false, children, ...props }) {
   }, children });
 }
 function CompletedToolDisclosure({ blocks, children }) {
-  const context = (0, import_react9.useContext)(PresentationContext);
-  const local = (0, import_react9.useRef)(/* @__PURE__ */ new Map());
+  const context = (0, import_react12.useContext)(PresentationContext);
+  const local = (0, import_react12.useRef)(/* @__PURE__ */ new Map());
   const disclosures = context?.disclosures ?? local.current;
   const key = JSON.stringify(blocks.map((block) => block.toolCallId));
   const initiallyOpen = disclosures.get(key) ?? context?.autoFold === false;
   if (context && !disclosures.has(key)) rememberRowState(disclosures, key, initiallyOpen);
-  const [state, setState] = (0, import_react9.useState)(() => ({ disclosures, key, open: initiallyOpen }));
+  const [state, setState] = (0, import_react12.useState)(() => ({ disclosures, key, open: initiallyOpen }));
   const open = state.disclosures === disclosures && state.key === key ? state.open : initiallyOpen;
   return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("details", { className: "cc-completed-tools", open, onToggle: (event) => {
     const next = event.currentTarget.open;
@@ -27647,7 +27771,7 @@ function CompletedToolDisclosure({ blocks, children }) {
 // ../packages/console-components/src/conversation/approval-card.tsx
 var import_jsx_runtime26 = require("react/jsx-runtime");
 var labels = { approve: "Approve", reject: "Reject", escalate: "Escalate" };
-var variants = { approve: "primary", reject: "danger", escalate: "default" };
+var variants = { approve: "positive", reject: "danger", escalate: "default" };
 var STATE_WORDS = {
   pending: { text: "Approval needed", tone: "warn" },
   submitting: { text: "Submitting decision", tone: "info" },
@@ -27657,8 +27781,10 @@ var STATE_WORDS = {
   expired: { text: "Expired", tone: "neutral" },
   settled: { text: "Resolved", tone: "ok" }
 };
-function riskLabel(tier) {
-  return /^r\d$/i.test(tier) ? tier.toUpperCase() : tier;
+function riskChip(tier) {
+  const word = riskTierWord(tier);
+  const code4 = /^r\d$/i.test(tier) ? tier.toUpperCase() : tier;
+  return { text: word ? "".concat(word, " risk") : code4, title: "Risk tier ".concat(code4) };
 }
 function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onDecide }) {
   const now = useNow();
@@ -27689,7 +27815,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onD
           request.riskTier ? {
             key: "risk",
             label: "Risk",
-            value: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { tone: riskTone(request.riskTier), children: riskLabel(request.riskTier) })
+            value: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { tone: riskTone(request.riskTier), title: riskChip(request.riskTier).title, children: riskChip(request.riskTier).text })
           } : null,
           request.approvalRecipient ? { key: "recipient", label: "Notification recipient", value: request.approvalRecipient } : null,
           request.approvalChannel ? { key: "channel", label: "Notification channel", value: request.approvalChannel } : null,
@@ -27790,10 +27916,10 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
 }
 
 // ../packages/console-components/src/conversation/conversation-pane.tsx
-var import_react21 = require("react");
+var import_react24 = require("react");
 
 // ../packages/console-components/src/conversation/scroll-controller.ts
-var import_react10 = require("react");
+var import_react13 = require("react");
 
 // ../packages/console-components/src/conversation/scroll-geometry.ts
 var CONVERSATION_LIVE_EDGE_PX = 32;
@@ -27908,18 +28034,18 @@ function steadySession(session) {
   return !session.pendingSubmittedRow && !session.awaitingAnchor && !session.reveal && (session.mode === "following-end" || session.anchor !== null);
 }
 function useConversationScrollController(options) {
-  const optionsRef = (0, import_react10.useRef)(options);
+  const optionsRef = (0, import_react13.useRef)(options);
   optionsRef.current = options;
-  const localPositions = (0, import_react10.useRef)(new ConversationPositionCache());
-  const sessionRef = (0, import_react10.useRef)(null);
-  const frameRef = (0, import_react10.useRef)(null);
-  const applyLayoutRef = (0, import_react10.useRef)(() => {
+  const localPositions = (0, import_react13.useRef)(new ConversationPositionCache());
+  const sessionRef = (0, import_react13.useRef)(null);
+  const frameRef = (0, import_react13.useRef)(null);
+  const applyLayoutRef = (0, import_react13.useRef)(() => {
   });
-  const observingResizeRef = (0, import_react10.useRef)(false);
-  const [state, setState] = (0, import_react10.useState)({ mode: "following-end", awayFromEnd: false, missingAnchor: false, revealingAnchor: false });
+  const observingResizeRef = (0, import_react13.useRef)(false);
+  const [state, setState] = (0, import_react13.useState)({ mode: "following-end", awayFromEnd: false, missingAnchor: false, revealingAnchor: false });
   const key = options.viewportKey ? JSON.stringify([options.viewportKey.authority, options.viewportKey.identity, options.viewportKey.conversation, options.viewportKey.pane]) : options.conversationId;
   const authority = options.viewportKey?.authority;
-  const publish = (0, import_react10.useCallback)((missing) => {
+  const publish = (0, import_react13.useCallback)((missing) => {
     const viewport = optionsRef.current.viewportRef.current;
     const session = sessionRef.current;
     if (!viewport || !session) return;
@@ -27931,7 +28057,7 @@ function useConversationScrollController(options) {
     const cache = session.authority === void 0 ? localPositions.current : sharedPositions;
     cache.remember(session.key, { mode: session.mode, anchor: session.anchor, scrollTop: viewport.scrollTop, lastSubmittedRow: session.lastSubmittedRow, pendingSubmittedRow: session.pendingSubmittedRow });
   }, []);
-  const writeScroll = (0, import_react10.useCallback)((top) => {
+  const writeScroll = (0, import_react13.useCallback)((top) => {
     const viewport = optionsRef.current.viewportRef.current;
     const session = sessionRef.current;
     if (!viewport || !session) return;
@@ -27942,7 +28068,7 @@ function useConversationScrollController(options) {
     session.expectedScrollTop = viewport.scrollTop;
     session.lastScrollTop = session.expectedScrollTop;
   }, []);
-  const applyLayout = (0, import_react10.useCallback)(() => {
+  const applyLayout = (0, import_react13.useCallback)(() => {
     const viewport = optionsRef.current.viewportRef.current;
     const session = sessionRef.current;
     if (!viewport || !session) return;
@@ -28029,14 +28155,14 @@ function useConversationScrollController(options) {
     publish(missing);
   }, [publish, writeScroll]);
   applyLayoutRef.current = applyLayout;
-  const notifyLayoutChange = (0, import_react10.useCallback)(() => {
+  const notifyLayoutChange = (0, import_react13.useCallback)(() => {
     if (frameRef.current !== null) return;
     frameRef.current = window.requestAnimationFrame(() => {
       frameRef.current = null;
       applyLayout();
     });
   }, [applyLayout]);
-  const readHistory = (0, import_react10.useCallback)(() => {
+  const readHistory = (0, import_react13.useCallback)(() => {
     const viewport = optionsRef.current.viewportRef.current;
     const session = sessionRef.current;
     if (!viewport || !session) return;
@@ -28048,7 +28174,7 @@ function useConversationScrollController(options) {
     session.anchor = captureConversationAnchor(rowGeometry(viewport));
     publish();
   }, [publish]);
-  const jumpToLatest = (0, import_react10.useCallback)(() => {
+  const jumpToLatest = (0, import_react13.useCallback)(() => {
     const session = sessionRef.current;
     if (!session) return;
     session.mode = "following-end";
@@ -28058,7 +28184,7 @@ function useConversationScrollController(options) {
     session.missingAnchor = false;
     applyLayout();
   }, [applyLayout]);
-  const jumpToRow = (0, import_react10.useCallback)((rowId) => {
+  const jumpToRow = (0, import_react13.useCallback)((rowId) => {
     const viewport = optionsRef.current.viewportRef.current;
     const session = sessionRef.current;
     if (!viewport || !session) return false;
@@ -28071,7 +28197,7 @@ function useConversationScrollController(options) {
     applyLayout();
     return rowGeometryOf(viewport, [rowId]).length > 0;
   }, [applyLayout]);
-  (0, import_react10.useLayoutEffect)(() => {
+  (0, import_react13.useLayoutEffect)(() => {
     const previous3 = sessionRef.current;
     if (!previous3 || previous3.key !== key || previous3.authority !== authority) {
       if (previous3) cancelReveal(previous3);
@@ -28103,7 +28229,7 @@ function useConversationScrollController(options) {
     }
     if (sessionChanged || !observingResizeRef.current || !steadySession(session)) applyLayout();
   });
-  (0, import_react10.useLayoutEffect)(() => {
+  (0, import_react13.useLayoutEffect)(() => {
     const viewport = options.viewportRef.current;
     if (!viewport) return;
     const observedSession = sessionRef.current;
@@ -28218,19 +28344,19 @@ function useConversationScrollController(options) {
 }
 
 // ../packages/console-components/src/conversation/conversation-transcript.tsx
-var import_react20 = require("react");
+var import_react23 = require("react");
 
 // ../packages/console-components/src/conversation/conversation-message-group.tsx
-var import_react19 = require("react");
+var import_react22 = require("react");
 
 // ../packages/console-components/src/conversation/conversation-message-view.tsx
-var import_react18 = require("react");
+var import_react21 = require("react");
 
 // ../packages/console-components/src/conversation/conversation-rich-content.tsx
-var import_react14 = require("react");
+var import_react17 = require("react");
 
 // ../packages/console-components/src/conversation/conversation-markdown.tsx
-var import_react12 = require("react");
+var import_react15 = require("react");
 
 // node_modules/devlop/lib/default.js
 function ok() {
@@ -30117,7 +30243,7 @@ var urlAttributes = {
 
 // node_modules/react-markdown/lib/index.js
 var import_jsx_runtime28 = require("react/jsx-runtime");
-var import_react11 = require("react");
+var import_react14 = require("react");
 
 // node_modules/mdast-util-to-string/lib/index.js
 var emptyOptions2 = {};
@@ -41060,13 +41186,13 @@ function markdownComponents(urlPolicy, base) {
     }
   };
 }
-var MarkdownPart = (0, import_react12.memo)(function MarkdownPart2({ source, base, urlPolicy, clobberPrefix }) {
+var MarkdownPart = (0, import_react15.memo)(function MarkdownPart2({ source, base, urlPolicy, clobberPrefix }) {
   countParsedSource(source.length);
-  const components = (0, import_react12.useMemo)(() => markdownComponents(urlPolicy, base), [urlPolicy, base]);
+  const components = (0, import_react15.useMemo)(() => markdownComponents(urlPolicy, base), [urlPolicy, base]);
   return /* @__PURE__ */ (0, import_jsx_runtime29.jsx)(Markdown, { remarkPlugins: plugins, remarkRehypeOptions: { clobberPrefix }, components, urlTransform: (url2) => url2, children: source });
 });
-var ConversationMarkdown = (0, import_react12.memo)(function ConversationMarkdown2({ block, urlPolicy, className }) {
-  const streamed = (0, import_react12.useRef)(false);
+var ConversationMarkdown = (0, import_react15.memo)(function ConversationMarkdown2({ block, urlPolicy, className }) {
+  const streamed = (0, import_react15.useRef)(false);
   if (block.streaming) streamed.current = true;
   let content3;
   if (isJsonDocument(block.source)) {
@@ -41074,7 +41200,7 @@ var ConversationMarkdown = (0, import_react12.memo)(function ConversationMarkdow
   } else {
     const clobberPrefix = "markdown-".concat(encodeURIComponent(block.id), "-");
     if (streamed.current && (block.streaming || chunksMatchWhole(block.source))) {
-      content3 = splitMarkdownChunks(block.source).map((chunk, index2) => /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)(import_react12.Fragment, { children: [
+      content3 = splitMarkdownChunks(block.source).map((chunk, index2) => /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)(import_react15.Fragment, { children: [
         index2 > 0 ? "\n" : null,
         /* @__PURE__ */ (0, import_jsx_runtime29.jsx)(MarkdownPart, { source: chunk.source, base: chunk.start, urlPolicy, clobberPrefix })
       ] }, chunk.start));
@@ -41094,18 +41220,18 @@ var ConversationMarkdown = (0, import_react12.memo)(function ConversationMarkdow
 }, (previous3, next) => previous3.block.id === next.block.id && previous3.block.source === next.block.source && previous3.block.streaming === next.block.streaming && previous3.urlPolicy === next.urlPolicy && previous3.className === next.className);
 
 // ../packages/console-components/src/conversation/blob-image.tsx
-var import_react13 = require("react");
+var import_react16 = require("react");
 var import_jsx_runtime30 = require("react/jsx-runtime");
-var ConversationBlobReaderContext = (0, import_react13.createContext)(void 0);
+var ConversationBlobReaderContext = (0, import_react16.createContext)(void 0);
 function ConversationBlobReaderProvider({ reader, children }) {
   return /* @__PURE__ */ (0, import_jsx_runtime30.jsx)(ConversationBlobReaderContext.Provider, { value: reader, children });
 }
 function useConversationImageSource(image3) {
-  const reader = (0, import_react13.useContext)(ConversationBlobReaderContext);
+  const reader = (0, import_react16.useContext)(ConversationBlobReaderContext);
   const blobId = image3.blobId;
   const stored = Boolean(reader && blobId && image3.src.endsWith("/blobs/".concat(encodeURIComponent(blobId))));
-  const [loaded, setLoaded] = (0, import_react13.useState)(null);
-  (0, import_react13.useEffect)(() => {
+  const [loaded, setLoaded] = (0, import_react16.useState)(null);
+  (0, import_react16.useEffect)(() => {
     setLoaded(null);
     if (!stored || !reader || !blobId) return void 0;
     const controller = new AbortController();
@@ -41468,9 +41594,9 @@ function peerDetailRows(block) {
   ].filter(Boolean);
 }
 function CopyBtn({ text: text11, label = "Copy" }) {
-  const [outcome, setOutcome] = (0, import_react14.useState)("idle");
-  const resetTimer = (0, import_react14.useRef)(null);
-  (0, import_react14.useEffect)(
+  const [outcome, setOutcome] = (0, import_react17.useState)("idle");
+  const resetTimer = (0, import_react17.useRef)(null);
+  (0, import_react17.useEffect)(
     () => () => {
       if (resetTimer.current) clearTimeout(resetTimer.current);
     },
@@ -41805,7 +41931,7 @@ function ConversationRichContent({
   if (body.length === 0) {
     return null;
   }
-  const renderedBody = richStyle === "streaming" ? body.map((element3) => (0, import_react14.cloneElement)(element3, {
+  const renderedBody = richStyle === "streaming" ? body.map((element3) => (0, import_react17.cloneElement)(element3, {
     className: clsx_default(element3.props.className, "cc-rich-streaming")
   })) : body;
   return /* @__PURE__ */ (0, import_jsx_runtime32.jsx)(import_jsx_runtime32.Fragment, { children: renderedBody });
@@ -41839,14 +41965,14 @@ function DeliveredContextMessage({ message }) {
 var import_jsx_runtime34 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/conversation/flow-run-card.tsx
-var import_react15 = require("react");
+var import_react18 = require("react");
 var import_jsx_runtime35 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/conversation/summary-card.tsx
 var import_jsx_runtime36 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/conversation/council-card.tsx
-var import_react16 = require("react");
+var import_react19 = require("react");
 var import_jsx_runtime37 = require("react/jsx-runtime");
 var CARD_STATUS_LABEL = {
   completed: "Concluded",
@@ -41926,7 +42052,7 @@ function CouncilCard({
   entry,
   Icon: Icon2
 }) {
-  const [collapsed, setCollapsedState] = (0, import_react16.useState)(() => collapsedCouncilCards.has(entry.id));
+  const [collapsed, setCollapsedState] = (0, import_react19.useState)(() => collapsedCouncilCards.has(entry.id));
   const setCollapsed = (update) => {
     setCollapsedState((value) => {
       const next = update(value);
@@ -42059,7 +42185,7 @@ function CouncilCard({
 }
 
 // ../packages/console-components/src/conversation/work-graph-card.tsx
-var import_react17 = require("react");
+var import_react20 = require("react");
 var import_jsx_runtime38 = require("react/jsx-runtime");
 var CARD_STATUS_LABEL2 = {
   active: "Active",
@@ -42105,7 +42231,7 @@ function ItemRow({
   row,
   actions
 }) {
-  const [expanded, setExpandedState] = (0, import_react17.useState)(() => expandedWorkGraphItems.has(row.itemId));
+  const [expanded, setExpandedState] = (0, import_react20.useState)(() => expandedWorkGraphItems.has(row.itemId));
   const setExpanded = (update) => {
     setExpandedState((value) => {
       const next = update(value);
@@ -42299,7 +42425,7 @@ function WorkGraphCard({
   actions = null
 }) {
   const uiStateKey = entry.uiStateKey || entry.id;
-  const [collapsed, setCollapsedState] = (0, import_react17.useState)(() => collapsedWorkGraphCards.has(uiStateKey));
+  const [collapsed, setCollapsedState] = (0, import_react20.useState)(() => collapsedWorkGraphCards.has(uiStateKey));
   const setCollapsed = (update) => {
     setCollapsedState((value) => {
       const next = update(value);
@@ -42465,18 +42591,18 @@ var import_jsx_runtime43 = require("react/jsx-runtime");
 var import_jsx_runtime44 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/dock/console-dock.tsx
-var import_react22 = require("react");
+var import_react25 = require("react");
 var import_jsx_runtime45 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/dock/browser-dock-target-host.tsx
 var import_jsx_runtime46 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/pending/console-pending-stack.tsx
-var import_react23 = __toESM(require("react"));
+var import_react26 = __toESM(require("react"));
 var import_jsx_runtime47 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/dock/use-console-dock-controller.ts
-var import_react24 = require("react");
+var import_react27 = require("react");
 function useConsoleDockController({
   initialTarget = null,
   initialPresetId = "single",
@@ -42485,9 +42611,9 @@ function useConsoleDockController({
   resolvePanelView,
   resolveTabView
 }) {
-  const panelCounterRef = (0, import_react24.useRef)(1);
-  const splitCounterRef = (0, import_react24.useRef)(1);
-  const tabCounterRef = (0, import_react24.useRef)(1);
+  const panelCounterRef = (0, import_react27.useRef)(1);
+  const splitCounterRef = (0, import_react27.useRef)(1);
+  const tabCounterRef = (0, import_react27.useRef)(1);
   function nextPanelId() {
     return "panel-".concat(panelCounterRef.current++);
   }
@@ -42497,7 +42623,7 @@ function useConsoleDockController({
   function nextTabId() {
     return "tab-".concat(tabCounterRef.current++);
   }
-  const [state, setState] = (0, import_react24.useState)(() => createConsoleDockState({
+  const [state, setState] = (0, import_react27.useState)(() => createConsoleDockState({
     initialTarget,
     initialPresetId,
     createPanelState: (args) => {
@@ -42511,11 +42637,11 @@ function useConsoleDockController({
     createTabId: nextTabId,
     suggestTargets
   }));
-  const viewState = (0, import_react24.useMemo)(() => buildConsoleDockViewState(state, {
+  const viewState = (0, import_react27.useMemo)(() => buildConsoleDockViewState(state, {
     resolvePanelView,
     resolveTabView
   }), [resolvePanelView, resolveTabView, state]);
-  const focusedPanel = (0, import_react24.useMemo)(
+  const focusedPanel = (0, import_react27.useMemo)(
     () => state.panels.find((panel) => panel.id === state.focusedPanelId) || null,
     [state.focusedPanelId, state.panels]
   );
@@ -42557,11 +42683,11 @@ function useConsoleDockController({
 }
 
 // ../packages/console-components/src/sidebar/console-sidebar.tsx
-var import_react25 = require("react");
+var import_react28 = require("react");
 var import_jsx_runtime48 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/topology/connection-picker.tsx
-var import_react26 = __toESM(require("react"));
+var import_react29 = __toESM(require("react"));
 var import_jsx_runtime49 = require("react/jsx-runtime");
 var DEFAULT_VISIBLE_LIMIT = 100;
 function endpointSearchText(endpoint) {
@@ -42753,25 +42879,25 @@ function ConnectionPicker({
   title = "Connections",
   description
 }) {
-  const [uncontrolledSourceId, setUncontrolledSourceId] = import_react26.default.useState(defaultSourceId);
-  const [query, setQuery] = import_react26.default.useState("");
-  const deferredQuery = import_react26.default.useDeferredValue(query);
+  const [uncontrolledSourceId, setUncontrolledSourceId] = import_react29.default.useState(defaultSourceId);
+  const [query, setQuery] = import_react29.default.useState("");
+  const deferredQuery = import_react29.default.useDeferredValue(query);
   const sourceId = controlledSourceId === void 0 ? uncontrolledSourceId : controlledSourceId;
-  const endpointById = import_react26.default.useMemo(
+  const endpointById = import_react29.default.useMemo(
     () => new Map(endpoints.map((endpoint) => [endpoint.ref.id, endpoint])),
     [endpoints]
   );
   const source = sourceId ? endpointById.get(sourceId) || null : null;
-  const connectedEdgeKeys = import_react26.default.useMemo(
+  const connectedEdgeKeys = import_react29.default.useMemo(
     () => new Set(edges.map((edge) => topologyEdgeKey(edge))),
     [edges]
   );
-  const selectSource = import_react26.default.useCallback((nextSourceId) => {
+  const selectSource = import_react29.default.useCallback((nextSourceId) => {
     if (controlledSourceId === void 0) setUncontrolledSourceId(nextSourceId);
     onSourceChange?.(nextSourceId);
   }, [controlledSourceId, onSourceChange]);
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
-  const candidates = import_react26.default.useMemo(() => endpoints.filter((endpoint) => endpoint.ref.id !== source?.ref.id && (!normalizedQuery || endpointSearchText(endpoint).includes(normalizedQuery))), [endpoints, normalizedQuery, source?.ref.id]);
+  const candidates = import_react29.default.useMemo(() => endpoints.filter((endpoint) => endpoint.ref.id !== source?.ref.id && (!normalizedQuery || endpointSearchText(endpoint).includes(normalizedQuery))), [endpoints, normalizedQuery, source?.ref.id]);
   const cappedCandidates = candidates.slice(0, Math.max(1, visibleLimit));
   const hiddenCount = Math.max(0, candidates.length - cappedCandidates.length);
   const sections = /* @__PURE__ */ new Map();
@@ -42951,13 +43077,13 @@ function ConnectionPicker({
 }
 
 // ../packages/console-components/src/topology/topology-panel.tsx
-var import_react30 = __toESM(require("react"));
+var import_react33 = __toESM(require("react"));
 
 // ../packages/console-components/src/topology/role-tree.tsx
-var import_react28 = __toESM(require("react"));
+var import_react31 = __toESM(require("react"));
 
 // ../packages/console-components/src/topology/data.ts
-var import_react27 = __toESM(require("react"));
+var import_react30 = __toESM(require("react"));
 var PEER_TOOL_NAMES2 = /* @__PURE__ */ new Set(["send_request", "send_message", "send_response"]);
 function frameData(frame) {
   return frame.data && typeof frame.data === "object" ? frame.data : null;
@@ -43172,7 +43298,16 @@ function buildGraph(nodes, agents) {
     const agent = {
       id,
       ref: n2.ref ? { ...n2.ref, id } : { id },
-      label: (n2.label || registry2?.label || labels2.display_name || id).trim(),
+      // One name for the agent on every surface; the raw key stays in tooltips.
+      label: agentDisplayTitle({
+        label: (n2.label || registry2?.label || labels2.display_name || n2.ref?.identity || n2.identity || id).trim(),
+        identity: n2.ref?.identity || n2.identity || id,
+        member_id: registry2?.member_id,
+        agent_id: registry2?.agent_id,
+        labels: labels2,
+        role: n2.role || registry2?.role || labels2.role,
+        group
+      }),
       role: (n2.role || registry2?.role || labels2.role || "agent").trim(),
       state: (n2.state || registry2?.state || "").toLowerCase(),
       wiredTo: (n2.wired_to || []).map((s) => s.trim()).filter(Boolean),
@@ -43225,12 +43360,12 @@ function roleIndexFor(roles) {
 }
 function useTopologyActivity(frames, graph, options = {}) {
   const life = options.life ?? 1500;
-  const [now, setNow] = import_react27.default.useState(() => Date.now());
-  const activity = import_react27.default.useMemo(() => {
+  const [now, setNow] = import_react30.default.useState(() => Date.now());
+  const activity = import_react30.default.useMemo(() => {
     return deriveTopologyActivity(frames, graph, now, life);
   }, [frames, graph, life, now]);
   const hasTransientActivity = activity.pulses.length > 0 || Object.keys(activity.active).length > 0 || Object.keys(activity.calls).length > 0;
-  import_react27.default.useEffect(() => {
+  import_react30.default.useEffect(() => {
     if (!hasTransientActivity) return void 0;
     let heartbeat = null;
     const clearHeartbeat = () => {
@@ -43346,19 +43481,20 @@ function RoleTree({
   nodes,
   agents,
   activity,
-  onSelectAgent
+  onSelectAgent,
+  teamName: teamName2
 }) {
-  const graph = import_react28.default.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
-  const roleIndex = import_react28.default.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
+  const graph = import_react31.default.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
+  const roleIndex = import_react31.default.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
   const live = useTopologyActivity(activity, graph, { life: 1500 });
-  const grouped = import_react28.default.useMemo(() => {
+  const grouped = import_react31.default.useMemo(() => {
     var _a19;
     const g2 = {};
     for (const r2 of graph.roles) g2[r2] = [];
     for (const a of graph.agents) (g2[_a19 = a.role] || (g2[_a19] = [])).push(a);
     return g2;
   }, [graph]);
-  const [expanded, setExpanded] = import_react28.default.useState(() => {
+  const [expanded, setExpanded] = import_react31.default.useState(() => {
     const initial = { __root: true };
     for (const r2 of graph.roles) {
       const count2 = grouped[r2]?.length || 0;
@@ -43386,7 +43522,7 @@ function RoleTree({
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__dot", style: { background: "var(--ok)" } }),
-          /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", children: "mob" }),
+          /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", children: teamName2?.trim() || "Team" }),
           /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("span", { className: "topo-roletree__count", children: [
             graph.agents.length,
             " agents \xB7 ",
@@ -43422,7 +43558,7 @@ function RoleTree({
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__dot", style: { background: colour } }),
-              /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", children: role }),
+              /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", title: role, children: humanizeEnum(role) || role }),
               /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__count", children: list4.length }),
               sectionBusy && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__busy", "aria-label": "".concat(sectionBusyCount, " working"), children: /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__busy-count", children: sectionBusyCount }) })
             ]
@@ -43472,7 +43608,7 @@ function RoleTree({
 }
 
 // ../packages/console-components/src/topology/dense-graph-map.tsx
-var import_react29 = __toESM(require("react"));
+var import_react32 = __toESM(require("react"));
 var import_jsx_runtime51 = require("react/jsx-runtime");
 var GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 var EMPTY_ACTIVITY = { active: {}, busy: {}, calls: {}, pulses: [] };
@@ -43912,30 +44048,30 @@ function DenseGraphMap({
   resolveMutation,
   onRequestMutation
 }) {
-  const wrapRef = import_react29.default.useRef(null);
-  const canvasRef = import_react29.default.useRef(null);
-  const staticRef = import_react29.default.useRef(null);
-  const dragRef = import_react29.default.useRef(null);
-  const [drag, setDrag] = import_react29.default.useState(null);
-  const [size, setSize] = import_react29.default.useState({ width: 900, height: 420 });
-  const [viewport, setViewport] = import_react29.default.useState({ scale: 1, x: 0, y: 0 });
-  const viewportRef = import_react29.default.useRef(viewport);
-  const [hoverId, setHoverId] = import_react29.default.useState(null);
+  const wrapRef = import_react32.default.useRef(null);
+  const canvasRef = import_react32.default.useRef(null);
+  const staticRef = import_react32.default.useRef(null);
+  const dragRef = import_react32.default.useRef(null);
+  const [drag, setDrag] = import_react32.default.useState(null);
+  const [size, setSize] = import_react32.default.useState({ width: 900, height: 420 });
+  const [viewport, setViewport] = import_react32.default.useState({ scale: 1, x: 0, y: 0 });
+  const viewportRef = import_react32.default.useRef(viewport);
+  const [hoverId, setHoverId] = import_react32.default.useState(null);
   const roleFingerprint = JSON.stringify(graph.roles);
-  const roleIndex = import_react29.default.useMemo(
+  const roleIndex = import_react32.default.useMemo(
     () => roleIndexFor(graph.roles),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [roleFingerprint]
   );
-  const edgeFingerprint = import_react29.default.useMemo(
+  const edgeFingerprint = import_react32.default.useMemo(
     () => denseGraphEdgeFingerprint(graph.edges),
     [graph.edges]
   );
-  const layoutFingerprint = import_react29.default.useMemo(
+  const layoutFingerprint = import_react32.default.useMemo(
     () => denseGraphLayoutFingerprint(graph),
     [graph.agents, graph.groups]
   );
-  const nodeRoleFingerprint = import_react29.default.useMemo(
+  const nodeRoleFingerprint = import_react32.default.useMemo(
     () => JSON.stringify(
       graph.agents.map((agent) => [agent.id, agent.role]).sort((left, right) => {
         const leftKey = JSON.stringify(left);
@@ -43953,13 +44089,13 @@ function DenseGraphMap({
     })
   );
   const pendingFingerprint = JSON.stringify(Array.from(pendingEdgeKeys).sort());
-  const pendingNodeIds = import_react29.default.useMemo(
+  const pendingNodeIds = import_react32.default.useMemo(
     () => denseGraphPendingNodeIds(graph.agents.map((agent) => agent.id), pendingEdgeKeys),
     // Equivalent host-owned pending sets should not restart graph gestures.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [layoutFingerprint, pendingFingerprint]
   );
-  const drawFingerprint = import_react29.default.useMemo(
+  const drawFingerprint = import_react32.default.useMemo(
     () => JSON.stringify([
       layoutFingerprint,
       nodeRoleFingerprint,
@@ -43968,7 +44104,7 @@ function DenseGraphMap({
     ]),
     [edgeFingerprint, edgeMode, layoutFingerprint, nodeRoleFingerprint]
   );
-  const layout = import_react29.default.useMemo(
+  const layout = import_react32.default.useMemo(
     () => buildLayout(graph, size.width, size.height),
     // `graph` is rebuilt every console poll. The dense layout
     // should only rerun when graph shape changes, not when an equivalent
@@ -43976,7 +44112,7 @@ function DenseGraphMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [layoutFingerprint, size.width, size.height]
   );
-  const edgeById = import_react29.default.useMemo(() => {
+  const edgeById = import_react32.default.useMemo(() => {
     const result = /* @__PURE__ */ new Map();
     for (const agent of graph.agents) result.set(agent.id, []);
     for (const edge of graph.edges) {
@@ -43985,12 +44121,12 @@ function DenseGraphMap({
     }
     return result;
   }, [edgeFingerprint, layoutFingerprint]);
-  const edgeByKey = import_react29.default.useMemo(
+  const edgeByKey = import_react32.default.useMemo(
     () => new Map(graph.edges.map((edge) => [edgeKey(edge.from, edge.to), edge])),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [edgeFingerprint]
   );
-  const edgeCurves = import_react29.default.useMemo(
+  const edgeCurves = import_react32.default.useMemo(
     () => graph.edges.flatMap((edge) => layout.byId.has(edge.from) && layout.byId.has(edge.to) ? [{
       key: edgeKey(edge.from, edge.to),
       pointAt: (t) => edgePointAt(graph, layout, edge, t)
@@ -43998,19 +44134,19 @@ function DenseGraphMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [edgeFingerprint, layout]
   );
-  const setCurrentDrag = import_react29.default.useCallback((next) => {
+  const setCurrentDrag = import_react32.default.useCallback((next) => {
     dragRef.current = next;
     setDrag(next);
   }, []);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     viewportRef.current = viewport;
   }, [viewport]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     setCurrentDrag(null);
     setHoverId(null);
     setViewport({ scale: 1, x: 0, y: 0 });
   }, [layoutFingerprint, setCurrentDrag, size.width, size.height]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     const current = dragRef.current;
     if (!current) return;
     const becamePending = current.kind === "node" ? pendingNodeIds.has(current.sourceId) || Boolean(current.targetId && pendingNodeIds.has(current.targetId)) : current.kind === "edge" && (pendingEdgeKeys.has(current.key) || pendingNodeIds.has(current.edge.from) || pendingNodeIds.has(current.edge.to));
@@ -44018,7 +44154,7 @@ function DenseGraphMap({
     setCurrentDrag(null);
     setHoverId(null);
   }, [pendingFingerprint, pendingNodeIds, setCurrentDrag]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
@@ -44032,7 +44168,7 @@ function DenseGraphMap({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const drawStatic = import_react29.default.useCallback((hiddenEdgeKey = null) => {
+  const drawStatic = import_react32.default.useCallback((hiddenEdgeKey = null) => {
     const host = wrapRef.current;
     if (!host) return null;
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -44120,10 +44256,10 @@ function DenseGraphMap({
     ctx.globalAlpha = 1;
     return off;
   }, [drawFingerprint, layout, roleIndex]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     staticRef.current = drawStatic(null);
   }, [drawStatic]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const onWheel = (event) => {
@@ -44146,7 +44282,7 @@ function DenseGraphMap({
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     if (!drag) return;
     const onKeyDown = (event) => {
       if (event.key !== "Escape") return;
@@ -44156,7 +44292,7 @@ function DenseGraphMap({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [drag, setCurrentDrag]);
-  const drawFrame = import_react29.default.useCallback(() => {
+  const drawFrame = import_react32.default.useCallback(() => {
     const canvas = canvasRef.current;
     const host = wrapRef.current;
     const ctx = canvas?.getContext("2d");
@@ -44372,10 +44508,10 @@ function DenseGraphMap({
     responsePhaseFingerprint,
     viewport
   ]);
-  import_react29.default.useEffect(() => {
+  import_react32.default.useEffect(() => {
     drawFrame();
   }, [drawFrame]);
-  const nodeIdAtPoint = import_react29.default.useCallback((clientX, clientY) => {
+  const nodeIdAtPoint = import_react32.default.useCallback((clientX, clientY) => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const current = viewportRef.current;
@@ -44385,7 +44521,7 @@ function DenseGraphMap({
       current.scale
     );
   }, [layout.nodes]);
-  const edgeKeyAtPoint = import_react29.default.useCallback((clientX, clientY) => {
+  const edgeKeyAtPoint = import_react32.default.useCallback((clientX, clientY) => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const current = viewportRef.current;
@@ -44395,7 +44531,7 @@ function DenseGraphMap({
       current.scale
     );
   }, [edgeCurves]);
-  const pointerGraphPoint = import_react29.default.useCallback((clientX, clientY) => {
+  const pointerGraphPoint = import_react32.default.useCallback((clientX, clientY) => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     return screenToGraph(clientX, clientY, canvas, viewportRef.current);
@@ -44654,10 +44790,11 @@ function TopologyPanel({
   onRetryOperation,
   bulkActions,
   onRequestBulkAction,
-  onSelectAgent
+  onSelectAgent,
+  teamName: teamName2
 }) {
   const hasConnectionView = Boolean(management && management.policy.mode !== "disabled");
-  const [uncontrolledView, setUncontrolledView] = import_react30.default.useState(() => {
+  const [uncontrolledView, setUncontrolledView] = import_react33.default.useState(() => {
     if (defaultView && (defaultView !== "connections" || hasConnectionView)) return defaultView;
     try {
       const stored = localStorage.getItem(VIEW_STORAGE);
@@ -44683,7 +44820,7 @@ function TopologyPanel({
     }
     onViewChange?.(next);
   };
-  const [edgeMode, setEdgeMode] = import_react30.default.useState(() => {
+  const [edgeMode, setEdgeMode] = import_react33.default.useState(() => {
     try {
       const stored = localStorage.getItem(EDGE_STORAGE);
       if (stored === "all" || stored === "focus") return stored;
@@ -44698,8 +44835,8 @@ function TopologyPanel({
     } catch {
     }
   };
-  const graph = import_react30.default.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
-  const endpoints = import_react30.default.useMemo(() => graph.agents.map((agent) => ({
+  const graph = import_react33.default.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
+  const endpoints = import_react33.default.useMemo(() => graph.agents.map((agent) => ({
     ref: agent.ref,
     presentation: {
       label: agent.presentation?.label || agent.label,
@@ -44722,11 +44859,11 @@ function TopologyPanel({
   const live = useTopologyActivity(activity, graph, { life: 8e3 });
   const liveCount = Object.keys(live.active).length;
   const busyCount = Object.values(live.busy).filter(Boolean).length;
-  const pendingEdgeKeys = import_react30.default.useMemo(() => new Set(
+  const pendingEdgeKeys = import_react33.default.useMemo(() => new Set(
     (management?.operations || []).filter((operation2) => operation2.edge && topologyOperationIsPending(operation2)).map((operation2) => topologyEdgeKey(operation2.edge))
   ), [management?.operations]);
-  const resolveMutation = import_react30.default.useCallback((action, edge, origin) => management ? topologyMutationIntent(management, action, edge, origin) : null, [management]);
-  const canRequestGraphMutation = import_react30.default.useMemo(() => {
+  const resolveMutation = import_react33.default.useCallback((action, edge, origin) => management ? topologyMutationIntent(management, action, edge, origin) : null, [management]);
+  const canRequestGraphMutation = import_react33.default.useMemo(() => {
     if (!management || management.policy.mode !== "editable" || !onRequestMutation) return false;
     const connectedEdgeKeys = new Set(graph.edges.map((edge) => topologyEdgeKey(edge)));
     return management.affordances.some((affordance) => {
@@ -44809,7 +44946,8 @@ function TopologyPanel({
               nodes,
               agents,
               activity,
-              onSelectAgent
+              onSelectAgent,
+              teamName: teamName2
             }
           ) : null,
           view === "connections" && management ? /* @__PURE__ */ (0, import_jsx_runtime52.jsx)(
@@ -44840,7 +44978,7 @@ function TopologyPanel({
 var import_jsx_runtime53 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/composer/pending-stack.tsx
-var import_react31 = __toESM(require("react"));
+var import_react34 = __toESM(require("react"));
 var import_jsx_runtime54 = require("react/jsx-runtime");
 
 // ../packages/console-components/src/conversation/transport-status.tsx
@@ -44877,7 +45015,7 @@ function ConsoleTransportStatus({ state, onRetry }) {
 }
 
 // ../packages/console-components/src/conversation/context-chips.tsx
-var import_react32 = require("react");
+var import_react35 = require("react");
 var import_jsx_runtime56 = require("react/jsx-runtime");
 function QuoteActionIcon({ action }) {
   return /* @__PURE__ */ (0, import_jsx_runtime56.jsx)("svg", { viewBox: "0 0 20 20", width: "14", height: "14", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: action === "edit" ? /* @__PURE__ */ (0, import_jsx_runtime56.jsxs)(import_jsx_runtime56.Fragment, { children: [
@@ -44886,21 +45024,21 @@ function QuoteActionIcon({ action }) {
   ] }) : action === "remove" ? /* @__PURE__ */ (0, import_jsx_runtime56.jsx)("path", { d: "m5 5 10 10M15 5 5 15" }) : action === "up" ? /* @__PURE__ */ (0, import_jsx_runtime56.jsx)("path", { d: "M10 16V4m-5 5 5-5 5 5" }) : /* @__PURE__ */ (0, import_jsx_runtime56.jsx)("path", { d: "M10 4v12m-5-5 5 5 5-5" }) });
 }
 function QuoteContextChip({ record: record10, index: index2, records, onEdit, onRemove, onReorder }) {
-  const [editing, setEditing] = (0, import_react32.useState)(false);
-  const [draft, setDraft] = (0, import_react32.useState)(record10.quote);
-  const [saving, setSaving] = (0, import_react32.useState)(false);
-  const [error48, setError] = (0, import_react32.useState)("");
-  const editorRef = (0, import_react32.useRef)(null);
-  const editButtonRef = (0, import_react32.useRef)(null);
-  const restoreFocusRef = (0, import_react32.useRef)(false);
-  const errorId = (0, import_react32.useId)();
-  (0, import_react32.useEffect)(() => {
+  const [editing, setEditing] = (0, import_react35.useState)(false);
+  const [draft, setDraft] = (0, import_react35.useState)(record10.quote);
+  const [saving, setSaving] = (0, import_react35.useState)(false);
+  const [error48, setError] = (0, import_react35.useState)("");
+  const editorRef = (0, import_react35.useRef)(null);
+  const editButtonRef = (0, import_react35.useRef)(null);
+  const restoreFocusRef = (0, import_react35.useRef)(false);
+  const errorId = (0, import_react35.useId)();
+  (0, import_react35.useEffect)(() => {
     if (!onEdit) {
       setEditing(false);
       setError("");
     }
   }, [onEdit]);
-  (0, import_react32.useEffect)(() => {
+  (0, import_react35.useEffect)(() => {
     if (editing) editorRef.current?.focus();
     else if (restoreFocusRef.current) {
       restoreFocusRef.current = false;
@@ -45164,12 +45302,12 @@ function createNativeMcpAppsHost(options) {
 }
 
 // src/lib/custom-panels.ts
-var import_react33 = __toESM(require("react"));
+var import_react36 = __toESM(require("react"));
 var EMPTY_PANELS = [];
 function useConsolePanels(supplied = EMPTY_PANELS, modules = [], baseUrl = "", load = loadModule) {
   const moduleKey = JSON.stringify(modules);
-  const [loaded, setLoaded] = import_react33.default.useState(null);
-  const initial = import_react33.default.useMemo(() => {
+  const [loaded, setLoaded] = import_react36.default.useState(null);
+  const initial = import_react36.default.useMemo(() => {
     try {
       validateConsolePanels(supplied);
       return { panels: supplied, errors: [] };
@@ -45177,7 +45315,7 @@ function useConsolePanels(supplied = EMPTY_PANELS, modules = [], baseUrl = "", l
       return { panels: EMPTY_PANELS, errors: [String(error48)] };
     }
   }, [supplied]);
-  import_react33.default.useEffect(() => {
+  import_react36.default.useEffect(() => {
     let active = true;
     const paths = JSON.parse(moduleKey);
     void Promise.all(paths.map(async (path2) => {
@@ -45523,28 +45661,6 @@ function describeFailure(data, fallback = "error") {
   const { message, reasonType } = summarizeFailureData(data);
   if (message && reasonType && !message.includes(reasonType)) return "".concat(message, " (").concat(reasonType, ")");
   return message || reasonType || fallback;
-}
-
-// src/lib/agent-title.ts
-function agentKindLabel(agent) {
-  const kind = (agent.role || agent.group || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
-  return kind ? kind[0].toUpperCase() + kind.slice(1) : "";
-}
-function isOpaqueIdPart(part) {
-  return part.length >= 8 && /\d/.test(part) && !/^\p{L}+\d{1,4}$/u.test(part);
-}
-function agentDisplayTitle(agent) {
-  const label = (agent.label || "").trim();
-  const ids = [agent.identity, agent.member_id, agent.agent_id, agent.labels?.agent_identity].map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean);
-  if (label && !ids.includes(label)) return label;
-  const id = label || ids[0] || "";
-  const parts = id.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  if (parts.length === 0) return id || "Agent";
-  if (parts.some(isOpaqueIdPart)) {
-    return "".concat(agentKindLabel(agent) || "Agent", " ").concat(parts.join("").slice(-6).toLowerCase());
-  }
-  const words2 = parts.join(" ");
-  return words2[0].toUpperCase() + words2.slice(1);
 }
 
 // src/lib/id.ts
@@ -49644,7 +49760,7 @@ function framesAfterIdleWatermark(frames, watermark) {
 }
 
 // src/ConsoleApp.tsx
-var import_react54 = __toESM(require("react"));
+var import_react57 = __toESM(require("react"));
 
 // src/lib/panel-runtime.ts
 function selectionStorageKey(scope) {
@@ -51498,7 +51614,15 @@ function normalizeConsoleTopologyQuery(value, options = {}) {
     return {
       identity,
       ref: { id: identity, authority, identity: runtimeIdentity },
-      label: fallback?.label || agent?.label || runtimeIdentity,
+      label: agentDisplayTitle({
+        label: fallback?.label || agent?.label || runtimeIdentity,
+        identity: runtimeIdentity,
+        member_id: agent?.member_id,
+        agent_id: agent?.agent_id,
+        labels: agent?.labels,
+        role: node2.role || fallback?.role || agent?.role,
+        group: fallback?.group || agent?.group
+      }),
       role: node2.role || fallback?.role || agent?.role,
       state: fallback?.state || agent?.state,
       wired_to: Array.from(actualPeers.get(identity) || []).sort(),
@@ -52261,6 +52385,18 @@ function describeSchedulePhase(phase2) {
   if (phase2 === "paused") return "Paused";
   return phase2;
 }
+function describeScheduleSender(sender, agentName = () => void 0) {
+  const raw = typeof sender === "string" ? sender.trim() : "";
+  if (!raw) return "this console";
+  const named = agentName(raw)?.trim();
+  if (named) return named;
+  const consoleIdentity = /^console:(.+)$/i.exec(raw);
+  if (consoleIdentity) {
+    const words2 = consoleIdentity[1].replace(/[_\-.:]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    if (words2) return "the ".concat(words2, " console identity");
+  }
+  return raw;
+}
 var UNIT_SECONDS = {
   minutes: 60,
   hours: 3600,
@@ -52705,7 +52841,7 @@ function resetIdentityLogCore(log) {
 }
 
 // src/panels/TimelinePanel.tsx
-var import_react34 = __toESM(require("react"));
+var import_react37 = __toESM(require("react"));
 var import_jsx_runtime58 = require("react/jsx-runtime");
 var INTERNAL_TIMELINE_EVENTS = /* @__PURE__ */ new Set([
   "keep-alive",
@@ -52866,7 +53002,7 @@ function startOfToday() {
 }
 function TimelinePanel({ frames }) {
   const directory = useAgentDirectory();
-  const entries = import_react34.default.useMemo(() => {
+  const entries = import_react37.default.useMemo(() => {
     const todayMs = startOfToday();
     return frames.filter((frame) => !INTERNAL_TIMELINE_EVENTS.has(frame.event)).filter((frame) => (frame.timestampMs || 0) >= todayMs).slice(0, MAX_ENTRIES).map((frame, index2) => ({
       key: frame.id || "".concat(frame.event, ":").concat(frame.timestampMs, ":").concat(index2),
@@ -52875,7 +53011,7 @@ function TimelinePanel({ frames }) {
     }));
   }, [frames]);
   const now = Date.now();
-  const renderSegment = (segment, index2) => typeof segment === "string" ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(import_react34.default.Fragment, { children: segment }, index2) : segment.agent === null ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { className: "today__who", children: "System" }, index2) : /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { className: "today__who", title: segment.agent, children: agentDisplayName(segment.agent, directory) || segment.agent }, index2);
+  const renderSegment = (segment, index2) => typeof segment === "string" ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(import_react37.default.Fragment, { children: segment }, index2) : segment.agent === null ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { className: "today__who", children: "System" }, index2) : /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { className: "today__who", title: segment.agent, children: agentDisplayName(segment.agent, directory) || segment.agent }, index2);
   return /* @__PURE__ */ (0, import_jsx_runtime58.jsxs)(PanelShell, { className: "today", testId: "timeline-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(PanelHeader, { title: "Today", subtitle: joinMeta(plural(entries.length, "event"), formatShortDate(now, now)) }),
     /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(PanelBody, { children: entries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(
@@ -52924,7 +53060,7 @@ function OperatorPanel({ buttonId, buttons }) {
 }
 
 // src/panels/GatingInboxPanel.tsx
-var import_react35 = __toESM(require("react"));
+var import_react38 = __toESM(require("react"));
 var import_jsx_runtime60 = require("react/jsx-runtime");
 function recordOf4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -52965,6 +53101,7 @@ var OUTCOME_WORDS = {
 function outcomeWords(outcome) {
   return outcome ? OUTCOME_WORDS[outcome] || humanizeEnum(outcome) : "";
 }
+var DECISION_VERDICTS = /* @__PURE__ */ new Set(["approve", "reject", "escalate"]);
 function recordVerdict(record10) {
   if (record10.decision === "approve") return { label: "Approved", tone: "ok" };
   if (record10.decision === "reject") return { label: "Rejected", tone: "crit" };
@@ -52987,16 +53124,23 @@ function recordVerdict(record10) {
   if (record10.outcome === "allowed" || record10.outcome === "allowed_with_audit") return { label: "Allowed", tone: "ok" };
   return record10.eventType ? { label: humanizeEnum(record10.eventType), tone: "neutral" } : null;
 }
-function tierLabel(record10) {
-  return record10.riskTier === "unknown" ? "Unknown".concat(record10.recordedRiskTier ? " (".concat(record10.recordedRiskTier, ")") : "") : record10.riskTier.toUpperCase();
+function riskWords(record10) {
+  if (record10.riskTier === "unknown") {
+    return "Unknown".concat(record10.recordedRiskTier ? " (".concat(record10.recordedRiskTier, ")") : "");
+  }
+  const word = riskTierWord(record10.riskTier);
+  const code4 = record10.riskTier.toUpperCase();
+  return word ? "".concat(word, " (").concat(code4, ")") : code4;
 }
 function recordFacts(record10, actor, directory, withDecision) {
   const facts = [
-    "Tier: ".concat(tierLabel(record10)),
+    "Risk: ".concat(riskWords(record10)),
     "Actor: ".concat(actor ? agentDisplayName(actor, directory) : "Not recorded")
   ];
   if (withDecision) {
-    facts.push("Decision: ".concat(record10.decision ? humanizeEnum(record10.decision) : "Not recorded"));
+    if (!record10.decision || !DECISION_VERDICTS.has(record10.decision)) {
+      facts.push("Decision: ".concat(record10.decision ? humanizeEnum(record10.decision) : "Not recorded"));
+    }
     if (record10.approverId) facts.push("Approver: ".concat(agentDisplayName(record10.approverId, directory)));
     facts.push("Outcome: ".concat(outcomeWords(record10.outcome) || "Not recorded"));
   }
@@ -53074,23 +53218,25 @@ function GatingInboxPanel({
   onRefresh,
   onRefreshAudit,
   auditUpdatedAtMs,
+  auditError,
   selectedPendingId
 }) {
-  const [tab2, setTab] = import_react35.default.useState("pending");
-  const [selectedId, setSelectedId] = import_react35.default.useState(null);
-  const [expandedId, setExpandedId] = import_react35.default.useState(null);
-  const listRef = import_react35.default.useRef(null);
+  const [tab2, setTab] = import_react38.default.useState("pending");
+  const tabIds = import_react38.default.useId();
+  const [selectedId, setSelectedId] = import_react38.default.useState(null);
+  const [expandedId, setExpandedId] = import_react38.default.useState(null);
+  const listRef = import_react38.default.useRef(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
   const pendingKnown = !resource || resource.status === "ready";
   const pendingCount = pendingRequests ? pendingRequests.length : pending.length;
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
-  import_react35.default.useEffect(() => {
+  import_react38.default.useEffect(() => {
     if (selectedPendingId) {
       setSelectedId(selectedPendingId);
       setTab("pending");
     }
   }, [selectedPendingId]);
-  import_react35.default.useEffect(() => {
+  import_react38.default.useEffect(() => {
     if (tab2 !== "pending" || !selectedPendingId || !selectedRequestAvailable) return;
     const selected = Array.from(listRef.current?.querySelectorAll("[data-approval-id]") || []).find((element3) => element3.dataset.approvalId === selectedPendingId);
     selected?.scrollIntoView?.({ block: "nearest" });
@@ -53185,6 +53331,7 @@ function GatingInboxPanel({
   }
   const refreshShown = tab2 === "pending" ? onRefresh : tab2 === "policies" ? void 0 : onRefreshAudit;
   const updatedShown = tab2 === "pending" ? resource?.updatedAtMs : tab2 === "policies" ? void 0 : auditUpdatedAtMs ?? void 0;
+  const errorShown = (tab2 === "auto" || tab2 === "audit") && auditError ? "Couldn't refresh the approval records (".concat(auditError, "). Showing the ones loaded before.") : null;
   return /* @__PURE__ */ (0, import_jsx_runtime60.jsxs)(PanelShell, { className: "gating-inbox", testId: "gating-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(
       PanelHeader,
@@ -53200,6 +53347,7 @@ function GatingInboxPanel({
       PanelTabs,
       {
         ariaLabel: "Approval views",
+        idBase: tabIds,
         active: tab2,
         onSelect: setTab,
         tabs: [
@@ -53210,13 +53358,13 @@ function GatingInboxPanel({
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(StatusRow, { updatedAt: updatedShown }),
-    /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(PanelBody, { className: "gating-inbox__body", children: /* @__PURE__ */ (0, import_jsx_runtime60.jsx)("div", { className: "gating-inbox__content", ref: listRef, children: content3 }) })
+    /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(StatusRow, { updatedAt: updatedShown, error: errorShown, errorTestId: "gating-audit-error" }),
+    /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(PanelBody, { className: "gating-inbox__body", children: /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(PanelTabPanel, { className: "gating-inbox__content", ref: listRef, idBase: tabIds, tab: tab2, children: content3 }) })
   ] });
 }
 
 // src/panels/AccessPanel.tsx
-var import_react36 = __toESM(require("react"));
+var import_react39 = __toESM(require("react"));
 
 // src/lib/access-actions.ts
 var ACCESS_ACTION_WORDS = {
@@ -53248,8 +53396,8 @@ var ACCESS_ACTION_WORDS = {
   "topology.reconnect": "Reconnect agents",
   "topology.bulk": "Change many connections at once",
   "topology.cross_authority": "Connect agents across teams",
-  "mobpack.author": "Author mobpacks",
-  "mobpack.deploy": "Deploy mobpacks",
+  "mobpack.author": "Author team packages",
+  "mobpack.deploy": "Deploy team packages",
   "access.admin": "Administer console access",
   "extension.read": "Read extension state",
   "extension.edit": "Edit extension state",
@@ -53283,6 +53431,14 @@ function parseLabelSelectorInput(raw) {
 }
 function formatLabelSelectorInput(labels2) {
   return Object.entries(labels2 || {}).map(([key, value]) => "".concat(key, "=").concat(value)).join(", ");
+}
+function ruleTitle(rule) {
+  return rule.description?.trim() || "Unnamed rule";
+}
+function ruleDeleteConfirmText(rule) {
+  const description = rule.description?.trim();
+  const which = description ? 'the rule "'.concat(description, '" (ID ').concat(rule.id, ")") : "this unnamed rule (ID ".concat(rule.id, ")");
+  return "Delete ".concat(which, "? Access it grants (or denies) stops immediately.");
 }
 function emptyRuleDraft() {
   return {
@@ -53348,7 +53504,7 @@ function TextField({
   inputRef,
   wide
 }) {
-  const id = import_react36.default.useId();
+  const id = import_react39.default.useId();
   const hintId = "".concat(id, "-hint");
   return /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: cx("cc-field", "access-panel__field", wide && "access-panel__field--wide"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("label", { htmlFor: id, className: "cc-field__label", children: label }),
@@ -53391,7 +53547,7 @@ function RuleCard({
   const directory = useAgentDirectory();
   const deny = rule.effect === "deny";
   const description = rule.description?.trim() || "";
-  const title = description || rule.id;
+  const title = ruleTitle(rule);
   const groups = rule.groups ?? [];
   const subjects = rule.subjects ?? [];
   const agents = rule.agents ?? [];
@@ -53409,10 +53565,10 @@ function RuleCard({
   ] }) : "All agents";
   return /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__rule", "data-effect": deny ? "deny" : "allow", "data-testid": "access-rule:".concat(rule.id), children: [
     /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__rule-head", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("h3", { className: "access-panel__rule-title", title, children: title }),
+      /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("h3", { className: "access-panel__rule-title", title: description || "Rule ".concat(rule.id), children: title }),
       /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(Chip, { tone: deny ? "crit" : "ok", children: deny ? "Deny" : "Allow" })
     ] }),
-    description ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(TechnicalId, { value: rule.id, label: "Rule ID", copy: false, className: "access-panel__rule-id" }) : null,
+    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(TechnicalId, { value: rule.id, label: "Rule ID", copy: false, className: "access-panel__rule-id" }),
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
       KeyValueList,
       {
@@ -53451,35 +53607,36 @@ function AccessPanel({
   onDeleteGroup,
   onPreview
 }) {
-  const [tab2, setTab] = import_react36.default.useState("overview");
-  const [ruleDraft, setRuleDraft] = import_react36.default.useState(null);
-  const [editingRuleId, setEditingRuleId] = import_react36.default.useState(null);
-  const [adminsDraft, setAdminsDraft] = import_react36.default.useState(null);
-  const [groupNameDraft, setGroupNameDraft] = import_react36.default.useState("");
-  const [groupMembersDraft, setGroupMembersDraft] = import_react36.default.useState("");
-  const [editingGroup, setEditingGroup] = import_react36.default.useState(null);
-  const [previewSubject, setPreviewSubject] = import_react36.default.useState("");
-  const [previewAction, setPreviewAction] = import_react36.default.useState("agent.view");
-  const [previewIdentity, setPreviewIdentity] = import_react36.default.useState("");
-  const [previewFeedback, setPreviewFeedback] = import_react36.default.useState(null);
-  const previewSubjectInput = import_react36.default.useRef(null);
-  const inspectFocusPending = import_react36.default.useRef(false);
-  const actionsLabelId = import_react36.default.useId();
+  const [tab2, setTab] = import_react39.default.useState("overview");
+  const tabIds = import_react39.default.useId();
+  const [ruleDraft, setRuleDraft] = import_react39.default.useState(null);
+  const [editingRuleId, setEditingRuleId] = import_react39.default.useState(null);
+  const [adminsDraft, setAdminsDraft] = import_react39.default.useState(null);
+  const [groupNameDraft, setGroupNameDraft] = import_react39.default.useState("");
+  const [groupMembersDraft, setGroupMembersDraft] = import_react39.default.useState("");
+  const [editingGroup, setEditingGroup] = import_react39.default.useState(null);
+  const [previewSubject, setPreviewSubject] = import_react39.default.useState("");
+  const [previewAction, setPreviewAction] = import_react39.default.useState("agent.view");
+  const [previewIdentity, setPreviewIdentity] = import_react39.default.useState("");
+  const [previewFeedback, setPreviewFeedback] = import_react39.default.useState(null);
+  const previewSubjectInput = import_react39.default.useRef(null);
+  const inspectFocusPending = import_react39.default.useRef(false);
+  const actionsLabelId = import_react39.default.useId();
   const actions = status?.actions ?? [];
-  const [saving, setSaving] = import_react36.default.useState(false);
-  const [saveFailure, setSaveFailure] = import_react36.default.useState(null);
-  const [adminsBase, setAdminsBase] = import_react36.default.useState(null);
-  const [ruleBase, setRuleBase] = import_react36.default.useState(null);
-  const [groupBase, setGroupBase] = import_react36.default.useState(null);
-  const [previewPending, setPreviewPending] = import_react36.default.useState(false);
-  const previewVersion = import_react36.default.useRef(0);
+  const [saving, setSaving] = import_react39.default.useState(false);
+  const [saveFailure, setSaveFailure] = import_react39.default.useState(null);
+  const [adminsBase, setAdminsBase] = import_react39.default.useState(null);
+  const [ruleBase, setRuleBase] = import_react39.default.useState(null);
+  const [groupBase, setGroupBase] = import_react39.default.useState(null);
+  const [previewPending, setPreviewPending] = import_react39.default.useState(false);
+  const previewVersion = import_react39.default.useRef(0);
   const mayView = status?.available === true && status.can_administer === true;
   const current = mayView && !loading && !error48 && Boolean(config2);
   const actionCatalogKey = JSON.stringify(actions);
   const scope = JSON.stringify([status?.subject, status?.available, status?.can_administer]);
-  const mutationScope = import_react36.default.useRef(scope);
+  const mutationScope = import_react39.default.useRef(scope);
   mutationScope.current = scope;
-  const [editScope, setEditScope] = import_react36.default.useState(scope);
+  const [editScope, setEditScope] = import_react39.default.useState(scope);
   if (editScope !== scope) {
     setEditScope(scope);
     setRuleDraft(null);
@@ -53509,20 +53666,20 @@ function AccessPanel({
   const currentPreview = current && previewFeedback?.scope === previewScope ? previewFeedback : null;
   const previewResult = currentPreview?.result;
   const previewError = currentPreview?.error;
-  const latestPreviewScope = import_react36.default.useRef(previewScope);
+  const latestPreviewScope = import_react39.default.useRef(previewScope);
   latestPreviewScope.current = previewScope;
-  import_react36.default.useEffect(() => {
+  import_react39.default.useEffect(() => {
     previewVersion.current += 1;
     setPreviewFeedback(null);
     setPreviewPending(false);
   }, [previewScope]);
-  import_react36.default.useEffect(() => {
+  import_react39.default.useEffect(() => {
     setPreviewAction((value) => actions.includes(value) ? value : actions[0] ?? "");
   }, [actionCatalogKey]);
-  import_react36.default.useEffect(() => () => {
+  import_react39.default.useEffect(() => () => {
     previewVersion.current += 1;
   }, []);
-  import_react36.default.useEffect(() => {
+  import_react39.default.useEffect(() => {
     if (tab2 === "preview" && inspectFocusPending.current) {
       previewSubjectInput.current?.focus();
       inspectFocusPending.current = false;
@@ -53841,11 +53998,12 @@ function AccessPanel({
         divider: false
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__intro", children: "Manage access to Meta console and runtime surfaces. These rules do not grant native tool, source or connected-account permissions." }),
+    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__intro", children: "Manage who can see and do what in this console and the runtime behind it. These rules do not grant native tool, source or connected-account permissions." }),
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
       PanelTabs,
       {
         ariaLabel: "Console access sections",
+        idBase: tabIds,
         active: tab2,
         onSelect: setTab,
         tabs: ["overview", "groups", "rules", "preview"].map((candidate) => ({
@@ -53873,7 +54031,7 @@ function AccessPanel({
         }
       ) : null
     ] }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(PanelBody, { children: /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("fieldset", { className: "access-panel__fieldset", disabled: tab2 === "preview" ? !current : tab2 === "groups" ? !current || saving : !canEdit, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(PanelBody, { tabPanel: { idBase: tabIds, tab: tab2 }, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("fieldset", { className: "access-panel__fieldset", disabled: tab2 === "preview" ? !current : tab2 === "groups" ? !current || saving : !canEdit, children: [
       tab2 === "overview" ? /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(import_jsx_runtime61.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
           PanelSection,
@@ -53888,7 +54046,7 @@ function AccessPanel({
                 children: enabled ? "Disable enforcement" : "Enable enforcement"
               }
             ) : null,
-            children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__text", children: enabled ? "Deny by default: every console caller only sees and operates what a rule (or admin standing) grants." : "Access control is configured but not enforced. Enabling requires at least one admin subject." })
+            children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__text", children: enabled ? "Deny by default: everyone using this console sees and does only what a rule allows. Admins can do everything." : "Access control is set up but not enforced. Turning it on needs at least one admin." })
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(
@@ -53908,12 +54066,12 @@ function AccessPanel({
               }
             ) : null,
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__text access-panel__text--inset", children: "Admin subjects bypass every rule and manage this configuration." }),
+              /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__text access-panel__text--inset", children: "Admins can do everything, whatever the rules say, and manage these settings." }),
               adminsDraft === null ? admins.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(EmptyState, { inline: true, title: "No admins configured" }) : /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(RowList, { children: admins.map((admin) => /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(SubjectRow, { subject: admin }, admin)) }) : /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__inset", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("div", { className: "access-panel__form", children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
                   TextField,
                   {
-                    label: "Admin subjects",
+                    label: "Admins",
                     hint: "Separated by commas.",
                     testId: "access-admins-input",
                     value: adminsDraft,
@@ -53956,7 +54114,7 @@ function AccessPanel({
           }
         ) : null,
         groups.map(
-          ([name2, group]) => editingGroup === name2 ? groupFormShown ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(import_react36.default.Fragment, { children: groupForm }, name2) : null : /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("section", { "data-testid": "access-group:".concat(name2), children: [
+          ([name2, group]) => editingGroup === name2 ? groupFormShown ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(import_react39.default.Fragment, { children: groupForm }, name2) : null : /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("section", { "data-testid": "access-group:".concat(name2), children: [
             /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__group-head", children: [
               /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__group-text", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("h3", { className: "access-panel__group-name", title: name2, children: name2 }),
@@ -54034,7 +54192,7 @@ function AccessPanel({
         ruleDraft || rules.length ? /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("div", { className: "access-panel__rules", children: [
           ruleEditedInPlace ? null : ruleEditor,
           rules.map(
-            (rule) => ruleEditedInPlace && rule.id === editingRuleId ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(import_react36.default.Fragment, { children: ruleEditor }, rule.id) : /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
+            (rule) => ruleEditedInPlace && rule.id === editingRuleId ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(import_react39.default.Fragment, { children: ruleEditor }, rule.id) : /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
               RuleCard,
               {
                 rule,
@@ -54059,7 +54217,7 @@ function AccessPanel({
                       variant: "danger",
                       "data-testid": "access-rule-delete:".concat(rule.id),
                       onClick: () => {
-                        if (window.confirm('Delete rule "'.concat(rule.id, '"? Access it grants (or denies) stops immediately.'))) {
+                        if (window.confirm(ruleDeleteConfirmText(rule))) {
                           void mutate("immediate", captureBase(), (base) => onDeleteRule(rule.id, base));
                         }
                       },
@@ -54148,7 +54306,7 @@ function AccessPanel({
 }
 
 // src/panels/MemoryPanel.tsx
-var import_react37 = __toESM(require("react"));
+var import_react40 = __toESM(require("react"));
 
 // src/lib/memory-event-words.ts
 function text10(data, key) {
@@ -54666,7 +54824,7 @@ function computeVerdictTiles(inputs) {
     summary: "Not checked automatically",
     lines: [
       "The same memory should not be injected into an agent again and again.",
-      "This console cannot check it automatically. The injection history on the Knowledge tab marks repeated injections."
+      "This console cannot check it automatically. On the Knowledge tab, the list of memory given to agents marks repeats."
     ],
     targetTab: "knowledge"
   });
@@ -54677,7 +54835,7 @@ function computeVerdictTiles(inputs) {
     summary: inputs.recordsDenied ? "No access to records" : "Not checked automatically",
     lines: [
       "Memory written in an untrusted session stays quarantined.",
-      inputs.recordsDenied ? RECORDS_NOT_READABLE : "This console cannot check it automatically. The Pipeline tab marks proposals from tainted sessions."
+      inputs.recordsDenied ? RECORDS_NOT_READABLE : "This console cannot check it automatically. The Pipeline tab marks proposals from untrusted sessions."
     ],
     targetTab: "pipeline"
   });
@@ -55055,13 +55213,17 @@ function quarantineRationaleProblem(rationale) {
   const bytes = new TextEncoder().encode(rationale.trim()).length;
   return bytes > QUARANTINE_RATIONALE_MAX_BYTES ? "The rationale is ".concat(bytes, " bytes (UTF-8); the limit is ").concat(QUARANTINE_RATIONALE_MAX_BYTES, ".") : null;
 }
+function statusInSentence(status) {
+  const known = STATUS_WORD[String(status)];
+  return known ? known.toLowerCase() : humanizeEnum(String(status)).toLowerCase();
+}
 function quarantineDecisionSummary(result) {
   const successor = result.successor?.memory_id;
   const successorIds = successor ? [{ label: "New record", value: successor }] : [];
   switch (result.outcome) {
     case "released":
       return {
-        text: "Released. A new active record holds this memory at observed trust, marked as once quarantined; the quarantined original is kept as tombstoned.",
+        text: "Released. A new active record holds this memory at observed trust, marked as once quarantined; the quarantined original is kept, marked as discarded.",
         ids: successorIds
       };
     case "already_released":
@@ -55069,22 +55231,24 @@ function quarantineDecisionSummary(result) {
     case "tombstoned": {
       const invalidated = result.decision?.review?.invalidated_promotions ?? [];
       return {
-        text: invalidated.length === 0 ? "Tombstoned; it will never be recalled." : "Tombstoned; it will never be recalled. ".concat(invalidated.length === 1 ? "The promotion waiting on it was cancelled" : "The ".concat(invalidated.length, " promotions waiting on it were cancelled"), " and can no longer publish."),
+        text: invalidated.length === 0 ? "Discarded; it will never be recalled." : "Discarded; it will never be recalled. ".concat(invalidated.length === 1 ? "The promotion waiting on it was cancelled" : "The ".concat(invalidated.length, " promotions waiting on it were cancelled"), " and can no longer publish."),
         ids: invalidated.map((id) => ({ label: "Cancelled promotion", value: id }))
       };
     }
     case "already_tombstoned":
-      return { text: "Already tombstoned; nothing changed.", ids: [] };
+      return { text: "Already discarded; nothing changed.", ids: [] };
     default:
       return { text: "Decided: ".concat(humanizeEnum(String(result.outcome)).toLowerCase(), "."), ids: [] };
   }
 }
+var QUARANTINE_DECISION_GRANTS = "Grants: memory.quarantine.review, agent.view and agent.memory.read, plus agent.memory.write to release or agent.memory.delete to discard (tombstone)";
 function quarantineDecisionErrorText(error48) {
   const rpcError = error48?.rpcError;
   if (rpcError?.code === -32030) {
     return {
-      text: "No grant. Deciding needs the quarantine review grant, plus view and memory read on this agent, and memory write to release or delete to tombstone.",
-      ids: []
+      text: "No grant. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
+      ids: [],
+      title: QUARANTINE_DECISION_GRANTS
     };
   }
   const data = rpcError?.data ?? null;
@@ -55101,11 +55265,11 @@ function quarantineDecisionErrorText(error48) {
         return data.released_as ? {
           text: "Refused: it was already released.",
           ids: [{ label: "Released as", value: String(data.released_as) }]
-        } : { text: "Refused: the record is ".concat(String(data.status), ", not quarantined."), ids: [] };
+        } : { text: "Refused: the record is ".concat(statusInSentence(data.status), ", not quarantined."), ids: [] };
       case "gate_pending": {
         const expires = typeof data.expires_at_ms === "number" && data.expires_at_ms > 0 ? ", or wait until it expires on ".concat(formatAbsoluteTime(data.expires_at_ms)) : "";
         return {
-          text: "Refused: a promotion of this record is waiting for approval. Decide it in Approvals".concat(expires, ". Tombstoning the record instead cancels that promotion."),
+          text: "Refused: a promotion of this record is waiting for approval. Decide it in Approvals".concat(expires, ". Discarding the record instead cancels that promotion."),
           ids: data.pending_id ? [{ label: "Waiting promotion", value: String(data.pending_id) }] : []
         };
       }
@@ -55116,12 +55280,12 @@ function quarantineDecisionErrorText(error48) {
         };
       case "secret_detected":
         return {
-          text: "Refused: the content matches the ".concat(String(data.class), " secret pattern; tombstone is the only exit."),
+          text: "Refused: the content matches the ".concat(String(data.class), " secret pattern; it can only be discarded."),
           ids: []
         };
       case "stale_update":
         return {
-          text: "Refused: the version this record replaces is ".concat(String(data.prior_status), "; tombstone it instead."),
+          text: "Refused: the version this record replaces is ".concat(statusInSentence(data.prior_status), "; discard it instead."),
           ids: data.prior ? [{ label: "Replaced version", value: String(data.prior) }] : []
         };
       default:
@@ -55165,13 +55329,20 @@ function trustChipTone(trust) {
 }
 var STATUS_WORD = {
   active: "Active",
-  superseded: "Superseded",
+  superseded: "Replaced",
   quarantined: "Quarantined",
-  tombstoned: "Tombstoned"
+  tombstoned: "Discarded"
 };
 function statusWord(status) {
   if (!status) return "Unknown";
   return STATUS_WORD[status.status] ?? humanizeEnum(status.status);
+}
+var STATUS_TITLE = {
+  superseded: "Superseded: a newer version replaced this record.",
+  tombstoned: "Tombstoned: kept only as a deletion marker; it is never recalled."
+};
+function statusTitle(status) {
+  return status ? STATUS_TITLE[status.status] : void 0;
 }
 function statusChipTone(status) {
   switch (status?.status) {
@@ -55226,10 +55397,17 @@ function scopeKeyOf(scope) {
       return "";
   }
 }
+function teamName(key) {
+  const words2 = humanizeEnum(key);
+  if (!words2) return "Team";
+  return /\bteam$/i.test(words2) ? words2 : "".concat(words2, " team");
+}
 function scopeOwnerName(kind, key, nameOf = stripAgentKeyPrefix) {
   switch (kind) {
     case "identity":
       return nameOf(key) || key;
+    case "mob":
+      return teamName(key);
     case "realm":
       return "Everyone";
     default:
@@ -55240,6 +55418,8 @@ function scopeHeading(scope, nameOf = stripAgentKeyPrefix) {
   switch (scope.scope) {
     case "identity":
       return nameOf(scope.identity) || scope.identity;
+    case "mob":
+      return joinMeta(scopeKindLabel(scope.scope), teamName(scope.mob));
     case "realm":
       return "Shared memory";
     default:
@@ -55251,7 +55431,7 @@ function overviewScopeName(scope, nameOf = stripAgentKeyPrefix) {
     case "identity":
       return nameOf(scope.scope_key) || scope.scope_key;
     case "mob":
-      return "Team ".concat(scope.scope_key);
+      return teamName(scope.scope_key);
     case "operator":
       return "Operator ".concat(scope.scope_key);
     case "realm":
@@ -55263,8 +55443,8 @@ function overviewScopeName(scope, nameOf = stripAgentKeyPrefix) {
 function scopeCountsText(counts) {
   const parts = ["".concat(counts.active ?? 0, " active")];
   if ((counts.quarantined ?? 0) > 0) parts.push("".concat(counts.quarantined, " quarantined"));
-  if ((counts.superseded ?? 0) > 0) parts.push("".concat(counts.superseded, " superseded"));
-  if ((counts.tombstoned ?? 0) > 0) parts.push("".concat(counts.tombstoned, " tombstoned"));
+  if ((counts.superseded ?? 0) > 0) parts.push("".concat(counts.superseded, " replaced"));
+  if ((counts.tombstoned ?? 0) > 0) parts.push("".concat(counts.tombstoned, " discarded"));
   return parts.join(", ");
 }
 function targetName(kind, key, nameOf = stripAgentKeyPrefix) {
@@ -55272,7 +55452,7 @@ function targetName(kind, key, nameOf = stripAgentKeyPrefix) {
     case "identity":
       return nameOf(key) || key;
     case "mob":
-      return "".concat(key, " (team)");
+      return teamName(key);
     case "operator":
       return "".concat(key, " (operator)");
     case "realm":
@@ -55314,10 +55494,13 @@ var REVIEW_VERDICT_LABEL = {
 function reviewVerdictLabel(verdict) {
   return REVIEW_VERDICT_LABEL[verdict] ?? humanizeEnum(verdict);
 }
+function plainStoreWords(words2) {
+  return words2.replace(/\btombstoned\b/g, "discarded").replace(/\btombstone\b/g, "discard").replace(/\bsuperseded\b/g, "replaced").replace(/\bsupersede\b/g, "replace");
+}
 function dreamVerdictChips(verdicts) {
   return verdicts.map(([name2, count2]) => ({
     key: name2,
-    label: "".concat(count2, " ").concat(humanizeEnum(name2).toLowerCase()),
+    label: "".concat(count2, " ").concat(plainStoreWords(humanizeEnum(name2).toLowerCase())),
     tone: /quarantin|blocked|dead|reject/.test(name2) ? "warn" : "neutral"
   }));
 }
@@ -55326,14 +55509,14 @@ var OP_KIND_DONE = {
   promote: "promoted",
   merge: "merged",
   quarantine: "quarantined",
-  supersede: "superseded",
-  tombstone: "tombstoned",
+  supersede: "replaced",
+  tombstone: "discarded",
   update: "updated",
   release: "released"
 };
 function dreamOpKindsDisplay(opKinds) {
   if (!opKinds) return "";
-  return Object.entries(opKinds).filter(([, count2]) => typeof count2 === "number" && count2 > 0).sort((a, b2) => b2[1] - a[1] || a[0].localeCompare(b2[0])).map(([kind, count2]) => "".concat(count2, " ").concat(OP_KIND_DONE[kind] ?? humanizeEnum(kind).toLowerCase())).join(", ");
+  return Object.entries(opKinds).filter(([, count2]) => typeof count2 === "number" && count2 > 0).sort((a, b2) => b2[1] - a[1] || a[0].localeCompare(b2[0])).map(([kind, count2]) => "".concat(count2, " ").concat(OP_KIND_DONE[kind] ?? plainStoreWords(humanizeEnum(kind).toLowerCase()))).join(", ");
 }
 function partitionName(partition, nameOf = stripAgentKeyPrefix) {
   if (!partition) return "";
@@ -55348,7 +55531,7 @@ function partitionName(partition, nameOf = stripAgentKeyPrefix) {
     case "member":
       return nameOf(partition) || key;
     case "mob":
-      return "".concat(key, " (team)");
+      return teamName(key);
     case "operator":
       return "".concat(key, " (operator)");
     default:
@@ -55369,21 +55552,33 @@ function knowledgeSegmentTitle(segment, agentName) {
       return segment.label;
   }
 }
+function needsGrantText(grant) {
+  if (!isKnownAccessAction(grant)) return "You need a permission you do not have";
+  const words2 = accessActionLabel(grant);
+  return "You need permission to ".concat(words2.charAt(0).toLowerCase()).concat(words2.slice(1));
+}
+function grantTitle(grant) {
+  return "Grant: ".concat(grant);
+}
+function realmSpaceName(realm) {
+  return "".concat(realm, " space");
+}
 function useNameOf() {
   const directory = useAgentDirectory();
-  return import_react37.default.useCallback((key) => agentDisplayName(key, directory), [directory]);
+  return import_react40.default.useCallback((key) => agentDisplayName(key, directory), [directory]);
 }
 function MetaLine({ parts }) {
   const shown = parts.filter(
     (part) => part !== null && part !== void 0 && part !== false && part !== ""
   );
-  return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(import_jsx_runtime62.Fragment, { children: shown.map((part, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_react37.default.Fragment, { children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(import_jsx_runtime62.Fragment, { children: shown.map((part, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_react40.default.Fragment, { children: [
     index2 > 0 ? " \xB7 " : null,
     part
   ] }, index2)) });
 }
 function ScopeTarget({ kind, scopeKey }) {
   if (kind === "identity") return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(AgentName, { id: scopeKey });
+  if (kind === "mob") return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: scopeKey, children: targetName(kind, scopeKey) });
   return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(import_jsx_runtime62.Fragment, { children: targetName(kind, scopeKey) });
 }
 function RecordFacts({
@@ -55396,8 +55591,8 @@ function RecordFacts({
   return /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("span", { className: "memory-facts", children: [
     /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-facts__kind", children: kindLabel(record10.kind) }),
     /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: trustChipTone(record10.trust), children: trustDisplay(record10.trust) }),
-    status && !hideStatus && (showActive || status !== "active") ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: statusChipTone(record10.status), children: statusWord(record10.status) }) : null,
-    status === "superseded" && !hideStatus ? onOpenNewer ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("button", { type: "button", className: "memory-link", onClick: onOpenNewer, children: "Open the newer version" }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-facts__note", children: "replaced by a newer version" }) : null
+    status && !hideStatus && (showActive || status !== "active") ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: statusChipTone(record10.status), title: statusTitle(record10.status), children: statusWord(record10.status) }) : null,
+    status === "superseded" && !hideStatus && onOpenNewer ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("button", { type: "button", className: "memory-link", onClick: onOpenNewer, children: "Open the newer version" }) : null
   ] });
 }
 function RecordLink({
@@ -55423,7 +55618,7 @@ function RecordLink({
 }
 function QuarantineNoticeText({ notice }) {
   return /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
-    notice.text,
+    notice.title ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: notice.title, children: notice.text }) : notice.text,
     notice.ids.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-notice-ids", children: notice.ids.map((id) => /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("span", { className: "memory-notice-ids__item", children: [
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-notice-ids__label", children: id.label }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: id.value, label: id.label })
@@ -55465,10 +55660,10 @@ function QuarantineDecisionBlock({
   onDecide
 }) {
   const nameOf = useNameOf();
-  const rationaleId = import_react37.default.useId();
-  const [rationale, setRationale] = import_react37.default.useState("");
-  const [pending, setPending] = import_react37.default.useState(null);
-  const [failure, setFailure] = import_react37.default.useState(null);
+  const rationaleId = import_react40.default.useId();
+  const [rationale, setRationale] = import_react40.default.useState("");
+  const [pending, setPending] = import_react40.default.useState(null);
+  const [failure, setFailure] = import_react40.default.useState(null);
   const rationaleProblem = quarantineRationaleProblem(rationale);
   const blocked = pending !== null || rationaleProblem !== null;
   const notice = rationaleProblem ? { text: rationaleProblem, ids: [] } : failure;
@@ -55491,7 +55686,7 @@ function QuarantineDecisionBlock({
       /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(Notice, { tone: "warn", children: [
         "Release makes this an active record in ",
         owner,
-        " at observed trust. Because it was quarantined, it can never reach verified trust. Tombstone discards it for good."
+        " at observed trust. Because it was quarantined, it can never reach verified trust. Discard marks it deleted for good, so it is never recalled."
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("label", { className: "memory-review__label", htmlFor: rationaleId, children: "Rationale, optional and kept in the audit log" }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -55501,7 +55696,7 @@ function QuarantineDecisionBlock({
           className: "cc-input memory-quarantine__rationale",
           "aria-label": "Rationale",
           "data-testid": "memory-quarantine-rationale",
-          placeholder: "Why you release or tombstone it",
+          placeholder: "Why you release or discard it",
           value: rationale,
           disabled: pending !== null,
           onChange: (event) => setRationale(event.target.value)
@@ -55522,9 +55717,10 @@ function QuarantineDecisionBlock({
           {
             variant: "danger",
             "data-testid": "memory-quarantine-tombstone",
+            title: "Tombstone: keeps only a deletion marker; the record is never recalled.",
             disabled: blocked,
             onClick: () => void decide("tombstone"),
-            children: pending === "tombstone" ? "Tombstoning\u2026" : "Tombstone"
+            children: pending === "tombstone" ? "Discarding\u2026" : "Discard"
           }
         )
       ] }),
@@ -55550,8 +55746,8 @@ function BiographyView({
   const usage = record10.usage;
   const lane = lineageLane(chain, record10.id);
   const touchingRuns = dreamRunsTouching(dreams, record10.id);
-  const [evidenceState, setEvidenceState] = import_react37.default.useState(null);
-  const evidenceSeqRef = import_react37.default.useRef(0);
+  const [evidenceState, setEvidenceState] = import_react40.default.useState(null);
+  const evidenceSeqRef = import_react40.default.useRef(0);
   const recordIdentity = record10.scope.scope === "identity" ? record10.scope.identity : author?.author === "agent" ? author.identity : void 0;
   const conversationWith = recordIdentity ? nameOf(recordIdentity) || recordIdentity : void 0;
   const supersededBy = record10.status?.status === "superseded" ? record10.status.by : void 0;
@@ -55646,9 +55842,10 @@ function BiographyView({
               evidence.length > 0 ? {
                 key: "evidence",
                 label: "Evidence",
-                value: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-evidence", children: evidence.map((ref, index2) => {
-                  const details = evidenceDetails(ref);
-                  return /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(
+                value: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-evidence", children: evidence.map((ref, index2) => (
+                  // The session ID, generation and revision are in
+                  // the technical details below, not on the link.
+                  /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
                     "button",
                     {
                       type: "button",
@@ -55657,18 +55854,11 @@ function BiographyView({
                       onClick: () => void openEvidence(ref, index2),
                       disabled: !onLoadEvidence,
                       title: onLoadEvidence ? "Open the conversation" : void 0,
-                      children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-evidence__label", children: evidenceDisplay(ref, conversationWith) }),
-                        ref.session_id || details ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("span", { className: "memory-evidence__meta", children: [
-                          ref.session_id ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: ref.session_id, copy: false }) : null,
-                          ref.session_id && details ? " \xB7 " : null,
-                          details
-                        ] }) : null
-                      ]
+                      children: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-evidence__label", children: evidenceDisplay(ref, conversationWith) })
                     },
                     "ev-".concat(index2)
-                  );
-                }) })
+                  )
+                )) })
               } : null,
               verification?.checked ? { key: "verified", label: "Verified", value: verification.checked } : null
             ]
@@ -55704,7 +55894,7 @@ function BiographyView({
           titleAttr: entry.title || void 0,
           meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: trustChipTone(entry.trust), children: trustDisplay(entry.trust) }),
-            /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: statusChipTone(entry.status), children: statusWord(entry.status) }),
+            /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: statusChipTone(entry.status), title: statusTitle(entry.status), children: statusWord(entry.status) }),
             current ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-chain__current", children: "Current" }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RelativeTime, { value: entry.updated_at_ms })
           ] })
         },
@@ -55775,15 +55965,18 @@ function BiographyView({
             value: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-tech-list", children: record10.derived_from.map((id) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: id, label: "Record ID" }, id)) })
           } : null,
           { label: "Author run", value: authorRun },
-          ...evidence.map(
-            (ref, index2) => ref.session_id ? {
+          // Each evidence reference's session, generation and revision: the
+          // evidence link above shows only the conversation and its messages.
+          ...evidence.map((ref, index2) => {
+            const details = evidenceDetails(ref);
+            return ref.session_id || details ? {
               label: evidence.length > 1 ? "Evidence ".concat(index2 + 1) : "Evidence",
               value: /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("span", { className: "memory-tech-list", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: ref.session_id, label: "Session ID" }),
-                evidenceDetails(ref) ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-tech-note", children: evidenceDetails(ref) }) : null
+                ref.session_id ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: ref.session_id, label: "Session ID" }) : null,
+                details ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-tech-note", children: details }) : null
               ] })
-            } : null
-          ),
+            } : null;
+          }),
           touchingRuns.length > 0 ? {
             label: "Dream runs",
             value: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-tech-list", children: touchingRuns.map((run) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(TechnicalId, { value: run.run_id, label: "Dream run ID" }, run.run_id)) })
@@ -55925,7 +56118,17 @@ function ScopeRow({
       onActivate: onOpen,
       lead: agent ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(AgentAvatar, { name: name2 }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-scope-mark", "aria-hidden": "true" }),
       title: agent ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(AgentName, { id: row.scopeKey }) : name2,
-      subtitle: joinMeta(scopeKindLabel(row.kind), multiRealm ? "realm ".concat(row.realm) : null, counts),
+      titleAttr: row.kind === "mob" && row.scopeKey ? row.scopeKey : void 0,
+      subtitle: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+        MetaLine,
+        {
+          parts: [
+            scopeKindLabel(row.kind),
+            multiRealm ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: "Realm ".concat(row.realm), children: realmSpaceName(row.realm) }) : null,
+            counts
+          ]
+        }
+      ),
       meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
         row.floorPressure ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: "warn", testId: "memory-holdings-floor:".concat(row.key), title: limitTitle, children: "Near limit" }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -55937,8 +56140,8 @@ function ScopeRow({
             segments: [
               { value: row.active, tone: "ok", label: "".concat(row.active, " active") },
               { value: row.quarantined, tone: "warn", label: "".concat(row.quarantined, " quarantined") },
-              { value: row.superseded, tone: "neutral", label: "".concat(row.superseded, " superseded") },
-              { value: row.tombstoned, tone: "locked", label: "".concat(row.tombstoned, " tombstoned") }
+              { value: row.superseded, tone: "neutral", label: "".concat(row.superseded, " replaced") },
+              { value: row.tombstoned, tone: "locked", label: "".concat(row.tombstoned, " discarded") }
             ]
           }
         ),
@@ -55948,6 +56151,7 @@ function ScopeRow({
   );
 }
 function DeniedScopeRow({ kind }) {
+  const grant = "".concat(kind, ".memory.read");
   return /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
     ListRow,
     {
@@ -55955,7 +56159,7 @@ function DeniedScopeRow({ kind }) {
       testId: "memory-holdings-scope-denied:".concat(kind),
       lead: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(KitGlyph, { name: "shield", className: "memory-scope-lock" }),
       title: kind === "mob" ? "Team memory" : "Operator memory",
-      subtitle: "Needs the ".concat(kind, ".memory.read grant"),
+      subtitle: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle(grant), children: needsGrantText(grant) }),
       meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: "locked", children: "No grant" })
     }
   );
@@ -56016,7 +56220,7 @@ function DreamRunRow({
             ]
           }
         ),
-        meta: chips.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(import_jsx_runtime62.Fragment, { children: chips.map((chip) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: chip.tone, children: chip.label }, chip.key)) }) : void 0
+        meta: chips.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(import_jsx_runtime62.Fragment, { children: chips.map((chip) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: chip.tone, title: chip.key, children: chip.label }, chip.key)) }) : void 0
       }
     ),
     expanded ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("div", { className: "memory-dream-run__detail", "data-testid": "memory-dream-run-detail:".concat(run.run_id), children: [
@@ -56103,9 +56307,9 @@ function MemoryLiveStrip({
   onPivot
 }) {
   const directory = useAgentDirectory();
-  const deduped = import_react37.default.useMemo(() => dedupeFramesById(frames), [frames]);
-  const [frozen, setFrozen] = import_react37.default.useState(null);
-  const listRef = import_react37.default.useRef(null);
+  const deduped = import_react40.default.useMemo(() => dedupeFramesById(frames), [frames]);
+  const [frozen, setFrozen] = import_react40.default.useState(null);
+  const listRef = import_react40.default.useRef(null);
   const shown = frozen ?? deduped;
   const behind = frozen ? countFramesBehind(deduped, frozen) : 0;
   function handleScroll() {
@@ -56176,10 +56380,10 @@ var SCOPE_FILTER_OPTIONS = [
 ];
 var STATUS_FILTER_OPTIONS = [
   { value: "", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "quarantined", label: "Quarantined" },
-  { value: "superseded", label: "Superseded" },
-  { value: "tombstoned", label: "Tombstoned" }
+  { value: "active", label: STATUS_WORD.active },
+  { value: "quarantined", label: STATUS_WORD.quarantined },
+  { value: "superseded", label: STATUS_WORD.superseded },
+  { value: "tombstoned", label: STATUS_WORD.tombstoned }
 ];
 var SORT_OPTIONS = [
   { value: "recency", label: "Recent" },
@@ -56225,8 +56429,9 @@ function MemoryPanel({
   onDecideQuarantine
 }) {
   const nameOf = useNameOf();
-  const [tab2, setTab] = import_react37.default.useState("holdings");
-  const [decisionNotice, setDecisionNotice] = import_react37.default.useState(null);
+  const [tab2, setTab] = import_react40.default.useState("holdings");
+  const tabIds = import_react40.default.useId();
+  const [decisionNotice, setDecisionNotice] = import_react40.default.useState(null);
   const decideQuarantine = onDecideQuarantine ? async (record10, verdict, rationale) => {
     if (!detail) return;
     const realm = detail.realm;
@@ -56234,25 +56439,31 @@ function MemoryPanel({
     setDecisionNotice(quarantineDecisionSummary(result));
     onSelectRecord(realm, result.successor?.memory_id ?? record10.id);
   } : void 0;
-  const [filter, setFilter] = import_react37.default.useState({});
-  const [sortMode, setSortMode] = import_react37.default.useState("recency");
-  const [paged, setPaged] = import_react37.default.useState(null);
-  const [pageLoading, setPageLoading] = import_react37.default.useState(false);
-  const queryRecordsRef = import_react37.default.useRef(onQueryRecords);
+  const [filter, setFilter] = import_react40.default.useState({});
+  const [sortMode, setSortMode] = import_react40.default.useState("recency");
+  const [paged, setPaged] = import_react40.default.useState(null);
+  const [pageLoading, setPageLoading] = import_react40.default.useState(false);
+  const queryRecordsRef = import_react40.default.useRef(onQueryRecords);
   queryRecordsRef.current = onQueryRecords;
   const searchDirectory = useAgentDirectory();
-  const searchCandidatesRef = import_react37.default.useRef([]);
-  searchCandidatesRef.current = import_react37.default.useMemo(() => {
+  const searchCandidatesRef = import_react40.default.useRef([]);
+  searchCandidatesRef.current = import_react40.default.useMemo(() => {
     const keys2 = /* @__PURE__ */ new Set();
+    const teams = /* @__PURE__ */ new Set();
     for (const record10 of records) {
       if (record10.scope?.scope === "identity" && record10.scope.identity) keys2.add(record10.scope.identity);
+      if (record10.scope?.scope === "mob" && record10.scope.mob) teams.add(record10.scope.mob);
     }
     for (const scope of overview?.scopes ?? []) {
       if (scope.scope_kind === "identity" && scope.scope_key) keys2.add(scope.scope_key);
+      if (scope.scope_kind === "mob" && scope.scope_key) teams.add(scope.scope_key);
     }
-    return Array.from(keys2, (key) => ({ key, name: agentDisplayName(key, searchDirectory) }));
+    return [
+      ...Array.from(keys2, (key) => ({ key, name: agentDisplayName(key, searchDirectory) })),
+      ...Array.from(teams, (key) => ({ key, name: teamName(key) }))
+    ];
   }, [records, overview, searchDirectory]);
-  const pagerRef = import_react37.default.useRef(null);
+  const pagerRef = import_react40.default.useRef(null);
   if (!pagerRef.current) {
     pagerRef.current = createMemoryRecordsPager({
       query: (params) => queryRecordsRef.current ? queryRecordsRef.current(params) : Promise.resolve(null),
@@ -56262,15 +56473,15 @@ function MemoryPanel({
     });
   }
   const pager = pagerRef.current;
-  const [lattice, setLattice] = import_react37.default.useState(null);
-  const [latticeRunning, setLatticeRunning] = import_react37.default.useState(false);
-  const [knowledgeIdentity, setKnowledgeIdentity] = import_react37.default.useState("");
+  const [lattice, setLattice] = import_react40.default.useState(null);
+  const [latticeRunning, setLatticeRunning] = import_react40.default.useState(false);
+  const [knowledgeIdentity, setKnowledgeIdentity] = import_react40.default.useState("");
   const openRecordKey = detail ? "".concat(detail.realm, "\0").concat(detail.record.id) : null;
-  import_react37.default.useEffect(() => {
+  import_react40.default.useEffect(() => {
     if (openRecordKey) setTab("records");
   }, [openRecordKey]);
-  const latticeRanForRef = import_react37.default.useRef(null);
-  import_react37.default.useEffect(() => {
+  const latticeRanForRef = import_react40.default.useRef(null);
+  import_react40.default.useEffect(() => {
     if (tab2 !== "holdings" || !onQueryRecords || recordsDenied || !loaded) return;
     const fingerprint = latticeFingerprint(records, realms, nextCursor);
     if (latticeRanForRef.current === fingerprint) return;
@@ -56297,8 +56508,8 @@ function MemoryPanel({
       }
     };
   }, [tab2, records, recordsDenied, realms, nextCursor, loaded]);
-  const updatedAt = import_react37.default.useMemo(() => loaded ? Date.now() : null, [records, loaded]);
-  const overviewScopes = import_react37.default.useMemo(
+  const updatedAt = import_react40.default.useMemo(() => loaded ? Date.now() : null, [records, loaded]);
+  const overviewScopes = import_react40.default.useMemo(
     () => overview ? sortOverviewScopes(
       visibleOverviewScopes(overview.scopes || [], {
         operatorScopeDenied,
@@ -56307,7 +56518,7 @@ function MemoryPanel({
     ) : null,
     [overview, operatorScopeDenied, mobScopeDenied]
   );
-  const tiles = import_react37.default.useMemo(
+  const tiles = import_react40.default.useMemo(
     () => computeVerdictTiles({
       records,
       recordsDenied,
@@ -56332,7 +56543,7 @@ function MemoryPanel({
       nameOf
     ]
   );
-  const recordTitles = import_react37.default.useMemo(() => {
+  const recordTitles = import_react40.default.useMemo(() => {
     const titles = /* @__PURE__ */ new Map();
     const add = (list4) => {
       for (const entry of list4 ?? []) {
@@ -56345,19 +56556,19 @@ function MemoryPanel({
     if (detail) add([detail.record, ...detail.chain]);
     return titles;
   }, [records, quarantineRecords, paged, detail]);
-  const annotatedInjections = import_react37.default.useMemo(
+  const annotatedInjections = import_react40.default.useMemo(
     () => annotateInjectionDups(injections),
     [injections]
   );
-  const dreamSheets = import_react37.default.useMemo(() => dreamRunsNewestFirst(dreamRuns), [dreamRuns]);
-  const sheetPartitions = import_react37.default.useMemo(
+  const dreamSheets = import_react40.default.useMemo(() => dreamRunsNewestFirst(dreamRuns), [dreamRuns]);
+  const sheetPartitions = import_react40.default.useMemo(
     () => new Map(dreamRuns.map((run) => [run.run_id, run.partition])),
     [dreamRuns]
   );
-  const [expandedRuns, setExpandedRuns] = import_react37.default.useState({});
-  const identities = import_react37.default.useMemo(() => identityOptions(records), [records]);
+  const [expandedRuns, setExpandedRuns] = import_react40.default.useState({});
+  const identities = import_react40.default.useMemo(() => identityOptions(records), [records]);
   const selectedIdentity = identities.includes(knowledgeIdentity) ? knowledgeIdentity : identities[0] || "";
-  const memoryFrames = import_react37.default.useMemo(
+  const memoryFrames = import_react40.default.useMemo(
     () => liveFrames.filter((frame) => frame.event.startsWith("memory.")),
     [liveFrames]
   );
@@ -56403,7 +56614,7 @@ function MemoryPanel({
   const quarantineCount = quarantineRecords.length + pendingPromotions.length;
   const multiRealm = realms.length > 1;
   const recordCount = nextCursor ? "".concat(records.length, "+ records") : plural(records.length, "record");
-  const subtitle = !loaded ? "Loading records" : recordsDenied ? "No access to records" : joinMeta(recordCount, multiRealm ? plural(realms.length, "realm") : null);
+  const subtitle = !loaded ? "Loading records" : recordsDenied ? "No access to records" : joinMeta(recordCount, multiRealm ? plural(realms.length, "space") : null);
   const tabs = MEMORY_TABS.map((candidate) => ({
     id: candidate,
     label: memoryTabLabel(candidate),
@@ -56478,12 +56689,12 @@ function MemoryPanel({
               value: canReviewQuarantine ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("span", { className: "memory-progress__value", children: [
                 "".concat(plural(quarantineRecords.length, "record"), ", ").concat(pendingPromotions.length, " waiting for approval"),
                 /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Button, { size: "sm", onClick: () => setTab("pipeline"), children: "Open pipeline" })
-              ] }) : "Needs the memory.quarantine.review grant"
+              ] }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle("memory.quarantine.review"), children: needsGrantText("memory.quarantine.review") })
             },
             {
               key: "proposals",
               label: "Proposals",
-              value: proposalsDenied ? "No grant" : "".concat(proposals.length, " waiting").concat(tainted > 0 ? ", ".concat(tainted, " held because ").concat(tainted === 1 ? "its source was" : "their sources were", " tainted") : "")
+              value: proposalsDenied ? "No grant" : "".concat(proposals.length, " waiting").concat(tainted > 0 ? ", ".concat(tainted, " held because ").concat(tainted === 1 ? "its source was" : "their sources were", " untrusted") : "")
             }
           ]
         }
@@ -56539,18 +56750,21 @@ function MemoryPanel({
             onChange: (value) => applyFilter({ ...filter, status: value || void 0 })
           }
         ),
-        multiRealm ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
-          SelectField,
-          {
-            label: "Realm",
-            value: filter.realm || "",
-            options: [
-              { value: "", label: "All realms" },
-              ...realms.map((realm) => ({ value: realm, label: realm }))
-            ],
-            testId: "memory-filter:realm",
-            onChange: (value) => applyFilter({ ...filter, realm: value || void 0 })
-          }
+        multiRealm ? (
+          // Realms read as spaces: the stores of state this gateway serves.
+          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+            SelectField,
+            {
+              label: "Space",
+              value: filter.realm || "",
+              options: [
+                { value: "", label: "All spaces" },
+                ...realms.map((realm) => ({ value: realm, label: realm }))
+              ],
+              testId: "memory-filter:realm",
+              onChange: (value) => applyFilter({ ...filter, realm: value || void 0 })
+            }
+          )
         ) : null,
         /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
           SelectField,
@@ -56565,7 +56779,7 @@ function MemoryPanel({
         filtered ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Button, { variant: "ghost", "data-testid": "memory-filter-clear", onClick: () => applyFilter({}), children: "Clear filters" }) : null
       ] }) : null,
       sortMode === "utility" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-utility-note", children: "Least useful first: records injected at least ".concat(DEAD_INJECTION_THRESHOLD, " times and never judged useful lead, marked Never useful. Space spent is estimated from the injections and the record's size.") }) : null,
-      multiRealm && !filter.realm?.trim() ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-multi-realm-note", children: "This is one combined page across realms. Pick a realm to page through its records." }) : null,
+      multiRealm && !filter.realm?.trim() ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-multi-realm-note", children: "This page combines records from several spaces. Pick a space to page through its records." }) : null,
       !loaded || pageLoading ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(LoadingState, { label: "Loading records", rows: 4 }) : null,
       loaded && !pageLoading && listView.records.length === 0 ? recordsDenied || listView.denied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         EmptyState,
@@ -56619,8 +56833,8 @@ function MemoryPanel({
               SectionHeader,
               {
                 label: /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
-                  group.scope.scope === "identity" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(AgentName, { id: group.scope.identity }) : scopeHeading(group.scope, nameOf),
-                  multiRealm ? " \xB7 ".concat(group.scope.realm) : null
+                  group.scope.scope === "identity" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(AgentName, { id: group.scope.identity }) : group.scope.scope === "mob" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: group.scope.mob, children: scopeHeading(group.scope, nameOf) }) : scopeHeading(group.scope, nameOf),
+                  multiRealm ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: "Realm ".concat(group.scope.realm), children: " \xB7 ".concat(realmSpaceName(group.scope.realm)) }) : null
                 ] }),
                 count: group.records.length
               }
@@ -56697,10 +56911,10 @@ function MemoryPanel({
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
-          label: "Injection history",
+          label: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: "Injection history", children: "Memory given to agents" }),
           count: !injectionsDenied && annotatedInjections.length > 0 ? annotatedInjections.length : null,
           testId: "memory-knowledge-history",
-          children: injectionsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Injection history: no grant." }) : annotatedInjections.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "Nothing has been injected yet." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: annotatedInjections.map(({ entry, dup }, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+          children: injectionsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Memory given to agents: no grant." }) : annotatedInjections.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No memory has been given to an agent yet." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: annotatedInjections.map(({ entry, dup }, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
             ListRow,
             {
               className: "memory-injection-row",
@@ -56772,7 +56986,7 @@ function MemoryPanel({
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? quarantineRecords.length : "no grant" })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or tombstone it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
+      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or discard it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
@@ -56800,8 +57014,8 @@ function MemoryPanel({
                   {
                     tone: "warn",
                     testId: "memory-proposal-taint:".concat(proposal.proposal_id),
-                    title: "Proposed in a session that read untrusted input.",
-                    children: "Tainted"
+                    title: "Tainted: proposed in a session that read untrusted input.",
+                    children: "Untrusted source"
                   }
                 ) : null,
                 proposal.status && proposal.status !== "pending" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: proposal.status === "held" ? "warn" : "neutral", children: humanizeEnum(proposal.status) }) : null,
@@ -56873,7 +57087,7 @@ function MemoryPanel({
             }) })
           }
         )
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-pipeline-no-grant", children: "Quarantine: no grant. Seeing the queue needs the memory.quarantine.review grant." }),
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-pipeline-no-grant", children: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle("memory.quarantine.review"), children: "Quarantine: no grant. ".concat(needsGrantText("memory.quarantine.review"), " to see the queue.") }) }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
@@ -57027,7 +57241,7 @@ function MemoryPanel({
         ] })
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(PanelTabs, { tabs, active: tab2, onSelect: setTab, ariaLabel: "Memory views" }),
+    /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(PanelTabs, { tabs, active: tab2, onSelect: setTab, ariaLabel: "Memory views", idBase: tabIds }),
     /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
       "button",
       {
@@ -57041,7 +57255,7 @@ function MemoryPanel({
       }
     ),
     /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(StatusRow, { error: error48, errorTestId: "memory-error", updatedAt: updatedAt ?? void 0, children: !loaded ? "Loading memory" : void 0 }),
-    /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(PanelBody, { className: "memory-panel__body", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(PanelBody, { className: "memory-panel__body", tabPanel: { idBase: tabIds, tab: tab2 }, children: [
       tab2 === "holdings" ? renderHoldings() : null,
       tab2 === "records" ? renderRecords() : null,
       tab2 === "knowledge" ? renderKnowledge() : null,
@@ -57052,10 +57266,10 @@ function MemoryPanel({
 }
 
 // src/panels/RosterPanel.tsx
-var import_react39 = __toESM(require("react"));
+var import_react42 = __toESM(require("react"));
 
 // src/panels/Sidebar.tsx
-var import_react38 = __toESM(require("react"));
+var import_react41 = __toESM(require("react"));
 var import_jsx_runtime63 = require("react/jsx-runtime");
 var ALL_NAV = ["topology", "timeline", "gating", "roster", "routing", "logs", "health", "access", "memory", "workgraph"];
 var NAV_LABEL = {
@@ -58111,9 +58325,9 @@ function pendingOrderFocusMatchesElement(pending, element3) {
   return true;
 }
 function useMeasuredHeight() {
-  const ref = import_react38.default.useRef(null);
-  const [height, setHeight] = import_react38.default.useState(0);
-  import_react38.default.useLayoutEffect(() => {
+  const ref = import_react41.default.useRef(null);
+  const [height, setHeight] = import_react41.default.useState(0);
+  import_react41.default.useLayoutEffect(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const update = () => setHeight(element3.clientHeight);
@@ -58200,10 +58414,8 @@ function renderAgentRow({
           detail.kind || detail.status ? (
             // The kind gives way first, so the status always shows in a narrow roster.
             /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__detail", "data-testid": "sidebar-agent-detail:".concat(agent.member_id), children: [
-              detail.kind ? /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__detail-kind", children: [
-                detail.kind,
-                detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-separator", children: " \xB7 " }) : null
-              ] }) : null,
+              detail.kind ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-kind", title: detail.kind, children: detail.kind }) : null,
+              detail.kind && detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-separator", children: " \xB7 " }) : null,
               detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-status", children: detail.status }) : null
             ] })
           ) : null,
@@ -58281,7 +58493,7 @@ function inboxCount(agent) {
   const n2 = Number(agent.labels?.console_inbox_count ?? 0);
   return Number.isFinite(n2) ? n2 : 0;
 }
-var Sidebar = import_react38.default.memo(function Sidebar2({
+var Sidebar = import_react41.default.memo(function Sidebar2({
   agents,
   selectedMemberId,
   recentActivity,
@@ -58302,48 +58514,48 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
   onOpenApproval
 }) {
   countRender("Sidebar");
-  const [q2, setQ] = import_react38.default.useState("");
-  const [activityFilter, setActivityFilter] = import_react38.default.useState("all");
-  const [draggingOrder, setDraggingOrder] = import_react38.default.useState(null);
-  const [dragOverOrder, setDragOverOrder] = import_react38.default.useState(null);
-  const [dragPreview, setDragPreview] = import_react38.default.useState(null);
-  const [orderAnnouncement, setOrderAnnouncement] = import_react38.default.useState("");
-  const pendingOrderFocusRef = import_react38.default.useRef(null);
-  const draggingOrderRef = import_react38.default.useRef(null);
-  const pointerDragRef = import_react38.default.useRef(null);
-  const suppressOrderClickRef = import_react38.default.useRef(false);
-  const virtualRowsRef = import_react38.default.useRef([]);
-  import_react38.default.useEffect(() => {
+  const [q2, setQ] = import_react41.default.useState("");
+  const [activityFilter, setActivityFilter] = import_react41.default.useState("all");
+  const [draggingOrder, setDraggingOrder] = import_react41.default.useState(null);
+  const [dragOverOrder, setDragOverOrder] = import_react41.default.useState(null);
+  const [dragPreview, setDragPreview] = import_react41.default.useState(null);
+  const [orderAnnouncement, setOrderAnnouncement] = import_react41.default.useState("");
+  const pendingOrderFocusRef = import_react41.default.useRef(null);
+  const draggingOrderRef = import_react41.default.useRef(null);
+  const pointerDragRef = import_react41.default.useRef(null);
+  const suppressOrderClickRef = import_react41.default.useRef(false);
+  const virtualRowsRef = import_react41.default.useRef([]);
+  import_react41.default.useEffect(() => {
     draggingOrderRef.current = draggingOrder;
   }, [draggingOrder]);
-  const navKinds = import_react38.default.useMemo(() => {
+  const navKinds = import_react41.default.useMemo(() => {
     const configured = visibleNavKinds();
     if (!visibleControls) return configured;
     const allowed = new Set(visibleControls);
     return configured.filter((kind) => allowed.has(kind));
   }, [visibleControls]);
   const preferenceNamespace = preferenceScope ?? storageNamespace;
-  const viewStorageKey = import_react38.default.useMemo(
+  const viewStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_VIEW_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const agentOrderStorageKey = import_react38.default.useMemo(
+  const agentOrderStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_AGENT_ORDER_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const [view, setView] = import_react38.default.useState(
+  const [view, setView] = import_react41.default.useState(
     () => readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW }
   );
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
   }, [viewStorageKey]);
-  const [agentOrder, setAgentOrder] = import_react38.default.useState(
+  const [agentOrder, setAgentOrder] = import_react41.default.useState(
     () => readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []
   );
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setAgentOrder(readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []);
   }, [agentOrderStorageKey]);
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     if (typeof window === "undefined") return void 0;
     const onStorage = (event) => {
       if (event.key === agentOrderStorageKey) {
@@ -58355,21 +58567,21 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [agentOrderStorageKey, viewStorageKey]);
-  const updateView = import_react38.default.useCallback((patch2) => {
+  const updateView = import_react41.default.useCallback((patch2) => {
     setView((current) => {
       const next = { ...current, ...patch2 };
       writeConsoleSidebarView(localSidebarStorage(), viewStorageKey, next);
       return next;
     });
   }, [viewStorageKey]);
-  const [nowMs, setNowMs] = import_react38.default.useState(() => Date.now());
-  import_react38.default.useEffect(() => {
+  const [nowMs, setNowMs] = import_react41.default.useState(() => Date.now());
+  import_react41.default.useEffect(() => {
     if (collapsed || typeof window === "undefined") return void 0;
     const timer2 = window.setInterval(() => setNowMs(Date.now()), 3e4);
     return () => window.clearInterval(timer2);
   }, [collapsed]);
-  const frameTimes = import_react38.default.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
-  const liveActivity = import_react38.default.useMemo(() => {
+  const frameTimes = import_react41.default.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
+  const liveActivity = import_react41.default.useMemo(() => {
     const byMember = /* @__PURE__ */ new Map();
     for (const agent of agents) {
       const at = agentLastActivity(agent, frameTimes);
@@ -58377,90 +58589,90 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     }
     return byMember;
   }, [agents, frameTimes]);
-  const heldActivityRef = import_react38.default.useRef(liveActivity);
+  const heldActivityRef = import_react41.default.useRef(liveActivity);
   if (!draggingOrder) heldActivityRef.current = liveActivity;
   const sortActivity = view.sortBy !== "activity" ? EMPTY_ACTIVITY2 : draggingOrder ? heldActivityRef.current : liveActivity;
-  const sortContext = import_react38.default.useMemo(() => ({
+  const sortContext = import_react41.default.useMemo(() => ({
     sortBy: view.sortBy,
     rank: new Map(agentOrder.map((key, index2) => [key, index2])),
     lastActivity: (agent) => sortActivity.get(agent.member_id)
   }), [agentOrder, sortActivity, view.sortBy]);
   const flat = view.groupBy === "none";
   const searchActive = Boolean(q2) || activityFilter !== "all";
-  const filtered = import_react38.default.useMemo(() => {
+  const filtered = import_react41.default.useMemo(() => {
     const needle = q2.toLowerCase();
     return agents.filter((agent) => {
       const activity = agent.response_phase === null ? "quiet" : agent.response_phase === "waiting" || agent.response_phase === "tool-executing" || agent.response_phase === "generating" ? "working" : "unknown";
       return (activityFilter === "all" || activity === activityFilter) && (!needle || [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role].some((value) => value?.toLowerCase().includes(needle)));
     });
   }, [agents, q2, activityFilter]);
-  const sectionOrderStorageKey = import_react38.default.useMemo(
+  const sectionOrderStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const subgroupOrderStorageKey = import_react38.default.useMemo(
+  const subgroupOrderStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const [sectionOrder, setSectionOrder] = import_react38.default.useState(() => {
+  const [sectionOrder, setSectionOrder] = import_react41.default.useState(() => {
     return readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || [];
   });
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setSectionOrder(readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || []);
   }, [sectionOrderStorageKey]);
-  const [subgroupOrder, setSubgroupOrder] = import_react38.default.useState(() => {
+  const [subgroupOrder, setSubgroupOrder] = import_react41.default.useState(() => {
     return readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || [];
   });
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setSubgroupOrder(readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || []);
   }, [subgroupOrderStorageKey]);
-  const classified = import_react38.default.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
-  const categoryGrouped = import_react38.default.useMemo(
+  const classified = import_react41.default.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
+  const categoryGrouped = import_react41.default.useMemo(
     () => flat && view.sortBy !== "manual" ? null : orderSidebarGroups(classified, sortContext),
     [classified, flat, sortContext, view.sortBy]
   );
-  const categorySequence = import_react38.default.useMemo(
+  const categorySequence = import_react41.default.useMemo(
     () => categoryGrouped && view.sortBy === "manual" ? sidebarCategorySequence(categoryGrouped, grouping, sectionOrder, subgroupOrder) : [],
     [categoryGrouped, grouping, sectionOrder, subgroupOrder, view.sortBy]
   );
-  const grouped = import_react38.default.useMemo(
+  const grouped = import_react41.default.useMemo(
     () => !flat && categoryGrouped ? categoryGrouped : orderFlatSidebarGroup(classified, categorySequence, sortContext),
     [categoryGrouped, categorySequence, classified, flat, sortContext]
   );
-  const familyPinIdsByMemberId = import_react38.default.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
-  const sectionNames = import_react38.default.useMemo(
+  const familyPinIdsByMemberId = import_react41.default.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
+  const sectionNames = import_react41.default.useMemo(
     () => flat ? grouped.has(FLAT_SECTION_NAME) ? [FLAT_SECTION_NAME] : [] : orderedSectionNames(grouped, grouping),
     [flat, grouped, grouping]
   );
-  const defaultCollapsedKey = import_react38.default.useMemo(
+  const defaultCollapsedKey = import_react41.default.useMemo(
     () => JSON.stringify((grouping?.sections || []).map((section) => [section.name, section.collapsed === true])),
     [grouping?.sections]
   );
-  const sectionCollapseStorageKey = import_react38.default.useMemo(
+  const sectionCollapseStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SECTION_COLLAPSE_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const subgroupCollapseStorageKey = import_react38.default.useMemo(
+  const subgroupCollapseStorageKey = import_react41.default.useMemo(
     () => sidebarStorageKey(SUBGROUP_COLLAPSE_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const [collapsedSections, setCollapsedSections] = import_react38.default.useState(() => {
+  const [collapsedSections, setCollapsedSections] = import_react41.default.useState(() => {
     return collapsedSectionsForStorage(grouping, sectionCollapseStorageKey);
   });
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setCollapsedSections(collapsedSectionsForStorage(grouping, sectionCollapseStorageKey));
   }, [defaultCollapsedKey, grouping, sectionCollapseStorageKey]);
-  const [collapsedSubgroups, setCollapsedSubgroups] = import_react38.default.useState(() => {
+  const [collapsedSubgroups, setCollapsedSubgroups] = import_react41.default.useState(() => {
     return collapsedSubgroupsForStorage(subgroupCollapseStorageKey);
   });
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     setCollapsedSubgroups(collapsedSubgroupsForStorage(subgroupCollapseStorageKey));
   }, [subgroupCollapseStorageKey]);
-  const customSidebarButtons = import_react38.default.useMemo(
+  const customSidebarButtons = import_react41.default.useMemo(
     () => (customButtons || []).filter((button) => button.id && button.label && (button.control || button.href || button.panel)),
     [customButtons]
   );
-  const completeSectionDrop = import_react38.default.useCallback((target, where, draggedId = draggingOrderRef.current?.id, inputSource = "pointer") => {
+  const completeSectionDrop = import_react41.default.useCallback((target, where, draggedId = draggingOrderRef.current?.id, inputSource = "pointer") => {
     if (!draggedId || draggedId === target) return;
     if (inputSource === "keyboard") {
       pendingOrderFocusRef.current = { kind: "section", id: draggedId };
@@ -58473,12 +58685,12 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     });
     setOrderAnnouncement("Moved section ".concat(draggedId, " ").concat(where, " ").concat(target, "."));
   }, [sectionNames, sectionOrderStorageKey]);
-  const subgroupIdsForBucket = import_react38.default.useCallback((bucket) => {
+  const subgroupIdsForBucket = import_react41.default.useCallback((bucket) => {
     const list4 = grouped.get(bucket) || [];
     const ids = list4.map((row) => row.subgroup).filter((value) => Boolean(value)).map((subgroup) => sidebarSubgroupStorageId(bucket, subgroup));
     return Array.from(new Set(ids));
   }, [grouped]);
-  const completeSubgroupDrop = import_react38.default.useCallback((target, bucket, where, draggedId = draggingOrderRef.current?.id, draggedBucket = draggingOrderRef.current?.bucket, inputSource = "pointer") => {
+  const completeSubgroupDrop = import_react41.default.useCallback((target, bucket, where, draggedId = draggingOrderRef.current?.id, draggedBucket = draggingOrderRef.current?.bucket, inputSource = "pointer") => {
     if (!draggedId || draggedBucket !== bucket || draggedId === target) return;
     if (inputSource === "keyboard") {
       pendingOrderFocusRef.current = { kind: "subgroup", id: draggedId, bucket };
@@ -58496,12 +58708,12 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     });
     setOrderAnnouncement("Moved subgroup ".concat(sidebarSubgroupStorageLabel(draggedId), " ").concat(where, " ").concat(sidebarSubgroupStorageLabel(target), "."));
   }, [subgroupIdsForBucket, subgroupOrderStorageKey]);
-  const presentAgentKeys = import_react38.default.useMemo(
+  const presentAgentKeys = import_react41.default.useMemo(
     () => categorySequence.map((row) => sidebarAgentOrderKey(row.agent)),
     [categorySequence]
   );
   const agentReorderBlocked = view.sortBy !== "manual" ? "Choose Sort: Manual to reorder agents." : searchActive ? "Clear the search and the activity filter to reorder agents." : null;
-  const completeAgentDrop = import_react38.default.useCallback((target, where, draggedId, container, inputSource) => {
+  const completeAgentDrop = import_react41.default.useCallback((target, where, draggedId, container, inputSource) => {
     if (!draggedId || draggedId === target) return;
     const siblings = virtualRowsRef.current.filter(
       (row) => row.kind === "agent" && row.container === container
@@ -58528,7 +58740,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     };
     setOrderAnnouncement("Moved ".concat(labelOf(draggedId), " ").concat(where === "before" ? "above" : "below", " ").concat(labelOf(target), "."));
   }, [agentOrder, agentOrderStorageKey, agents, presentAgentKeys]);
-  const handleSectionOrderKeyDown = import_react38.default.useCallback((event, bucket) => {
+  const handleSectionOrderKeyDown = import_react41.default.useCallback((event, bucket) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const ordered = applyConsoleSidebarOrder(sectionNames, sectionOrder);
     const index2 = ordered.indexOf(bucket);
@@ -58537,7 +58749,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     event.preventDefault();
     completeSectionDrop(target, event.key === "ArrowUp" ? "before" : "after", bucket, "keyboard");
   }, [completeSectionDrop, sectionNames, sectionOrder]);
-  const handleSubgroupOrderKeyDown = import_react38.default.useCallback((event, storageKey, bucket) => {
+  const handleSubgroupOrderKeyDown = import_react41.default.useCallback((event, storageKey, bucket) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const ordered = applyConsoleSidebarOrder(subgroupIdsForBucket(bucket), subgroupOrder);
     const index2 = ordered.indexOf(storageKey);
@@ -58546,7 +58758,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     event.preventDefault();
     completeSubgroupDrop(target, bucket, event.key === "ArrowUp" ? "before" : "after", storageKey, bucket, "keyboard");
   }, [completeSubgroupDrop, subgroupIdsForBucket, subgroupOrder]);
-  const handleAgentOrderKeyDown = import_react38.default.useCallback((event, row) => {
+  const handleAgentOrderKeyDown = import_react41.default.useCallback((event, row) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
     event.preventDefault();
     if (agentReorderBlocked) {
@@ -58565,7 +58777,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     completeAgentDrop(target, up ? "before" : "after", key, row.container, "keyboard");
     return true;
   }, [agentReorderBlocked, completeAgentDrop]);
-  const beginPointerOrderDrag = import_react38.default.useCallback((event, item) => {
+  const beginPointerOrderDrag = import_react41.default.useCallback((event, item) => {
     if (event.button !== 0) return;
     event.preventDefault();
     pointerDragRef.current = {
@@ -58581,7 +58793,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     setDraggingOrder(item);
     draggingOrderRef.current = item;
   }, []);
-  const updatePointerOrderTarget = import_react38.default.useCallback((clientX, clientY) => {
+  const updatePointerOrderTarget = import_react41.default.useCallback((clientX, clientY) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     const target = document.elementFromPoint(clientX, clientY)?.closest("[data-sidebar-order-kind]");
@@ -58606,7 +58818,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     }
     setDragOverOrder({ kind, id, where, indicatorId });
   }, []);
-  const movePointerOrderDrag = import_react38.default.useCallback((event) => {
+  const movePointerOrderDrag = import_react41.default.useCallback((event) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     drag.lastX = event.clientX;
@@ -58621,7 +58833,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     });
     updatePointerOrderTarget(event.clientX, event.clientY);
   }, [updatePointerOrderTarget]);
-  const finishPointerOrderDrag = import_react38.default.useCallback((drop) => {
+  const finishPointerOrderDrag = import_react41.default.useCallback((drop) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     pointerDragRef.current = null;
@@ -58645,7 +58857,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     setDragOverOrder(null);
     setDragPreview(null);
   }, [completeAgentDrop, completeSectionDrop, completeSubgroupDrop]);
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     if (!draggingOrder) return void 0;
     const onMove = (event) => movePointerOrderDrag(event);
     const onDrop = () => finishPointerOrderDrag(true);
@@ -58659,7 +58871,7 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
       window.removeEventListener("pointercancel", onCancel);
     };
   }, [draggingOrder, finishPointerOrderDrag, movePointerOrderDrag]);
-  const sidebarNavigationModel = import_react38.default.useMemo(() => {
+  const sidebarNavigationModel = import_react41.default.useMemo(() => {
     return buildStockSidebarNavigationModel({
       sectionNames,
       grouped,
@@ -58674,26 +58886,26 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
       order: sortContext
     });
   }, [sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, searchActive, flat, sortContext]);
-  const virtualRows = import_react38.default.useMemo(
+  const virtualRows = import_react41.default.useMemo(
     () => sidebarNavigationRows(sidebarNavigationModel),
     [sidebarNavigationModel]
   );
   virtualRowsRef.current = virtualRows;
-  const agentSiblingCounts = import_react38.default.useMemo(() => {
+  const agentSiblingCounts = import_react41.default.useMemo(() => {
     const counts = /* @__PURE__ */ new Map();
     for (const row of virtualRows) {
       if (row.kind === "agent") counts.set(row.container, (counts.get(row.container) || 0) + 1);
     }
     return counts;
   }, [virtualRows]);
-  const virtualOffsets = import_react38.default.useMemo(() => sidebarVirtualOffsets(virtualRows), [virtualRows]);
+  const virtualOffsets = import_react41.default.useMemo(() => sidebarVirtualOffsets(virtualRows), [virtualRows]);
   const [listRef, listHeight] = useMeasuredHeight();
-  const [scrollTop, setScrollTop] = import_react38.default.useState(0);
-  import_react38.default.useEffect(() => {
+  const [scrollTop, setScrollTop] = import_react41.default.useState(0);
+  import_react41.default.useEffect(() => {
     setScrollTop(0);
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [q2, activityFilter, grouping, view.groupBy, view.sortBy, listRef]);
-  import_react38.default.useEffect(() => {
+  import_react41.default.useEffect(() => {
     if (!draggingOrder || typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return void 0;
     let frame = 0;
     const step = () => {
@@ -58724,18 +58936,18 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
     frame = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(frame);
   }, [draggingOrder, listRef, updatePointerOrderTarget]);
-  const visibleRange = import_react38.default.useMemo(() => sidebarVisibleRange({
+  const visibleRange = import_react41.default.useMemo(() => sidebarVisibleRange({
     rowCount: virtualRows.length,
     offsets: virtualOffsets.offsets,
     total: virtualOffsets.total,
     scrollTop,
     listHeight
   }), [listHeight, scrollTop, virtualOffsets, virtualRows.length]);
-  const visibleRows = import_react38.default.useMemo(
+  const visibleRows = import_react41.default.useMemo(
     () => virtualRows.slice(visibleRange.start, visibleRange.end),
     [virtualRows, visibleRange]
   );
-  import_react38.default.useLayoutEffect(() => {
+  import_react41.default.useLayoutEffect(() => {
     const pending = pendingOrderFocusRef.current;
     const list4 = listRef.current;
     if (!pending || !list4) return;
@@ -58767,11 +58979,11 @@ var Sidebar = import_react38.default.memo(function Sidebar2({
       window.setTimeout(restoreFocus, 0);
     }
   }, [listHeight, listRef, scrollTop, virtualOffsets, virtualRows]);
-  const dragPreviewRows = import_react38.default.useMemo(
+  const dragPreviewRows = import_react41.default.useMemo(
     () => sidebarDragPreviewRows(virtualRows, draggingOrder),
     [virtualRows, draggingOrder]
   );
-  const selectUnlessDropped = import_react38.default.useCallback((agent) => {
+  const selectUnlessDropped = import_react41.default.useCallback((agent) => {
     if (suppressOrderClickRef.current) return;
     onSelect(agent);
   }, [onSelect]);
@@ -59143,6 +59355,7 @@ function roleWords(agent) {
 function lastChange(agent) {
   const progress = agent.progress;
   const at = progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
+  if (progress?.health === "wedged") return { words: at ? "Last progress" : "", at };
   switch (progress?.last_progress_event) {
     case "execution_advanced":
       return { words: "Made progress", at };
@@ -59178,19 +59391,19 @@ function RosterPanel({
   actionLabels,
   actionVisibility
 }) {
-  const [query, setQuery] = import_react39.default.useState("");
-  const [filter, setFilter] = import_react39.default.useState("all");
-  const [sel, setSel] = import_react39.default.useState(agents[0]?.member_id || "");
-  const [detailOpen, setDetailOpen] = import_react39.default.useState(false);
-  import_react39.default.useEffect(() => {
+  const [query, setQuery] = import_react42.default.useState("");
+  const [filter, setFilter] = import_react42.default.useState("all");
+  const [sel, setSel] = import_react42.default.useState(agents[0]?.member_id || "");
+  const [detailOpen, setDetailOpen] = import_react42.default.useState(false);
+  import_react42.default.useEffect(() => {
     if (selectedMemberId) setSel(selectedMemberId);
   }, [selectedMemberId]);
-  const buckets = import_react39.default.useMemo(() => {
+  const buckets = import_react42.default.useMemo(() => {
     const counts = /* @__PURE__ */ new Map();
     for (const agent of agents) counts.set(bucketOf(agent), (counts.get(bucketOf(agent)) || 0) + 1);
     return BUCKET_ORDER.filter((bucket) => counts.has(bucket)).map((bucket) => ({ bucket, count: counts.get(bucket) || 0 }));
   }, [agents]);
-  const rows = import_react39.default.useMemo(() => {
+  const rows = import_react42.default.useMemo(() => {
     const needle = query.trim().toLowerCase();
     return agents.filter((agent) => {
       if (filter !== "all" && bucketOf(agent) !== filter) return false;
@@ -59448,7 +59661,7 @@ function AgentDetailsPanel({
           /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(CommandBlock, { command: repair.diagnose_command, testId: "inspect-session-repair-diagnose", label: "diagnose" }),
           /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(CommandBlock, { command: repair.apply_command, testId: "inspect-session-repair-apply", label: "repair" })
         ] }) }) : null,
-        /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(PanelSection, { label: "Overview", headerAs: "div", padded: true, children: /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(PanelSection, { label: "Overview", padded: true, children: /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(
           KeyValueList,
           {
             items: [
@@ -59466,7 +59679,7 @@ function AgentDetailsPanel({
             ]
           }
         ) }),
-        inspect.output_preview ? /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(PanelSection, { label: "Latest output", headerAs: "div", padded: true, children: /* @__PURE__ */ (0, import_jsx_runtime65.jsx)("blockquote", { className: "agent-details__preview", children: inspect.output_preview }) }) : null,
+        inspect.output_preview ? /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(PanelSection, { label: "Latest output", padded: true, children: /* @__PURE__ */ (0, import_jsx_runtime65.jsx)("blockquote", { className: "agent-details__preview", children: inspect.output_preview }) }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime65.jsx)("div", { className: "agent-details__tech", children: /* @__PURE__ */ (0, import_jsx_runtime65.jsx)(
           TechnicalDetails,
           {
@@ -59492,6 +59705,8 @@ function HealthPanel({
   onOpen,
   canOpen
 }) {
+  const directory = useAgentDirectory();
+  const titleOf = (row) => directory.lookup(row.identity)?.label || agentDisplayTitle({ label: row.display_name || "", identity: row.identity, role: row.role });
   const rows = identities.map((row) => ({ row, status: agentStatusChip(stateLabel(row), row.progress?.health) }));
   const count2 = (label) => rows.filter((entry) => entry.status.label === label).length;
   const healthy = count2("Healthy");
@@ -59520,7 +59735,7 @@ function HealthPanel({
           testId: "health-identity:".concat(row.identity),
           onActivate: onOpen && (canOpen ? canOpen(row.identity) : true) ? () => onOpen(row.identity) : void 0,
           lead: /* @__PURE__ */ (0, import_jsx_runtime66.jsx)(StatusDot, { tone: status.tone }),
-          title: row.display_name || row.identity,
+          title: titleOf(row),
           titleAttr: row.identity,
           subtitle: reachabilityWords(row.addressability),
           meta: /* @__PURE__ */ (0, import_jsx_runtime66.jsxs)(import_jsx_runtime66.Fragment, { children: [
@@ -59535,7 +59750,7 @@ function HealthPanel({
 }
 
 // src/panels/SchedulesSection.tsx
-var import_react40 = __toESM(require("react"));
+var import_react43 = __toESM(require("react"));
 var import_jsx_runtime67 = require("react/jsx-runtime");
 var AUTO_REFRESH_INTERVAL_MS = 15e3;
 var WEEKDAYS = [
@@ -59556,29 +59771,29 @@ function SchedulesSection({
   timezone,
   formatTime: formatTime3 = formatScheduleTime
 }) {
-  const [schedules, setSchedules] = import_react40.default.useState([]);
-  const [status, setStatus] = import_react40.default.useState("loading");
-  const [loadError, setLoadError] = import_react40.default.useState(null);
-  const [actionError, setActionError] = import_react40.default.useState(null);
-  const [busy, setBusy] = import_react40.default.useState(null);
+  const [schedules, setSchedules] = import_react43.default.useState([]);
+  const [status, setStatus] = import_react43.default.useState("loading");
+  const [loadError, setLoadError] = import_react43.default.useState(null);
+  const [actionError, setActionError] = import_react43.default.useState(null);
+  const [busy, setBusy] = import_react43.default.useState(null);
   const directory = useAgentDirectory();
-  const senderName = (sender) => directory.lookup(sender)?.label ?? sender;
-  const [confirmingDelete, setConfirmingDelete] = import_react40.default.useState(null);
-  const [form, setForm] = import_react40.default.useState(null);
-  const runRef = import_react40.default.useRef(run);
+  const senderLabel = (sender) => directory.lookup(sender)?.label;
+  const [confirmingDelete, setConfirmingDelete] = import_react43.default.useState(null);
+  const [form, setForm] = import_react43.default.useState(null);
+  const runRef = import_react43.default.useRef(run);
   runRef.current = run;
-  const nowRef = import_react40.default.useRef(now);
+  const nowRef = import_react43.default.useRef(now);
   nowRef.current = now;
-  const alive = import_react40.default.useRef(true);
-  const loadSeq = import_react40.default.useRef(0);
-  const lastLoadAt = import_react40.default.useRef(null);
-  import_react40.default.useEffect(() => {
+  const alive = import_react43.default.useRef(true);
+  const loadSeq = import_react43.default.useRef(0);
+  const lastLoadAt = import_react43.default.useRef(null);
+  import_react43.default.useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
     };
   }, []);
-  const load = import_react40.default.useCallback(async () => {
+  const load = import_react43.default.useCallback(async () => {
     const seq = ++loadSeq.current;
     lastLoadAt.current = nowRef.current().getTime();
     try {
@@ -59594,15 +59809,15 @@ function SchedulesSection({
       setLoadError(scheduleErrorMessage(error48, CONSOLE_SCHEDULE_COMMANDS.list));
     }
   }, []);
-  import_react40.default.useEffect(() => {
+  import_react43.default.useEffect(() => {
     void load();
   }, [identity, load]);
-  import_react40.default.useEffect(() => {
+  import_react43.default.useEffect(() => {
     const last = lastLoadAt.current;
     if (last !== null && nowRef.current().getTime() - last < AUTO_REFRESH_INTERVAL_MS) return;
     void load();
   }, [refreshToken, load]);
-  import_react40.default.useEffect(() => {
+  import_react43.default.useEffect(() => {
     if (!editing.canChange) {
       setForm(null);
       setConfirmingDelete(null);
@@ -59737,7 +59952,15 @@ function SchedulesSection({
       /* @__PURE__ */ (0, import_jsx_runtime67.jsx)("p", { className: "console-schedules__content", children: schedule.content }),
       /* @__PURE__ */ (0, import_jsx_runtime67.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-when:".concat(id), children: describeScheduleTrigger(schedule.trigger, formatTime3) }),
       schedule.phase === "active" ? /* @__PURE__ */ (0, import_jsx_runtime67.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-next:".concat(id), children: schedule.nextDueAt ? "Next: ".concat(formatTime3(schedule.nextDueAt)) : "Next: none planned" }) : null,
-      schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime67.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-sender:".concat(id), children: schedule.sender ? "Sends as ".concat(senderName(schedule.sender)) : "Sends as this console" }),
+      schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime67.jsx)(
+        "p",
+        {
+          className: "console-schedules__meta",
+          "data-testid": "schedule-sender:".concat(id),
+          title: schedule.sender || void 0,
+          children: "Sends as ".concat(describeScheduleSender(schedule.sender, senderLabel))
+        }
+      ),
       editing.canChange ? /* @__PURE__ */ (0, import_jsx_runtime67.jsxs)("div", { className: "cc-btn-row console-schedules__actions", children: [
         /* @__PURE__ */ (0, import_jsx_runtime67.jsx)(
           "button",
@@ -59989,7 +60212,7 @@ function SchedulesSection({
 }
 
 // src/panels/WorkGraphPanel.tsx
-var import_react43 = __toESM(require("react"));
+var import_react46 = __toESM(require("react"));
 
 // src/lib/workgraph-layout.ts
 var WORKGRAPH_GRAPH_COL_WIDTH = 220;
@@ -60024,6 +60247,15 @@ var WORK_STATUS_WORDS = {
 function workGraphStatusWord(status) {
   const key = status || "open";
   return WORK_STATUS_WORDS[key] || humanizeEnum(key);
+}
+var EDGE_WORDS = {
+  blocks: "blocks",
+  related: "related",
+  supersedes: "replaces",
+  derived_from: "derived from"
+};
+function workGraphEdgeWord(kind) {
+  return EDGE_WORDS[kind] || humanizeEnum(kind).toLowerCase();
 }
 function compareIds(byId, left, right) {
   const leftKey = byId.get(left)?.created_at || "";
@@ -60211,10 +60443,22 @@ function workGraphEdgeMidpoint(edge) {
 }
 
 // src/panels/WorkGraphGraphView.tsx
-var import_react42 = __toESM(require("react"));
+var import_react45 = __toESM(require("react"));
 
 // src/panels/topology/zoom-pan.ts
-var import_react41 = __toESM(require("react"));
+var import_react44 = __toESM(require("react"));
+function revealViewport(v, box, width, height, margin = 16) {
+  const axis = (t, start2, size, extent) => {
+    const low = t + start2 * v.scale;
+    const high = t + (start2 + size) * v.scale;
+    if (high - low + 2 * margin > extent || low < margin) return t + (margin - low);
+    if (high > extent - margin) return t - (high - (extent - margin));
+    return t;
+  };
+  const tx = axis(v.tx, box.x, box.w, width);
+  const ty = axis(v.ty, box.y, box.h, height);
+  return tx === v.tx && ty === v.ty ? v : { ...v, tx, ty };
+}
 var MIN_SCALE = 0.4;
 var MAX_SCALE = 6;
 function clientToViewBox(el, clientX, clientY, viewBoxW, viewBoxH) {
@@ -60231,21 +60475,24 @@ function clientToViewBox(el, clientX, clientY, viewBoxW, viewBoxH) {
 }
 var IDENTITY_VIEWPORT = { tx: 0, ty: 0, scale: 1 };
 function useZoomPan(width, height, fit = IDENTITY_VIEWPORT) {
-  const [viewport, setViewport] = import_react41.default.useState(fit);
-  const fitRef = import_react41.default.useRef(fit);
+  const [viewport, setViewport] = import_react44.default.useState(fit);
+  const fitRef = import_react44.default.useRef(fit);
   fitRef.current = fit;
-  const dragRef = import_react41.default.useRef(null);
-  const [isDragging, setIsDragging] = import_react41.default.useState(false);
-  const svgRef = import_react41.default.useRef(null);
-  const reset = import_react41.default.useCallback(() => {
+  const dragRef = import_react44.default.useRef(null);
+  const [isDragging, setIsDragging] = import_react44.default.useState(false);
+  const svgRef = import_react44.default.useRef(null);
+  const reset = import_react44.default.useCallback(() => {
     setViewport(fitRef.current);
   }, []);
-  import_react41.default.useLayoutEffect(() => {
+  const reveal = import_react44.default.useCallback((box) => {
+    setViewport((prev) => revealViewport(prev, box, width, height));
+  }, [width, height]);
+  import_react44.default.useLayoutEffect(() => {
     setViewport(fitRef.current);
     dragRef.current = null;
     setIsDragging(false);
   }, [width, height, fit.tx, fit.ty, fit.scale]);
-  import_react41.default.useEffect(() => {
+  import_react44.default.useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
     const handler = (e) => {
@@ -60267,7 +60514,7 @@ function useZoomPan(width, height, fit = IDENTITY_VIEWPORT) {
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
   }, [width, height]);
-  const onPointerDown = import_react41.default.useCallback((e) => {
+  const onPointerDown = import_react44.default.useCallback((e) => {
     if (e.button !== 0) return;
     const tag = e.target?.tagName?.toLowerCase();
     if (tag !== "svg" && tag !== "g" && tag !== "rect" && tag !== "line") return;
@@ -60275,7 +60522,7 @@ function useZoomPan(width, height, fit = IDENTITY_VIEWPORT) {
     dragRef.current = { pointerId: e.pointerId, lastX: e.clientX, lastY: e.clientY };
     setIsDragging(true);
   }, []);
-  const onPointerMove = import_react41.default.useCallback((e) => {
+  const onPointerMove = import_react44.default.useCallback((e) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     const dx = e.clientX - drag.lastX;
@@ -60288,14 +60535,14 @@ function useZoomPan(width, height, fit = IDENTITY_VIEWPORT) {
     const vbDy = dy / renderScale;
     setViewport((prev) => ({ ...prev, tx: prev.tx + vbDx, ty: prev.ty + vbDy }));
   }, [width, height]);
-  const onPointerUp = import_react41.default.useCallback((e) => {
+  const onPointerUp = import_react44.default.useCallback((e) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
     dragRef.current = null;
     setIsDragging(false);
   }, []);
-  return { viewport, reset, svgRef, onPointerDown, onPointerMove, onPointerUp, isDragging };
+  return { viewport, reset, reveal, svgRef, onPointerDown, onPointerMove, onPointerUp, isDragging };
 }
 function viewportTransform(v) {
   return "translate(".concat(v.tx, " ").concat(v.ty, ") scale(").concat(v.scale, ")");
@@ -60340,8 +60587,8 @@ function fitViewport(frameWidth, frameHeight, layoutWidth, layoutHeight) {
   };
 }
 function useFrameSize(ref, mounted) {
-  const [size, setSize] = import_react42.default.useState({ width: 0, height: 0 });
-  import_react42.default.useLayoutEffect(() => {
+  const [size, setSize] = import_react45.default.useState({ width: 0, height: 0 });
+  import_react45.default.useLayoutEffect(() => {
     const el = ref.current;
     if (!mounted || !el) return;
     const apply = (width, height) => {
@@ -60360,9 +60607,9 @@ function useFrameSize(ref, mounted) {
   return size;
 }
 function useLabelMeasurers(ref, mounted) {
-  const [fontsEpoch, setFontsEpoch] = import_react42.default.useState(0);
-  const [families, setFamilies] = import_react42.default.useState(null);
-  import_react42.default.useEffect(() => {
+  const [fontsEpoch, setFontsEpoch] = import_react45.default.useState(0);
+  const [families, setFamilies] = import_react45.default.useState(null);
+  import_react45.default.useEffect(() => {
     if (typeof document === "undefined" || !document.fonts?.ready) return;
     let live = true;
     void document.fonts.ready.then(() => {
@@ -60372,7 +60619,7 @@ function useLabelMeasurers(ref, mounted) {
       live = false;
     };
   }, []);
-  import_react42.default.useLayoutEffect(() => {
+  import_react45.default.useLayoutEffect(() => {
     const el = ref.current;
     if (!mounted || !el || typeof getComputedStyle !== "function") return;
     const style = getComputedStyle(el);
@@ -60380,7 +60627,7 @@ function useLabelMeasurers(ref, mounted) {
     const mono = style.getPropertyValue("--mono").trim() || "monospace";
     setFamilies((prev) => prev && prev.sans === sans && prev.mono === mono ? prev : { sans, mono });
   });
-  return import_react42.default.useMemo(() => {
+  return import_react45.default.useMemo(() => {
     if (!families || typeof document === "undefined") return null;
     const ctx = document.createElement("canvas").getContext("2d");
     if (!ctx) return null;
@@ -60428,6 +60675,43 @@ function nodeHoverText(node2, item, ownerName) {
 }
 function moreItemsNotDrawn(count2) {
   return "+".concat(count2, " more ").concat(count2 === 1 ? "item" : "items", " not drawn");
+}
+var ARROW_STEPS = /* @__PURE__ */ new Map([
+  ["ArrowRight", [1, 0]],
+  ["ArrowLeft", [-1, 0]],
+  ["ArrowDown", [0, 1]],
+  ["ArrowUp", [0, -1]]
+]);
+function nodeToward(nodes, fromId, key) {
+  if (key === "Home" || key === "End") {
+    let best = null;
+    for (const node2 of nodes) {
+      const first = !best || node2.x < best.x || node2.x === best.x && node2.y < best.y;
+      const last = !best || node2.x > best.x || node2.x === best.x && node2.y > best.y;
+      if (key === "Home" ? first : last) best = node2;
+    }
+    return best ? best.itemId : null;
+  }
+  const step = ARROW_STEPS.get(key);
+  const from = step ? nodes.find((node2) => node2.itemId === fromId) : void 0;
+  if (!step || !from) return null;
+  const [ux, uy] = step;
+  const fromX = from.x + from.w / 2;
+  const fromY = from.y + from.h / 2;
+  let bestId = null;
+  let bestScore = Infinity;
+  for (const node2 of nodes) {
+    const dx = node2.x + node2.w / 2 - fromX;
+    const dy = node2.y + node2.h / 2 - fromY;
+    const ahead = dx * ux + dy * uy;
+    if (ahead < 1) continue;
+    const score = ahead + 2 * Math.abs(dx * uy - dy * ux);
+    if (score < bestScore) {
+      bestScore = score;
+      bestId = node2.itemId;
+    }
+  }
+  return bestId;
 }
 function WorkGraphPerson({
   person,
@@ -60496,8 +60780,8 @@ function WorkGraphGraphView({
   selectedId,
   onSelect
 }) {
-  const layout = import_react42.default.useMemo(() => layoutWorkGraph(items, edges), [items, edges]);
-  const itemById = import_react42.default.useMemo(() => {
+  const layout = import_react45.default.useMemo(() => layoutWorkGraph(items, edges), [items, edges]);
+  const itemById = import_react45.default.useMemo(() => {
     const map4 = /* @__PURE__ */ new Map();
     for (const item of items) {
       if (typeof item.id === "string" && item.id) map4.set(item.id, item);
@@ -60505,10 +60789,10 @@ function WorkGraphGraphView({
     return map4;
   }, [items]);
   const hasNodes = layout.nodes.length > 0;
-  const svgRef = import_react42.default.useRef(null);
+  const svgRef = import_react45.default.useRef(null);
   const frame = useFrameSize(svgRef, hasNodes);
   const measured2 = frame.width > 0 && frame.height > 0;
-  const fit = import_react42.default.useMemo(
+  const fit = import_react45.default.useMemo(
     () => measured2 ? fitViewport(frame.width, frame.height, layout.width, layout.height) : { tx: 0, ty: 0, scale: 1 },
     [measured2, frame.width, frame.height, layout.width, layout.height]
   );
@@ -60516,11 +60800,11 @@ function WorkGraphGraphView({
   const viewBoxHeight = measured2 ? frame.height : layout.height;
   const zoom = useZoomPan(viewBoxWidth, viewBoxHeight, fit);
   const measure = useLabelMeasurers(svgRef, hasNodes);
-  const setSvgRef = import_react42.default.useCallback((el) => {
+  const setSvgRef = import_react45.default.useCallback((el) => {
     svgRef.current = el;
     zoom.svgRef.current = el;
   }, [zoom.svgRef]);
-  const boundItemIds = import_react42.default.useMemo(() => {
+  const boundItemIds = import_react45.default.useMemo(() => {
     const bound = /* @__PURE__ */ new Set();
     for (const binding of attention2) {
       const itemId2 = binding.work_ref?.item_id;
@@ -60529,6 +60813,8 @@ function WorkGraphGraphView({
     return bound;
   }, [attention2]);
   const directory = useAgentDirectory();
+  const [focusedId, setFocusedId] = import_react45.default.useState(null);
+  const nodeIds = import_react45.default.useMemo(() => new Set(layout.nodes.map((node2) => node2.itemId)), [layout]);
   if (layout.nodes.length === 0) {
     return /* @__PURE__ */ (0, import_jsx_runtime68.jsx)(EmptyState, { inline: true, title: "No work items yet" });
   }
@@ -60537,6 +60823,16 @@ function WorkGraphGraphView({
     return (item ? workGraphItemOwner(item, directory)?.name : "") || node2.ownerLabel;
   };
   const selectedNode = selectedId ? layout.nodes.find((node2) => node2.itemId === selectedId) : void 0;
+  const tabStopId = focusedId && nodeIds.has(focusedId) ? focusedId : selectedNode ? selectedNode.itemId : nodeToward(layout.nodes, "", "Home");
+  const moveFocus = (event, fromId) => {
+    const targetId = nodeToward(layout.nodes, fromId, event.key);
+    if (!targetId || targetId === fromId) return;
+    const target = Array.from(
+      event.currentTarget.ownerSVGElement?.querySelectorAll('[data-testid="workgraph-graph-node"]') ?? []
+    ).find((element3) => element3.getAttribute("data-item-id") === targetId);
+    setFocusedId(targetId);
+    target?.focus();
+  };
   return /* @__PURE__ */ (0, import_jsx_runtime68.jsxs)("div", { className: "workgraph-graph", "data-testid": "workgraph-graph-frame", children: [
     /* @__PURE__ */ (0, import_jsx_runtime68.jsxs)("div", { className: "workgraph-graph__toolbar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime68.jsx)(Button, { size: "sm", title: "Fit the graph to the frame", "data-testid": "workgraph-graph-fit", onClick: zoom.reset, children: "Fit" }),
@@ -60621,17 +60917,24 @@ function WorkGraphGraphView({
                   className: "workgraph-graph__node is-".concat(node2.status).concat(selected ? " is-selected" : ""),
                   transform: "translate(".concat(node2.x, " ").concat(node2.y, ")"),
                   role: "button",
-                  tabIndex: 0,
+                  tabIndex: node2.itemId === tabStopId ? 0 : -1,
                   "aria-label": "".concat(node2.title, ", ").concat(workGraphStatusWord(node2.status)),
                   "aria-current": selected ? "true" : void 0,
                   onPointerDown: (event) => {
                     event.stopPropagation();
                     onSelect?.(node2.itemId);
                   },
+                  onFocus: () => setFocusedId(node2.itemId),
                   onKeyDown: (event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelect?.(node2.itemId);
+                      return;
+                    }
+                    const navigation = ARROW_STEPS.has(event.key) || event.key === "Home" || event.key === "End";
+                    if (!navigation || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
                     event.preventDefault();
-                    onSelect?.(node2.itemId);
+                    moveFocus(event, node2.itemId);
                   },
                   children: [
                     /* @__PURE__ */ (0, import_jsx_runtime68.jsx)("title", { children: nodeHoverText(node2, itemById.get(node2.itemId), ownerName) }),
@@ -60684,7 +60987,7 @@ function WorkGraphGraphView({
                   y: label.y,
                   textAnchor: label.anchor,
                   dominantBaseline: "central",
-                  children: edge.kind
+                  children: workGraphEdgeWord(edge.kind)
                 },
                 "label:".concat(edge.kind, ":").concat(edge.fromId, ":").concat(edge.toId, ":").concat(index2)
               );
@@ -60792,11 +61095,12 @@ function createWorkGraphRefreshSequencer() {
 }
 var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "cancelled", "failed"]);
 var MODE_WORDS = {
-  coordinate: "Coordinating",
-  pursue: "Pursuing",
-  review: "Reviewing",
-  falsify: "Testing",
-  judge: "Judging"
+  pursue: "Doing the work",
+  coordinate: "Leading the work",
+  review: "Reviewing the work",
+  falsify: "Testing the work",
+  judge: "Judging the work",
+  observe: "Watching the work"
 };
 function workGraphModeWord(mode) {
   const key = mode || "pursue";
@@ -60818,6 +61122,7 @@ function workGraphBindingStateText(binding, now = Date.now()) {
     const until = toEpochMs(binding.status?.until);
     return until === null ? "Paused" : "Paused until ".concat(nearMoment(until, now));
   }
+  if (state === "superseded") return "Replaced";
   return humanizeEnum(state);
 }
 function workGraphBindingTarget(binding, directory) {
@@ -60832,6 +61137,14 @@ function workGraphBindingTarget(binding, directory) {
   const kind = target.owner_key?.kind?.trim() || "";
   const key = kind ? "".concat(kind, ":").concat(id) : id;
   return { name: directory?.lookup(key)?.label.trim() || stripAgentKeyPrefix(id), key };
+}
+function bindingAgentName(binding, directory) {
+  if (!binding) return null;
+  const target = workGraphBindingTarget(binding, directory);
+  if (!target) return null;
+  const sessionId = typeof binding.target?.session_id === "string" ? binding.target.session_id.trim() : "";
+  if (sessionId && !directory?.lookup(sessionId)) return null;
+  return target.name || null;
 }
 function workGraphSummary(items) {
   if (items.length === 0) return "No work items";
@@ -60910,6 +61223,7 @@ function workGraphEventSentence(event, context) {
   const named = titleOf(itemId2) || textOf3(item?.title);
   const subject = named || "A work item";
   const object2 = named || "a work item";
+  const agentOnGoal = bindingAgentName(attention2, context.directory);
   const kind = textOf3(event.kind).toLowerCase().replace(/^item_/, "");
   switch (kind) {
     case "created":
@@ -60941,15 +61255,18 @@ function workGraphEventSentence(event, context) {
     }
     case "evidence_added":
       return "Evidence was added to ".concat(object2);
+    // Attention events say which agent works toward a goal, never
+    // "attention": the agent is put on it, the goal is paused for it, the
+    // agent is taken off it.
     case "attention_created":
-      return "Attention on ".concat(object2, " started");
+      return "".concat(agentOnGoal ?? "An agent", " was put on ").concat(object2);
     case "attention_paused":
-      return "Attention on ".concat(object2, " was paused");
+      return "".concat(subject, " was paused for ").concat(agentOnGoal ?? "its agent");
     case "attention_updated": {
       const state = attention2?.status?.state;
-      if (state === "paused") return "Attention on ".concat(object2, " was paused");
-      if (state === "superseded" || state === "stopped") return "Attention on ".concat(object2, " ended");
-      return "Attention on ".concat(object2, " was updated");
+      if (state === "paused") return "".concat(subject, " was paused for ").concat(agentOnGoal ?? "its agent");
+      if (state === "superseded" || state === "stopped") return "".concat(agentOnGoal ?? "An agent", " was taken off ").concat(object2);
+      return "".concat(agentOnGoal ? "".concat(agentOnGoal, "'s") : "An agent's", " part in ").concat(object2, " changed");
     }
     case "execution_bound":
       return "Work on ".concat(object2, " started");
@@ -61013,9 +61330,9 @@ function AttentionRow2({
 }) {
   const directory = useAgentDirectory();
   const now = useNow();
-  const inputId = import_react43.default.useId();
-  const [reassignOpen, setReassignOpen] = import_react43.default.useState(false);
-  const [reassignIdentity, setReassignIdentity] = import_react43.default.useState("");
+  const inputId = import_react46.default.useId();
+  const [reassignOpen, setReassignOpen] = import_react46.default.useState(false);
+  const [reassignIdentity, setReassignIdentity] = import_react46.default.useState("");
   const bindingId = binding.binding_id || "";
   const revision = binding.machine_state?.revision;
   const statusLabel = workGraphBindingStatusLabel(binding);
@@ -61045,7 +61362,7 @@ function AttentionRow2({
       /* @__PURE__ */ (0, import_jsx_runtime69.jsxs)("span", { className: "workgraph-binding__summary", children: [
         /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(StatusDot, { tone: statusTone(state), bound: true }),
         /* @__PURE__ */ (0, import_jsx_runtime69.jsxs)("span", { className: "workgraph-binding__text", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime69.jsx)("span", { className: "workgraph-binding__mode", children: workGraphModeWord(binding.mode) }),
+          /* @__PURE__ */ (0, import_jsx_runtime69.jsx)("span", { className: "workgraph-binding__mode", title: "Attention mode: ".concat(binding.mode || "pursue"), children: workGraphModeWord(binding.mode) }),
           " \xB7 ",
           workGraphBindingStateText(binding, now),
           target ? /* @__PURE__ */ (0, import_jsx_runtime69.jsxs)(import_jsx_runtime69.Fragment, { children: [
@@ -61059,8 +61376,8 @@ function AttentionRow2({
         ] })
       ] }),
       pause || resume || confirm || requestClose || reassignable ? /* @__PURE__ */ (0, import_jsx_runtime69.jsxs)("span", { className: "workgraph-binding__actions", children: [
-        pause ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Pause attention on this goal", onClick: () => onAttentionPause?.(bindingInput), children: "Pause" }) : null,
-        resume ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Resume attention on this goal", onClick: () => onAttentionResume?.(bindingInput), children: "Resume" }) : null,
+        pause ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Pause this goal for its agent", onClick: () => onAttentionPause?.(bindingInput), children: "Pause" }) : null,
+        resume ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Resume this goal for its agent", onClick: () => onAttentionResume?.(bindingInput), children: "Resume" }) : null,
         confirm ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Confirm the goal is complete", onClick: () => onGoalConfirm?.(goalInput), children: "Confirm" }) : null,
         requestClose ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(Button, { size: "sm", title: "Ask to close the goal", onClick: () => onGoalRequestClose?.(goalInput), children: "Request close" }) : null,
         reassignable ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(
@@ -61243,26 +61560,26 @@ function WorkGraphPanel({
   onAttentionReassign
 }) {
   const directory = useAgentDirectory();
-  const rows = import_react43.default.useMemo(
+  const rows = import_react46.default.useMemo(
     () => buildWorkGraphPanelTree(data.items, data.edges),
     [data.items, data.edges]
   );
   const visibleCount = Math.min(rows.length, WORKGRAPH_GRAPH_NODE_CAP);
   const treeOverflowCount = rows.length - visibleCount;
-  const groups = import_react43.default.useMemo(() => groupWorkGraphTree(rows, visibleCount), [rows, visibleCount]);
-  const blockers = import_react43.default.useMemo(
+  const groups = import_react46.default.useMemo(() => groupWorkGraphTree(rows, visibleCount), [rows, visibleCount]);
+  const blockers = import_react46.default.useMemo(
     () => workGraphBlockersOf(data.items, data.edges),
     [data.items, data.edges]
   );
-  const itemById = import_react43.default.useMemo(() => {
+  const itemById = import_react46.default.useMemo(() => {
     const map4 = /* @__PURE__ */ new Map();
     for (const item of data.items) {
       if (typeof item.id === "string" && item.id) map4.set(item.id, item);
     }
     return map4;
   }, [data.items]);
-  const [viewMode, setViewModeState] = import_react43.default.useState(workGraphViewModeMemory);
-  const [selectedGraphItem, setSelectedGraphItem] = import_react43.default.useState(null);
+  const [viewMode, setViewModeState] = import_react46.default.useState(workGraphViewModeMemory);
+  const [selectedGraphItem, setSelectedGraphItem] = import_react46.default.useState(null);
   const setViewMode = (mode) => {
     workGraphViewModeMemory = mode;
     setViewModeState(mode);
@@ -61360,7 +61677,7 @@ function WorkGraphPanel({
             onSelect: setSelectedGraphItem
           }
         ) }),
-        data.attention.length ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(PanelSection, { label: "Attention", count: data.attention.length, children: attentionList(data.attention) }) : null
+        data.attention.length ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(PanelSection, { label: /* @__PURE__ */ (0, import_jsx_runtime69.jsx)("span", { title: "Attention bindings", children: "Agents on goals" }), count: data.attention.length, children: attentionList(data.attention) }) : null
       ] }) : /* @__PURE__ */ (0, import_jsx_runtime69.jsxs)(import_jsx_runtime69.Fragment, { children: [
         rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(
           EmptyState,
@@ -61397,7 +61714,7 @@ function WorkGraphPanel({
           group.root.itemId
         )) }) }) : null,
         treeOverflowCount > 0 ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)("p", { className: "workgraph__overflow", "data-testid": "workgraph-panel-overflow", children: moreItemsText(treeOverflowCount, "shown") }) : null,
-        otherAttention.length ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(PanelSection, { label: "Other attention", count: otherAttention.length, children: attentionList(otherAttention) }) : null
+        otherAttention.length ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(PanelSection, { label: /* @__PURE__ */ (0, import_jsx_runtime69.jsx)("span", { title: "Attention bindings", children: "Agents on other goals" }), count: otherAttention.length, children: attentionList(otherAttention) }) : null
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(PanelSection, { label: "Activity", count: data.events.length || null, className: "workgraph__activity", children: data.events.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(EmptyState, { inline: true, title: "No activity yet" }) : /* @__PURE__ */ (0, import_jsx_runtime69.jsx)(RowList, { children: data.events.map((event, index2) => {
         const sentence2 = workGraphEventSentence(event, { titleOf, directory });
@@ -61464,7 +61781,7 @@ function WorkGraphPanel({
 }
 
 // src/panels/RoutingPanel.tsx
-var import_react44 = __toESM(require("react"));
+var import_react47 = __toESM(require("react"));
 var import_jsx_runtime70 = require("react/jsx-runtime");
 var RECENT_DELIVERIES = 40;
 var ROUTE_DELIVERIES_SHOWN = 8;
@@ -61492,32 +61809,42 @@ function deliveryCounts(deliveries) {
 function countLabel(status, count2) {
   return "".concat(count2, " ").concat(humanizeEnum(status).toLowerCase() || "unknown");
 }
+function routeKeysTitle(route) {
+  return joinMeta(
+    route.channel ? "Channel: ".concat(route.channel) : null,
+    "Sink: ".concat(route.sink),
+    "Module: ".concat(route.target_module)
+  );
+}
 function RouteCaption({ route }) {
   const directory = useAgentDirectory();
-  const channel = humanizeEnum(route.channel) || "Messages";
   const name2 = agentDisplayName(route.recipient, directory) || route.recipient;
-  return /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)(import_jsx_runtime70.Fragment, { children: [
-    channel,
-    " to ",
-    /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { title: route.recipient, children: name2 }),
-    route.sink ? " via ".concat(route.sink) : null
+  return /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("span", { title: routeKeysTitle(route), children: [
+    "Delivers to ",
+    /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { title: route.recipient, children: name2 })
   ] });
+}
+function routeMatches(route, needle, recipientName) {
+  const text11 = needle.trim().toLowerCase();
+  if (!text11) return true;
+  return [route.route_key, route.recipient, recipientName, route.sink, route.target_module].some((value) => value.toLowerCase().includes(text11));
+}
+function deliveryTitle(delivery, at) {
+  return joinMeta(formatAbsoluteTime(at), "Delivery ".concat(delivery.delivery_id));
 }
 function RoutingPanel({ data, loading = false, error: error48 }) {
   const routes = data.routes || [];
   const deliveries = data.deliveries || [];
-  const [q2, setQ] = import_react44.default.useState("");
-  const [sel, setSel] = import_react44.default.useState(routes[0]?.route_key || "");
-  const rows = import_react44.default.useMemo(() => {
+  const directory = useAgentDirectory();
+  const [q2, setQ] = import_react47.default.useState("");
+  const [sel, setSel] = import_react47.default.useState(routes[0]?.route_key || "");
+  const rows = import_react47.default.useMemo(() => {
     if (!q2) return routes;
-    const needle = q2.toLowerCase();
-    return routes.filter(
-      (r2) => r2.route_key.toLowerCase().includes(needle) || r2.recipient.toLowerCase().includes(needle) || r2.sink.toLowerCase().includes(needle) || r2.target_module.toLowerCase().includes(needle)
-    );
-  }, [routes, q2]);
+    return routes.filter((r2) => routeMatches(r2, q2, agentDisplayName(r2.recipient, directory)));
+  }, [routes, q2, directory]);
   const active = rows.find((r2) => r2.route_key === sel) || rows[0];
-  const recentDeliveries = import_react44.default.useMemo(() => deliveries.slice(0, RECENT_DELIVERIES), [deliveries]);
-  const deliveriesByRoute = import_react44.default.useMemo(() => {
+  const recentDeliveries = import_react47.default.useMemo(() => deliveries.slice(0, RECENT_DELIVERIES), [deliveries]);
+  const deliveriesByRoute = import_react47.default.useMemo(() => {
     const byRoute = /* @__PURE__ */ new Map();
     for (const delivery of recentDeliveries) {
       const list5 = byRoute.get(delivery.route_id);
@@ -61569,17 +61896,7 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("li", { className: "routing__step", children: [
         /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__step-label", children: "Recipient" }),
-        /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("span", { className: "routing__step-value", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(AgentName, { id: active.recipient, avatar: 18 }),
-          active.sink ? /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("span", { className: "routing__step-note", children: [
-            "via ",
-            active.sink
-          ] }) : null
-        ] })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("li", { className: "routing__step", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__step-label", children: "Module" }),
-        /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__step-value", title: active.target_module, children: active.target_module })
+        /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__step-value", children: /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(AgentName, { id: active.recipient, avatar: 18 }) })
       ] })
     ] }) }),
     /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)(PanelSection, { label: "Policy", padded: true, children: [
@@ -61587,7 +61904,6 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
         KeyValueList,
         {
           items: [
-            { label: "Channel", value: humanizeEnum(active.channel) },
             { label: "Retries", value: active.retry_max != null ? String(active.retry_max) : "" },
             { label: "Backoff", value: formatBackoff(active.backoff_ms) },
             { label: "Rate limit", value: active.rate_limit_per_minute ? "".concat(active.rate_limit_per_minute, " per minute") : "" }
@@ -61595,11 +61911,23 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
         }
       ),
       active.retry_max == null && !active.backoff_ms && !active.rate_limit_per_minute ? /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("p", { className: "routing__quiet", children: "Default delivery policy." }) : null,
-      /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(TechnicalDetails, { items: [{ label: "Recipient key", value: active.recipient }] })
+      /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(
+        TechnicalDetails,
+        {
+          items: [
+            { label: "Recipient key", value: active.recipient },
+            { label: "Channel", value: active.channel },
+            { label: "Sink", value: active.sink },
+            { label: "Module", value: active.target_module }
+          ]
+        }
+      )
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(PanelSection, { label: "Recent deliveries", count: activeDeliveries.length || null, children: activeDeliveries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(EmptyState, { inline: true, title: "No recent deliveries for this route" }) : /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(RowList, { children: activeDeliveries.slice(0, ROUTE_DELIVERIES_SHOWN).map((delivery) => {
       const tone = statusTone(delivery.status);
       const attempts = delivery.attempts?.length ?? 0;
+      const at = deliveryTime(delivery);
+      const hover = deliveryTitle(delivery, at);
       return /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(
         ListRow,
         {
@@ -61607,13 +61935,10 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
           dense: true,
           lead: /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(StatusDot, { tone }),
           title: /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(AgentName, { id: delivery.recipient }),
-          subtitle: /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)("span", { className: "routing__delivery-sub", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(TechnicalId, { value: delivery.delivery_id, label: "Delivery ID" }),
-            attempts > 1 ? /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__delivery-attempts", children: plural(attempts, "attempt") }) : null
-          ] }),
+          subtitle: attempts > 1 ? /* @__PURE__ */ (0, import_jsx_runtime70.jsx)("span", { className: "routing__delivery-attempts", children: plural(attempts, "attempt") }) : void 0,
           meta: /* @__PURE__ */ (0, import_jsx_runtime70.jsxs)(import_jsx_runtime70.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(Chip, { tone, children: humanizeEnum(delivery.status) || "Unknown" }),
-            /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(RelativeTime, { value: deliveryTime(delivery) })
+            /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(Chip, { tone, title: "Delivery ".concat(delivery.delivery_id), children: humanizeEnum(delivery.status) || "Unknown" }),
+            /* @__PURE__ */ (0, import_jsx_runtime70.jsx)(RelativeTime, { value: at, title: hover })
           ] })
         },
         delivery.delivery_id
@@ -61632,7 +61957,7 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
             label: "Filter routes",
             value: q2,
             onChange: (value) => setQ(value),
-            placeholder: "Route, recipient, sink or module"
+            placeholder: "Route or recipient"
           }
         ) : null
       }
@@ -61646,7 +61971,7 @@ function RoutingPanel({ data, loading = false, error: error48 }) {
 }
 
 // src/panels/LogsPanel.tsx
-var import_react45 = __toESM(require("react"));
+var import_react48 = __toESM(require("react"));
 var import_jsx_runtime71 = require("react/jsx-runtime");
 var INTERNAL_LOG_EVENTS = /* @__PURE__ */ new Set([
   "keep-alive",
@@ -61794,10 +62119,10 @@ function hasStructuredOutput(frame) {
   return d2.structured_output != null;
 }
 function LogTechnicalId({ value, label }) {
-  const [copied, setCopied] = import_react45.default.useState(false);
+  const [copied, setCopied] = import_react48.default.useState(false);
   const tail = value.length > 12 ? value.slice(-6) : "";
   const head = tail ? value.slice(0, -6) : value;
-  import_react45.default.useEffect(() => {
+  import_react48.default.useEffect(() => {
     if (!copied) return void 0;
     const timer2 = window.setTimeout(() => setCopied(false), 1600);
     return () => window.clearTimeout(timer2);
@@ -61830,11 +62155,11 @@ function LogTechnicalId({ value, label }) {
   ] });
 }
 function LogsPanel({ frames, agentDirectory = EMPTY_AGENT_DIRECTORY }) {
-  const [q2, setQ] = import_react45.default.useState("");
-  const [lvl, setLvl] = import_react45.default.useState("all");
-  const [expanded, setExpanded] = import_react45.default.useState(/* @__PURE__ */ new Set());
-  const [pausedFrames, setPausedFrames] = import_react45.default.useState(null);
-  const searchId = import_react45.default.useId();
+  const [q2, setQ] = import_react48.default.useState("");
+  const [lvl, setLvl] = import_react48.default.useState("all");
+  const [expanded, setExpanded] = import_react48.default.useState(/* @__PURE__ */ new Set());
+  const [pausedFrames, setPausedFrames] = import_react48.default.useState(null);
+  const searchId = import_react48.default.useId();
   const shownFrames = pausedFrames ?? frames;
   const toggle = (key) => setExpanded((prev) => {
     const next = new Set(prev);
@@ -61842,7 +62167,7 @@ function LogsPanel({ frames, agentDirectory = EMPTY_AGENT_DIRECTORY }) {
     else next.add(key);
     return next;
   });
-  const rows = import_react45.default.useMemo(() => {
+  const rows = import_react48.default.useMemo(() => {
     return shownFrames.filter(isLogFrameVisible).map((f2) => ({ f: f2, level: levelFor(f2), who: logIdentityLabel(f2.identity, agentDirectory) })).filter(({ f: f2, level, who }) => {
       if (lvl !== "all" && level !== lvl) return false;
       if (!q2) return true;
@@ -61850,7 +62175,7 @@ function LogsPanel({ frames, agentDirectory = EMPTY_AGENT_DIRECTORY }) {
       return f2.event.toLowerCase().includes(needle) || (f2.identity || "").toLowerCase().includes(needle) || who.toLowerCase().includes(needle);
     });
   }, [shownFrames, q2, lvl, agentDirectory]);
-  const counts = import_react45.default.useMemo(() => {
+  const counts = import_react48.default.useMemo(() => {
     const c = { info: 0, warn: 0, error: 0 };
     shownFrames.filter(isLogFrameVisible).forEach((f2) => {
       c[levelFor(f2)]++;
@@ -62105,10 +62430,10 @@ function Topbar({
 }
 
 // src/panels/Tweaks.tsx
-var import_react46 = __toESM(require("react"));
+var import_react49 = __toESM(require("react"));
 var VARIANT_STORAGE = "meta-console-variant";
 function useConsoleVariant() {
-  const [v, setV] = import_react46.default.useState(() => {
+  const [v, setV] = import_react49.default.useState(() => {
     try {
       const stored = localStorage.getItem(VARIANT_STORAGE);
       if (stored === "rams" || stored === "terminal" || stored === "graphite") return stored;
@@ -62116,7 +62441,7 @@ function useConsoleVariant() {
     }
     return "rams";
   });
-  const set2 = import_react46.default.useCallback((next) => {
+  const set2 = import_react49.default.useCallback((next) => {
     setV(next);
     try {
       localStorage.setItem(VARIANT_STORAGE, next);
@@ -62127,7 +62452,7 @@ function useConsoleVariant() {
 }
 
 // src/panels/SignalsRail.tsx
-var import_react47 = __toESM(require("react"));
+var import_react50 = __toESM(require("react"));
 var import_jsx_runtime73 = require("react/jsx-runtime");
 var DEFAULT_FILTER_PRESETS = [
   { id: "all", label: "All" },
@@ -62508,7 +62833,7 @@ function buildSignalGroupsForTest(frames, directory = EMPTY_AGENT_DIRECTORY) {
   }
   return groupSignals(next);
 }
-var SignalsRail = import_react47.default.memo(function SignalsRail2({
+var SignalsRail = import_react50.default.memo(function SignalsRail2({
   frames,
   collapsed,
   filterPresets,
@@ -62520,21 +62845,21 @@ var SignalsRail = import_react47.default.memo(function SignalsRail2({
   onSelect
 }) {
   countRender("SignalsRail");
-  const presets = import_react47.default.useMemo(() => {
+  const presets = import_react50.default.useMemo(() => {
     const configured = (filterPresets || []).filter((preset) => preset.id && preset.label);
     return configured.length > 0 ? configured : DEFAULT_FILTER_PRESETS;
   }, [filterPresets]);
-  const [filter, setFilter] = import_react47.default.useState(activePresetId || presets[0]?.id || "all");
-  const [expandedGroups, setExpandedGroups] = import_react47.default.useState(() => /* @__PURE__ */ new Set());
-  import_react47.default.useEffect(() => {
+  const [filter, setFilter] = import_react50.default.useState(activePresetId || presets[0]?.id || "all");
+  const [expandedGroups, setExpandedGroups] = import_react50.default.useState(() => /* @__PURE__ */ new Set());
+  import_react50.default.useEffect(() => {
     if (activePresetId && presets.some((preset) => preset.id === activePresetId)) {
       setFilter(activePresetId);
     }
   }, [activePresetId, presets]);
-  const groups = import_react47.default.useMemo(() => {
+  const groups = import_react50.default.useMemo(() => {
     return buildSignalGroupsForTest(frames, agentDirectory);
   }, [frames, agentDirectory]);
-  const nameOf = import_react47.default.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
+  const nameOf = import_react50.default.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
   function groupMatchesPreset(group, preset) {
     if (preset.watchedOnly) {
       const watched = watchedIdentities || /* @__PURE__ */ new Set();
@@ -62549,7 +62874,7 @@ var SignalsRail = import_react47.default.memo(function SignalsRail2({
     return true;
   }
   const activePreset = presets.find((preset) => preset.id === filter) || presets[0] || DEFAULT_FILTER_PRESETS[0];
-  const counts = import_react47.default.useMemo(() => {
+  const counts = import_react50.default.useMemo(() => {
     return new Map(presets.map((preset) => [
       preset.id,
       groups.filter((group) => groupMatchesPreset(group, preset)).length
@@ -62680,10 +63005,10 @@ var SignalsRail = import_react47.default.memo(function SignalsRail2({
 });
 
 // src/panels/ChatPane.tsx
-var import_react49 = __toESM(require("react"));
+var import_react52 = __toESM(require("react"));
 
 // src/panels/VoiceBar.tsx
-var import_react48 = __toESM(require("react"));
+var import_react51 = __toESM(require("react"));
 
 // src/lib/voice-context.ts
 var failureMessages = {
@@ -62784,8 +63109,8 @@ function AudioWaveform({
   sampleWaveform,
   active
 }) {
-  const canvasRef = import_react48.default.useRef(null);
-  import_react48.default.useEffect(() => {
+  const canvasRef = import_react51.default.useRef(null);
+  import_react51.default.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = canvas.getContext("2d");
@@ -62846,7 +63171,7 @@ function AudioWaveform({
   }, [active, sampleWaveform, source]);
   return /* @__PURE__ */ (0, import_jsx_runtime74.jsx)("canvas", { className: "voice-waveform voice-waveform--".concat(source), ref: canvasRef, "aria-hidden": "true" });
 }
-var VoiceBar = import_react48.default.memo(function VoiceBar2({
+var VoiceBar = import_react51.default.memo(function VoiceBar2({
   state,
   sampleWaveform,
   onClose,
@@ -63473,14 +63798,14 @@ function TranscriptFindBar({
   onJump,
   onClose
 }) {
-  const [query, setQuery] = import_react49.default.useState("");
-  const matches = import_react49.default.useMemo(() => transcriptFindMatches(messages, query), [messages, query]);
-  const [current, setCurrent] = import_react49.default.useState(-1);
-  import_react49.default.useEffect(() => {
+  const [query, setQuery] = import_react52.default.useState("");
+  const matches = import_react52.default.useMemo(() => transcriptFindMatches(messages, query), [messages, query]);
+  const [current, setCurrent] = import_react52.default.useState(-1);
+  import_react52.default.useEffect(() => {
     setCurrent(matches.length ? matches.length - 1 : -1);
   }, [query]);
   const target = current >= 0 && current < matches.length ? matches[current] : null;
-  import_react49.default.useEffect(() => {
+  import_react52.default.useEffect(() => {
     if (!target) {
       clearFindHighlight();
       return;
@@ -63496,7 +63821,7 @@ function TranscriptFindBar({
     handle2 = window.requestAnimationFrame(tryHighlight);
     return () => window.cancelAnimationFrame(handle2);
   }, [target]);
-  import_react49.default.useEffect(() => clearFindHighlight, []);
+  import_react52.default.useEffect(() => clearFindHighlight, []);
   const step = (delta) => {
     if (!matches.length) return;
     setCurrent((index2) => ((index2 < 0 ? 0 : index2) + delta + matches.length) % matches.length);
@@ -63885,9 +64210,9 @@ function CopyInlineButton({
   label,
   className = ""
 }) {
-  const [outcome, setOutcome] = import_react49.default.useState("idle");
-  const resetTimer = import_react49.default.useRef(null);
-  import_react49.default.useEffect(
+  const [outcome, setOutcome] = import_react52.default.useState("idle");
+  const resetTimer = import_react52.default.useRef(null);
+  import_react52.default.useEffect(
     () => () => {
       if (resetTimer.current) clearTimeout(resetTimer.current);
     },
@@ -64070,7 +64395,7 @@ function MessageHeader({ message: m2, copyLabel }) {
     copyLabel ? /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(CopyInlineButton, { className: "msg__copy--head", label: copyLabel, text: msgCopyText(m2) }) : null
   ] });
 }
-var MessageRow = import_react49.default.memo(function MessageRow2({
+var MessageRow = import_react52.default.memo(function MessageRow2({
   message: m2,
   suppressWorked,
   workGraphActions,
@@ -64109,7 +64434,7 @@ function MessageRowBody({
     ] })
   ] });
 }
-var TranscriptTurn = import_react49.default.memo(function TranscriptTurn2({
+var TranscriptTurn = import_react52.default.memo(function TranscriptTurn2({
   turn,
   turnIndex,
   identity,
@@ -64126,8 +64451,8 @@ var TranscriptTurn = import_react49.default.memo(function TranscriptTurn2({
   parkedHeight
 }) {
   countRender("TranscriptTurn");
-  const turnRef = import_react49.default.useRef(null);
-  import_react49.default.useLayoutEffect(() => {
+  const turnRef = import_react52.default.useRef(null);
+  import_react52.default.useLayoutEffect(() => {
     const element3 = turnRef.current;
     if (!element3) return;
     if (parkedHeight === void 0) {
@@ -64173,18 +64498,18 @@ var TranscriptTurn = import_react49.default.memo(function TranscriptTurn2({
       tabIndex: -1,
       children: [
         groupRoutineToolRows(turn.messages, (message) => message.kind === "tool" ? message.blocks : void 0).map((run) => {
-          const rows = run.rows.map((m2) => /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_react49.default.Fragment, { children: [
+          const rows = run.rows.map((m2) => /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_react52.default.Fragment, { children: [
             daySeparator(m2),
             /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(MessageRow, { message: m2, suppressWorked: m2.id === suppressWorkedId, workGraphActions, markdownUrlPolicy })
           ] }, m2.scrollRowId ?? m2.id));
-          return /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(import_react49.default.Fragment, { children: run.tools.length >= 2 ? /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(CompletedToolDisclosure, { blocks: run.tools, children: rows }) : rows }, run.rows[0].scrollRowId ?? run.rows[0].id);
+          return /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(import_react52.default.Fragment, { children: run.tools.length >= 2 ? /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(CompletedToolDisclosure, { blocks: run.tools, children: rows }) : rows }, run.rows[0].scrollRowId ?? run.rows[0].id);
         }),
         /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(ConversationRowStateScope, { rowId: "approvals:".concat(turn.id), children: /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId, interactionIds: approvalInteractionIds }) })
       ]
     }
   );
 });
-var TranscriptView = import_react49.default.memo(function TranscriptView2({
+var TranscriptView = import_react52.default.memo(function TranscriptView2({
   identity,
   agentLabel,
   turns,
@@ -64210,12 +64535,12 @@ var TranscriptView = import_react49.default.memo(function TranscriptView2({
   onOpenFind
 }) {
   countRender("TranscriptView");
-  const windowedTurns = import_react49.default.useMemo(
+  const windowedTurns = import_react52.default.useMemo(
     () => windowStart > 0 ? turns.slice(windowStart) : turns,
     [turns, windowStart]
   );
-  const approvalIdsRef = import_react49.default.useRef(/* @__PURE__ */ new Map());
-  const approvalInteractions = import_react49.default.useMemo(() => {
+  const approvalIdsRef = import_react52.default.useRef(/* @__PURE__ */ new Map());
+  const approvalInteractions = import_react52.default.useMemo(() => {
     const next = approvalInteractionIdsByTurn(windowedTurns.map((turn) => turn.messages.flatMap((message) => message.interactionId ? [message.interactionId] : [])));
     const interned = /* @__PURE__ */ new Map();
     const result = next.map((ids, offset) => {
@@ -64228,7 +64553,7 @@ var TranscriptView = import_react49.default.memo(function TranscriptView2({
     approvalIdsRef.current = interned;
     return result;
   }, [windowedTurns]);
-  const previousDays = import_react49.default.useMemo(() => {
+  const previousDays = import_react52.default.useMemo(() => {
     let day = null;
     return windowedTurns.map((turn) => {
       const before = day;
@@ -64237,8 +64562,8 @@ var TranscriptView = import_react49.default.memo(function TranscriptView2({
     });
   }, [windowedTurns]);
   const todayKey = transcriptDayKey((/* @__PURE__ */ new Date()).toISOString());
-  const dayLabelNow = import_react49.default.useMemo(() => /* @__PURE__ */ new Date(), [todayKey]);
-  const getTranscriptText = import_react49.default.useCallback(() => transcriptCopyText(messages), [messages]);
+  const dayLabelNow = import_react52.default.useMemo(() => /* @__PURE__ */ new Date(), [todayKey]);
+  const getTranscriptText = import_react52.default.useCallback(() => transcriptCopyText(messages), [messages]);
   const setSize = windowStart > 0 || hasOlderHistory ? -1 : turns.length;
   const renderTurn = (offset, parkedHeight) => {
     const turn = windowedTurns[offset];
@@ -64396,7 +64721,7 @@ var TranscriptView = import_react49.default.memo(function TranscriptView2({
     }
   );
 });
-var ComposerTextarea = import_react49.default.memo(function ComposerTextarea2({
+var ComposerTextarea = import_react52.default.memo(function ComposerTextarea2({
   identity,
   agentLabel,
   agentRole,
@@ -64417,8 +64742,8 @@ var ComposerTextarea = import_react49.default.memo(function ComposerTextarea2({
   onSubmit
 }) {
   countRender("ComposerTextarea");
-  const [value, setValue] = import_react49.default.useState(initialValue);
-  const [appliedExternal, setAppliedExternal] = import_react49.default.useState(null);
+  const [value, setValue] = import_react52.default.useState(initialValue);
+  const [appliedExternal, setAppliedExternal] = import_react52.default.useState(null);
   if (externalValue && appliedExternal !== externalValue.at) {
     setAppliedExternal(externalValue.at);
     setValue(externalValue.value);
@@ -64447,7 +64772,7 @@ var ComposerTextarea = import_react49.default.memo(function ComposerTextarea2({
       }
     ) }),
     /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)("div", { className: "composer__row", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { className: "composer__chip mono", children: agentRole || "agent" }),
+      /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { className: "composer__chip", title: agentRole || void 0, children: humanizeEnum(agentRole || "agent") }),
       /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { className: "composer__spacer" }),
       onVoiceToggle && !readOnly && !sendWithheld && /* @__PURE__ */ (0, import_jsx_runtime75.jsx)(
         VoiceButton,
@@ -64534,19 +64859,19 @@ function ChatPane({
   peerLabels = null
 }) {
   countRender("ChatPane");
-  const [quoteError, setQuoteError] = import_react49.default.useState(null);
-  const quoteErrorRef = import_react49.default.useRef(quoteError);
+  const [quoteError, setQuoteError] = import_react52.default.useState(null);
+  const quoteErrorRef = import_react52.default.useRef(quoteError);
   quoteErrorRef.current = quoteError;
-  import_react49.default.useEffect(() => {
+  import_react52.default.useEffect(() => {
     setQuoteError(null);
   }, [submittedRowId, identity, conversationId, viewportKey?.authority, viewportKey?.pane]);
-  const liveDraftRef = import_react49.default.useRef(draft);
-  const liveDraftRevisionRef = import_react49.default.useRef(0);
-  const lastPublishedDraftRef = import_react49.default.useRef(draft);
-  const publishDraftTimerRef = import_react49.default.useRef(null);
-  const onDraftChangeRef = import_react49.default.useRef(onDraftChange);
+  const liveDraftRef = import_react52.default.useRef(draft);
+  const liveDraftRevisionRef = import_react52.default.useRef(0);
+  const lastPublishedDraftRef = import_react52.default.useRef(draft);
+  const publishDraftTimerRef = import_react52.default.useRef(null);
+  const onDraftChangeRef = import_react52.default.useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
-  const publishDraft = import_react49.default.useCallback(() => {
+  const publishDraft = import_react52.default.useCallback(() => {
     if (publishDraftTimerRef.current !== null) {
       window.clearTimeout(publishDraftTimerRef.current);
       publishDraftTimerRef.current = null;
@@ -64556,8 +64881,8 @@ function ChatPane({
     lastPublishedDraftRef.current = value;
     onDraftChangeRef.current(value);
   }, []);
-  const [liveDraftTick, setLiveDraftTick] = import_react49.default.useState(0);
-  const onLiveChange = import_react49.default.useCallback(
+  const [liveDraftTick, setLiveDraftTick] = import_react52.default.useState(0);
+  const onLiveChange = import_react52.default.useCallback(
     (value) => {
       if (quoteErrorRef.current !== null) setQuoteError(null);
       liveDraftRef.current = value;
@@ -64570,16 +64895,16 @@ function ChatPane({
     },
     [publishDraft]
   );
-  const externalSeqRef = import_react49.default.useRef(0);
-  const [externalValue, setExternalValue] = import_react49.default.useState(null);
-  import_react49.default.useEffect(() => {
+  const externalSeqRef = import_react52.default.useRef(0);
+  const [externalValue, setExternalValue] = import_react52.default.useState(null);
+  import_react52.default.useEffect(() => {
     if (draft === lastPublishedDraftRef.current) return;
     lastPublishedDraftRef.current = draft;
     liveDraftRef.current = draft;
     externalSeqRef.current += 1;
     setExternalValue({ value: draft, at: externalSeqRef.current });
   }, [draft]);
-  const setDraft = import_react49.default.useCallback(
+  const setDraft = import_react52.default.useCallback(
     (value) => {
       liveDraftRef.current = value;
       externalSeqRef.current += 1;
@@ -64588,43 +64913,43 @@ function ChatPane({
     },
     [publishDraft]
   );
-  import_react49.default.useEffect(() => () => publishDraft(), [publishDraft]);
-  const bodyRef = import_react49.default.useRef(null);
-  const activeTurnFrameRef = import_react49.default.useRef(0);
-  const [visibleTurnIndexes, setVisibleTurnIndexes] = import_react49.default.useState([]);
-  const visibleLiveSpeech = import_react49.default.useMemo(
+  import_react52.default.useEffect(() => () => publishDraft(), [publishDraft]);
+  const bodyRef = import_react52.default.useRef(null);
+  const activeTurnFrameRef = import_react52.default.useRef(0);
+  const [visibleTurnIndexes, setVisibleTurnIndexes] = import_react52.default.useState([]);
+  const visibleLiveSpeech = import_react52.default.useMemo(
     () => uncommittedLiveSpeech(entries, liveSpeech, activeVoiceScope),
     [entries, liveSpeech, activeVoiceScope]
   );
-  const onApprovalDecisionRef = import_react49.default.useRef(onApprovalDecision);
+  const onApprovalDecisionRef = import_react52.default.useRef(onApprovalDecision);
   onApprovalDecisionRef.current = onApprovalDecision;
-  const stableApprovalDecision = import_react49.default.useCallback(
+  const stableApprovalDecision = import_react52.default.useCallback(
     (pendingId, action) => onApprovalDecisionRef.current?.(pendingId, action),
     []
   );
-  const presentationLabels = import_react49.default.useMemo(
+  const presentationLabels = import_react52.default.useMemo(
     () => displayLabels ?? { peers: peerLabels ?? void 0 },
     [displayLabels, peerLabels]
   );
-  const resolvePeerLabel = import_react49.default.useMemo(
+  const resolvePeerLabel = import_react52.default.useMemo(
     () => peerLabels ? (alias) => peerLabels.get(alias) ?? null : null,
     [peerLabels]
   );
-  const chatMessagesRef = import_react49.default.useRef(null);
-  const messages = import_react49.default.useMemo(() => {
+  const chatMessagesRef = import_react52.default.useRef(null);
+  const messages = import_react52.default.useMemo(() => {
     const next = extendChatMessages(chatMessagesRef.current, entries, { resolvePeerLabel });
     chatMessagesRef.current = next;
     return next.messages;
   }, [entries, resolvePeerLabel]);
-  const turnsRef = import_react49.default.useRef([]);
-  const turns = import_react49.default.useMemo(() => {
+  const turnsRef = import_react52.default.useRef([]);
+  const turns = import_react52.default.useMemo(() => {
     const next = internTurns(buildChatTurns(messages), turnsRef.current);
     turnsRef.current = next;
     return next;
   }, [messages]);
-  const [revealedFrom, setRevealedFrom] = import_react49.default.useState(null);
+  const [revealedFrom, setRevealedFrom] = import_react52.default.useState(null);
   const windowAnchor = revealedFrom && revealedFrom.identity === identity ? revealedFrom : null;
-  const turnIndexById = import_react49.default.useMemo(() => {
+  const turnIndexById = import_react52.default.useMemo(() => {
     const index2 = /* @__PURE__ */ new Map();
     turns.forEach((turn, i2) => index2.set(turn.id, i2));
     return index2;
@@ -64634,8 +64959,8 @@ function ChatPane({
     windowAnchor,
     (id) => turnIndexById.get(id) ?? -1
   );
-  const revealedTurns = import_react49.default.useMemo(() => windowStart > 0 ? turns.slice(windowStart) : turns, [turns, windowStart]);
-  const turnRenderKey = import_react49.default.useMemo(() => {
+  const revealedTurns = import_react52.default.useMemo(() => windowStart > 0 ? turns.slice(windowStart) : turns, [turns, windowStart]);
+  const turnRenderKey = import_react52.default.useMemo(() => {
     let day = null;
     const previous3 = revealedTurns.map((turn) => {
       const before = day;
@@ -64644,7 +64969,7 @@ function ChatPane({
     });
     return (turn, index2) => "".concat(previous3[index2] ?? "", "\0").concat(turnContentKey(turn));
   }, [revealedTurns]);
-  const actionableTurnIds = import_react49.default.useMemo(() => {
+  const actionableTurnIds = import_react52.default.useMemo(() => {
     if (!approvalSnapshot?.requests.length) return NO_TURN_IDS;
     const indexes = pendingApprovalTurns(
       revealedTurns.map((turn) => turn.messages.flatMap((message) => message.interactionId ? [message.interactionId] : [])),
@@ -64653,7 +64978,7 @@ function ChatPane({
     return indexes.length > 0 ? new Set(indexes.map((index2) => revealedTurns[index2].id)) : NO_TURN_IDS;
   }, [approvalSnapshot, revealedTurns, identity, conversationId]);
   const turnWindow = useTurnWindow(bodyRef, revealedTurns, windowed, turnRenderKey, actionableTurnIds);
-  const revealScrollAnchorRef = import_react49.default.useRef(() => false);
+  const revealScrollAnchorRef = import_react52.default.useRef(() => false);
   const scroll = useConversationScrollController({
     viewportRef: bodyRef,
     viewportKey,
@@ -64666,7 +64991,7 @@ function ChatPane({
     },
     revealAnchor: (rowId) => revealScrollAnchorRef.current(rowId)
   });
-  const revealTurnsFrom = import_react49.default.useCallback(
+  const revealTurnsFrom = import_react52.default.useCallback(
     (firstIndex) => {
       const target = Math.max(0, firstIndex);
       scroll.captureBeforePrepend();
@@ -64675,16 +65000,16 @@ function ChatPane({
     },
     [identity, turns, scroll.captureBeforePrepend]
   );
-  const revealEarlier = import_react49.default.useCallback(() => {
+  const revealEarlier = import_react52.default.useCallback(() => {
     revealTurnsFrom(windowStart - TRANSCRIPT_WINDOW_STEP);
   }, [revealTurnsFrom, windowStart]);
-  const lastAgentMessageId = import_react49.default.useMemo(() => {
+  const lastAgentMessageId = import_react52.default.useMemo(() => {
     for (let i2 = messages.length - 1; i2 >= 0; i2 -= 1) {
       if (messages[i2].kind === "agent" && messages[i2].source?.kind === "assistant") return messages[i2].id;
     }
     return null;
   }, [messages]);
-  const scrollSignature = import_react49.default.useMemo(() => {
+  const scrollSignature = import_react52.default.useMemo(() => {
     const last = messages[messages.length - 1];
     const lastTextLength = last?.text?.length ?? 0;
     const lastBlockLength = last?.blocks ? JSON.stringify(last.blocks).length : last?.workGraphEntry ? JSON.stringify(last.workGraphEntry).length : 0;
@@ -64705,7 +65030,7 @@ function ChatPane({
     setRevealedFrom({ identity, turnId, mountedTurns: turns.length - index2 });
     return true;
   };
-  const updateActiveTurn = import_react49.default.useCallback(() => {
+  const updateActiveTurn = import_react52.default.useCallback(() => {
     activeTurnFrameRef.current = 0;
     const body = bodyRef.current;
     if (!body || turns.length <= 1) {
@@ -64761,16 +65086,16 @@ function ChatPane({
       return nextIndexes;
     });
   }, [turns.length]);
-  const scheduleActiveTurnUpdate = import_react49.default.useCallback(() => {
+  const scheduleActiveTurnUpdate = import_react52.default.useCallback(() => {
     if (activeTurnFrameRef.current) {
       return;
     }
     activeTurnFrameRef.current = window.requestAnimationFrame(updateActiveTurn);
   }, [updateActiveTurn]);
-  import_react49.default.useEffect(() => {
+  import_react52.default.useEffect(() => {
     scheduleActiveTurnUpdate();
   }, [scheduleActiveTurnUpdate, scrollSignature, turnWindow.slots]);
-  import_react49.default.useEffect(() => {
+  import_react52.default.useEffect(() => {
     updateActiveTurn();
     window.addEventListener("resize", scheduleActiveTurnUpdate);
     return () => {
@@ -64786,37 +65111,37 @@ function ChatPane({
     const rowId = message?.scrollRowId ?? message?.id;
     if (rowId) scroll.jumpToRow(rowId);
   }
-  const onLoadOlderRef = import_react49.default.useRef(onLoadOlder);
+  const onLoadOlderRef = import_react52.default.useRef(onLoadOlder);
   onLoadOlderRef.current = onLoadOlder;
-  const requestOlderHistory = import_react49.default.useCallback(() => {
+  const requestOlderHistory = import_react52.default.useCallback(() => {
     scroll.captureBeforePrepend();
     onLoadOlderRef.current?.();
   }, [scroll.captureBeforePrepend]);
-  const hasOlderHistoryRef = import_react49.default.useRef(hasOlderHistory);
+  const hasOlderHistoryRef = import_react52.default.useRef(hasOlderHistory);
   hasOlderHistoryRef.current = hasOlderHistory;
-  const loadingOlderHistoryRef = import_react49.default.useRef(loadingOlderHistory);
+  const loadingOlderHistoryRef = import_react52.default.useRef(loadingOlderHistory);
   loadingOlderHistoryRef.current = loadingOlderHistory;
-  const windowStartRef = import_react49.default.useRef(windowStart);
+  const windowStartRef = import_react52.default.useRef(windowStart);
   windowStartRef.current = windowStart;
-  const revealEarlierRef = import_react49.default.useRef(revealEarlier);
+  const revealEarlierRef = import_react52.default.useRef(revealEarlier);
   revealEarlierRef.current = revealEarlier;
-  const [findOpen, setFindOpen] = import_react49.default.useState(false);
-  const openFind = import_react49.default.useCallback(() => setFindOpen(true), []);
-  const closeFind = import_react49.default.useCallback(() => {
+  const [findOpen, setFindOpen] = import_react52.default.useState(false);
+  const openFind = import_react52.default.useCallback(() => setFindOpen(true), []);
+  const closeFind = import_react52.default.useCallback(() => {
     setFindOpen(false);
     bodyRef.current?.focus();
   }, []);
-  const jumpToFoundRef = import_react49.default.useRef(() => {
+  const jumpToFoundRef = import_react52.default.useRef(() => {
   });
   jumpToFoundRef.current = (rowId) => {
     scroll.jumpToRow(rowId);
   };
-  const jumpToFound = import_react49.default.useCallback((rowId) => jumpToFoundRef.current(rowId), []);
-  const turnsRefForKeys = import_react49.default.useRef(turns);
+  const jumpToFound = import_react52.default.useCallback((rowId) => jumpToFoundRef.current(rowId), []);
+  const turnsRefForKeys = import_react52.default.useRef(turns);
   turnsRefForKeys.current = turns;
-  const turnWindowRef = import_react49.default.useRef(turnWindow);
+  const turnWindowRef = import_react52.default.useRef(turnWindow);
   turnWindowRef.current = turnWindow;
-  const onTranscriptKeyDown = import_react49.default.useCallback((event) => {
+  const onTranscriptKeyDown = import_react52.default.useCallback((event) => {
     const target = event.target;
     if (!target.matches?.("[data-conversation-turn-id]") || event.altKey || event.metaKey || event.shiftKey) return;
     if (event.ctrlKey && event.key === "End") {
@@ -64833,7 +65158,7 @@ function ChatPane({
     if (next < windowStartRef.current) revealEarlierRef.current();
     turnWindowRef.current.focusTurn(all2[next].id);
   }, []);
-  const onBodyScroll = import_react49.default.useCallback(
+  const onBodyScroll = import_react52.default.useCallback(
     (event) => {
       if (event.currentTarget.scrollLeft !== 0) {
         event.currentTarget.scrollLeft = 0;
@@ -64854,12 +65179,12 @@ function ChatPane({
   const state = (agent?.state || "unknown").toLowerCase();
   const canAttachImages = !readOnly && agent?.model_capabilities?.image_input === true;
   const sendWithheld = accessEnforcing && agent?.affordances?.can_send_message === false;
-  const [dragActive, setDragActive] = import_react49.default.useState(false);
-  const [attachmentError, setAttachmentError] = import_react49.default.useState(null);
-  const resolvedDraftBlobRefs = import_react49.default.useRef("");
-  const railRef = import_react49.default.useRef(null);
-  const [railHeight, setRailHeight] = import_react49.default.useState(null);
-  import_react49.default.useEffect(() => {
+  const [dragActive, setDragActive] = import_react52.default.useState(false);
+  const [attachmentError, setAttachmentError] = import_react52.default.useState(null);
+  const resolvedDraftBlobRefs = import_react52.default.useRef("");
+  const railRef = import_react52.default.useRef(null);
+  const [railHeight, setRailHeight] = import_react52.default.useState(null);
+  import_react52.default.useEffect(() => {
     const nav = railRef.current;
     const body = bodyRef.current;
     const pane = body?.parentElement;
@@ -64883,8 +65208,8 @@ function ChatPane({
     observer.observe(pane);
     return () => observer.disconnect();
   }, [turns.length > 1]);
-  const [transcriptOverflows, setTranscriptOverflows] = import_react49.default.useState(null);
-  import_react49.default.useEffect(() => {
+  const [transcriptOverflows, setTranscriptOverflows] = import_react52.default.useState(null);
+  import_react52.default.useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
     const measure = () => setTranscriptOverflows(body.scrollHeight > body.clientHeight + 1);
@@ -65015,7 +65340,7 @@ function ChatPane({
       return current.filter((item) => item.id !== id);
     });
   }
-  import_react49.default.useEffect(() => {
+  import_react52.default.useEffect(() => {
     if (!canAttachImages) return;
     const refs = consoleBlobReferencesFromText(liveDraftRef.current);
     if (refs.length === 0) {
@@ -65051,9 +65376,9 @@ function ChatPane({
       window.clearTimeout(timer2);
     };
   }, [canAttachImages, liveDraftTick, publishDraft, setDraft]);
-  const submitComposerRef = import_react49.default.useRef(async () => {
+  const submitComposerRef = import_react52.default.useRef(async () => {
   });
-  const submitComposer = import_react49.default.useCallback(() => submitComposerRef.current(), []);
+  const submitComposer = import_react52.default.useCallback(() => submitComposerRef.current(), []);
   submitComposerRef.current = async function submitComposerNow() {
     if (staged.length > 0 && !canAttachImages) {
       setAttachmentError("model cannot see images");
@@ -65299,7 +65624,7 @@ function ChatPane({
             voiceActive && /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7 text to background agent" }),
             agent?.role && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
-              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: agent.role })
+              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: humanizeEnum(agent.role) })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
             /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { className: "dot", style: {
@@ -65324,7 +65649,7 @@ function ChatPane({
             ] }),
             attachmentError && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
-              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { style: { color: "var(--bad)" }, children: attachmentError })
+              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { style: { color: "var(--crit-ink)" }, children: attachmentError })
             ] })
           ] })
         ] })
@@ -65334,7 +65659,7 @@ function ChatPane({
 }
 
 // src/panels/MetaDock.tsx
-var import_react50 = __toESM(require("react"));
+var import_react53 = __toESM(require("react"));
 var import_jsx_runtime76 = require("react/jsx-runtime");
 function tabPanelCount(node2) {
   if (!node2) return 0;
@@ -65357,7 +65682,7 @@ function MetaDock({
   onOpenTargetInPanel
 }) {
   const activeTab = viewState.tabs.find((t) => t.id === viewState.activeTabId) || viewState.tabs[0];
-  import_react50.default.useEffect(() => {
+  import_react53.default.useEffect(() => {
     function onKey(e) {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
@@ -65468,7 +65793,7 @@ function SplitView(props) {
   const ratio = typeof node2.ratio === "number" ? Math.max(0.1, Math.min(0.9, node2.ratio)) : 0.5;
   const direction = node2.direction;
   const style = direction === "horizontal" ? { gridTemplateColumns: "".concat(ratio * 100, "% 6px ").concat((1 - ratio) * 100, "%") } : { gridTemplateRows: "".concat(ratio * 100, "% 6px ").concat((1 - ratio) * 100, "%") };
-  const hostRef = import_react50.default.useRef(null);
+  const hostRef = import_react53.default.useRef(null);
   function startDrag(e) {
     e.preventDefault();
     const host = hostRef.current;
@@ -65527,7 +65852,7 @@ function PaneView({
   const title = panel.title || panel.target?.title || "untitled";
   const target = panel.target;
   const subId = target?.kind === "agent-chat" ? target.identity || target.memberId : target?.kind === "identity-inspect" ? target.identity : void 0;
-  const [menuOpen, setMenuOpen] = import_react50.default.useState(false);
+  const [menuOpen, setMenuOpen] = import_react53.default.useState(false);
   return /* @__PURE__ */ (0, import_jsx_runtime76.jsxs)(
     "div",
     {
@@ -65683,7 +66008,7 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
 }
 
 // src/panels/PendingStack.tsx
-var import_react51 = __toESM(require("react"));
+var import_react54 = __toESM(require("react"));
 var import_jsx_runtime77 = require("react/jsx-runtime");
 var ACCEPTANCE_NOTICE_GRACE_MS = 2e3;
 function acceptanceGraceDeadlines(items, firstSeenAttempting, now, directSendIds = /* @__PURE__ */ new Set()) {
@@ -65780,9 +66105,9 @@ function StackItem({
   onDrop,
   onDragEnd
 }) {
-  const taRef = import_react51.default.useRef(null);
-  const [draft, setDraft] = import_react51.default.useState(item.text);
-  import_react51.default.useEffect(() => {
+  const taRef = import_react54.default.useRef(null);
+  const [draft, setDraft] = import_react54.default.useState(item.text);
+  import_react54.default.useEffect(() => {
     if (item.editing && taRef.current) {
       taRef.current.focus();
       const len = taRef.current.value.length;
@@ -65791,7 +66116,7 @@ function StackItem({
       taRef.current.style.height = taRef.current.scrollHeight + "px";
     }
   }, [item.editing]);
-  import_react51.default.useEffect(() => {
+  import_react54.default.useEffect(() => {
     setDraft(item.text);
   }, [item.text, item.editing]);
   const handleEditKey = (e) => {
@@ -65809,7 +66134,7 @@ function StackItem({
   const settledFailure = item.state === "outcome-unknown" || item.state === "definitely-rejected";
   const canResend = item.state === "definitely-rejected" || item.state === "outcome-unknown" && resendUncertain;
   const checking = check2?.phase === "checking";
-  const previewId = import_react51.default.useId();
+  const previewId = import_react54.default.useId();
   const cls = [
     "stk-item",
     !isDraft ? "is-frozen" : "",
@@ -66026,26 +66351,26 @@ function PendingStack3({
   onClearAll,
   onToggleExpand
 }) {
-  const [, setTick] = import_react51.default.useState(0);
-  import_react51.default.useEffect(() => {
+  const [, setTick] = import_react54.default.useState(0);
+  import_react54.default.useEffect(() => {
     const t = window.setInterval(() => setTick((n2) => n2 + 1), 1e4);
     return () => window.clearInterval(t);
   }, []);
-  const [dragId, setDragId] = import_react51.default.useState(null);
-  const [dropTarget, setDropTarget] = import_react51.default.useState({ id: null, where: null });
-  const [collapsed, setCollapsed] = import_react51.default.useState(false);
-  const firstSeenAttempting = import_react51.default.useRef(/* @__PURE__ */ new Map());
-  const [, revealTick] = import_react51.default.useReducer((n2) => n2 + 1, 0);
+  const [dragId, setDragId] = import_react54.default.useState(null);
+  const [dropTarget, setDropTarget] = import_react54.default.useState({ id: null, where: null });
+  const [collapsed, setCollapsed] = import_react54.default.useState(false);
+  const firstSeenAttempting = import_react54.default.useRef(/* @__PURE__ */ new Map());
+  const [, revealTick] = import_react54.default.useReducer((n2) => n2 + 1, 0);
   const graceDeadlines = acceptanceGraceDeadlines(items, firstSeenAttempting.current, Date.now(), directSendIds);
   const nextReveal = graceDeadlines.size > 0 ? Math.min(...graceDeadlines.values()) : null;
-  import_react51.default.useEffect(() => {
+  import_react54.default.useEffect(() => {
     if (nextReveal === null) return void 0;
     const timer2 = window.setTimeout(revealTick, Math.max(0, nextReveal - Date.now()));
     return () => window.clearTimeout(timer2);
   }, [nextReveal]);
   const visibleItems = graceDeadlines.size > 0 ? items.filter((item) => !graceDeadlines.has(item.id)) : items;
-  const lastCount = import_react51.default.useRef(0);
-  import_react51.default.useEffect(() => {
+  const lastCount = import_react54.default.useRef(0);
+  import_react54.default.useEffect(() => {
     if (visibleItems.length > lastCount.current) setCollapsed(false);
     lastCount.current = visibleItems.length;
   }, [visibleItems.length]);
@@ -66267,7 +66592,7 @@ function saveConsoleComposerDraft(storage, namespace, destination, draft, compos
 }
 
 // src/lib/use-voice-controller.ts
-var import_react52 = __toESM(require("react"));
+var import_react55 = __toESM(require("react"));
 
 // ../sdk/typescript/src/live.ts
 function asRecord3(value, context) {
@@ -67823,13 +68148,13 @@ var idleSnapshot = () => IDLE;
 var idleSubscribe = () => () => {
 };
 function useVoiceController(baseUrl) {
-  const [voice, setVoice] = import_react52.default.useState(null);
-  import_react52.default.useEffect(() => {
+  const [voice, setVoice] = import_react55.default.useState(null);
+  import_react55.default.useEffect(() => {
     const owned = createVoiceSession(baseUrl);
     setVoice(owned);
     return () => owned.dispose();
   }, [baseUrl]);
-  const state = import_react52.default.useSyncExternalStore(
+  const state = import_react55.default.useSyncExternalStore(
     voice?.subscribe ?? idleSubscribe,
     voice?.getSnapshot ?? idleSnapshot,
     idleSnapshot
@@ -67838,7 +68163,7 @@ function useVoiceController(baseUrl) {
 }
 
 // src/lib/use-voice-readiness.ts
-var import_react53 = __toESM(require("react"));
+var import_react56 = __toESM(require("react"));
 var NO_READINESS = {};
 var READINESS_REFRESH_INTERVAL_MS = 15e3;
 var READINESS_RETRY_BASE_MS = 1e3;
@@ -67862,14 +68187,14 @@ function voiceReadinessPending(state) {
   return state === "checking" || state === "retrying";
 }
 function useVoiceReadiness(baseUrl, focusedIdentity, voiceIdentity, enabled) {
-  const identities = import_react53.default.useMemo(
+  const identities = import_react56.default.useMemo(
     () => enabled ? [...new Set([focusedIdentity, voiceIdentity].filter(
       (identity) => Boolean(identity)
     ))] : [],
     [enabled, focusedIdentity, voiceIdentity]
   );
-  const [state, setState] = import_react53.default.useState({ baseUrl: "", values: NO_READINESS });
-  import_react53.default.useEffect(() => {
+  const [state, setState] = import_react56.default.useState({ baseUrl: "", values: NO_READINESS });
+  import_react56.default.useEffect(() => {
     if (!identities.length) return;
     const abort = new AbortController();
     const timers = /* @__PURE__ */ new Set();
@@ -67902,7 +68227,7 @@ function useVoiceReadiness(baseUrl, focusedIdentity, voiceIdentity, enabled) {
       timers.clear();
     };
   }, [baseUrl, identities]);
-  return import_react53.default.useMemo(() => {
+  return import_react56.default.useMemo(() => {
     if (!identities.length) return NO_READINESS;
     const known = state.baseUrl === baseUrl ? state.values : NO_READINESS;
     const values = {};
@@ -68213,13 +68538,13 @@ function emptyWorkGraphPanelData() {
   };
 }
 function ConsoleApp(props) {
-  const instanceKey = import_react54.default.useMemo(() => createConsoleId("console-instance"), [props.baseUrl, props.transport, props.storageNamespace, props.panelService, props.mcpAppsHost]);
+  const instanceKey = import_react57.default.useMemo(() => createConsoleId("console-instance"), [props.baseUrl, props.transport, props.storageNamespace, props.panelService, props.mcpAppsHost]);
   return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(ConsoleAppAuthority, { ...props }, instanceKey);
 }
 function ConsoleAppAuthority(props) {
-  const observedScope = import_react54.default.useRef(null);
-  const [generation, setGeneration] = import_react54.default.useState(0);
-  const observeScope = import_react54.default.useCallback((value) => {
+  const observedScope = import_react57.default.useRef(null);
+  const [generation, setGeneration] = import_react57.default.useState(0);
+  const observeScope = import_react57.default.useCallback((value) => {
     const previous3 = observedScope.current;
     observedScope.current = { value };
     if (previous3 && previous3.value !== value) {
@@ -68233,8 +68558,8 @@ function ConsoleAppAuthority(props) {
 }
 function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, observeScope }) {
   countRender("ConsoleApp");
-  const lifetimeRef = import_react54.default.useRef({ active: true, generation: 0 });
-  import_react54.default.useLayoutEffect(() => {
+  const lifetimeRef = import_react57.default.useRef({ active: true, generation: 0 });
+  import_react57.default.useLayoutEffect(() => {
     lifetimeRef.current.active = true;
     lifetimeRef.current.generation += 1;
     return () => {
@@ -68242,8 +68567,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       lifetimeRef.current.generation += 1;
     };
   }, []);
-  const consoleFetchTimeoutMsRef = import_react54.default.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2);
-  const consoleTransport = import_react54.default.useMemo(
+  const consoleFetchTimeoutMsRef = import_react57.default.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2);
+  const consoleTransport = import_react57.default.useMemo(
     () => {
       const source = transport ?? createHttpConsoleTransport2({
         baseUrl,
@@ -68295,46 +68620,46 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [baseUrl, transport]
   );
-  const consoleController = import_react54.default.useMemo(
+  const consoleController = import_react57.default.useMemo(
     () => createMetaConsoleController2({ transport: consoleTransport }),
     [consoleTransport]
   );
-  const blobReader = import_react54.default.useMemo(
+  const blobReader = import_react57.default.useMemo(
     () => consoleTransport.readBlob ? (input) => consoleTransport.readBlob(input) : void 0,
     [consoleTransport]
   );
   const { voice, state: voiceState } = useVoiceController(baseUrl);
-  const sampleVoiceWaveform = import_react54.default.useCallback(
+  const sampleVoiceWaveform = import_react57.default.useCallback(
     (source, samples) => voice?.sampleWaveform(source, samples),
     [voice]
   );
-  const [pendingChecks, setPendingChecks] = import_react54.default.useState({});
-  const [deliveredNotices, setDeliveredNotices] = import_react54.default.useState({});
-  const [experience, setExperience] = import_react54.default.useState(
+  const [pendingChecks, setPendingChecks] = import_react57.default.useState({});
+  const [deliveredNotices, setDeliveredNotices] = import_react57.default.useState({});
+  const [experience, setExperience] = import_react57.default.useState(
     null
   );
   const persistentSendScope = storageNamespace?.trim() || (experience?.storage_scope?.trim() ? JSON.stringify([baseUrl, experience.storage_scope]) : null);
-  const savedPanelRuntimeSelection = import_react54.default.useMemo(
+  const savedPanelRuntimeSelection = import_react57.default.useMemo(
     () => loadPanelRuntimeSelection(browserLocalStorage(), persistentSendScope),
     [persistentSendScope]
   );
-  const [panelRuntimeSelection, setPanelRuntimeSelection] = import_react54.default.useState(null);
+  const [panelRuntimeSelection, setPanelRuntimeSelection] = import_react57.default.useState(null);
   const explicitPanelRuntime = panelRuntimeSelection?.scope === persistentSendScope ? panelRuntimeSelection.key : savedPanelRuntimeSelection;
   const panelRuntimeKey = selectedPanelRuntime(explicitPanelRuntime, experience?.panel_runtimes);
   const emptyPanelRegistry = experience?.panel_runtimes?.length === 0 && experience.memory?.available === false && experience.workgraph?.available === false;
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     if (!panelRuntimeKey) return;
     setPanelRuntimeSelection((current) => current?.scope === persistentSendScope && current.key === panelRuntimeKey ? current : { scope: persistentSendScope, key: panelRuntimeKey });
     savePanelRuntimeSelection(browserLocalStorage(), persistentSendScope, panelRuntimeKey);
   }, [persistentSendScope, panelRuntimeKey]);
-  const panelRuntimeKeyRef = import_react54.default.useRef(panelRuntimeKey);
-  const memoryDetailRequestRef = import_react54.default.useRef(0);
+  const panelRuntimeKeyRef = import_react57.default.useRef(panelRuntimeKey);
+  const memoryDetailRequestRef = import_react57.default.useRef(0);
   panelRuntimeKeyRef.current = panelRuntimeKey;
-  const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = import_react54.default.useState("");
-  const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = import_react54.default.useState("");
-  const [agents, setAgents] = import_react54.default.useState([]);
-  const agentDirectory = import_react54.default.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
-  const peerLabels = import_react54.default.useMemo(() => {
+  const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = import_react57.default.useState("");
+  const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = import_react57.default.useState("");
+  const [agents, setAgents] = import_react57.default.useState([]);
+  const agentDirectory = import_react57.default.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
+  const peerLabels = import_react57.default.useMemo(() => {
     const labels2 = /* @__PURE__ */ new Map();
     for (const agent of agents) {
       const label = agentDisplayTitle(agent);
@@ -68346,66 +68671,66 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return labels2;
   }, [agents]);
-  const chatDisplayLabels = import_react54.default.useMemo(() => ({ peers: peerLabels }), [peerLabels]);
-  const [draftByKey, setDraftByKey] = import_react54.default.useState(
+  const chatDisplayLabels = import_react57.default.useMemo(() => ({ peers: peerLabels }), [peerLabels]);
+  const [draftByKey, setDraftByKey] = import_react57.default.useState(
     {}
   );
-  const [stagedAttachmentsByIdentity, setStagedAttachmentsByIdentity] = import_react54.default.useState({});
-  const [sendingPanels, setSendingPanels] = import_react54.default.useState(
+  const [stagedAttachmentsByIdentity, setStagedAttachmentsByIdentity] = import_react57.default.useState({});
+  const [sendingPanels, setSendingPanels] = import_react57.default.useState(
     /* @__PURE__ */ new Set()
   );
-  const sendingPanelsRef = import_react54.default.useRef(sendingPanels);
+  const sendingPanelsRef = import_react57.default.useRef(sendingPanels);
   sendingPanelsRef.current = sendingPanels;
-  const [pinnedAgentIds, setPinnedAgentIds] = import_react54.default.useState(
+  const [pinnedAgentIds, setPinnedAgentIds] = import_react57.default.useState(
     /* @__PURE__ */ new Set()
   );
-  const [inspectByIdentity, setInspectByIdentity] = import_react54.default.useState({});
-  const [routingData, setRoutingData] = import_react54.default.useState({
+  const [inspectByIdentity, setInspectByIdentity] = import_react57.default.useState({});
+  const [routingData, setRoutingData] = import_react57.default.useState({
     routes: [],
     deliveries: []
   });
-  const [gatingData, setGatingData] = import_react54.default.useState({
+  const [gatingData, setGatingData] = import_react57.default.useState({
     pending: [],
     audit: []
   });
-  const [accessData, setAccessData] = import_react54.default.useState({
+  const [accessData, setAccessData] = import_react57.default.useState({
     scope: "",
     loading: false,
     status: null,
     config: null,
     error: null
   });
-  const [memoryData, setMemoryData] = import_react54.default.useState(emptyMemoryPanelData);
-  const [workGraphData, setWorkGraphData] = import_react54.default.useState(emptyWorkGraphPanelData);
-  import_react54.default.useEffect(() => {
+  const [memoryData, setMemoryData] = import_react57.default.useState(emptyMemoryPanelData);
+  const [workGraphData, setWorkGraphData] = import_react57.default.useState(emptyWorkGraphPanelData);
+  import_react57.default.useEffect(() => {
     setMemoryDataRuntimeKey("");
     setWorkGraphDataRuntimeKey("");
     memoryDetailRequestRef.current += 1;
     setMemoryData(emptyMemoryPanelData());
     setWorkGraphData(emptyWorkGraphPanelData());
   }, [panelRuntimeKey]);
-  const [topologyQueryResult, setTopologyQueryResult] = import_react54.default.useState(null);
-  const [topologyCapabilities, setTopologyCapabilities] = import_react54.default.useState(null);
-  const [topologyOperations, setTopologyOperations] = import_react54.default.useState([]);
-  const [topologyConnectionSourceId, setTopologyConnectionSourceId] = import_react54.default.useState(null);
-  const [activeActivityPresetId, setActiveActivityPresetId] = import_react54.default.useState("");
-  const [selectedRosterMemberId, setSelectedRosterMemberId] = import_react54.default.useState("");
-  const [loading, setLoading] = import_react54.default.useState(true);
-  const [loadingHistory, setLoadingHistory] = import_react54.default.useState({});
-  const [error48, setError] = import_react54.default.useState("");
-  const [actionError, setActionError] = import_react54.default.useState("");
-  const [runStopNotices, setRunStopNotices] = import_react54.default.useState({});
-  const [sideChatsOffered, setSideChatsOffered] = import_react54.default.useState(false);
-  const [sideChatNotices, setSideChatNotices] = import_react54.default.useState({});
-  const [forkingPanels, setForkingPanels] = import_react54.default.useState(() => /* @__PURE__ */ new Set());
-  const [scheduleOffer, setScheduleOffer] = import_react54.default.useState(NO_CONSOLE_SCHEDULES);
-  const [transportState, setTransportState] = import_react54.default.useState({
+  const [topologyQueryResult, setTopologyQueryResult] = import_react57.default.useState(null);
+  const [topologyCapabilities, setTopologyCapabilities] = import_react57.default.useState(null);
+  const [topologyOperations, setTopologyOperations] = import_react57.default.useState([]);
+  const [topologyConnectionSourceId, setTopologyConnectionSourceId] = import_react57.default.useState(null);
+  const [activeActivityPresetId, setActiveActivityPresetId] = import_react57.default.useState("");
+  const [selectedRosterMemberId, setSelectedRosterMemberId] = import_react57.default.useState("");
+  const [loading, setLoading] = import_react57.default.useState(true);
+  const [loadingHistory, setLoadingHistory] = import_react57.default.useState({});
+  const [error48, setError] = import_react57.default.useState("");
+  const [actionError, setActionError] = import_react57.default.useState("");
+  const [runStopNotices, setRunStopNotices] = import_react57.default.useState({});
+  const [sideChatsOffered, setSideChatsOffered] = import_react57.default.useState(false);
+  const [sideChatNotices, setSideChatNotices] = import_react57.default.useState({});
+  const [forkingPanels, setForkingPanels] = import_react57.default.useState(() => /* @__PURE__ */ new Set());
+  const [scheduleOffer, setScheduleOffer] = import_react57.default.useState(NO_CONSOLE_SCHEDULES);
+  const [transportState, setTransportState] = import_react57.default.useState({
     phase: "connecting",
     stale: true,
     freshness: "unknown"
   });
-  const [transportRetry, setTransportRetry] = import_react54.default.useState(0);
-  const [theme, setTheme] = import_react54.default.useState(() => {
+  const [transportRetry, setTransportRetry] = import_react57.default.useState(0);
+  const [theme, setTheme] = import_react57.default.useState(() => {
     try {
       return localStorage.getItem("meta-console-theme") || "light";
     } catch {
@@ -68413,30 +68738,30 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   });
   const [variant, setVariant] = useConsoleVariant();
-  const sidebarStorageScope = import_react54.default.useMemo(
+  const sidebarStorageScope = import_react57.default.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience]
   );
-  const sidebarStorageNamespace = import_react54.default.useMemo(
+  const sidebarStorageNamespace = import_react57.default.useMemo(
     () => sidebarPreferencesNamespace(baseUrl, experience),
     [baseUrl, experience]
   );
-  const sidebarPinsStorageKey = import_react54.default.useMemo(
+  const sidebarPinsStorageKey = import_react57.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_PINS_STORAGE_PREFIX, sidebarStorageNamespace),
     [sidebarStorageNamespace]
   );
-  const sidebarPreferenceScope = import_react54.default.useMemo(
+  const sidebarPreferenceScope = import_react57.default.useMemo(
     () => encodeURIComponent(persistentSendScope || sidebarStorageScope),
     [persistentSendScope, sidebarStorageScope]
   );
-  const sidebarAgentPinsStorageKey = import_react54.default.useMemo(
+  const sidebarAgentPinsStorageKey = import_react57.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
     [sidebarPreferenceScope]
   );
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
   }, [sidebarStorageScope, sidebarStorageNamespace]);
-  const [sidebarCollapsed, setSidebarCollapsed] = import_react54.default.useState(
+  const [sidebarCollapsed, setSidebarCollapsed] = import_react57.default.useState(
     () => {
       try {
         return localStorage.getItem("meta-console-sidebar-collapsed") === "1";
@@ -68445,7 +68770,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
     }
   );
-  const toggleSidebarCollapsed = import_react54.default.useCallback(() => {
+  const toggleSidebarCollapsed = import_react57.default.useCallback(() => {
     setSidebarCollapsed((c) => {
       const next = !c;
       try {
@@ -68458,14 +68783,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return next;
     });
   }, []);
-  const [railCollapsed, setRailCollapsed] = import_react54.default.useState(() => {
+  const [railCollapsed, setRailCollapsed] = import_react57.default.useState(() => {
     try {
       return localStorage.getItem("meta-console-rail-collapsed") === "1";
     } catch {
       return false;
     }
   });
-  const toggleRailCollapsed = import_react54.default.useCallback(() => {
+  const toggleRailCollapsed = import_react57.default.useCallback(() => {
     setRailCollapsed((c) => {
       const next = !c;
       try {
@@ -68475,11 +68800,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return next;
     });
   }, []);
-  const defaultPinnedAgentIdsKey = import_react54.default.useMemo(
+  const defaultPinnedAgentIdsKey = import_react57.default.useMemo(
     () => JSON.stringify(experience?.console_config?.agent_list?.default_pinned_agent_ids || []),
     [experience?.console_config?.agent_list?.default_pinned_agent_ids]
   );
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     setPinnedAgentIds(readSidebarPins(
       browserLocalStorage(),
       sidebarAgentPinsStorageKey,
@@ -68487,7 +68812,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.console_config?.agent_list?.default_pinned_agent_ids || []
     ));
   }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
-  const togglePinnedAgent = import_react54.default.useCallback((agent, renderedFamilyPinIds) => {
+  const togglePinnedAgent = import_react57.default.useCallback((agent, renderedFamilyPinIds) => {
     const pinId = sidebarAgentPinId2(agent);
     setPinnedAgentIds((current) => {
       const next = new Set(current);
@@ -68506,12 +68831,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return next;
     });
   }, [agents, sidebarAgentPinsStorageKey]);
-  const [, setRenderTick] = import_react54.default.useState(0);
-  const liveFramesRef = import_react54.default.useRef([]);
-  const [liveFrames, setLiveFrames] = import_react54.default.useState([]);
-  const renderScheduledRef = import_react54.default.useRef(null);
-  const liveFramesDirtyRef = import_react54.default.useRef(false);
-  const flushScheduledRender = import_react54.default.useCallback((transition = false) => {
+  const [, setRenderTick] = import_react57.default.useState(0);
+  const liveFramesRef = import_react57.default.useRef([]);
+  const [liveFrames, setLiveFrames] = import_react57.default.useState([]);
+  const renderScheduledRef = import_react57.default.useRef(null);
+  const liveFramesDirtyRef = import_react57.default.useRef(false);
+  const flushScheduledRender = import_react57.default.useCallback((transition = false) => {
     renderScheduledRef.current = null;
     countRender("LiveRenderFlush");
     const commit = () => {
@@ -68521,10 +68846,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       setRenderTick((n2) => n2 + 1);
     };
-    if (transition) import_react54.default.startTransition(commit);
+    if (transition) import_react57.default.startTransition(commit);
     else commit();
   }, []);
-  const onScheduledFrame = import_react54.default.useCallback(() => {
+  const onScheduledFrame = import_react57.default.useCallback(() => {
     const pending = renderScheduledRef.current;
     if (!pending || pending.kind !== "raf") return;
     pending.frames += 1;
@@ -68534,14 +68859,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     flushScheduledRender(pending.textOnly);
   }, [flushScheduledRender]);
-  const cancelScheduledRender = import_react54.default.useCallback(() => {
+  const cancelScheduledRender = import_react57.default.useCallback(() => {
     const pending = renderScheduledRef.current;
     if (!pending || typeof window === "undefined") return;
     if (pending.kind === "raf") window.cancelAnimationFrame(pending.id);
     else window.clearTimeout(pending.id);
     renderScheduledRef.current = null;
   }, []);
-  const forceRender = import_react54.default.useCallback((cause = "frame") => {
+  const forceRender = import_react57.default.useCallback((cause = "frame") => {
     const pending = renderScheduledRef.current;
     if (cause === "now") {
       cancelScheduledRender();
@@ -68569,7 +68894,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       frames: 0
     };
   }, [cancelScheduledRender, flushScheduledRender, onScheduledFrame]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     if (typeof document === "undefined") return;
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") return;
@@ -68583,11 +68908,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       cancelScheduledRender();
     };
   }, [cancelScheduledRender, flushScheduledRender]);
-  const stagedAttachmentsRef = import_react54.default.useRef(stagedAttachmentsByIdentity);
-  import_react54.default.useEffect(() => {
+  const stagedAttachmentsRef = import_react57.default.useRef(stagedAttachmentsByIdentity);
+  import_react57.default.useEffect(() => {
     stagedAttachmentsRef.current = stagedAttachmentsByIdentity;
   }, [stagedAttachmentsByIdentity]);
-  import_react54.default.useEffect(
+  import_react57.default.useEffect(
     () => () => {
       for (const items of Object.values(stagedAttachmentsRef.current)) {
         items.forEach((item) => URL.revokeObjectURL(item.previewUrl));
@@ -68657,8 +68982,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       SelectField,
       {
         className: "runtime-panel-control",
-        label: "Mob",
-        ariaLabel: "".concat(kind === "memory" ? "Memory" : "Work Graph", " mob"),
+        label: "Team",
+        ariaLabel: "".concat(kind === "memory" ? "Memory" : "Work Graph", " team"),
         value: panelRuntimeKey,
         options: [
           ...runtimes.some((runtime) => runtime.key === panelRuntimeKey) ? [] : [{ value: panelRuntimeKey, label: "Runtime unavailable" }],
@@ -68679,11 +69004,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       params: scopedPanelParams(target.kind, panelRuntimeKey, params)
     })).result;
   }
-  const identityLogRef = import_react54.default.useRef({});
-  const timelineFetchInFlightRef = import_react54.default.useRef(
+  const identityLogRef = import_react57.default.useRef({});
+  const timelineFetchInFlightRef = import_react57.default.useRef(
     {}
   );
-  const optimisticUserByPanelKeyRef = import_react54.default.useRef({});
+  const optimisticUserByPanelKeyRef = import_react57.default.useRef({});
   function getOrCreateLog(identity) {
     let log = identityLogRef.current[identity];
     if (!log) {
@@ -69020,7 +69345,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (!log) return [];
     return sortedEvents(log);
   }
-  const derivedTranscriptRef = import_react54.default.useRef({});
+  const derivedTranscriptRef = import_react57.default.useRef({});
   function derivedTranscriptFor(identity, panelId, agent) {
     const log = getOrCreateLog(identity);
     const cached2 = derivedTranscriptRef.current[identity];
@@ -69042,7 +69367,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     derivedTranscriptRef.current[identity] = next;
     return next;
   }
-  const panelPhaseRef = import_react54.default.useRef({});
+  const panelPhaseRef = import_react57.default.useRef({});
   function panelPhaseFor(panelKey, sortedFrames, inputs) {
     if (inputs.hasLocalPhase) return inputs.localPhase ?? null;
     const cached2 = panelPhaseRef.current[panelKey];
@@ -69072,7 +69397,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     panelPhaseRef.current[panelKey] = { frames: sortedFrames.slice(), serverPhase: inputs.serverPhase, phase: phase2 };
     return phase2;
   }
-  const activeRunIdRef = import_react54.default.useRef({});
+  const activeRunIdRef = import_react57.default.useRef({});
   function activeRunIdFor(identity, version2, sortedFrames) {
     const cached2 = activeRunIdRef.current[identity];
     if (cached2 && cached2.version === version2) return cached2.runId;
@@ -69084,17 +69409,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     void panelId;
     return frames;
   }
-  const activityRef = import_react54.default.useRef([]);
+  const activityRef = import_react57.default.useRef([]);
   function commitLiveFrames(frames, cause = "frame") {
     liveFramesRef.current = frames;
     liveFramesDirtyRef.current = true;
     forceRender(cause);
   }
-  const sendControllerRef = import_react54.default.useRef(consoleController);
+  const sendControllerRef = import_react57.default.useRef(consoleController);
   sendControllerRef.current = consoleController;
-  const transientSendScope = import_react54.default.useMemo(() => "transient:".concat(createIdempotencyKey()), [consoleController]);
+  const transientSendScope = import_react57.default.useMemo(() => "transient:".concat(createIdempotencyKey()), [consoleController]);
   const sendScope = persistentSendScope || "".concat(transientSendScope, ":").concat(baseUrl);
-  const [composerTabId] = import_react54.default.useState(() => {
+  const [composerTabId] = import_react57.default.useState(() => {
     try {
       return consoleComposerTabId(window.sessionStorage, createIdempotencyKey);
     } catch {
@@ -69102,16 +69427,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   });
   const composerIdFor = (panelKey) => JSON.stringify([composerTabId, panelKey]);
-  const sendScopeRef = import_react54.default.useRef(sendScope);
-  const persistentSendScopeRef = import_react54.default.useRef(persistentSendScope);
-  const pendingStackRef = import_react54.default.useRef({});
-  const autoDrainRequestedRef = import_react54.default.useRef(/* @__PURE__ */ new Map());
-  const sendRetryEpochRef = import_react54.default.useRef(0);
-  const pendingStorageErrorRef = import_react54.default.useRef({});
-  const queueStorageBannerRef = import_react54.default.useRef(null);
-  const [contextDrafts, setContextDrafts] = import_react54.default.useState({});
-  const [submittedFrames, setSubmittedFrames] = import_react54.default.useState({});
-  const loadedComposerDraftsRef = import_react54.default.useRef({});
+  const sendScopeRef = import_react57.default.useRef(sendScope);
+  const persistentSendScopeRef = import_react57.default.useRef(persistentSendScope);
+  const pendingStackRef = import_react57.default.useRef({});
+  const autoDrainRequestedRef = import_react57.default.useRef(/* @__PURE__ */ new Map());
+  const sendRetryEpochRef = import_react57.default.useRef(0);
+  const pendingStorageErrorRef = import_react57.default.useRef({});
+  const queueStorageBannerRef = import_react57.default.useRef(null);
+  const [contextDrafts, setContextDrafts] = import_react57.default.useState({});
+  const [submittedFrames, setSubmittedFrames] = import_react57.default.useState({});
+  const loadedComposerDraftsRef = import_react57.default.useRef({});
   function storedComposerDraft(identity, panelKey) {
     const namespace = persistentSendScopeRef.current;
     const key = "".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey));
@@ -69154,7 +69479,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     optimisticUserByPanelKeyRef.current = {};
   }
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     setDraftByKey({});
     setContextDrafts({});
     setSubmittedFrames({});
@@ -69235,7 +69560,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return false;
     });
   }
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const onStorage = (event) => {
       const namespace = persistentSendScopeRef.current;
       if (!namespace) return;
@@ -69259,7 +69584,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       window.removeEventListener("online", onRetryOpportunity);
     };
   }, []);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const timer2 = window.setInterval(() => {
       let changed = false;
       for (const [identity, items] of Object.entries(pendingStackRef.current)) {
@@ -69273,29 +69598,29 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }, 15e3);
     return () => window.clearInterval(timer2);
   }, []);
-  const identityBusyRef = import_react54.default.useRef({});
-  const identityLifecycleRef = import_react54.default.useRef({});
+  const identityBusyRef = import_react57.default.useRef({});
+  const identityLifecycleRef = import_react57.default.useRef({});
   const isIdentityBusy = (identity) => identityBusyRef.current[identity] === true;
-  const phaseRef = import_react54.default.useRef({});
-  const phaseValueByKey = import_react54.default.useRef({});
-  const phaseSinceByKey = import_react54.default.useRef({});
-  const phaseTimerByKey = import_react54.default.useRef({});
-  const refreshTimersRef = import_react54.default.useRef({});
-  const experienceTimerRef = import_react54.default.useRef(null);
-  const experienceLoadInFlightRef = import_react54.default.useRef(
+  const phaseRef = import_react57.default.useRef({});
+  const phaseValueByKey = import_react57.default.useRef({});
+  const phaseSinceByKey = import_react57.default.useRef({});
+  const phaseTimerByKey = import_react57.default.useRef({});
+  const refreshTimersRef = import_react57.default.useRef({});
+  const experienceTimerRef = import_react57.default.useRef(null);
+  const experienceLoadInFlightRef = import_react57.default.useRef(
     null
   );
-  const experienceLoadGenerationRef = import_react54.default.useRef(-1);
-  const agentsRef = import_react54.default.useRef([]);
-  const identityAliasesRef = import_react54.default.useRef(/* @__PURE__ */ new Map());
-  import_react54.default.useEffect(() => {
+  const experienceLoadGenerationRef = import_react57.default.useRef(-1);
+  const agentsRef = import_react57.default.useRef([]);
+  const identityAliasesRef = import_react57.default.useRef(/* @__PURE__ */ new Map());
+  import_react57.default.useEffect(() => {
     agentsRef.current = agents;
     identityAliasesRef.current = buildConsoleIdentityAliasMap(agents);
   }, [agents]);
-  const initialTargetOpened = import_react54.default.useRef(false);
-  const dockLayoutHydrated = import_react54.default.useRef(false);
-  const dockLayoutRestored = import_react54.default.useRef(false);
-  const dockLayoutRestoring = import_react54.default.useRef(false);
+  const initialTargetOpened = import_react57.default.useRef(false);
+  const dockLayoutHydrated = import_react57.default.useRef(false);
+  const dockLayoutRestored = import_react57.default.useRef(false);
+  const dockLayoutRestoring = import_react57.default.useRef(false);
   const dock = useConsoleDockController({
     createPanelState: ({ target }) => ({
       id: createConsoleId("panel"),
@@ -69303,11 +69628,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       mode: "console"
     })
   });
-  const currentDockLayoutStorageKey = import_react54.default.useMemo(
+  const currentDockLayoutStorageKey = import_react57.default.useMemo(
     () => dockLayoutStorageKey(sendScope),
     [sendScope]
   );
-  import_react54.default.useLayoutEffect(() => {
+  import_react57.default.useLayoutEffect(() => {
     if (!experience || dockLayoutHydrated.current) return;
     dockLayoutHydrated.current = true;
     try {
@@ -69329,7 +69654,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch {
     }
   }, [currentDockLayoutStorageKey, experience]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     if (!experience || !dockLayoutHydrated.current) return;
     if (dockLayoutRestoring.current) {
       dockLayoutRestoring.current = false;
@@ -69438,7 +69763,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         return false;
     }
   }
-  const dockRef = import_react54.default.useRef(dock);
+  const dockRef = import_react57.default.useRef(dock);
   dockRef.current = dock;
   function updatePhaseForIdentity(identity, frame) {
     if (frame.sourceKind === "session_history" || frame.event === "assistant_history_snapshot" || frame.event === "frame_updated") {
@@ -69499,7 +69824,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return changed;
   }
-  const settleIdleIdentitiesRef = import_react54.default.useRef(() => {
+  const settleIdleIdentitiesRef = import_react57.default.useRef(() => {
   });
   function settleIdleIdentities(agents2, logVersionsAtRequest) {
     let changed = false;
@@ -69546,7 +69871,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (changed) forceRender();
   }
   settleIdleIdentitiesRef.current = settleIdleIdentities;
-  const loadExperience = import_react54.default.useCallback(() => {
+  const loadExperience = import_react57.default.useCallback(() => {
     if (experienceLoadInFlightRef.current && experienceLoadGenerationRef.current === lifetimeRef.current.generation) {
       return experienceLoadInFlightRef.current;
     }
@@ -69582,7 +69907,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     experienceLoadGenerationRef.current = lifetimeRef.current.generation;
     return request;
   }, [consoleTransport]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     let mounted = true;
     setLoading(true);
     setError("");
@@ -69595,14 +69920,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       mounted = false;
     };
   }, [loadExperience]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const timer2 = window.setInterval(() => {
       void loadExperience().catch(() => {
       });
     }, 15e3);
     return () => window.clearInterval(timer2);
   }, [loadExperience]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const appearance = experience?.console_config?.appearance;
     if (!appearance) return;
     const configuredTheme = normalizeConsoleTheme(appearance.default_theme);
@@ -69626,7 +69951,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
     }
   }, [experience?.console_config?.appearance, setVariant]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const configured = experience?.console_config?.layout?.sidebar_collapsed;
     if (typeof configured !== "boolean") return;
     try {
@@ -69636,7 +69961,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     setSidebarCollapsed(configured);
   }, [experience?.console_config?.layout?.sidebar_collapsed]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const configured = experience?.console_config?.rail?.collapsed;
     if (typeof configured !== "boolean") return;
     try {
@@ -69647,13 +69972,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     setRailCollapsed(configured);
   }, [experience?.console_config?.rail?.collapsed]);
   const hasMobControlSurface = experience?.runtime_id !== "console-aggregator";
-  const frontendReadOnly = import_react54.default.useMemo(() => resolveConsoleReadOnlyOverride(), []);
+  const frontendReadOnly = import_react57.default.useMemo(() => resolveConsoleReadOnlyOverride(), []);
   const accessEnforcing = experience?.access?.enabled === true;
   const consoleReadOnly = frontendReadOnly || experience?.console_policy?.read_only === true || !accessEnforcing && experience?.runtime_capabilities?.can_send_messages === false;
-  const consoleReadOnlyRef = import_react54.default.useRef(false);
+  const consoleReadOnlyRef = import_react57.default.useRef(false);
   consoleReadOnlyRef.current = consoleReadOnly;
   const canSpawnMembers = experience?.runtime_capabilities?.can_spawn_members === true;
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     if (!canSpawnMembers) setSideChatsOffered(false);
     let active = true;
     void Promise.resolve().then(() => consoleTransport.capabilities()).then((capabilities) => {
@@ -69672,13 +69997,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [consoleTransport, canSpawnMembers, sendScope]);
   const resendUncertain = experience?.send_dedupe?.durable === true;
-  const resendUncertainRef = import_react54.default.useRef(false);
+  const resendUncertainRef = import_react57.default.useRef(false);
   resendUncertainRef.current = resendUncertain;
-  const [approvalSnapshot, setApprovalSnapshot] = import_react54.default.useState();
-  const [selectedApprovalId, setSelectedApprovalId] = import_react54.default.useState();
-  const approvalResourceRef = import_react54.default.useRef(null);
+  const [approvalSnapshot, setApprovalSnapshot] = import_react57.default.useState();
+  const [selectedApprovalId, setSelectedApprovalId] = import_react57.default.useState();
+  const approvalResourceRef = import_react57.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
     if (!experience || !hasMobControlSurface) return;
@@ -69720,7 +70045,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     voiceState.target?.identity ?? null,
     hasVoiceHost && !consoleReadOnly && voice !== null
   );
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const target = voiceState.target;
     if (!experience || !voice || !target || !["requesting", "connecting", "active"].includes(voiceState.phase)) return;
     const voiceAgent = agents.find(
@@ -69731,7 +70056,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       void voice.close();
     }
   }, [agents, consoleReadOnly, experience, hasVoiceHost, voice, voiceReadiness, voiceState.phase, voiceState.target]);
-  const normalizedTopology = import_react54.default.useMemo(
+  const normalizedTopology = import_react57.default.useMemo(
     () => normalizeConsoleTopologyQuery(topologyQueryResult, {
       agents,
       fallbackNodes: experience?.topology?.live_snapshot?.nodes || [],
@@ -69750,7 +70075,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       topologyQueryResult
     ]
   );
-  const visibleControls = import_react54.default.useMemo(() => {
+  const visibleControls = import_react57.default.useMemo(() => {
     const runtimeControls = hasMobControlSurface ? [
       "topology",
       "timeline",
@@ -69793,7 +70118,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     emptyPanelRegistry,
     hasMobControlSurface
   ]);
-  import_react54.default.useLayoutEffect(() => {
+  import_react57.default.useLayoutEffect(() => {
     if (initialTargetOpened.current || dock.focusedTarget || !experience)
       return;
     if (!dockLayoutHydrated.current) return;
@@ -69827,7 +70152,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (preset) dock.applyPreset(preset);
     dock.openTarget(target, "replace_focused");
   }, [agents, dock, experience, visibleControls]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     const target = dock.focusedTarget;
     if (!target || target.kind !== "agent-chat" || agents.length === 0) return;
     const identity = target.identity || target.memberId;
@@ -69844,26 +70169,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       dock.openTarget(buildControlTarget2("roster"), "replace_focused");
     }
   }, [agents, dock.focusedTarget]);
-  const panelRefreshFlight = import_react54.default.useMemo(() => createSingleFlight(), []);
-  const visiblePanelTargets = import_react54.default.useMemo(() => {
+  const panelRefreshFlight = import_react57.default.useMemo(() => createSingleFlight(), []);
+  const visiblePanelTargets = import_react57.default.useMemo(() => {
     const activeTab = dock.viewState.tabs.find((tab2) => tab2.id === dock.viewState.activeTabId);
     const visible = new Set(collectConsoleDockPanelIds(activeTab?.layout));
     return dock.viewState.panels.filter((panel) => visible.has(panel.id)).map((panel) => panel.target).filter(Boolean);
   }, [dock.viewState.panels, dock.viewState.tabs, dock.viewState.activeTabId]);
   const accessScope = JSON.stringify([baseUrl, storageNamespace, experience?.runtime_id, experience?.access?.subject]);
-  const accessScopeRef = import_react54.default.useRef(accessScope);
+  const accessScopeRef = import_react57.default.useRef(accessScope);
   accessScopeRef.current = accessScope;
-  const accessRefreshVersion = import_react54.default.useRef(0);
-  const accessSettledScope = import_react54.default.useRef(null);
-  const accessRevisionRef = import_react54.default.useRef(void 0);
+  const accessRefreshVersion = import_react57.default.useRef(0);
+  const accessSettledScope = import_react57.default.useRef(null);
+  const accessRevisionRef = import_react57.default.useRef(void 0);
   const visibleAccessData = accessData.scope === accessScope ? accessData : null;
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     accessRefreshVersion.current += 1;
     accessSettledScope.current = null;
     accessRevisionRef.current = void 0;
     setAccessData({ scope: accessScope, loading: false, status: null, config: null, error: null });
   }, [accessScope, experience?.access?.can_administer]);
-  const refreshAccessData = import_react54.default.useCallback((mode = "explicit") => {
+  const refreshAccessData = import_react57.default.useCallback((mode = "explicit") => {
     if (accessScope === accessScopeRef.current && (mode === "explicit" || accessSettledScope.current !== accessScope)) {
       if (mode === "explicit") accessRefreshVersion.current += 1;
       setAccessData((current) => ({
@@ -69914,7 +70239,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
     });
   }, [panelRefreshFlight, baseUrl, accessScope]);
-  const refreshMemoryData = import_react54.default.useCallback(() => panelRefreshFlight("memory:".concat(panelRuntimeKey), async () => {
+  const refreshMemoryData = import_react57.default.useCallback(() => panelRefreshFlight("memory:".concat(panelRuntimeKey), async () => {
     if (emptyPanelRegistry) return;
     const memoryTarget = controlWorkbenchTarget("memory");
     try {
@@ -70071,8 +70396,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setMemoryData((current) => ({ ...current, error: errorMessage(err) }));
     }
   }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine]);
-  const workGraphRefreshSequencerRef = import_react54.default.useRef(createWorkGraphRefreshSequencer());
-  const refreshWorkGraphData = import_react54.default.useCallback(() => panelRefreshFlight("workgraph:".concat(panelRuntimeKey), async () => {
+  const workGraphRefreshSequencerRef = import_react57.default.useRef(createWorkGraphRefreshSequencer());
+  const refreshWorkGraphData = import_react57.default.useCallback(() => panelRefreshFlight("workgraph:".concat(panelRuntimeKey), async () => {
     if (emptyPanelRegistry) return;
     const workGraphTarget = controlWorkbenchTarget("workgraph");
     const isCurrent = workGraphRefreshSequencerRef.current.begin();
@@ -70126,7 +70451,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setWorkGraphData((current) => ({ ...current, error: errorMessage(err) }));
     }
   }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry]);
-  const queryMemoryRecords = import_react54.default.useCallback(
+  const queryMemoryRecords = import_react57.default.useCallback(
     async (params) => {
       try {
         return await executeHeadlessCommand(
@@ -70143,7 +70468,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, panelRuntimeKey]
   );
-  const loadMemoryEvidence = import_react54.default.useCallback(
+  const loadMemoryEvidence = import_react57.default.useCallback(
     async (identity, evidence) => {
       if (!evidence.session_id) return null;
       try {
@@ -70169,7 +70494,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [consoleController, panelRuntimeKey, experience?.panel_runtimes]
   );
-  const loadMemoryRecordDetail = import_react54.default.useCallback(
+  const loadMemoryRecordDetail = import_react57.default.useCallback(
     async (realm, memoryId, preserveDetail = false) => {
       const request = ++memoryDetailRequestRef.current;
       setMemoryData((current) => ({ ...current, detail: preserveDetail ? current.detail : null, detailLoading: true, error: null }));
@@ -70200,7 +70525,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, panelRuntimeKey]
   );
-  const decideMemoryQuarantine = import_react54.default.useCallback(
+  const decideMemoryQuarantine = import_react57.default.useCallback(
     async (realm, record10, verdict, rationale) => {
       const identity = record10.scope.scope === "identity" ? record10.scope.identity : void 0;
       const result = await executeHeadlessCommand(
@@ -70221,7 +70546,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshMemoryData]
   );
-  const runAccessMutation = import_react54.default.useCallback(
+  const runAccessMutation = import_react57.default.useCallback(
     async (command, params, base) => {
       if (accessData.scope !== accessScope || accessData.loading || accessData.error || accessData.status?.available !== true || accessData.status.can_administer !== true || accessData.status.conditional_mutations !== "checked_v1" || typeof accessData.status.owner_instance !== "string" || !accessData.status.owner_instance || !Number.isSafeInteger(accessData.status.revision) || accessData.status.revision < 0 || typeof base.owner_instance !== "string" || !base.owner_instance || !Number.isSafeInteger(base.revision) || base.revision < 0 || experience?.access?.can_administer !== true || frontendReadOnly || experience?.console_policy?.read_only === true) return false;
       let failure = null;
@@ -70243,7 +70568,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshAccessData, loadExperience, accessData, accessScope, experience?.access?.can_administer, frontendReadOnly, experience?.console_policy?.read_only]
   );
-  const refreshTopologyData = import_react54.default.useCallback(() => panelRefreshFlight("topology", async () => {
+  const refreshTopologyData = import_react57.default.useCallback(() => panelRefreshFlight("topology", async () => {
     try {
       const capabilities = await consoleTransport.capabilities();
       setTopologyCapabilities(capabilities.topologyControl || null);
@@ -70263,11 +70588,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error49;
     }
   }), [panelRefreshFlight, consoleTransport]);
-  const refreshGatingAudit = import_react54.default.useCallback(() => panelRefreshFlight("gating-audit", async () => {
-    const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 });
-    setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+  const [gatingAuditError, setGatingAuditError] = import_react57.default.useState(null);
+  const refreshGatingAudit = import_react57.default.useCallback(() => panelRefreshFlight("gating-audit", async () => {
+    try {
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 });
+      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      setGatingAuditError(null);
+    } catch (error49) {
+      setGatingAuditError(errorMessage(error49));
+      throw error49;
+    }
   }), [baseUrl, panelRefreshFlight]);
-  const refreshPanelData = import_react54.default.useCallback(async ({ access = true } = {}) => {
+  const refreshPanelData = import_react57.default.useCallback(async ({ access = true } = {}) => {
     const openPanels = visiblePanelTargets;
     const inspects = openPanels.filter(
       (t) => t.kind === "identity-inspect"
@@ -70301,14 +70633,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     await Promise.all(refreshes);
   }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
-  const refreshPanelDataRef = import_react54.default.useRef(refreshPanelData);
+  const refreshPanelDataRef = import_react57.default.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
   const visiblePanelKey = JSON.stringify(visiblePanelTargets);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     void refreshPanelDataRef.current().catch(() => {
     });
   }, [visiblePanelKey, accessScope, panelRuntimeKey, emptyPanelRegistry, experience?.access?.can_administer]);
-  const scheduleExperienceRefresh = import_react54.default.useCallback(() => {
+  const scheduleExperienceRefresh = import_react57.default.useCallback(() => {
     if (experienceTimerRef.current !== null) return;
     experienceTimerRef.current = window.setTimeout(() => {
       experienceTimerRef.current = null;
@@ -70319,7 +70651,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
     }, 150);
   }, [loadExperience, panelRefreshFlight]);
-  const handleAccessChangedRef = import_react54.default.useRef(() => {
+  const handleAccessChangedRef = import_react57.default.useRef(() => {
   });
   handleAccessChangedRef.current = (revision) => {
     const known = accessRevisionRef.current;
@@ -70333,7 +70665,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     scheduleExperienceRefresh();
   };
-  const scheduleHistoryRefresh = import_react54.default.useCallback(
+  const scheduleHistoryRefresh = import_react57.default.useCallback(
     (identity) => {
       clearTimeout(refreshTimersRef.current[identity]);
       refreshTimersRef.current[identity] = window.setTimeout(async () => {
@@ -70351,7 +70683,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [baseUrl, forceRender]
   );
-  const workGraphHydrationGateRef = import_react54.default.useRef(createWorkGraphHydrationGate());
+  const workGraphHydrationGateRef = import_react57.default.useRef(createWorkGraphHydrationGate());
   async function hydrateWorkGraphCardsForIdentity(identity) {
     const shouldFetch = workGraphHydrationGateRef.current.shouldFetch(identity, {
       workgraphAvailable: experience?.workgraph?.available === true,
@@ -70382,7 +70714,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch {
     }
   }
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     for (const panel of dock.viewState.panels) {
       const target = panel.target;
       if (!target || target.kind !== "agent-chat") continue;
@@ -70396,8 +70728,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
     }
   }, [baseUrl, dock.viewState.panels, forceRender, experience?.workgraph?.available]);
-  const identityRefreshInFlightRef = import_react54.default.useRef(/* @__PURE__ */ new Set());
-  const repairIdentityAfterReplayGap = import_react54.default.useCallback(
+  const identityRefreshInFlightRef = import_react57.default.useRef(/* @__PURE__ */ new Set());
+  const repairIdentityAfterReplayGap = import_react57.default.useCallback(
     async (identity) => {
       const log = getOrCreateLog(identity);
       if (log.hasServerLog === false) return false;
@@ -70438,28 +70770,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, forceRender]
   );
-  const repairIdentityAfterReplayGapRef = import_react54.default.useRef(repairIdentityAfterReplayGap);
+  const repairIdentityAfterReplayGapRef = import_react57.default.useRef(repairIdentityAfterReplayGap);
   repairIdentityAfterReplayGapRef.current = repairIdentityAfterReplayGap;
-  const scheduleHistoryRefreshRef = import_react54.default.useRef(scheduleHistoryRefresh);
+  const scheduleHistoryRefreshRef = import_react57.default.useRef(scheduleHistoryRefresh);
   scheduleHistoryRefreshRef.current = scheduleHistoryRefresh;
-  const scheduleExperienceRefreshRef = import_react54.default.useRef(scheduleExperienceRefresh);
+  const scheduleExperienceRefreshRef = import_react57.default.useRef(scheduleExperienceRefresh);
   scheduleExperienceRefreshRef.current = scheduleExperienceRefresh;
-  const refreshMemoryDataRef = import_react54.default.useRef(refreshMemoryData);
+  const refreshMemoryDataRef = import_react57.default.useRef(refreshMemoryData);
   refreshMemoryDataRef.current = refreshMemoryData;
-  const memoryPanelDockedRef = import_react54.default.useRef(false);
+  const memoryPanelDockedRef = import_react57.default.useRef(false);
   memoryPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "memory");
-  const dockedChatIdentitiesRef = import_react54.default.useRef([]);
+  const dockedChatIdentitiesRef = import_react57.default.useRef([]);
   dockedChatIdentitiesRef.current = dock.viewState.panels.flatMap((panel) => {
     const target = panel.target;
     return target && target.kind === "agent-chat" ? [target.identity || target.memberId] : [];
   });
-  const memoryRefreshTimerRef = import_react54.default.useRef(null);
-  const refreshWorkGraphDataRef = import_react54.default.useRef(refreshWorkGraphData);
+  const memoryRefreshTimerRef = import_react57.default.useRef(null);
+  const refreshWorkGraphDataRef = import_react57.default.useRef(refreshWorkGraphData);
   refreshWorkGraphDataRef.current = refreshWorkGraphData;
-  const workGraphPanelDockedRef = import_react54.default.useRef(false);
+  const workGraphPanelDockedRef = import_react57.default.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
-  const workGraphRefreshTimerRef = import_react54.default.useRef(null);
-  import_react54.default.useEffect(() => {
+  const workGraphRefreshTimerRef = import_react57.default.useRef(null);
+  import_react57.default.useEffect(() => {
     const handleLiveFrame = (incomingFrame) => {
       if (incomingFrame.event === "access_changed") {
         const signalled = incomingFrame.data?.revision;
@@ -70541,7 +70873,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe?.();
     };
   }, [consoleController, consoleTransport, sidebarStorageNamespace, transportRetry]);
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     return () => {
       for (const timer2 of Object.values(phaseTimerByKey.current))
         window.clearTimeout(timer2);
@@ -70776,8 +71108,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return true;
   }
   const reducedMotion = typeof window !== "undefined" ? window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false : false;
-  const directSendIdsRef = import_react54.default.useRef(/* @__PURE__ */ new Set());
-  const pendingDrainOwnerRef = import_react54.default.useRef(
+  const directSendIdsRef = import_react57.default.useRef(/* @__PURE__ */ new Set());
+  const pendingDrainOwnerRef = import_react57.default.useRef(
     "tab-".concat(Date.now().toString(36), "-").concat(Math.random().toString(36).slice(2, 8))
   );
   function findChatTargetFor(identity) {
@@ -70945,7 +71277,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function onStackToggleExpand(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id ? { ...item, expanded: !item.expanded } : item));
   }
-  import_react54.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     for (const identity of Object.keys(pendingStackRef.current)) {
       if (getOrCreateLog(identity).hasServerLog === null) continue;
       maybeDrainHead(identity);
@@ -71173,28 +71505,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }
   const panelState = useConsolePanels(suppliedPanels, experience?.console_config?.panel_modules, baseUrl);
   const customPanels = panelState.panels;
-  const panelDockRef = import_react54.default.useRef(dock.openTarget);
+  const panelDockRef = import_react57.default.useRef(dock.openTarget);
   panelDockRef.current = dock.openTarget;
-  const panelVisibleIdentities = import_react54.default.useMemo(() => agents.flatMap((agent) => [agent.identity, agent.member_id, agent.agent_id]).filter((id) => Boolean(id)), [agents]);
-  const panelSelectionRef = import_react54.default.useRef(null);
+  const panelVisibleIdentities = import_react57.default.useMemo(() => agents.flatMap((agent) => [agent.identity, agent.member_id, agent.agent_id]).filter((id) => Boolean(id)), [agents]);
+  const panelSelectionRef = import_react57.default.useRef(null);
   if (dock.focusedTarget?.kind === "agent-chat" && panelVisibleIdentities.includes(dock.focusedTarget.identity)) {
     panelSelectionRef.current = dock.focusedTarget.identity;
   } else if (panelSelectionRef.current && !panelVisibleIdentities.includes(panelSelectionRef.current)) {
     panelSelectionRef.current = null;
   }
   const selectedPanelIdentity = panelSelectionRef.current;
-  const panelSelection = import_react54.default.useMemo(() => selectedPanelIdentity ? { scopeKey: sendScope, identity: selectedPanelIdentity } : null, [sendScope, selectedPanelIdentity]);
-  const panelAuthority = import_react54.default.useMemo(() => ({ key: sendScope, runtimeId: experience?.runtime_id }), [sendScope, experience?.runtime_id]);
-  const panelLifetime = import_react54.default.useMemo(() => ({ abort: new AbortController() }), [sendScope]);
-  import_react54.default.useLayoutEffect(() => {
+  const panelSelection = import_react57.default.useMemo(() => selectedPanelIdentity ? { scopeKey: sendScope, identity: selectedPanelIdentity } : null, [sendScope, selectedPanelIdentity]);
+  const panelAuthority = import_react57.default.useMemo(() => ({ key: sendScope, runtimeId: experience?.runtime_id }), [sendScope, experience?.runtime_id]);
+  const panelLifetime = import_react57.default.useMemo(() => ({ abort: new AbortController() }), [sendScope]);
+  import_react57.default.useLayoutEffect(() => {
     if (panelLifetime.abort.signal.aborted) panelLifetime.abort = new AbortController();
     return () => panelLifetime.abort.abort();
   }, [panelLifetime]);
-  const panelHostService = import_react54.default.useMemo(() => {
+  const panelHostService = import_react57.default.useMemo(() => {
     const service = panelService ?? createConsolePanelService(baseUrl);
     return (request, scope, signal) => bindConsolePanelService(service, panelLifetime.abort.signal)(request, scope, signal);
   }, [panelService, baseUrl, panelLifetime]);
-  const openCustomPanel = import_react54.default.useCallback((id, options) => {
+  const openCustomPanel = import_react57.default.useCallback((id, options) => {
     const panel = customPanels.find((panel2) => panel2.id === id);
     if (!panel) return;
     const input = typeof options === "string" ? { intent: options } : options ?? {};
@@ -71206,7 +71538,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       conversation
     }), input.intent);
   }, [customPanels, panelSelection, panelVisibleIdentities, sendScope]);
-  const panelContext = import_react54.default.useMemo(() => ({
+  const panelContext = import_react57.default.useMemo(() => ({
     baseUrl,
     readOnly: consoleReadOnly,
     experience,
@@ -71220,8 +71552,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return panelHostService(request, { authority: panelAuthority, conversation, readOnly: consoleReadOnlyRef.current }, signal);
     }
   }), [baseUrl, consoleReadOnly, experience, openCustomPanel, panelAuthority, panelSelection, panelHostService, panelVisibleIdentities, sendScope]);
-  const panelProvider = import_react54.default.useMemo(() => ({ panels: panelState.panels, context: panelContext }), [panelState.panels, panelContext]);
-  const effectiveMcpAppsHost = import_react54.default.useMemo(() => {
+  const panelProvider = import_react57.default.useMemo(() => ({ panels: panelState.panels, context: panelContext }), [panelState.panels, panelContext]);
+  const effectiveMcpAppsHost = import_react57.default.useMemo(() => {
     if (mcpAppsHost) return mcpAppsHost;
     const sandboxProxyUrl = experience?.console_config?.mcp_apps_sandbox_url;
     if (!sandboxProxyUrl) return void 0;
@@ -71239,7 +71571,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly]);
   const canManageWorkGraph = experience?.workgraph?.can_manage === true && !consoleReadOnly;
-  const runWorkGraphCommand = import_react54.default.useCallback(
+  const runWorkGraphCommand = import_react57.default.useCallback(
     async (command, params, cardIdentity) => {
       if (consoleReadOnlyRef.current) return;
       const echoResultToCard = (result, failureMessage) => {
@@ -71296,12 +71628,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshWorkGraphData]
   );
-  const runWorkGraphQuery = import_react54.default.useCallback(
+  const runWorkGraphQuery = import_react57.default.useCallback(
     (command, params) => executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl]
   );
-  const makeWorkGraphOperatorHandlers = import_react54.default.useCallback(
+  const makeWorkGraphOperatorHandlers = import_react57.default.useCallback(
     (cardIdentity) => {
       const dispatch = (resolveRevision, send) => {
         void (async () => {
@@ -71376,7 +71708,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject]
   );
-  const workGraphCardActions = import_react54.default.useCallback(
+  const workGraphCardActions = import_react57.default.useCallback(
     (cardIdentity) => {
       if (!canManageWorkGraph) return void 0;
       const { onAttentionReassign: _panelOnly, ...cardHandlers } = makeWorkGraphOperatorHandlers(cardIdentity);
@@ -71384,7 +71716,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [canManageWorkGraph, makeWorkGraphOperatorHandlers]
   );
-  const workGraphCardActionsByIdentity = import_react54.default.useMemo(
+  const workGraphCardActionsByIdentity = import_react57.default.useMemo(
     () => /* @__PURE__ */ new Map(),
     [workGraphCardActions]
   );
@@ -71462,35 +71794,35 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     window.addEventListener("pointerup", cleanup);
     window.addEventListener("pointercancel", cleanup);
   }
-  const voiceRef = import_react54.default.useRef(voice);
+  const voiceRef = import_react57.default.useRef(voice);
   voiceRef.current = voice;
-  const closeVoice = import_react54.default.useCallback(() => void voiceRef.current?.close(), []);
-  const toggleVoiceMicrophone = import_react54.default.useCallback(() => voiceRef.current?.toggleMicrophone(), []);
-  const toggleVoiceSpeaker = import_react54.default.useCallback(() => voiceRef.current?.toggleSpeaker(), []);
-  const openAgentChatRef = import_react54.default.useRef(openAgentChat);
+  const closeVoice = import_react57.default.useCallback(() => void voiceRef.current?.close(), []);
+  const toggleVoiceMicrophone = import_react57.default.useCallback(() => voiceRef.current?.toggleMicrophone(), []);
+  const toggleVoiceSpeaker = import_react57.default.useCallback(() => voiceRef.current?.toggleSpeaker(), []);
+  const openAgentChatRef = import_react57.default.useRef(openAgentChat);
   openAgentChatRef.current = openAgentChat;
-  const selectSidebarAgent = import_react54.default.useCallback(
+  const selectSidebarAgent = import_react57.default.useCallback(
     (agent) => openAgentChatRef.current(agent),
     []
   );
-  const openSidebarControl = import_react54.default.useCallback((kind) => {
+  const openSidebarControl = import_react57.default.useCallback((kind) => {
     dockRef.current.openTarget(buildControlTarget2(kind), "replace_focused");
   }, []);
   const sidebarButtons = experience?.console_config?.sidebar?.buttons;
-  const openOperatorPanel = import_react54.default.useCallback((buttonId) => {
+  const openOperatorPanel = import_react57.default.useCallback((buttonId) => {
     const button = (sidebarButtons || []).find((candidate) => candidate.id === buttonId);
     if (!button || !operatorPanelPath(button.panel)) return;
     dockRef.current.openTarget(buildOperatorPanelTarget(button), "replace_focused");
   }, [sidebarButtons]);
-  const loadMemoryRecordDetailRef = import_react54.default.useRef(loadMemoryRecordDetail);
+  const loadMemoryRecordDetailRef = import_react57.default.useRef(loadMemoryRecordDetail);
   loadMemoryRecordDetailRef.current = loadMemoryRecordDetail;
-  const selectRailFrame = import_react54.default.useCallback((frame) => {
+  const selectRailFrame = import_react57.default.useCallback((frame) => {
     if (!frame.event.startsWith("memory.")) return;
     dockRef.current.openTarget(buildControlTarget2("memory"), "replace_focused");
     const pivot = memoryFramePivot(frame);
     if (pivot) void loadMemoryRecordDetailRef.current(pivot.realm, pivot.recordId);
   }, []);
-  const watchedIdentities = import_react54.default.useMemo(
+  const watchedIdentities = import_react57.default.useMemo(
     () => new Set(
       agents.filter((agent) => agent.watched).map((agent) => agent.identity || agent.member_id).filter((value) => Boolean(value))
     ),
@@ -71894,6 +72226,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit: () => void refreshGatingAudit().catch(() => {
           }),
           auditUpdatedAtMs: gatingData.updatedAtMs,
+          auditError: gatingAuditError,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly
@@ -71914,7 +72247,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onSelectAgent: (id) => {
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
-          }
+          },
+          teamName: experience?.console_config?.title || experience?.agent_sidebar?.title || void 0
         }
       );
     if (target.kind === "health")
@@ -71954,6 +72288,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit: () => void refreshGatingAudit().catch(() => {
           }),
           auditUpdatedAtMs: gatingData.updatedAtMs,
+          auditError: gatingAuditError,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly

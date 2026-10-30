@@ -4561,7 +4561,7 @@ async fn failures_of(
     mob_id: &str,
 ) -> Vec<crate::runtime::LifecycleEffectFailure> {
     store
-        .lifecycle_effect_failures(mob_id)
+        .lifecycle_effect_failures(mob_id, 0, usize::MAX)
         .await
         .expect("read the failures")
 }

@@ -94,6 +94,7 @@ pub use metadata::{
 };
 pub(crate) use metadata::{
     METADATA_TABLE, create_metadata_table, decode_identity_record, encode_identity_record,
+    lifecycle_effect_failure_order,
 };
 pub use routing::WILDCARD_ROUTE;
 pub use routing::route_module_call;

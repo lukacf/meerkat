@@ -46,6 +46,7 @@ use crate::runtime::{
     IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
     LifecycleProjectionCursor, MemberIdleRetireOverrideRecord, MetadataStoreError,
     PersistentMetadataStore, decode_identity_record, encode_identity_record,
+    lifecycle_effect_failure_order,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -982,7 +983,40 @@ impl PersistentMetadataStore for SpiMetadataStore {
     async fn lifecycle_effect_failures(
         &self,
         mob_id: &str,
+        skip: usize,
+        limit: usize,
     ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id).await?;
+        Ok(failures
+            .into_iter()
+            .skip(skip)
+            .take(limit)
+            .map(|(_, failure)| failure)
+            .collect())
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id).await?;
+        let older = failures.len().saturating_sub(keep);
+        for (key, _) in &failures[..older] {
+            self.documents.write(key, None).await.map_err(io_error)?;
+        }
+        Ok(older)
+    }
+}
+
+impl SpiMetadataStore {
+    /// Every lifecycle effect failure of `mob_id`, each with its document
+    /// key, in the order
+    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them.
+    async fn lifecycle_effect_failures_of(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<(String, LifecycleEffectFailure)>, MetadataStoreError> {
         let mut failures = Vec::new();
         for key in self
             .documents
@@ -993,10 +1027,10 @@ impl PersistentMetadataStore for SpiMetadataStore {
             };
             let failure: LifecycleEffectFailure = decode_identity_record(&bytes)?;
             if failure.mob_id == mob_id {
-                failures.push(failure);
+                failures.push((key, failure));
             }
         }
-        failures.sort_by_key(|failure| failure.recorded_at_ms);
+        failures.sort_by(|(_, a), (_, b)| lifecycle_effect_failure_order(a, b));
         Ok(failures)
     }
 }

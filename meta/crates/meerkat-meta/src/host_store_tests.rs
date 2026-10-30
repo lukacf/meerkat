@@ -2865,7 +2865,7 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     );
     assert_eq!(
         store
-            .lifecycle_effect_failures(&mob_id)
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
             .await
             .expect("list the failures"),
         vec![failure]

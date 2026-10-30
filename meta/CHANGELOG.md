@@ -16,14 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
 
-- `PersistentMetadataStore` has eight new required methods, with no default:
+- `PersistentMetadataStore` has nine new required methods, with no default:
   `lifecycle_projection_cursor`, `set_lifecycle_projection_cursor`,
   `lifecycle_effect_intent`, `set_lifecycle_effect_intent`,
   `clear_lifecycle_effect_intent`, `lifecycle_effect_intents`,
-  `record_lifecycle_effect_failure` and `lifecycle_effect_failures`. A host's
-  own store (`UnifiedRuntimeBuilder::persistent_metadata`) must keep the
-  three record kinds durably: the cursor says which lifecycle side effects of
-  the identities were attempted and which a stopped process still owed, the
+  `record_lifecycle_effect_failure`, `lifecycle_effect_failures` (a page:
+  `skip` and `limit`, oldest first) and `prune_lifecycle_effect_failures`
+  (keep the latest `keep`). A host's own store
+  (`UnifiedRuntimeBuilder::persistent_metadata`) must keep the three record
+  kinds durably: the cursor says which lifecycle side effects of the
+  identities were attempted and which a stopped process still owed, the
   intents carry what a reset, a delete, a role move or the roster's
   unlisting owes across a restart that came between the step and its side
   effects, and the failures record the side effects that failed (see
@@ -241,8 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `lifecycle_projection`, and the JSON `/healthz` summary reads `degraded`
   while it is off or stalled and names it, and names the owed events while
   they drain.
-  `IdentityRuntime::lifecycle_effect_failures` reads the side effects
-  recorded as failed.
+  `IdentityRuntime::lifecycle_effect_failures(skip, limit)` reads a page of
+  the side effects recorded as failed, oldest first; each start of the
+  projection keeps the latest 1024 of the mob's and removes the older ones.
 
 - `RetiredIdentityCause::RoleMove` (`role_move`), for an incarnation a role
   move rotated onto a fresh session, and `RetiredIdentityCause::Rotated`

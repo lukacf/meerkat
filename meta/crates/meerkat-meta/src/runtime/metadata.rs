@@ -689,6 +689,28 @@ fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
     )
 }
 
+/// The order a mob's lifecycle effect failures read in: oldest first, then
+/// by generation, effect and identity.
+pub(crate) fn lifecycle_effect_failure_order(
+    a: &LifecycleEffectFailure,
+    b: &LifecycleEffectFailure,
+) -> std::cmp::Ordering {
+    (a.recorded_at_ms, a.generation, a.effect, &a.identity).cmp(&(
+        b.recorded_at_ms,
+        b.generation,
+        b.effect,
+        &b.identity,
+    ))
+}
+
+/// The first key past every key that starts with `prefix`, a key prefix
+/// ending with `/`: the same prefix ending with the byte after `/`, `0`. A
+/// prefix read as the key range from `prefix` to this one keeps to the
+/// `(mob_id, key)` index.
+fn key_range_end(prefix: &str) -> String {
+    format!("{}0", prefix.strip_suffix('/').unwrap_or(prefix))
+}
+
 /// Persistent storage for meta runtime metadata that must survive a
 /// gateway restart: the structural-events subscription cursor and spawned
 /// members' idle-retirement opt-ins.
@@ -853,11 +875,28 @@ pub trait PersistentMetadataStore: Send + Sync {
         failure: &LifecycleEffectFailure,
     ) -> Result<(), MetadataStoreError>;
 
-    /// The lifecycle effect failures recorded for `mob_id`, oldest first.
+    /// One page of the lifecycle effect failures recorded for `mob_id`,
+    /// oldest first (then by generation, effect and identity): at most
+    /// `limit` of them, after the first `skip`.
     async fn lifecycle_effect_failures(
         &self,
         mob_id: &str,
+        skip: usize,
+        limit: usize,
     ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError>;
+
+    /// Keep the `keep` latest lifecycle effect failures recorded for
+    /// `mob_id`, in the order [`Self::lifecycle_effect_failures`] reads them,
+    /// and remove the older ones: how many it removed.
+    ///
+    /// Required: one failure is recorded per failed side effect, so a host
+    /// hook that fails every retirement would otherwise leave one record per
+    /// retirement for good. The projection's start prunes them.
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, MetadataStoreError>;
 
     /// Wait until the writes this store runs off its callers' tasks (such as
     /// coalesced cursor writes) have landed. Shutdown calls it once the last
@@ -1100,6 +1139,8 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
     async fn lifecycle_effect_failures(
         &self,
         mob_id: &str,
+        skip: usize,
+        limit: usize,
     ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
         let mut failures = self
             .lifecycle_failures
@@ -1109,8 +1150,27 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
             .filter(|failure| failure.mob_id == mob_id)
             .cloned()
             .collect::<Vec<_>>();
-        failures.sort_by_key(|failure| failure.recorded_at_ms);
-        Ok(failures)
+        failures.sort_by(lifecycle_effect_failure_order);
+        Ok(failures.into_iter().skip(skip).take(limit).collect())
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, MetadataStoreError> {
+        let mut stored = self.lifecycle_failures.write().await;
+        let mut failures = stored
+            .values()
+            .filter(|failure| failure.mob_id == mob_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        failures.sort_by(lifecycle_effect_failure_order);
+        let older = failures.len().saturating_sub(keep);
+        for failure in &failures[..older] {
+            stored.remove(&(failure.mob_id.clone(), lifecycle_failure_key(failure)));
+        }
+        Ok(older)
     }
 }
 
@@ -1464,19 +1524,20 @@ impl PersistentMetadataStore for SqliteMetadataStore {
     ) -> Result<Vec<IdentityRotationIntent>, MetadataStoreError> {
         let _fence = self.operation_fence()?;
         let conn = self.lock_conn()?;
-        // A prefix compare, not LIKE: identities may carry `_` and `%`.
+        // A key range, not LIKE (identities may carry `_` and `%`) nor a
+        // compare of each key's start, which no index serves.
         let mut stmt = conn
             .prepare_cached(
                 "SELECT value FROM meta_metadata \
-                 WHERE mob_id = ?1 AND substr(key, 1, ?2) = ?3 ORDER BY key",
+                 WHERE mob_id = ?1 AND key >= ?2 AND key < ?3 ORDER BY key",
             )
             .map_err(|err| MetadataStoreError::Io(format!("prepare: {err}")))?;
         let rows = stmt
             .query_map(
                 rusqlite::params![
                     mob_id,
-                    IDENTITY_ROTATION_KEY_PREFIX.len(),
-                    IDENTITY_ROTATION_KEY_PREFIX
+                    IDENTITY_ROTATION_KEY_PREFIX,
+                    key_range_end(IDENTITY_ROTATION_KEY_PREFIX)
                 ],
                 |row| row.get::<_, String>(0),
             )
@@ -1602,20 +1663,61 @@ impl PersistentMetadataStore for SqliteMetadataStore {
     async fn lifecycle_effect_failures(
         &self,
         mob_id: &str,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id)?;
+        Ok(failures.into_iter().skip(skip).take(limit).collect())
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id)?;
+        let older = failures.len().saturating_sub(keep);
+        if older == 0 {
+            return Ok(0);
+        }
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|err| MetadataStoreError::Io(format!("begin: {err}")))?;
+        for failure in &failures[..older] {
+            transaction
+                .execute(
+                    "DELETE FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+                    rusqlite::params![mob_id, lifecycle_failure_key(failure)],
+                )
+                .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
+        }
+        transaction
+            .commit()
+            .map_err(|err| MetadataStoreError::Io(format!("commit: {err}")))?;
+        Ok(older)
+    }
+}
+
+impl SqliteMetadataStore {
+    /// Every lifecycle effect failure of `mob_id`, in the order
+    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them.
+    fn lifecycle_effect_failures_of(
+        &self,
+        mob_id: &str,
     ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
         let mut failures = self
             .identity_record_rows(mob_id, LIFECYCLE_FAILURE_KEY_PREFIX)?
             .iter()
             .map(|value| decode_identity_record::<LifecycleEffectFailure>(value.as_bytes()))
             .collect::<Result<Vec<_>, _>>()?;
-        failures.sort_by_key(|failure| failure.recorded_at_ms);
+        failures.sort_by(lifecycle_effect_failure_order);
         Ok(failures)
     }
-}
 
-impl SqliteMetadataStore {
     /// The values of the `meta_metadata` rows of `mob_id` whose key starts
-    /// with `prefix`, in key order.
+    /// with `prefix` (a key prefix ending with `/`), in key order.
     fn identity_record_rows(
         &self,
         mob_id: &str,
@@ -1623,17 +1725,19 @@ impl SqliteMetadataStore {
     ) -> Result<Vec<String>, MetadataStoreError> {
         let _fence = self.operation_fence()?;
         let conn = self.lock_conn()?;
-        // A prefix compare, not LIKE: identities may carry `_` and `%`.
+        // A key range, not LIKE (identities may carry `_` and `%`) nor a
+        // compare of each key's start, which no index serves.
         let mut stmt = conn
             .prepare_cached(
                 "SELECT value FROM meta_metadata \
-                 WHERE mob_id = ?1 AND substr(key, 1, ?2) = ?3 ORDER BY key",
+                 WHERE mob_id = ?1 AND key >= ?2 AND key < ?3 ORDER BY key",
             )
             .map_err(|err| MetadataStoreError::Io(format!("prepare: {err}")))?;
         let rows = stmt
-            .query_map(rusqlite::params![mob_id, prefix.len(), prefix], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map(
+                rusqlite::params![mob_id, prefix, key_range_end(prefix)],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))?;
         let mut values = Vec::new();
         for row in rows {
@@ -2154,13 +2258,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                store.lifecycle_effect_failures("mob-a").await.unwrap(),
+                store
+                    .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                    .await
+                    .unwrap(),
                 vec![interview.clone(), hook.clone()],
                 "one record per effect, oldest first"
             );
             assert!(
                 store
-                    .lifecycle_effect_failures("mob-b")
+                    .lifecycle_effect_failures("mob-b", 0, usize::MAX)
                     .await
                     .unwrap()
                     .is_empty()
@@ -2169,9 +2276,118 @@ mod tests {
         drop(sqlite);
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         assert_eq!(
-            reopened.lifecycle_effect_failures("mob-a").await.unwrap(),
+            reopened
+                .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                .await
+                .unwrap(),
             vec![interview, hook],
             "the failures survive a reopen"
+        );
+    }
+
+    /// A mob's lifecycle effect failures read in pages, oldest first, and a
+    /// prune keeps the latest of them and leaves another mob's alone. The
+    /// identity records read by key range take in the rows under their own
+    /// prefix only, whatever sorts right next to it.
+    #[tokio::test]
+    async fn lifecycle_failures_read_in_pages_and_prune_to_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteMetadataStore::open(dir.path().join("meta.sqlite")).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        let failure = |mob_id: &str, index: u64| {
+            LifecycleEffectFailure::new(
+                mob_id,
+                "incarnation-1",
+                index + 1,
+                format!("personal:failed-{index}"),
+                0,
+                LifecycleEffectKind::AfterCreate,
+                3,
+                "timed out",
+                1_700_000_000_000 + index,
+            )
+        };
+        for store in stores {
+            for index in (0..5).rev() {
+                store
+                    .record_lifecycle_effect_failure(&failure("mob-a", index))
+                    .await
+                    .unwrap();
+            }
+            store
+                .record_lifecycle_effect_failure(&failure("mob-b", 0))
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 0, 2)
+                    .await
+                    .unwrap(),
+                vec![failure("mob-a", 0), failure("mob-a", 1)]
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 2, 2)
+                    .await
+                    .unwrap(),
+                vec![failure("mob-a", 2), failure("mob-a", 3)]
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 4, 2)
+                    .await
+                    .unwrap(),
+                vec![failure("mob-a", 4)]
+            );
+            assert_eq!(
+                store
+                    .prune_lifecycle_effect_failures("mob-a", 2)
+                    .await
+                    .unwrap(),
+                3,
+                "the three oldest go"
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                    .await
+                    .unwrap(),
+                vec![failure("mob-a", 3), failure("mob-a", 4)]
+            );
+            assert_eq!(
+                store
+                    .prune_lifecycle_effect_failures("mob-a", 2)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-b", 0, usize::MAX)
+                    .await
+                    .unwrap(),
+                vec![failure("mob-b", 0)],
+                "another mob's failures stay"
+            );
+        }
+        {
+            let conn = sqlite.lock_conn().unwrap();
+            for key in ["lifecycle_intent", "lifecycle_intent0"] {
+                conn.execute(
+                    "INSERT INTO meta_metadata (mob_id, key, value) VALUES ('mob-a', ?1, 'none')",
+                    rusqlite::params![key],
+                )
+                .unwrap();
+            }
+        }
+        assert!(
+            sqlite
+                .lifecycle_effect_intents("mob-a")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a row beside the prefix is no intent"
         );
     }
 

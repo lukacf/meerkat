@@ -1199,8 +1199,17 @@ comms = true
             async fn lifecycle_effect_failures(
                 &self,
                 _mob_id: &str,
+                _skip: usize,
+                _limit: usize,
             ) -> Result<Vec<crate::LifecycleEffectFailure>, MetadataStoreError> {
                 Ok(Vec::new())
+            }
+            async fn prune_lifecycle_effect_failures(
+                &self,
+                _mob_id: &str,
+                _keep: usize,
+            ) -> Result<usize, MetadataStoreError> {
+                Ok(0)
             }
         }
 

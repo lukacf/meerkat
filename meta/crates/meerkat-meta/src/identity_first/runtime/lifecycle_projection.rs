@@ -190,6 +190,10 @@ const STALLED_AFTER_FAILED_RUNS: u32 = 3;
 /// The most intents of an earlier mob incarnation one start removes.
 const STALE_INTENT_SWEEP: usize = 1024;
 
+/// How many lifecycle effect failures of the mob a start of the projection
+/// keeps: the latest ones.
+const FAILURES_KEPT: usize = 1024;
+
 fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -918,13 +922,17 @@ impl IdentityRuntime {
         status
     }
 
-    /// The lifecycle side effects the projection recorded as failed, oldest
-    /// first.
+    /// One page of the lifecycle side effects the projection recorded as
+    /// failed, oldest first: at most `limit` of them, after the first
+    /// `skip`. Each start of the projection keeps the latest 1024 of the
+    /// mob's and removes the older ones.
     pub async fn lifecycle_effect_failures(
         &self,
+        skip: usize,
+        limit: usize,
     ) -> Result<Vec<LifecycleEffectFailure>, crate::runtime::MetadataStoreError> {
         let (store, mob_id) = self.identity_record_store();
-        store.lifecycle_effect_failures(&mob_id).await
+        store.lifecycle_effect_failures(&mob_id, skip, limit).await
     }
 
     /// Read the projection's cursor, or start it at the journal's head when
@@ -1063,6 +1071,7 @@ impl IdentityRuntime {
         });
         self.clear_uncleared_lifecycle_intents().await;
         self.sweep_stale_lifecycle_intents(&head.incarnation).await;
+        self.prune_lifecycle_effect_failures().await;
         Ok(())
     }
 
@@ -1741,6 +1750,29 @@ impl IdentityRuntime {
                      removed"
                 );
             }
+        }
+    }
+
+    /// Keep the latest [`FAILURES_KEPT`] lifecycle effect failures of the
+    /// mob and remove the older ones: one is recorded per failed side
+    /// effect, so a hook that fails every retirement would otherwise leave
+    /// one per retirement for good.
+    async fn prune_lifecycle_effect_failures(&self) {
+        let (store, mob_id) = self.identity_record_store();
+        match store
+            .prune_lifecycle_effect_failures(&mob_id, FAILURES_KEPT)
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::debug!(
+                removed,
+                "the oldest lifecycle effect failures of the mob were removed"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                "the lifecycle effect failures of the mob could not be pruned; the next start \
+                 tries again"
+            ),
         }
     }
 

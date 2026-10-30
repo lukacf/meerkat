@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from MobKit main at [df3f8a653117](https://github.com/lukacf/meerkat-meta/commit/df3f8a653117414a9399a69e0567413ce0dd3aaf) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -1845,6 +1845,11 @@ collapsed = false
 empty_title = "No initiatives"
 empty_text = "Create one in Linear."
 
+[[attention.sources]]
+id = "host-items"
+label = "Host"
+url = "/host/attention"
+
 [actions]
 inspect_label = "Profile"
 chat_label = "Open chat"
@@ -1871,9 +1876,29 @@ subgroup_by = ["labels.org"]
 | `sidebar` | Stock control visibility and custom buttons. |
 | `agent_list` | Grouping selectors, section order, default pins, badges, and empty states. |
 | `actions` | Operator-facing action labels and visibility toggles. |
+| `attention` | Host-provided attention items for **Needs you** (see below). |
 | `realms.<id>` | Partial overlay applied when the gateway is launched for a realm. |
 
 Agent grouping selectors and badge fields support `labels.<key>`, `label:<key>`, raw label keys, and direct fields such as `group`, `subgroup`, `role`, `kind`, `identity`, `member_id`, and `agent_id`.
+
+### Host-provided attention items
+
+`[[attention.sources]]` names same-origin JSON endpoints that list things waiting for the operator which the host, not Meta gating, owns. Each source has an `id`, a short `label` (shown on its cards and when it cannot be read) and a `url`. All three keys are required: a missing key fails the console configuration. An empty `id` or `label`, or a `url` that breaks the rules below, drops that source. The `url` follows the operator panel path rules: one leading `/`, no scheme or host, no whitespace, control characters or backslashes, and no `.` or `..` segment. A source that breaks a rule is dropped. A realm overlay's `attention` list replaces the default list.
+
+The console reads every source with the operator's session (`credentials: "same-origin"`, redirects refused) when it loads, every 30 seconds while visible, and when the page becomes visible again. A source answers:
+
+```json
+{"items": [{"id": "a1", "title": "Confirm a setting",
+            "details": [{"label": "For", "value": "plugin:example"}],
+            "href": "/host/items/a1", "tone": "attention"}]}
+```
+
+- `id`, `title` and `href` are required. `href` must be a same-origin path like `url`; an item with any other `href` is dropped.
+- `details` is optional, at most 12 label/value pairs. `tone` is optional: `attention`, `info`, `warning` or `critical`.
+- Text is trimmed and cut at 300 characters, and the console keeps at most 50 items per source.
+- A source that does not answer within 10 seconds, or whose answer is larger than 256 KiB, fails alone. A slow source delays the other sources' items by at most those 10 seconds.
+
+**Needs you** counts these items with the pending gating approvals. The inbox lists them after the approvals as cards with one **Open** link (named after the item's title), which loads `href` top-level; a single pending approval is still opened directly. A console without a gating surface (an aggregate console) shows only the host items there. The console never approves, rejects or changes an item: the host page decides. A source that fails (network error, non-2xx answer, malformed body) is named in the inbox as `Could not read: <label>` and hides nothing else. Gating approvals do not depend on any source.
 
 <Note>
 `ConsoleUiConfig` is intentionally view-level. It controls presentation, ordering, labels, default pins, and links; it does not decide runtime authorization, routing, or whether an agent exists.

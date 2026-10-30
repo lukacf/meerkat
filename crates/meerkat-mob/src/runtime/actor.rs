@@ -6999,6 +6999,9 @@ pub(super) struct PendingSpawn {
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
+    /// The notice a fresh seat embodied after the loss of the identity's
+    /// archived session carries, for the spawn's row.
+    pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7919,6 +7922,9 @@ struct SpawnFinalizeCtx {
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
     entry_custody: bool,
+    /// The notice a fresh seat embodied after the loss of the identity's
+    /// archived session carries: the spawn's row records it.
+    history_unavailable: Option<crate::runtime::HistoryUnavailable>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8033,6 +8039,8 @@ impl SpawnActivateState {
             fork_overlay,
             definition_wiring,
             entry_custody: _,
+            // Recorded on the spawn's row at its admission.
+            history_unavailable: _,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -35517,6 +35525,7 @@ impl MobActor {
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
+            history_unavailable: None,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -35905,9 +35914,10 @@ impl MobActor {
             // Folded into the ceiling above.
             inherited_operator_authority_bound: _,
             fresh_session_id,
-            // Only a dormant seat's row records it; an embodied seat's spawn
-            // does not.
-            history_unavailable: _,
+            // A fresh seat embodied after the loss of the identity's archived
+            // session: its spawn row records the notice, as a dormant seat's
+            // row does.
+            history_unavailable,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -36129,6 +36139,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -36758,6 +36769,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -36969,6 +36981,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                history_unavailable,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -37172,6 +37185,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -39104,6 +39118,7 @@ impl MobActor {
             definition_wiring: crate::DefinitionWiring::Applies,
             // Refused above: a placed spawn never acts for an identity entry.
             entry_custody: false,
+            history_unavailable: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39399,6 +39414,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                history_unavailable,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39603,6 +39619,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                history_unavailable,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39687,6 +39704,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                history_unavailable,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40052,6 +40070,7 @@ impl MobActor {
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
+            history_unavailable: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41099,6 +41118,9 @@ impl MobActor {
             &identity,
         );
         spawned_event = spawned_event.with_identity_entry(identity_entry);
+        // A fresh seat embodied after the loss of the identity's archived
+        // session records the notice, as a dormant seat's row does.
+        spawned_event = spawned_event.with_history_unavailable(ctx.history_unavailable.clone());
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(

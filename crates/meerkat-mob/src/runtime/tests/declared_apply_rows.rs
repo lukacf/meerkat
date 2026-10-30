@@ -1279,6 +1279,94 @@ async fn an_identity_whose_archived_session_is_gone_is_seated_fresh_with_a_notic
     );
 }
 
+/// Q1 (a) for an identity that owes a kickoff: an autonomous identity whose
+/// archived session is gone from the store is embodied on a fresh session
+/// (its kickoff runs once there), and the notice rides both its answer and
+/// its spawn's journal row.
+///
+/// RED: let the spawn path drop the spec's notice and the apply answer
+/// `Embodied` without one (the embodied seat before this fix): neither the
+/// answer nor the row carries it, and the host is never told that the
+/// identity's history was lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_autonomous_identity_whose_archived_session_is_gone_is_embodied_fresh_with_a_notice() {
+    let mob = ApplyMob::new("apply-history-lost-autonomous").await;
+    let roster = || {
+        DeclaredRoster::complete([declared_as(
+            "autonomous",
+            "worker",
+            crate::MobRuntimeMode::AutonomousHost,
+        )])
+    };
+    let embodied = mob.apply(roster()).await;
+    let purged = match answer(&embodied, "autonomous") {
+        DeclaredEntryOutcome::Embodied {
+            session_id,
+            history_unavailable: None,
+        } => session_id.clone(),
+        other => panic!("the autonomous identity is embodied: {other:?}"),
+    };
+    let unlisted = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&id("autonomous")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+    assert_eq!(
+        mob.archived_record("autonomous"),
+        Some(dsl::SessionId::from_domain(&purged))
+    );
+    // The store's retention purges the archived session.
+    mob.service.delete_persisted_session(&purged).await;
+
+    let listed = mob.apply(roster()).await;
+    let fresh = fresh_seat_session_id(
+        mob.handle.mob_id(),
+        mob.handle.incarnation(),
+        &id("autonomous"),
+        Generation::new(1),
+    );
+    assert!(
+        matches!(
+            answer(&listed, "autonomous"),
+            DeclaredEntryOutcome::Embodied {
+                session_id,
+                history_unavailable: Some(notice),
+            } if session_id == &fresh && notice == &HistoryUnavailable::new(purged.clone())
+        ),
+        "the identity is embodied fresh with the notice: {listed:?}"
+    );
+    assert_eq!(
+        mob.archived_record("autonomous"),
+        None,
+        "the record is let go"
+    );
+    let seats: Vec<(Generation, Option<HistoryUnavailable>)> = mob
+        .lifecycle()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            MemberLifecycleEvent::Spawned {
+                agent_identity,
+                generation,
+                history_unavailable,
+                ..
+            } if agent_identity == id("autonomous") => Some((generation, history_unavailable)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        seats,
+        vec![
+            (Generation::new(0), None),
+            (Generation::new(1), Some(HistoryUnavailable::new(purged))),
+        ],
+        "the spawn's row carries the notice"
+    );
+}
+
 /// An unlisted identity listed again while the store cannot read its
 /// archived session now is deferred, typed and retryable, for that identity
 /// alone: it is never seated on a fresh session (an unreadable session is

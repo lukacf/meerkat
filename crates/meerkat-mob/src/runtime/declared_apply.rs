@@ -190,7 +190,12 @@ pub enum DeclaredEntryOutcome {
         history_unavailable: Option<HistoryUnavailable>,
     },
     /// A fresh spec that owes a kickoff was spawned, live, on `session_id`.
-    Embodied { session_id: SessionId },
+    /// `history_unavailable` is set when the identity's archived session is
+    /// gone from the store and the identity was embodied on a fresh session.
+    Embodied {
+        session_id: SessionId,
+        history_unavailable: Option<HistoryUnavailable>,
+    },
     /// The identity's member keeps its seat: nothing was written. A change
     /// of descriptive facets alone answers this.
     Kept,
@@ -975,7 +980,10 @@ impl super::MobHandle {
                         DeclaredEntryOutcome::FreshLife { session_id }
                     }
                     super::DormantSeatOutcome::Embodied { session_id, .. } => {
-                        DeclaredEntryOutcome::Embodied { session_id }
+                        DeclaredEntryOutcome::Embodied {
+                            session_id,
+                            history_unavailable,
+                        }
                     }
                     // A revival whose archived session is gone from the store:
                     // the record is let go, and the identity is seated fresh

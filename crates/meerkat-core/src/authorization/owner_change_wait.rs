@@ -339,6 +339,52 @@ mod tests {
         }
     }
 
+    /// A work whose owner change is in progress until `release_at` on the
+    /// paused clock, so a row needs no task to complete it.
+    struct ReleasedAt {
+        release_at: DeadlineInstant,
+    }
+
+    impl WorkAuthorization for ReleasedAt {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            Err(OperationAuthorizationError::Unavailable)
+        }
+
+        fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
+            if DeadlineInstant::now() < self.release_at {
+                Some(OwnerChangeInProgress::new(uuid::Uuid::nil(), 1))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// A work whose owner change is in progress at its first read only.
+    #[derive(Default)]
+    struct ClearsAfterFirstRead {
+        read: AtomicBool,
+    }
+
+    impl WorkAuthorization for ClearsAfterFirstRead {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            Err(OperationAuthorizationError::Unavailable)
+        }
+
+        fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
+            if self.read.swap(true, Ordering::SeqCst) {
+                None
+            } else {
+                Some(OwnerChangeInProgress::new(uuid::Uuid::nil(), 1))
+            }
+        }
+    }
+
     /// A read that waited for an owner's own lock ends stale only once the
     /// change it met published, so that change may complete before the
     /// caller asks. With nothing in progress the settled-change wait has
@@ -447,6 +493,156 @@ mod tests {
             (late.settled(), late.waited()),
             (false, Duration::ZERO),
             "the cancelled first wait armed the deadline"
+        );
+    }
+
+    /// With nothing in progress the stale-read wait pauses one backoff step
+    /// first, and no read at or after its deadline settles: a budget within
+    /// that pause (500 us, or exactly 1 ms) ends the wait unsettled, with no
+    /// free rebuild spent, while a budget past it (2 ms) settles after the
+    /// pause. The timer rounds a sleep up to whole milliseconds, so a wait
+    /// ends at or after its budget.
+    ///
+    /// RED on the read-first loop: the read after the pause, at or past the
+    /// deadline, found nothing in progress and settled.
+    #[tokio::test(start_paused = true)]
+    async fn a_budget_within_the_pause_ends_the_stale_read_wait_unsettled() {
+        let work = Work::default();
+        for budget in [Duration::from_micros(500), Duration::from_millis(1)] {
+            let mut churn = OwnerChangeChurn::new();
+            let wait = churn
+                .wait_after_stale_read(&work, Some(budget), SITE, None)
+                .await;
+            assert!(
+                !wait.settled() && wait.waited() >= budget,
+                "RED (a) no holder, budget {budget:?}: settled at or past its deadline: {wait:?}"
+            );
+            assert_eq!(
+                churn.free_rebuilds, 0,
+                "RED (a) no holder, budget {budget:?}: spent a free rebuild past its deadline"
+            );
+        }
+
+        let mut churn = OwnerChangeChurn::new();
+        let wait = churn
+            .wait_after_stale_read(&work, Some(Duration::from_millis(2)), SITE, None)
+            .await;
+        assert!(
+            wait.settled() && wait.waited() >= FIRST_BACKOFF,
+            "guard (a) no holder, budget 2 ms: settles after the pause: {wait:?}"
+        );
+        assert_eq!(churn.free_rebuilds, 1, "guard (a): one free rebuild spent");
+    }
+
+    /// A change in progress until a fixed instant. Completing exactly at the
+    /// deadline, it ends both waits unsettled there: no read at or after the
+    /// deadline settles. Completing well before the deadline, it lets both
+    /// waits settle at their first read after it.
+    ///
+    /// RED on the read-first loop: the read at the deadline found the change
+    /// completed and settled, a free rebuild past the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_change_completing_at_the_deadline_settles_neither_wait() {
+        let work = ReleasedAt {
+            release_at: DeadlineInstant::now() + OWNER_CHANGE_WAIT_BOUND,
+        };
+        let mut churn = OwnerChangeChurn::new();
+        let wait = churn.wait_for_settled_change(&work, None, SITE, None).await;
+        assert!(
+            wait.is_some_and(|ended| !ended.settled() && ended.waited() >= OWNER_CHANGE_WAIT_BOUND),
+            "RED (b) wait_for_settled_change: a change completing at the deadline settled: {wait:?}"
+        );
+        assert_eq!(
+            churn.free_rebuilds, 0,
+            "RED (b) wait_for_settled_change: spent a free rebuild at the deadline"
+        );
+
+        let work = ReleasedAt {
+            release_at: DeadlineInstant::now() + OWNER_CHANGE_WAIT_BOUND,
+        };
+        let mut churn = OwnerChangeChurn::new();
+        let wait = churn.wait_after_stale_read(&work, None, SITE, None).await;
+        assert!(
+            !wait.settled() && wait.waited() >= OWNER_CHANGE_WAIT_BOUND,
+            "RED (b) wait_after_stale_read: a change completing at the deadline settled: {wait:?}"
+        );
+        assert_eq!(
+            churn.free_rebuilds, 0,
+            "RED (b) wait_after_stale_read: spent a free rebuild at the deadline"
+        );
+
+        let released_after = Duration::from_millis(100);
+        let work = ReleasedAt {
+            release_at: DeadlineInstant::now() + released_after,
+        };
+        let wait = OwnerChangeChurn::new()
+            .wait_for_settled_change(&work, None, SITE, None)
+            .await;
+        assert!(
+            wait.is_some_and(|ended| ended.settled()
+                && ended.waited() >= released_after
+                && ended.waited() < released_after + MAX_BACKOFF),
+            "guard (b) wait_for_settled_change: settles at its first read after the change: {wait:?}"
+        );
+        let work = ReleasedAt {
+            release_at: DeadlineInstant::now() + released_after,
+        };
+        let wait = OwnerChangeChurn::new()
+            .wait_after_stale_read(&work, None, SITE, None)
+            .await;
+        assert!(
+            wait.settled()
+                && wait.waited() >= released_after
+                && wait.waited() < released_after + MAX_BACKOFF,
+            "guard (b) wait_after_stale_read: settles at its first read after the change: {wait:?}"
+        );
+    }
+
+    /// Once a churn's deadline has passed no wait settles, even when the
+    /// change a wait was asked about clears between its first read and the
+    /// next one.
+    ///
+    /// RED on the read-first loop: the loop's first read found the change
+    /// cleared and settled with nothing waited, past the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn past_the_deadline_a_change_clearing_between_reads_settles_neither_wait() {
+        let mut churn = OwnerChangeChurn::new();
+        let armed = churn
+            .wait_after_stale_read(&Work::held(), Some(Duration::from_millis(10)), SITE, None)
+            .await;
+        assert!(
+            !armed.settled(),
+            "the earlier wait ends at its deadline: {armed:?}"
+        );
+
+        let wait = churn
+            .wait_for_settled_change(&ClearsAfterFirstRead::default(), None, SITE, None)
+            .await;
+        assert_eq!(
+            wait,
+            Some(OwnerChangeWait::NotSettled {
+                waited: Duration::ZERO
+            }),
+            "RED (c) wait_for_settled_change: settled past the deadline"
+        );
+        assert_eq!(
+            churn.free_rebuilds, 0,
+            "RED (c) wait_for_settled_change: spent a free rebuild past the deadline"
+        );
+
+        let wait = churn
+            .wait_after_stale_read(&ClearsAfterFirstRead::default(), None, SITE, None)
+            .await;
+        assert_eq!(
+            wait,
+            OwnerChangeWait::NotSettled {
+                waited: Duration::ZERO
+            },
+            "RED (c) wait_after_stale_read: settled past the deadline"
+        );
+        assert_eq!(
+            churn.free_rebuilds, 0,
+            "RED (c) wait_after_stale_read: spent a free rebuild past the deadline"
         );
     }
 }

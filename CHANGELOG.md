@@ -192,6 +192,15 @@ them.
   refuses the value the lease records unless the lease's declared freshness
   window ran out. Code that builds `Acquire` sets the new field.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::rotate_member` no longer takes over a retirement of the member
+  that started without a rotation, whose start row records none, so a crash
+  would end the member as a plain retirement. The call is refused retryable
+  (`MobError::LifecycleOperationPending`) while that retirement stands, unless
+  the member is host-pending, and a retry alone does not succeed: the
+  retirement must finish, or be re-driven (`MobHandle::redrive_retirement`),
+  first. In 0.9.7 the call took the retirement over.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -246,8 +255,9 @@ them.
   member's current incarnation and seats its next one Dormant at the next
   generation on the same session, each in one MobMachine step, so the
   identity is never unseated: the next incarnation keeps the member's
-  conversation, comms identity and wiring edges. The member's running turn is
-  cancelled. When its session commits each round, its queued inputs that may
+  conversation, comms identity, wiring edges and external peer edges, after a
+  restart too (the terminal's journal batch records the kept edges again
+  after its successor's row). The member's running turn is cancelled. When its session commits each round, its queued inputs that may
   cross a stop (durable prompts not bound to an objective) stay queued for the
   next incarnation, which the handover wakes to run each of them once, and
   their waiters are answered `RequeuedAcrossStop`; every other input ends
@@ -255,15 +265,27 @@ them.
   (a declared role migration, which the next incarnation's spawn row records,
   so its first build restamps the session after a restart too), a runtime mode
   and whether to wake the next incarnation; the answer is the successor's
-  `MemberRespawnReceipt`. A member a same-session successor cannot serve (a
-  placed member, one bound to no session of its own, one that is not
-  runtime-backed or whose service keeps no durable sessions, one whose
-  session is lost or archived, a fork-derived member, one holding a forked
-  participant attachment) is refused `MobError::UnsupportedForMode` before
-  anything starts. Every rotation is durable from its start: the retirement's
-  start row records it (`RotationTarget::FreshSession` for `rotate_member`,
+  `MemberRespawnReceipt`, and a wake that fails after the successor is
+  committed is reported on it (`MemberRespawnReceipt::wake_error`) instead of
+  failing the call, since calling again would respawn the member again. A
+  member a same-session successor cannot serve (a placed member, one bound to
+  no session of its own, one that is not runtime-backed or whose service
+  keeps no durable sessions, one whose session is lost or archived, a
+  fork-derived member, one holding a forked participant attachment, one whose
+  session's creation record, spawn continuity or, for a role migration, last
+  role cannot be read) is refused `MobError::UnsupportedForMode` before
+  anything starts; MobMachine's start refuses a lost or archived session.
+  `MobHandle::respawn` of an identity entry's member respawns it this way, so
+  the identity stays seated and an entry throughout and the successor keeps
+  the restrictions its session recorded, and
+  `MobHandle::respawn_with_successor_spec` refuses an entry's member
+  (`UnsupportedForMode`) before anything starts: an entry's successor keeps
+  its session, which a successor spec cannot. A worker's respawn is
+  unchanged. Every rotation is durable from its start: the retirement's start
+  row records it (`RotationTarget::FreshSession` for `rotate_member`,
   `SameSession` for a respawn), and a mob restarted at any point of it records
-  it again from that row and finishes it itself, with no host record. While a
+  it again from that row and finishes it itself, with no host record; a
+  record the stored event codec cannot read fails the resume typed. While a
   rotation of the member stands, `redrive_retirement` re-drives the rotation
   and any other retirement of the member is refused retryable.
   `MobHandle::release_member_at_scope(scope)` releases a
@@ -348,23 +370,24 @@ them.
 
 ### Changed
 
-- `meerkat-mob`: `MobHandle::respawn` of an identity entry's member respawns
-  it on its own session, as `MobHandle::respawn_member` does (see Added),
-  instead of retiring it and spawning a successor on a new session: the
-  identity stays seated and an entry throughout, and the successor keeps the
-  restrictions its session recorded. A worker's respawn is unchanged.
-
 - `meerkat-mob`: `MobHandle::rotate_member` no longer needs a host record to
   survive a crash: the rotation is durable from its start and a restarted mob
   finishes it itself. Re-issued while the rotation stands, the call re-drives
   that rotation and answers its session; re-issued after it finished, it
-  rotates the member again. A host that keeps its own rotation record still
-  passes the identity host-pending (`MobBuilder::with_host_pending_members`)
-  and calls `rotate_member` again after the restart: the restarted mob leaves
-  that rotation to the call, which finishes it once, as it did for a start row
-  that predates the record. The call is refused retryable
-  (`MobError::LifecycleOperationPending`) for a member whose retirement
-  started without a rotation, unless the member is host-pending.
+  rotates the member again, so a host that does not mark the member
+  host-pending must not re-issue an unanswered call after a restart. A host
+  that keeps its own rotation record still passes the identity host-pending
+  (`MobBuilder::with_host_pending_members`) and calls `rotate_member` again
+  after the restart with the same spec: the restarted mob does not re-drive
+  that FreshSession rotation, logs that it holds it, and records its
+  retirement stuck at admission with a cause that names the wait
+  (`MobHandle::retirement_settlement`), and the call finishes it once, as it
+  did for a start row that predates the record (`redrive_retirement`
+  re-drives it too). A same-session rotation (a respawn) is the mob's own: a
+  restart finishes it whatever the host-pending set says. A recorded rotation
+  whose next incarnation cannot be planned again (its profile left the
+  definition) stays recorded and stuck until a call plans the same next
+  session.
 
 ## [0.9.7] - 2026-10-28
 

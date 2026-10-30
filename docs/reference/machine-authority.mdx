@@ -124,11 +124,13 @@ admission realizes. The handle's entry reads project the published machine
 state. A respawn of an entry's member is a same-session rotation (below): the
 identity stays seated and an entry from its retirement's start to its next
 incarnation's seat, each one machine step, so a respawned entry no longer
-passes through a window in which it is neither seated nor an entry. The actor
-routes the respawn of an identity the published state names an entry to that
-rotation. One shell step still decides from the machine's entry facts until
-the machine owns it: a seat with entry custody of a name a worker holds is
-refused `MemberAlreadyExists` over the published facts. No
+passes through a window in which it is neither seated nor an entry. Two
+shell steps still decide from the machine's entry facts until the machine
+owns them. The actor routes a respawn by them: the respawn of an identity the
+published state names an entry is that rotation, and a successor spec for
+one is refused (the retire-then-spawn path refuses an entry too, and its
+successor never takes entry custody). A seat with entry custody of a name a
+worker holds is refused `MemberAlreadyExists` over the published facts. No
 other shell code records, removes or derives an entry. The ci profile has no
 identities, so the hand-written audit
 `specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms in
@@ -148,15 +150,23 @@ plain archive takes), and its terminal (the `SameSession` arms of
 `CommitMemberRotation`) retires the old incarnation and seats the next one on
 that session in one step, so the identity is never unseated. A releasing
 retirement of a member whose same-session rotation stands is refused: its
-re-drive preserves the binding. The retirement's start row journals the
+re-drive preserves the binding. A same-session start takes the shell's
+observation of the kept session (`session_archived`), which its
+`session_not_archived` guard refuses. The retirement's start row journals the
 rotation, and its replay records the rotation again
 (`RecoverMemberRotationIntent`), so a mob restarted mid-rotation finishes it
 with the rotation's own terminal and no host record, while the plain archive
-waits; an admitted destroy beats it. The release verdict
-(`ClassifyMemberRelease`) takes the incarnation a scoped release names and
-answers `Stale` for any other. The hand-written
+waits; an admitted destroy beats it. The start does not re-drive the
+FreshSession rotation of a member its host marked host-pending: the host's
+re-issue finishes it. The same-session terminal keeps the member's wiring
+and external peer edges, which the replay of its `MemberRetired` row ends, so
+its journal batch records them again after the next incarnation's row. The
+release verdict (`ClassifyMemberRelease`) takes the incarnation a scoped
+release names and answers `Stale` for any other. The hand-written
 `specs/machines/mob_machine/member_residency_audit.sh` drives these arms in
-its `rotate-same` and `recover-rotation` runs.
+its `rotate-same` and `recover-rotation` runs, and replays a committed
+same-session terminal's rows, its kept edges among them, in its
+`replay-same` run.
 
 ## Consumed Checkpoint Completion Recovery
 

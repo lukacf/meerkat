@@ -105,6 +105,57 @@ test("activity feed previews remove the entire transcript action row", () => {
   );
 });
 
+/** Every `color-mix(...)` in a stylesheet, as its interpolation space and colour arguments. */
+function colorMixes(css: string): { space: string; colors: string[]; text: string }[] {
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const mixes: { space: string; colors: string[]; text: string }[] = [];
+  let from = source.indexOf("color-mix(");
+  while (from !== -1) {
+    const open = from + "color-mix".length;
+    let depth = 0;
+    let end = open;
+    for (; end < source.length; end += 1) {
+      if (source[end] === "(") depth += 1;
+      else if (source[end] === ")" && (depth -= 1) === 0) break;
+    }
+    const inner = source.slice(open + 1, end);
+    const parts: string[] = [];
+    let level = 0;
+    let start = 0;
+    for (let index = 0; index < inner.length; index += 1) {
+      if (inner[index] === "(") level += 1;
+      else if (inner[index] === ")") level -= 1;
+      else if (inner[index] === "," && level === 0) {
+        parts.push(inner.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    parts.push(inner.slice(start).trim());
+    const [space = "", ...colors] = parts;
+    mixes.push({ space: space.replace(/^in\s+/, ""), colors: colors.map((color) => color.replace(/\s+\d+(\.\d+)?%$/, "")), text: source.slice(from, end + 1) });
+    from = source.indexOf("color-mix(", end);
+  }
+  return mixes;
+}
+
+test("kit colour mixes against an opaque colour interpolate in srgb", () => {
+  // The default variant's surfaces and foreground carry an explicit oklch
+  // hue, so an oklch mix with them pulls every tone toward that hue: toned
+  // chips all turned one pink (light) or brown (dark). A mix with
+  // transparent has no hue of its own and may stay in oklch.
+  const mixes = [
+    ...colorMixes(fs.readFileSync(path.join(componentsSrc, "styles", "panel-kit.css"), "utf8")),
+    ...colorMixes(fs.readFileSync(path.join(componentsSrc, "styles", "tokens.css"), "utf8")),
+  ];
+  const opaque = mixes.filter((mix) => !mix.colors.includes("transparent"));
+  assert.ok(
+    opaque.some((mix) => mix.colors.join(" ") === "var(--_cc-tone) var(--_cc-surface-card)"),
+    "the toned chip fill is an opaque mix with the card",
+  );
+  assert.ok(opaque.length >= 8, `expected the chip fill, the inks and the accent mixes, found ${opaque.length}`);
+  assert.deepEqual(opaque.filter((mix) => mix.space !== "srgb").map((mix) => mix.text), []);
+});
+
 test("stock console runtime path is backed by the headless controller", () => {
   const source = fs.readFileSync(stockConsoleAppSource, "utf8");
 

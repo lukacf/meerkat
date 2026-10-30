@@ -427,12 +427,12 @@ textarea.cc-input {
 }
 .cc-btn--primary:hover:not(:disabled) {
   color: var(--_cc-surface-canvas);
-  border-color: color-mix(in oklch, var(--_cc-member-accent) 85%, var(--_cc-foreground));
-  background: color-mix(in oklch, var(--_cc-member-accent) 85%, var(--_cc-foreground));
+  border-color: color-mix(in srgb, var(--_cc-member-accent) 85%, var(--_cc-foreground));
+  background: color-mix(in srgb, var(--_cc-member-accent) 85%, var(--_cc-foreground));
 }
 .cc-btn--danger {
   color: var(--_cc-negative-ink);
-  border-color: color-mix(in oklch, var(--_cc-negative) 40%, var(--_cc-border-soft));
+  border-color: color-mix(in srgb, var(--_cc-negative) 40%, var(--_cc-border-soft));
 }
 .cc-btn--danger:hover:not(:disabled) {
   color: var(--_cc-negative-ink);
@@ -477,9 +477,11 @@ textarea.cc-input {
   flex: none;
 }
 /* Toned chips sit on an opaque mix with the card, so their text keeps its
-   contrast on sunken and selected backgrounds too. */
+   contrast on sunken and selected backgrounds too. The mix is in srgb: the
+   default card carries an explicit oklch hue, and an oklch mix would pull
+   every tone toward it. */
 .cc-chip:not([data-tone="neutral"]):not([data-tone="locked"]) {
-  background: color-mix(in oklch, var(--_cc-tone) 12%, var(--_cc-surface-card));
+  background: color-mix(in srgb, var(--_cc-tone) 12%, var(--_cc-surface-card));
 }
 .cc-chip--outline,
 .cc-chip.cc-chip--outline:not([data-tone="neutral"]):not([data-tone="locked"]) { background: transparent; }
@@ -851,7 +853,7 @@ textarea.cc-input {
   border-radius: var(--_cc-radius-round);
   background: var(--_cc-member-accent-soft);
   /* Mixed toward the foreground so the small initial stays readable. */
-  color: color-mix(in oklch, var(--_cc-member-accent) 70%, var(--_cc-foreground));
+  color: color-mix(in srgb, var(--_cc-member-accent) 70%, var(--_cc-foreground));
   font-family: var(--_cc-font-display);
   font-size: 9.5px;
   font-weight: 600;

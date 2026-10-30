@@ -82,12 +82,14 @@
   /* Text-safe derived inks. Small meta text and tone-coloured text mix
      toward the foreground so they keep WCAG AA contrast on card and
      sunken surfaces in every variant; fills and dots keep the raw tone.
-     Derived only: no new palette values. */
-  --_cc-foreground-meta: var(--cc-foreground-meta, color-mix(in oklch, var(--_cc-foreground-subtle) 75%, var(--_cc-foreground)));
-  --_cc-positive-ink:    var(--cc-positive-ink, color-mix(in oklch, var(--_cc-positive) 65%, var(--_cc-foreground)));
-  --_cc-warning-ink:     var(--cc-warning-ink, color-mix(in oklch, var(--_cc-warning) 65%, var(--_cc-foreground)));
-  --_cc-negative-ink:    var(--cc-negative-ink, color-mix(in oklch, var(--_cc-negative) 65%, var(--_cc-foreground)));
-  --_cc-link-ink:        var(--cc-link-ink, color-mix(in oklch, var(--_cc-link) 80%, var(--_cc-foreground)));
+     Derived only: no new palette values. Mixed in srgb, because the
+     default foreground carries an explicit oklch hue that an oklch mix
+     would pull every tone toward. */
+  --_cc-foreground-meta: var(--cc-foreground-meta, color-mix(in srgb, var(--_cc-foreground-subtle) 75%, var(--_cc-foreground)));
+  --_cc-positive-ink:    var(--cc-positive-ink, color-mix(in srgb, var(--_cc-positive) 65%, var(--_cc-foreground)));
+  --_cc-warning-ink:     var(--cc-warning-ink, color-mix(in srgb, var(--_cc-warning) 65%, var(--_cc-foreground)));
+  --_cc-negative-ink:    var(--cc-negative-ink, color-mix(in srgb, var(--_cc-negative) 65%, var(--_cc-foreground)));
+  --_cc-link-ink:        var(--cc-link-ink, color-mix(in srgb, var(--_cc-link) 80%, var(--_cc-foreground)));
 
   --_cc-sheen-soft-default:        rgba(255, 255, 255, 0.08);
   --_cc-sheen-soft:                var(--_cc-sheen-soft-default);

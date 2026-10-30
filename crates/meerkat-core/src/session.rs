@@ -162,6 +162,7 @@ pub use instruction_activation::{
     MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
     materialize_instruction_activation_messages, validate_instruction_activation_messages,
 };
+pub(crate) use instruction_target::InstructionFold;
 pub use instruction_target::{
     InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
     InstructionRecordReceipt, InstructionRunStart, InstructionSetErrorCode, InstructionStateError,
@@ -170,6 +171,7 @@ pub use instruction_target::{
     RunStartInstructionOutcome, SessionInstructionChange, SessionInstructionReceipt,
     SessionInstructionState, SessionInstructionWrite,
 };
+pub(crate) use operator_instructions::is_operator_instruction_entry;
 pub use operator_instructions::{
     EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
     InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
@@ -9147,6 +9149,17 @@ impl Session {
             if activation_rows(self.messages()) != activation_rows(&rewritten) {
                 return Err(TranscriptEditError::InvalidTranscriptShape(
                     "same-session transcript rewrite cannot mint, alter, move, erase, or restore instruction activation boundaries"
+                        .to_string(),
+                ));
+            }
+            // Only a run start appends an operator-instruction entry row, and
+            // only the validated compaction fold takes entry rows out and
+            // inserts a snapshot.
+            if operator_instructions::operator_instruction_entry_rows(self.messages())
+                != operator_instructions::operator_instruction_entry_rows(&rewritten)
+            {
+                return Err(TranscriptEditError::InvalidTranscriptShape(
+                    "same-session transcript rewrite cannot mint, alter, move, erase, or restore operator instruction entries"
                         .to_string(),
                 ));
             }

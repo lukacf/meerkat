@@ -4496,10 +4496,11 @@ where
     async fn execute_turn_effects_unboxed(
         &mut self,
         transition: &TurnExecutionTransition,
-        // Retained in the signature as the turn context effects execute within;
-        // no longer consumed since compaction indexing stopped using the turn
-        // as a source-identity proxy (#152).
-        _turn_count: u32,
+        // The turn context effects execute within. A compaction reads it for
+        // one fact only: whether it runs before the run's first model
+        // response, where an operator-instruction fold may apply the
+        // recorded target.
+        turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
@@ -4646,6 +4647,15 @@ where
                                 }),
                             None => Ok(()),
                         };
+                        // The operator-instruction fold this rewrite carries.
+                        // It applies the recorded target only before the
+                        // first model response of a run that started fresh
+                        // (not from a run cursor); the session-document
+                        // authority decides.
+                        let instruction_fold_at_run_start =
+                            self.run_started_fresh && turn_count == 0;
+                        let instruction_lowering = self.operator_instruction_lowering();
+                        let instruction_run_id = self.runtime_started_run_id.clone();
                         let compaction_source = externalized.and_then(|()| {
                             self.session
                                 .transcript_content_digest()
@@ -4672,12 +4682,29 @@ where
                                         )
                                     }),
                             }
+                        })
+                        .and_then(|(revision, observations, prefix)| {
+                            self.session
+                                .authorize_instruction_fold(
+                                    instruction_fold_at_run_start,
+                                    instruction_lowering,
+                                    instruction_run_id,
+                                )
+                                .map(|fold| (revision, observations, prefix, fold))
+                                .map_err(|error| {
+                                    format!("operator instructions cannot be folded: {error}")
+                                })
                         });
                         // The summary request's own operation, so a refusal
                         // the host observes names what the audit records.
                         let summary_operation = crate::OperationId::new();
                         let outcome = match compaction_source {
-                            Ok((parent_revision, observation_source, prefix_messages)) => {
+                            Ok((
+                                parent_revision,
+                                observation_source,
+                                prefix_messages,
+                                instruction_fold,
+                            )) => {
                                 // Compaction of the admitted controller's own
                                 // context is its housekeeping: it runs on the
                                 // retained controller client (still authorized
@@ -4738,6 +4765,7 @@ where
                                         ),
                                         _ => crate::agent::compact::FoldedCalls::default(),
                                     },
+                                    instruction_fold,
                                 };
                                 // The compactor's warnings (a bounded source,
                                 // a rewrite keeping no complete turn) name the
@@ -4903,16 +4931,31 @@ where
                                 );
                             }
                             let retention = compactor.transcript_history_retention();
+                            let instruction_fold = outcome.instruction_fold;
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
                                     &outcome.rewrite_authority,
                                 )
                                 .and_then(|commit| {
-                                    // Bound the graph in the same prepared
-                                    // value: retired bodies never reach a
-                                    // persisted document.
                                     if commit.is_some() {
+                                        // The operator-instruction fold's
+                                        // target state (its entry-sequence
+                                        // high-water, the pending bodies it
+                                        // applied) goes with the rewrite
+                                        // that inserted its snapshot.
+                                        if let Some(fold) = instruction_fold.as_ref() {
+                                            compacted_session
+                                                .record_instruction_fold(fold)
+                                                .map_err(|error| {
+                                                    crate::TranscriptEditError::HistoryStateMalformed(
+                                                        error.to_string(),
+                                                    )
+                                                })?;
+                                        }
+                                        // Bound the graph in the same prepared
+                                        // value: retired bodies never reach a
+                                        // persisted document.
                                         compacted_session.retire_transcript_history(retention)?;
                                     }
                                     Ok(commit)
@@ -6477,6 +6520,10 @@ where
             }
         };
         self.runtime_started_run_id = Some(run_id.clone());
+        // A compaction before this run's first model response folds
+        // operator instructions at the run's start only when the run starts
+        // fresh, not from a run cursor.
+        self.run_started_fresh = resumed.is_none();
         self.tool_dispatch_context.bind_run_id(run_id.clone());
         match resumed.as_ref() {
             Some((cursor, _)) => self.resume_round_commits(cursor),

@@ -17,24 +17,36 @@
 //! a record only changes the target, and the only application points are a
 //! fresh run start (one coalesced delta entry, appended before the run's own
 //! inputs) and a compaction fold at a run's first request.
+//!
+//! A compaction folds every entry row into one snapshot
+//! ([`Session::authorize_instruction_fold`]): of what is in effect, or of the
+//! recorded target when it runs at a fresh run's first request. The fold
+//! records the entry-sequence high-water in the target state, so a session
+//! whose rewrite history holds entry rows always carries the state too.
 
 use super::operator_instructions::{
     ActiveOperatorInstruction, EffectiveInstructionSlot, EffectiveOperatorInstructions,
     InstructionEffect, InstructionRevision, InstructionSlot, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
     MAX_OPERATOR_INSTRUCTION_SLOTS, OperatorInstructionChangeContent,
     OperatorInstructionEntryHeader, effective_operator_instructions,
-    mint_operator_instruction_delta,
+    mint_operator_instruction_delta, mint_operator_instruction_snapshot,
 };
 use super::{MAX_INSTRUCTION_BODY_BYTES, SESSION_INSTRUCTION_STATE_KEY, Session};
 use crate::generated::session_document as document;
 use crate::lifecycle::RunId;
-use crate::types::{InstructionContentDigest, InstructionKey, InstructionNamespace, Message};
+use crate::types::{
+    InstructionContentDigest, InstructionKey, InstructionNamespace, Message, SystemMessage,
+};
 use serde::{Deserialize, Serialize};
 
 /// Who owns a session's recorded operator-instruction target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstructionTargetOwner {
+    /// No owner recorded a target: the state holds only the entry-sequence
+    /// high-water a compaction fold recorded. Nothing is pending, and any
+    /// owner can take the target. A rebind never names it.
+    Unowned,
     /// The session's own host writes the target slot by slot.
     Session,
     /// A mob delivers the member's whole snapshot by generation.
@@ -47,6 +59,7 @@ pub enum InstructionTargetOwner {
 impl InstructionTargetOwner {
     fn machine_owner(&self) -> document::InstructionTargetOwner {
         match self {
+            Self::Unowned => document::InstructionTargetOwner::Unowned,
             Self::Session => document::InstructionTargetOwner::Session,
             Self::Mob { .. } => document::InstructionTargetOwner::Mob,
         }
@@ -135,6 +148,17 @@ pub struct SessionInstructionState {
 }
 
 impl SessionInstructionState {
+    /// The state of a session no owner recorded a target for, holding only
+    /// the entry-sequence high-water.
+    fn unowned(entry_sequence: u64) -> Self {
+        Self {
+            owner: InstructionTargetOwner::Unowned,
+            target_generation: 0,
+            entry_sequence,
+            slots: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn owner(&self) -> &InstructionTargetOwner {
         &self.owner
@@ -201,6 +225,11 @@ impl SessionInstructionState {
     /// budgets, a digest and a length exactly for Active slots, and a
     /// pending body that is the recorded content.
     fn validate(&self) -> Result<(), String> {
+        if self.owner == InstructionTargetOwner::Unowned
+            && (self.target_generation != 0 || !self.slots.is_empty())
+        {
+            return Err("an unowned target records no slot and no generation".to_string());
+        }
         if self.slots.len() > MAX_OPERATOR_INSTRUCTION_SLOTS {
             return Err(format!(
                 "the target holds more than {MAX_OPERATOR_INSTRUCTION_SLOTS} slots"
@@ -530,6 +559,26 @@ pub enum RunStartInstructionOutcome {
     Deferred(InstructionDeferReason),
 }
 
+/// A compaction fold of a session's operator-instruction entry rows, as the
+/// session-document authority authorized it: the one snapshot entry the
+/// rewrite puts right after its leading System prefix (none for an empty
+/// set), and the recorded target the rewrite commits with it (the fold's
+/// entry sequence as the high-water, and the pending bodies a fold at a
+/// run's first request applied cleared). Only the validated compaction path
+/// inserts the snapshot.
+#[derive(Debug, Clone)]
+pub(crate) struct InstructionFold {
+    snapshot: Option<SystemMessage>,
+    state_after: SessionInstructionState,
+}
+
+impl InstructionFold {
+    /// The snapshot entry row the fold inserts; none for an empty set.
+    pub(crate) fn snapshot(&self) -> Option<&SystemMessage> {
+        self.snapshot.as_ref()
+    }
+}
+
 /// The instruction region's per-session registry key: every operation seeds
 /// one fresh authority for its one session.
 const SESSION_DOCUMENT_INSTRUCTION_KEY: &str = "operator_instructions";
@@ -645,13 +694,20 @@ struct PendingInstructionChanges {
 /// Compare the recorded target with the effective set, slot by slot. A slot
 /// is unchanged when the target holds what is in effect (the same revision
 /// and content, or Absent where nothing applies); an effective slot the
-/// target no longer names is revoked at the revision in effect.
+/// target no longer names is revoked at the revision in effect. An unowned
+/// state records no target, so nothing of it is pending.
 fn pending_instruction_changes(
     state: &SessionInstructionState,
     effective: &EffectiveOperatorInstructions,
 ) -> Result<PendingInstructionChanges, InstructionStateError> {
     let mut changes = Vec::new();
     let mut active_after = Vec::new();
+    if state.owner == InstructionTargetOwner::Unowned {
+        return Ok(PendingInstructionChanges {
+            changes,
+            active_after,
+        });
+    }
     for record in &state.slots {
         let slot = record.slot();
         let in_effect = effective
@@ -1010,7 +1066,7 @@ impl Session {
     /// standalone adoption. The new owner starts from what is in effect: the
     /// target becomes the effective set, its generation restarts, and no
     /// pending write of the previous owner carries over. Rebinding to the
-    /// owner the target already has is refused.
+    /// owner the target already has, or to no owner, is refused.
     pub fn rebind_instruction_owner(
         &mut self,
         owner: InstructionTargetOwner,
@@ -1150,5 +1206,120 @@ impl Session {
                 Ok(RunStartInstructionOutcome::Deferred(reason.into()))
             }
         }
+    }
+
+    /// Before a compaction rewrite: let the session-document authority
+    /// authorize the fold of this session's operator-instruction entry rows
+    /// and mint the snapshot it renders. `at_run_start` is whether the
+    /// compaction runs before the first model response of a fresh run,
+    /// `lowering` how the session's model carries System rows, and `run_id`
+    /// the run in flight. The authority folds the recorded target at a
+    /// run's first request (unless the model carries no System row), and
+    /// what is in effect otherwise. None when the session carries no
+    /// operator-instruction fact: its compaction is unchanged.
+    ///
+    /// Nothing changes here: the caller inserts the snapshot in the rebuilt
+    /// transcript and records the fold with the rewrite
+    /// ([`Self::record_instruction_fold`]).
+    pub(crate) fn authorize_instruction_fold(
+        &self,
+        at_run_start: bool,
+        lowering: InstructionLowering,
+        run_id: Option<RunId>,
+    ) -> Result<Option<InstructionFold>, InstructionStateError> {
+        if !self.carries_operator_instruction_facts() {
+            return Ok(None);
+        }
+        let state = self.instruction_target_state()?;
+        let effective = self.own_effective_instructions()?;
+        // The target's whole active set, its bodies pending or in effect;
+        // nothing without a recorded target.
+        let target_active = match state.as_ref() {
+            Some(state) => pending_instruction_changes(state, &effective)?.active_after,
+            None => Vec::new(),
+        };
+        let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
+        let key = document.key();
+        let effects = document
+            .authority
+            .authorize_instruction_fold(
+                key,
+                at_run_start,
+                lowering.into(),
+                count(target_active.len()),
+            )
+            .map_err(|error| refused_by_authority(&error))?;
+        let (entry_sequence, source) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                document::SessionDocumentEffect::InstructionFoldAuthorized {
+                    entry_sequence,
+                    source,
+                } => Some((*entry_sequence, *source)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                InstructionStateError::MalformedState(
+                    "the session-document authority emitted no fold verdict".to_string(),
+                )
+            })?;
+        let (active, target_generation, applies) = match source {
+            document::InstructionFoldSource::Target => (
+                target_active,
+                document
+                    .authority
+                    .session_instruction_target_generation_for(&document.key)
+                    .unwrap_or(0),
+                true,
+            ),
+            document::InstructionFoldSource::Effective => (
+                effective
+                    .slots()
+                    .filter_map(|(slot, current)| {
+                        current.body().map(|body| ActiveOperatorInstruction {
+                            slot: slot.clone(),
+                            revision: current.revision(),
+                            body: body.to_string(),
+                        })
+                    })
+                    .collect(),
+                effective.last_target_generation(),
+                false,
+            ),
+        };
+        let snapshot = mint_operator_instruction_snapshot(
+            OperatorInstructionEntryHeader {
+                origin_session_id: self.id().clone(),
+                entry_sequence,
+                target_generation,
+                run_id: if applies { run_id } else { None },
+            },
+            active,
+            crate::types::message_timestamp_now(),
+        )
+        .map_err(InstructionStateError::MalformedHistory)?;
+        let mut state_after =
+            state.unwrap_or_else(|| SessionInstructionState::unowned(entry_sequence));
+        state_after.entry_sequence = entry_sequence;
+        if applies {
+            state_after.clear_pending_bodies();
+        }
+        state_after
+            .validate()
+            .map_err(InstructionStateError::MalformedState)?;
+        Ok(Some(InstructionFold {
+            snapshot,
+            state_after,
+        }))
+    }
+
+    /// Record an authorized fold's target state in the session whose
+    /// compaction rewrite inserted its snapshot, in the same prepared
+    /// session value, so the two commit, roll back and persist together.
+    pub(crate) fn record_instruction_fold(
+        &mut self,
+        fold: &InstructionFold,
+    ) -> Result<(), InstructionStateError> {
+        self.store_instruction_target_state(&fold.state_after)
     }
 }

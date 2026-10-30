@@ -5467,6 +5467,10 @@ where
     /// failures can return before `StartConversationRun` and must never reuse
     /// the previous turn's terminal snapshot.
     pub(crate) runtime_started_run_id: Option<crate::lifecycle::RunId>,
+    /// The run in flight started fresh, not from a run cursor. A compaction
+    /// before its first model response may fold operator instructions at
+    /// the run's start (`Session::authorize_instruction_fold`).
+    pub(crate) run_started_fresh: bool,
     /// Machine-terminal failure observed for the exact runtime run above.
     /// Kept separate from the public `AgentError` so direct session surfaces
     /// preserve their original typed errors while the runtime can commit a

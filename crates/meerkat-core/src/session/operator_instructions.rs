@@ -257,8 +257,10 @@ impl InstructionEntryIdentity {
         self.target_generation
     }
 
-    /// The run whose start applied the entry; none for a fold, and for a run
-    /// without runtime identity.
+    /// The run whose start applied the entry: a delta's run, or the run at
+    /// whose first request a fold applied the recorded target. None for a
+    /// fold of what was already in effect, and for a run without runtime
+    /// identity.
     #[must_use]
     pub fn run_id(&self) -> Option<&RunId> {
         self.run_id.as_ref()
@@ -702,6 +704,20 @@ impl OriginChain {
     }
 }
 
+/// Whether `message` is an operator-instruction entry row.
+pub(crate) fn is_operator_instruction_entry(message: &Message) -> bool {
+    matches!(message, Message::System(system) if system.instruction_entry.is_some())
+}
+
+/// Every operator-instruction entry row with its transcript index.
+pub(crate) fn operator_instruction_entry_rows(messages: &[Message]) -> Vec<(usize, &Message)> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| is_operator_instruction_entry(message))
+        .collect()
+}
+
 fn entry_rows(
     messages: &[Message],
 ) -> impl Iterator<Item = (usize, &SystemMessage, &InstructionEntryIdentity)> {
@@ -879,6 +895,7 @@ impl EffectiveInstructionSlot {
 pub struct EffectiveOperatorInstructions {
     slots: BTreeMap<InstructionSlot, EffectiveInstructionSlot>,
     last_entry_sequence: u64,
+    last_target_generation: u64,
 }
 
 impl EffectiveOperatorInstructions {
@@ -901,6 +918,13 @@ impl EffectiveOperatorInstructions {
     #[must_use]
     pub fn last_entry_sequence(&self) -> u64 {
         self.last_entry_sequence
+    }
+
+    /// The target generation the session's last entry row realized; zero
+    /// without one.
+    #[must_use]
+    pub fn last_target_generation(&self) -> u64 {
+        self.last_target_generation
     }
 
     #[must_use]
@@ -982,6 +1006,7 @@ impl EffectiveOperatorInstructions {
             }
         }
         self.last_entry_sequence = identity.entry_sequence;
+        self.last_target_generation = identity.target_generation;
         Ok(())
     }
 }

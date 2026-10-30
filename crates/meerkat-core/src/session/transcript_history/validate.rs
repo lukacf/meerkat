@@ -8,7 +8,11 @@ use super::graph::{
     TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
     TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
 };
-use crate::session::{TranscriptEditError, TranscriptRewriteSemantic, transcript_messages_digest};
+use crate::session::operator_instructions::operator_instruction_entry_rows;
+use crate::session::{
+    InstructionEntryKind, TranscriptEditError, TranscriptRewriteSemantic,
+    transcript_messages_digest,
+};
 use crate::types::{AssistantBlock, Message};
 use std::collections::BTreeSet;
 
@@ -156,6 +160,60 @@ fn validate_instruction_activation_revision_transition(
     {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "transcript rewrite changed an instruction activation boundary".to_string(),
+        ));
+    }
+    validate_operator_instruction_entry_transition(commit, parent_body, revision_body)
+}
+
+/// Operator-instruction entry rows across one rewrite: a compaction fold
+/// takes every one out and leaves at most one snapshot, the last row of the
+/// rewritten transcript's leading System prefix, whose entry sequence follows
+/// every entry its origin session wrote before it. Any other rewrite keeps
+/// every entry row exactly, at its offset.
+fn validate_operator_instruction_entry_transition(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
+    let parent_entries = operator_instruction_entry_rows(&parent_body.messages);
+    let revision_entries = operator_instruction_entry_rows(&revision_body.messages);
+    if commit.selection.semantic() != TranscriptRewriteSemantic::Compaction {
+        if parent_entries != revision_entries {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "transcript rewrite changed an operator instruction entry".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    let folded = match revision_entries.as_slice() {
+        [] => return Ok(()),
+        [(index, Message::System(system))] => system
+            .instruction_entry
+            .as_ref()
+            .map(|snapshot| (*index, snapshot)),
+        _ => None,
+    };
+    let leading_system_rows = revision_body
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, Message::System(_)))
+        .count();
+    let well_placed = folded.is_some_and(|(index, snapshot)| {
+        snapshot.kind() == InstructionEntryKind::Snapshot
+            && index + 1 == leading_system_rows
+            && parent_entries.iter().all(|(_, message)| match message {
+                Message::System(parent) => parent.instruction_entry.as_ref().is_none_or(|entry| {
+                    entry.origin_session_id() != snapshot.origin_session_id()
+                        || entry.entry_sequence() < snapshot.entry_sequence()
+                }),
+                _ => true,
+            })
+    });
+    if !well_placed {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "compaction rewrite left an operator instruction entry other than one snapshot after \
+             the leading System prefix"
+                .to_string(),
         ));
     }
     Ok(())

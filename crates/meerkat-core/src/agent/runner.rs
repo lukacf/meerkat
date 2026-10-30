@@ -2417,6 +2417,7 @@ where
         let saved_runtime_execution_kind_required = self.runtime_execution_kind_required;
         let saved_runtime_execution_kind = self.runtime_execution_kind;
         let saved_runtime_started_run_id = self.runtime_started_run_id.take();
+        let saved_run_started_fresh = self.run_started_fresh;
         let saved_runtime_terminal_failure_witness = self.runtime_terminal_failure_witness.take();
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
@@ -2511,6 +2512,7 @@ where
         self.runtime_execution_kind_required = saved_runtime_execution_kind_required;
         self.runtime_execution_kind = saved_runtime_execution_kind;
         self.runtime_started_run_id = saved_runtime_started_run_id;
+        self.run_started_fresh = saved_run_started_fresh;
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;
@@ -3741,6 +3743,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             runtime_started_run_id: None,
+            run_started_fresh: false,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),

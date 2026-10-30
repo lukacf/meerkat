@@ -27675,6 +27675,181 @@ mod tests {
             .expect("runtime-routed turn");
     }
 
+    /// The name of the host runtime's threads in the rows below.
+    const RPC_HOST_WORKER_THREAD: &str = "rpc-host-worker";
+
+    /// The runtime a host builds its session runtime on, with named workers,
+    /// so a turn can tell whose worker it runs on.
+    fn rpc_host_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name(RPC_HOST_WORKER_THREAD)
+            .thread_stack_size(meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET)
+            .enable_all()
+            .build()
+            .expect("host runtime")
+    }
+
+    static TURN_THREAD_ANSWERS: MockLlmClient = MockLlmClient;
+
+    /// Answers like [`MockLlmClient`] and records the name of the thread each
+    /// model request is made on: the thread the session's turn runs on.
+    #[derive(Default)]
+    struct TurnThreadLlmClient {
+        threads: StdMutex<Vec<Option<String>>>,
+    }
+
+    impl TurnThreadLlmClient {
+        fn threads(&self) -> Vec<Option<String>> {
+            self.threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for TurnThreadLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(std::thread::current().name().map(str::to_owned));
+            TURN_THREAD_ANSWERS.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A deferred session's first turn creates the session's actor on the
+    /// runtime the session runtime was built on, the host's, so the turn runs
+    /// on the host's workers. The runtime loop that applies the turn runs on
+    /// Core's private serving runtime; the actor used to be created from that
+    /// apply, which put every turn of the session on that runtime's workers.
+    #[test]
+    fn a_deferred_sessions_first_turn_runs_on_the_runtime_its_host_built_on() {
+        let host = rpc_host_runtime();
+        let threads = host.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let recorder = Arc::new(TurnThreadLlmClient::default());
+            let runtime = make_runtime(temp_factory(&temp), 10);
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "first turn").await;
+            runtime.shutdown().await;
+            recorder.threads()
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            threads.len(),
+            1,
+            "the first turn made one model request: {threads:?}"
+        );
+        let thread = threads[0].as_deref();
+        assert_ne!(
+            thread,
+            Some("meerkat-runtime-serving"),
+            "the deferred session's first turn ran on Core's serving runtime"
+        );
+        assert_eq!(
+            thread,
+            Some(RPC_HOST_WORKER_THREAD),
+            "the deferred session's first turn runs on a worker of the host's runtime"
+        );
+    }
+
+    /// A session rebuilt from durable state on its next turn, as after a
+    /// restart, gets its new actor on the host's runtime too. The rebuild
+    /// runs from the runtime loop's apply, on Core's private serving runtime,
+    /// as a deferred session's first turn does.
+    #[test]
+    fn a_rebuilt_sessions_turn_runs_on_the_runtime_its_host_built_on() {
+        let host = rpc_host_runtime();
+        let (threads, actor_rebuilt) = host.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let recorder = Arc::new(TurnThreadLlmClient::default());
+            let runtime = make_runtime(temp_factory(&temp), 10);
+            // The rebuild makes its agent from durable state, which does not
+            // carry the build's client override: it uses the default client.
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "before the restart").await;
+            restart_session(&runtime, &session_id).await;
+            let actor_before = runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await;
+            runtime_turn(&runtime, &session_id, "after the restart").await;
+            let actor_after = runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await;
+            runtime.shutdown().await;
+            (recorder.threads(), (actor_before, actor_after))
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            actor_rebuilt,
+            (false, true),
+            "the turn after the restart rebuilt the session's actor"
+        );
+        assert_eq!(
+            threads.len(),
+            2,
+            "each turn made one model request: {threads:?}"
+        );
+        let thread = threads[1].as_deref();
+        assert_ne!(
+            thread,
+            Some("meerkat-runtime-serving"),
+            "the rebuilt session's turn ran on Core's serving runtime"
+        );
+        assert_eq!(
+            thread,
+            Some(RPC_HOST_WORKER_THREAD),
+            "the rebuilt session's turn runs on a worker of the host's runtime"
+        );
+    }
+
     /// The live open consumes the staged prompt and persists that with its
     /// row, so the persisted pending flag is clear after the first turn, and
     /// a restart does not deliver the prompt again: the transcript keeps

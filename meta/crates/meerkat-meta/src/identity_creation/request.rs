@@ -791,7 +791,9 @@ fn within_body_limit(normalized: NormalizedRequest) -> Result<NormalizedRequest,
 
 /// The template `id`, if the requester may use it: an agent from its
 /// creator rules (and its own origin), the console from the console's
-/// templates, a human through the console, and the host from any.
+/// templates, a human through the console, and the host from any. A
+/// create, an update and a removal all check it, so the console acts only
+/// on identities of its own templates.
 pub fn template_for<'a>(
     policy: &'a IdentityCreationPolicy,
     requester: &RequesterFacts,
@@ -1681,7 +1683,8 @@ pub fn normalize_update(
     })
 }
 
-/// Normalize a removal of the created identity `entry`.
+/// Normalize a removal of the created identity `entry`. The requester must
+/// be able to use the entry's template, as for an update.
 pub fn normalize_remove(
     policy: &IdentityCreationPolicy,
     requester: &RequesterFacts,
@@ -1696,6 +1699,7 @@ pub fn normalize_remove(
         &spec.identity,
         spec.expected_revision,
     )?;
+    template_for(policy, requester, &entry.template).map_err(|kind| refused(kind, "template"))?;
     let classes = BTreeSet::from([ChangeClass::Remove]);
     let templates = BTreeSet::from([entry.template.clone()]);
     let plan = plan_approval(

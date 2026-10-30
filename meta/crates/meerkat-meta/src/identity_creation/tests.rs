@@ -2223,6 +2223,50 @@ fn a_host_update_checks_tools_against_the_creators_live_tools() {
 }
 
 #[test]
+fn the_console_updates_and_removes_only_identities_of_its_templates() {
+    let console = RequesterFacts::console();
+    let entry = entry_facts(current_binding());
+    let purpose = update_spec(UpdateSetSpec {
+        purpose: Some("Find better sources.".to_owned()),
+        ..UpdateSetSpec::default()
+    });
+    let remove = RemoveIdentitySpec {
+        identity: "team:helper".to_owned(),
+        expected_revision: 3,
+    };
+    let removal = |requester: &RequesterFacts, entry: &CreatedEntryFacts| {
+        normalize_remove(
+            &policy(),
+            requester,
+            RequestEnvelope::default(),
+            entry,
+            &remove,
+        )
+    };
+    assert!(update(&console, &entry, &purpose).is_ok());
+    assert!(removal(&console, &entry).is_ok());
+
+    // An identity of a template the console does not create from: the
+    // console can neither update nor remove it.
+    let open = CreatedEntryFacts {
+        template: "open".to_owned(),
+        ..entry
+    };
+    let not_allowed = IdentityRefusalKind::TemplateNotAllowed {
+        template: "open".to_owned(),
+    };
+    for refusal in [
+        update(&console, &open, &purpose).unwrap_err(),
+        removal(&console, &open).unwrap_err(),
+    ] {
+        assert_eq!(refusal.kind, not_allowed);
+        assert_eq!(refusal.field.as_deref(), Some("template"));
+    }
+    // The host itself acts on any created identity.
+    assert!(removal(&RequesterFacts::host("gateway"), &open).is_ok());
+}
+
+#[test]
 fn update_and_remove_check_custody_revision_and_binding() {
     let entry = entry_facts(current_binding());
     let purpose = update_spec(UpdateSetSpec {

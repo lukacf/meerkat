@@ -2222,6 +2222,15 @@ pub struct SystemMessage {
     /// version identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_activation: Option<InstructionActivationIdentity>,
+    /// Typed identity of an operator-instruction entry.
+    ///
+    /// Only the session-document authorization of a fresh run start or of a
+    /// compaction fold mints this identity. It is mutually exclusive with the
+    /// append identity, the prompt version identity and the instruction
+    /// activation identity, and the rendered content is validated against it
+    /// by re-rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_entry: Option<crate::session::InstructionEntryIdentity>,
 }
 
 impl SystemMessage {
@@ -2232,6 +2241,7 @@ impl SystemMessage {
             identity: None,
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
         }
     }
 
@@ -2263,6 +2273,7 @@ impl SystemMessage {
             }),
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
         }
     }
 }

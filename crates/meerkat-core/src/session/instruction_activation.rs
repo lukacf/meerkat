@@ -591,7 +591,9 @@ fn body_from_origin_envelope<'a>(
 }
 
 /// Validate activation envelopes, predecessor chronology, uniqueness, revision
-/// immutability, and the bounded retained-body budget.
+/// immutability, and the bounded retained-body budget, the exclusivity of the
+/// System row semantic identities, and every operator-instruction entry row
+/// ([`super::validate_operator_instruction_messages`]).
 pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<(), String> {
     let mut activations = BTreeSet::new();
     let mut revisions = BTreeMap::new();
@@ -603,7 +605,8 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
         };
         let semantic_count = usize::from(system.identity.is_some())
             + usize::from(system.prompt_version.is_some())
-            + usize::from(system.instruction_activation.is_some());
+            + usize::from(system.instruction_activation.is_some())
+            + usize::from(system.instruction_entry.is_some());
         if semantic_count > 1 {
             return Err(
                 "System message semantic identities must be mutually exclusive".to_string(),
@@ -653,7 +656,7 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
             return Err("instruction revision is bound to multiple bodies or digests".to_string());
         }
     }
-    Ok(())
+    super::operator_instructions::validate_operator_instruction_messages(messages)
 }
 
 /// Project inherited rows as headers without their bodies, preserving
@@ -1182,6 +1185,7 @@ impl Session {
             identity: None,
             prompt_version: None,
             instruction_activation: Some(identity.clone()),
+            instruction_entry: None,
         }));
         self.mark_content_mutated(crate::time_compat::SystemTime::now());
         let transcript_revision = self

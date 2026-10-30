@@ -1296,6 +1296,7 @@ impl TranscriptRewriteMessage {
                 identity: None,
                 prompt_version,
                 instruction_activation: None,
+                instruction_entry: None,
             })),
             Self::SystemNotice {
                 kind,
@@ -1517,6 +1518,11 @@ pub enum WireSessionMessage {
         /// envelope in `content` is validated against this fact on ingress.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instruction_activation: Option<meerkat_core::InstructionActivationIdentity>,
+        /// Typed operator-instruction entry identity (a delta appended at a
+        /// run start, or a compaction snapshot). The rendered entry in
+        /// `content` is validated against this fact on ingress.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_entry: Option<meerkat_core::InstructionEntryIdentity>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1616,6 +1622,7 @@ impl From<Message> for WireSessionMessage {
                 identity: message.identity.map(Into::into),
                 prompt_version: message.prompt_version,
                 instruction_activation: message.instruction_activation,
+                instruction_entry: message.instruction_entry,
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2579,6 +2586,7 @@ mod tests {
                     identity: None,
                     prompt_version: None,
                     instruction_activation: None,
+                    instruction_entry: None,
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),

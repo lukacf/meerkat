@@ -338,6 +338,12 @@ impl Session {
                         index: target,
                     });
                 }
+                // An operator-instruction entry is not an ordinary System
+                // message: only a run start or a compaction fold mints or
+                // moves one.
+                if system.instruction_entry.is_some() {
+                    return Err(SystemPromptUpdateError::TargetIsNotSystem { index: target });
+                }
                 let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
                 let version = match lineage_high_water {
                     Some(high_water) => high_water.checked_next().ok_or_else(|| {
@@ -366,6 +372,7 @@ impl Session {
                 version,
             }),
             instruction_activation: None,
+            instruction_entry: None,
         });
         let commit = self.commit_transcript_rewrite_authorized(
             selection,
@@ -529,6 +536,7 @@ mod tests {
                 version: SystemPromptVersion::INITIAL,
             }),
             instruction_activation: None,
+            instruction_entry: None,
         });
 
         let error = expected_error(
@@ -587,6 +595,7 @@ mod tests {
                     version: SystemPromptVersion::INITIAL,
                 }),
                 instruction_activation: None,
+                instruction_entry: None,
             }));
         }));
         let payload = match outcome {

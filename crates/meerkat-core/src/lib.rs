@@ -577,6 +577,14 @@ pub use session::{
     try_session_metadata_from_map, try_tool_visibility_state_from_map,
     validate_current_persisted_transcript_history_slice,
 };
+pub use session::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
+    InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
+    MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
+    effective_operator_instructions, materialize_operator_instruction_messages,
+    validate_operator_instruction_messages,
+};
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,
     PreparedComponentEventSuffix, SerializedComponentEvent, SessionComponentKind,

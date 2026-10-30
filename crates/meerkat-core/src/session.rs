@@ -127,6 +127,7 @@ mod inline_image_externalization_tests;
 mod instruction_activation;
 pub mod model_routing_control;
 pub mod model_routing_handoff_staging;
+mod operator_instructions;
 #[cfg(test)]
 mod operator_instructions_tests;
 mod system_prompt_update;
@@ -155,6 +156,14 @@ pub use instruction_activation::{
     InstructionActivationRequest, MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES,
     MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
     materialize_instruction_activation_messages, validate_instruction_activation_messages,
+};
+pub use operator_instructions::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
+    InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
+    MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
+    effective_operator_instructions, materialize_operator_instruction_messages,
+    validate_operator_instruction_messages,
 };
 pub use system_prompt_update::{
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
@@ -5276,6 +5285,13 @@ fn assert_host_append_does_not_mint_system_semantics(message: &Message) {
         ),
         "ordinary Session append cannot mint an instruction activation; use activate_instruction",
     );
+    assert!(
+        !matches!(
+            message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ),
+        "ordinary Session append cannot mint an operator instruction entry; only a run start or a compaction fold mints one",
+    );
 }
 
 impl Session {
@@ -6805,6 +6821,7 @@ impl Session {
             identity,
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
         }));
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
@@ -6961,6 +6978,16 @@ impl Session {
                 session_id: self.id().clone(),
                 reason,
             })?;
+        // Operator-instruction entries a fork copied read as history in the
+        // child; a row whose bytes are not its typed entry fails closed.
+        operator_instructions::project_operator_instruction_messages_in_place(
+            self.id(),
+            &mut projected,
+        )
+        .map_err(|reason| ModelBoundaryProjectionError {
+            session_id: self.id().clone(),
+            reason,
+        })?;
         crate::types::strip_tool_result_host_metadata(&mut projected);
         Ok(projected)
     }
@@ -9549,6 +9576,15 @@ impl Session {
         ) {
             return Err(TranscriptEditError::InvalidTranscriptShape(
                 "fork replacement cannot mint an instruction activation; fork-at may only copy exact source-prefix activations"
+                    .to_string(),
+            ));
+        }
+        if matches!(
+            &replacement_message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "fork replacement cannot mint an operator instruction entry; fork-at may only copy exact source-prefix entries"
                     .to_string(),
             ));
         }

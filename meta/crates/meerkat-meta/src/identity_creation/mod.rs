@@ -73,10 +73,10 @@ pub use render::{
 pub use request::{
     CONSOLE_SURFACE, Consequence, ConsequenceEffect, CreateIdentitySpec, CreatedEntryFacts,
     CreatedSpec, CreatorOrigin, EdgeBasis, IdentityRequest, NormalizedRequest, PeerFacts,
-    PeerVerdict, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope, Requester,
-    RequesterFacts, SourceEvidence, UpdateIdentitySpec, UpdateSetSpec, UpdatedSpec,
-    creator_templates, evaluate_peer, normalize_create, normalize_remove, normalize_update,
-    template_for,
+    PeerVerdict, REQUEST_BODY_MAX_BYTES, RemoveIdentitySpec, RequestAction, RequestContext,
+    RequestEnvelope, Requester, RequesterFacts, SourceEvidence, UpdateIdentitySpec, UpdateSetSpec,
+    UpdatedSpec, creator_templates, evaluate_peer, normalize_create, normalize_remove,
+    normalize_update, template_for,
 };
 pub use template::{
     CREATOR_INSTRUCTIONS_HEADING, CreatorBound, MobProfiles, Preamble, PreambleInputs,

@@ -2427,6 +2427,29 @@ fn a_rendering_past_its_limit_is_refused() {
     assert_eq!(refusal.field.as_deref(), Some("rendering"));
 }
 
+#[test]
+fn a_request_body_past_its_limit_is_refused() {
+    let mut value = policy_json();
+    value["templates"]["research"]["max_bytes"]["instructions"] = json!(200_000);
+    let policy = parse(&value);
+    // 140000 quotes: about 140 KB of rendering, but about 280 KB of JSON.
+    let mut quotes = spec("helper");
+    quotes.instructions = "\"".repeat(140_000);
+    let refusal = create(&policy, &lead(), &[quotes.clone()]).expect_err("a body past its limit");
+    assert_eq!(
+        refusal.kind,
+        IdentityRefusalKind::TextTooLarge {
+            limit: REQUEST_BODY_MAX_BYTES as u64
+        }
+    );
+    assert_eq!(refusal.field.as_deref(), Some("request"));
+    // The same length of plain text fits: the body was the bound, not the
+    // text.
+    quotes.instructions = "x".repeat(140_000);
+    let fits = create(&policy, &lead(), &[quotes]).expect("a body within its limit");
+    assert!(render_v1(&fits.request, None).is_ok());
+}
+
 // ---------------------------------------------------------------------------
 // The contract's rendering rows, as pure render and digest checks
 // ---------------------------------------------------------------------------

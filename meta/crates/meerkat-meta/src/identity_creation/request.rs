@@ -32,6 +32,11 @@ use super::template::{MobProfiles, TemplateBinding, resolve_binding};
 /// this surface, and creates only from the console's templates.
 pub const CONSOLE_SURFACE: &str = "console";
 
+/// The most bytes the JSON text of a normalized request may take: the
+/// durable decision owner's limit on the request body it holds. A request
+/// past it is refused `text_too_large` at `request` before anything is held.
+pub const REQUEST_BODY_MAX_BYTES: usize = 256 * 1024;
+
 const FORMAT_REQUEST: &str = "meerkat.identity.request.v1";
 const REFERENCE_MAX_BYTES: u64 = 1024;
 
@@ -763,6 +768,22 @@ fn refused(kind: IdentityRefusalKind, field: impl Into<String>) -> IdentityRefus
     IdentityRefusal::new(kind).at(field)
 }
 
+/// `normalized`, unless its request's JSON text is past
+/// `REQUEST_BODY_MAX_BYTES`. A request that cannot be serialized could not
+/// be held either, and is refused the same way.
+fn within_body_limit(normalized: NormalizedRequest) -> Result<NormalizedRequest, IdentityRefusal> {
+    let size = serde_json::to_vec(&normalized.request).map_or(usize::MAX, |body| body.len());
+    if size > REQUEST_BODY_MAX_BYTES {
+        return Err(refused(
+            IdentityRefusalKind::TextTooLarge {
+                limit: REQUEST_BODY_MAX_BYTES as u64,
+            },
+            "request",
+        ));
+    }
+    Ok(normalized)
+}
+
 /// The template `id`, if the requester may use it: an agent from its
 /// creator rules (and its own origin), the console from the console's
 /// templates, a human through the console, and the host from any.
@@ -1355,7 +1376,7 @@ pub fn normalize_create(
             authority_field: authority_field.as_deref(),
         },
     )?;
-    Ok(NormalizedRequest {
+    within_body_limit(NormalizedRequest {
         request: IdentityRequest {
             requester: requester.requester.clone(),
             proposer: envelope.proposer,
@@ -1591,7 +1612,7 @@ pub fn normalize_update(
             authority_field: authority_field.as_deref(),
         },
     )?;
-    Ok(NormalizedRequest {
+    within_body_limit(NormalizedRequest {
         request: IdentityRequest {
             requester: requester.requester.clone(),
             proposer: envelope.proposer,
@@ -1631,7 +1652,7 @@ pub fn normalize_remove(
             authority_field: None,
         },
     )?;
-    Ok(NormalizedRequest {
+    within_body_limit(NormalizedRequest {
         request: IdentityRequest {
             requester: requester.requester.clone(),
             proposer: envelope.proposer,

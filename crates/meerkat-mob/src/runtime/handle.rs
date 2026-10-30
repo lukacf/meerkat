@@ -6411,6 +6411,11 @@ pub struct MobHandle {
     /// Whether the latest member plan of this mob's start could not observe
     /// recovery work; see [`MobHandle::boot_set_basis`].
     pub(super) boot_set_basis: super::boot_plan::MobBootSetBasisCell,
+    /// The live mob operator authority of every local member session this
+    /// mob's runtime built, as the runtime received it from each session's
+    /// build; see [`MobHandle::admit_member_identity_creation`].
+    pub(super) member_session_authorities:
+        Arc<super::member_session_authority::MemberSessionAuthorities>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -9935,6 +9940,39 @@ impl MobHandle {
     #[allow(clippy::disallowed_methods)]
     pub fn live_incarnation(&self) -> meerkat_core::service::LiveMobIncarnation {
         meerkat_core::service::LiveMobIncarnation::witnessed(self.incarnation)
+    }
+
+    /// The identity creation check of an agent creator's commit in this mob:
+    /// whether the member session `origin_session` may create identities
+    /// from `template` here, as this mob runs now. The commit of an agent's
+    /// created identities asks it once per identity's template, before it
+    /// writes anything.
+    ///
+    /// It reads only the live mob operator authority of `origin_session`
+    /// itself: every member build this mob's runtime provisions in a local
+    /// session carries a receiver to which the agent factory binds the
+    /// session's final, sealed authority, whatever the member's mob tools
+    /// are, so a creator whose build binds its creation scope authority only
+    /// is read like any other. It takes no authority from its caller, so a
+    /// caller holding another session's sealed authority, a wider one
+    /// included, cannot lend it. A session this runtime did not build (a
+    /// placed or external member, a session outside the mob), one whose
+    /// build bound no authority, and one whose tools are gone hold none and
+    /// are refused. The verdict is the generated MeerkatMachine one
+    /// (`meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template`),
+    /// at this runtime's own incarnation witness: scope minted for an
+    /// earlier incarnation of the mob admits nothing.
+    pub fn admit_member_identity_creation(
+        &self,
+        origin_session: &SessionId,
+        template: &str,
+    ) -> Result<(), meerkat_runtime::mob_operator_authority::IdentityCreationScopeRefusal> {
+        self.member_session_authorities.admit_identity_creation(
+            origin_session,
+            self.definition.id.as_str(),
+            self.live_incarnation(),
+            template,
+        )
     }
 
     /// Who created this mob ([`crate::MobProvenance`]): the fact its create

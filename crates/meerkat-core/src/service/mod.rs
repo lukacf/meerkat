@@ -1242,6 +1242,13 @@ pub struct SessionBuildOptions {
     /// creator takes the normal path, its full mob operator authority with
     /// the creation scope granted into it
     /// (`meerkat_runtime::mob_operator_authority::grant_identity_creation_in_mob`).
+    /// A host that disables such a member's mob tools in the build and sets
+    /// the flag leaves it no mob operator tool either: the runtime's own
+    /// member tools are removed (hidden, every call denied) under an
+    /// authority that holds no manage and no spawn-profile scope in the mob.
+    /// A mob runtime's member build also binds the authority to the
+    /// runtime's receiver for the session, which the runtime's creator check
+    /// reads (`meerkat_mob::MobHandle::admit_member_identity_creation`).
     /// `false`, the default, binds an authority only to a build with mob
     /// tools enabled.
     pub mob_operator_authority_only: bool,
@@ -1479,15 +1486,18 @@ impl std::fmt::Display for OpaquePrincipalToken {
 ///
 /// Mob operator grants name the incarnation they were minted for, so a grant
 /// never reaches a later mob under the same id. The mob runtime hands its
-/// incarnation out through its handles.
+/// incarnation out through its handles, and as a witness to every member
+/// build it performs ([`SessionBuildOptions::mob_incarnation`]).
 ///
 /// The value is an identity, not a credential: it renders and serializes as
 /// its canonical form, a lowercase hyphenated UUID, and [`FromStr`] and
 /// `Deserialize` accept only that form. Holding one grants nothing. The
-/// grant functions take a [`LiveMobIncarnation`], which only the mob
-/// runtime's own handle hands out, so no grant binds a value decoded from
-/// input; the authority is the sealed [`MobToolAuthorityContext`] that names
-/// it, whose bindings are never serialized.
+/// grant functions and the identity creation check take a
+/// [`LiveMobIncarnation`], which only the mob runtime hands out (from its
+/// handle, and to each member build it performs), so no grant binds and no
+/// check reads a value decoded from input; the authority is the sealed
+/// [`MobToolAuthorityContext`] that names it, whose bindings are never
+/// serialized.
 ///
 /// [`FromStr`]: std::str::FromStr
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1551,12 +1561,18 @@ impl<'de> Deserialize<'de> for MobIncarnationId {
     }
 }
 
-/// A [`MobIncarnationId`] read from the mob runtime that runs at it:
-/// `meerkat_mob::MobHandle::live_incarnation` hands it out. The mob operator
-/// grant functions (`meerkat_runtime::mob_operator_authority::grant_manage_mob`
-/// and the spawn-profile grants) take this witness instead of a bare id, so a
-/// grant binds only an incarnation a mob runtime of this process runs or ran
-/// at, never a value decoded from input. It has no serde.
+/// A [`MobIncarnationId`] read from the mob runtime that runs at it. The
+/// runtime hands it out from its handle
+/// (`meerkat_mob::MobHandle::live_incarnation`), and to every member build it
+/// performs, fresh, restore or wake ([`SessionBuildOptions::mob_incarnation`],
+/// where a host's member build hook reads it without holding the mob's
+/// handle). The mob operator grant functions
+/// (`meerkat_runtime::mob_operator_authority::grant_manage_mob`, the
+/// spawn-profile and identity creation grants) and the identity creation
+/// check (`admit_identity_creation_from_template`) take this witness instead
+/// of a bare id, so a grant binds and a check reads only an incarnation a mob
+/// runtime of this process runs or ran at, never a value decoded from input.
+/// It has no serde.
 ///
 /// Rust cannot keep another crate from calling a public constructor, so
 /// `LiveMobIncarnation::witnessed` is public but hidden from the docs, and

@@ -362,9 +362,14 @@ const CREATION_TEMPLATE: &str = "boot-rows-template";
 /// host's member build hook with the witness of the mob runtime performing
 /// it, so the hook, which holds no mob handle, mints the creation scope in
 /// that build (authority only: the creator's profile disables mob tools).
-/// The creation check then admits the creator's template in the mob as it
-/// runs, and no other template, and the restored creator delivers the
-/// completion.
+/// The creation check over the authority the hook minted admits the
+/// creator's template in the mob as it runs, and no other template. The
+/// session service here builds no agent: it binds the build's authority to
+/// the build's external tools as the agent factory does, so the runtime's
+/// receiver gets it and the runtime's creator check admits the restored
+/// creator too (the factory's own binding is covered by
+/// `a_creation_only_creator_is_admitted_through_the_runtime_receiver`). The
+/// restored creator then delivers the completion.
 ///
 /// RED on the old tree: a build carried no witness (the build options had no
 /// `mob_incarnation`; the row does not compile there), so a hook without the
@@ -440,7 +445,7 @@ async fn a_creator_restored_at_boot_with_pending_work_keeps_creation_in_that_bui
         admit_identity_creation_from_template(
             build.mob_tool_authority_context.as_ref(),
             handle.mob_id().as_str(),
-            handle.incarnation(),
+            handle.live_incarnation(),
             template,
         )
     };
@@ -451,6 +456,15 @@ async fn a_creator_restored_at_boot_with_pending_work_keeps_creation_in_that_bui
     );
     assert_eq!(
         admit("another-template"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&creator, CREATION_TEMPLATE),
+        Ok(()),
+        "the runtime received the restored creator's authority"
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&creator, "another-template"),
         Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
     );
 

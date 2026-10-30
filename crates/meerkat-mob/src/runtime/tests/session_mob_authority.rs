@@ -940,8 +940,9 @@ async fn a_creation_only_creator_has_the_scope_and_no_mob_tool_surfaces() {
         .expect("the session binds its authority to the host's tools");
     let bound = bound.read().expect("bound authority").clone();
     let incarnation = handle.incarnation();
+    let live_incarnation = handle.live_incarnation();
     let admit = |template: &str| {
-        admit_identity_creation_from_template(Some(&bound), &mob_id, incarnation, template)
+        admit_identity_creation_from_template(Some(&bound), &mob_id, live_incarnation, template)
     };
     assert_eq!(admit(CREATION_TEMPLATE), Ok(()));
     assert_eq!(
@@ -983,11 +984,14 @@ async fn a_creation_only_creator_has_the_scope_and_no_mob_tool_surfaces() {
 /// Row (RED): authority only is refused on a build whose profile enables mob
 /// tools. The mob runtime composed that member's own mob operator tools from
 /// its profile before the host's hook ran, so a creation-only authority bound
-/// there would leave them listed. The build fails with
+/// there would take them away. The build fails with
 /// `AuthorityOnlyWithMobTools` before it binds anything: the member's tools
-/// stay unbound and deny every call. Such a creator takes the normal path
-/// instead, its full mob operator authority with the creation scope granted
-/// into it, which builds, admits the creation, and keeps its mob tools.
+/// keep the authority their session was created with (they stay listed and
+/// still spawn, which a creation-only binding would not let them), and the
+/// runtime's creator check finds no creation scope for the session. Such a
+/// creator takes the normal path instead, its full mob operator authority
+/// with the creation scope granted into it, which builds, keeps its mob tools
+/// and is admitted by the runtime's creator check.
 ///
 /// RED on the old tree: the build accepted the flag (the error does not exist
 /// there), resolved the mob tools to disabled and bound the creation-only
@@ -995,7 +999,7 @@ async fn a_creation_only_creator_has_the_scope_and_no_mob_tool_surfaces() {
 #[tokio::test]
 async fn authority_only_with_a_profile_that_enables_mob_tools_is_refused_at_build() {
     use meerkat_runtime::mob_operator_authority::{
-        admit_identity_creation_from_template, grant_identity_creation_in_mob,
+        IdentityCreationScopeRefusal, grant_identity_creation_in_mob,
         identity_creation_only_mob_operator_authority,
     };
 
@@ -1033,9 +1037,17 @@ async fn authority_only_with_a_profile_that_enables_mob_tools_is_refused_at_buil
         Err(other) => panic!("expected AuthorityOnlyWithMobTools, got {other}"),
         Ok(_) => panic!("authority only on a build with mob tools must be refused"),
     }
-    assert_denied(
-        spawn(&tools, "worker", "w-2").await,
-        "the refused build bound no authority to the member's tools",
+    // The refused build bound nothing: the member's tools keep the authority
+    // their session was created with, and the runtime received no creation
+    // scope for the session.
+    assert!(
+        tool_names(&tools).iter().any(|name| name == "spawn_member"),
+        "the member's tools stay listed"
+    );
+    assert_spawned(spawn(&tools, "worker", "w-2").await, "w-2");
+    assert_eq!(
+        handle.admit_member_identity_creation(&session_id, CREATION_TEMPLATE),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
     );
 
     // The normal path: the full authority with the creation scope granted
@@ -1045,19 +1057,246 @@ async fn authority_only_with_a_profile_that_enables_mob_tools_is_refused_at_buil
         .mob_tool_authority_context
         .clone()
         .expect("a tools.mob member gets a default authority");
-    let creator =
+    config.mob_tool_authority_context = Some(
         grant_identity_creation_in_mob(&full, mob_id.clone(), witness, [CREATION_TEMPLATE])
-            .expect("grant the creation scope into the full authority");
+            .expect("grant the creation scope into the full authority"),
+    );
+    let (_dir, _agent) = build_through_factory(config, None).await;
+    assert_spawned(spawn(&tools, "worker", "w-3").await, "w-3");
     assert_eq!(
-        admit_identity_creation_from_template(
-            Some(&creator),
-            &mob_id,
-            handle.incarnation(),
-            CREATION_TEMPLATE
-        ),
+        handle.admit_member_identity_creation(&session_id, CREATION_TEMPLATE),
         Ok(())
     );
-    config.mob_tool_authority_context = Some(creator);
-    let (_dir, _agent) = build_through_factory(config, None).await;
-    assert_spawned(spawn(&tools, "worker", "w-2").await, "w-2");
+}
+
+/// Row (RED): a host hook that disables a member's mob tools and binds its
+/// creation scope authority only leaves the member no mob operator tool. The
+/// member's profile enables mob tools, so the mob runtime composed its own
+/// mob operator tools before the hook ran; the hook's `Disable` keeps the
+/// build from being refused, and the build binds the creation-only
+/// authority to the member's external tools. That authority holds no manage
+/// and no spawn-profile scope in the mob, so the member's operator tools are
+/// removed: none is listed, and a call from the member's own session, even
+/// one its owner view would admit, is denied. The creation scope still
+/// reaches the runtime's receiver, and the creator check admits it.
+///
+/// RED on the old tree: the creation-only authority bound the mob instance,
+/// so the member's operator tools stayed listed and admitted the calls that
+/// need no scope (its own children's list, status and retirement).
+#[tokio::test]
+async fn authority_only_on_a_member_whose_host_disabled_its_mob_tools_leaves_no_member_operator_tool()
+ {
+    use meerkat_runtime::mob_operator_authority::identity_creation_only_mob_operator_authority;
+
+    let (handle, service, session_id) = mob_with_spawned_worker().await;
+    let tools = recorded_member_tools(&service, &session_id).await;
+    let mob_id = handle.definition().id.to_string();
+    let config = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    let witness = config
+        .mob_incarnation
+        .expect("the build carries the runtime's witness");
+
+    // The host's hook: mob tools disabled, the creation scope authority only.
+    let mut request = crate::build::to_create_session_request(
+        &config,
+        meerkat_core::types::ContentInput::Text(String::new()),
+    );
+    let build = request.build.as_mut().expect("the member's build");
+    build.override_mob = ToolCategoryOverride::Disable;
+    build.mob_tool_authority_context = Some(
+        identity_creation_only_mob_operator_authority(mob_id, witness, [CREATION_TEMPLATE])
+            .expect("mint the creation-only authority"),
+    );
+    build.mob_operator_authority_only = true;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let rebuilt = meerkat::AgentBuildConfig::from_create_session_request(&request, event_tx);
+    let (_dir, _agent) = build_through_factory(rebuilt, None).await;
+
+    let listed = tool_names(&tools);
+    for tool in super::super::tools::local_operator_tool_defs() {
+        assert!(
+            !listed.iter().any(|name| name == tool.name.as_str()),
+            "{} is not listed: {listed:?}",
+            tool.name
+        );
+    }
+    let owner_bound = dispatched_from_session(Arc::clone(&tools), session_id.clone());
+    assert_denied(
+        call(&owner_bound, "list_members", serde_json::json!({})).await,
+        "listing the member's own children",
+    );
+    assert_denied(
+        spawn(&owner_bound, "worker", "w-2").await,
+        "spawning from the member's own session",
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&session_id, CREATION_TEMPLATE),
+        Ok(())
+    );
+}
+
+/// Row (RED): the runtime receives a creation-only creator's live authority
+/// from the creator's own build. A creator whose profile disables mob tools
+/// is spawned, and the build the runtime provisioned for its session carries
+/// the runtime's receiver for that session, which lists no tool. Until a
+/// build of the session binds an authority, the runtime's creator check
+/// refuses the creator. The host's hook then mints the creation scope
+/// authority only, and the build runs through the real agent factory, which
+/// binds the authority to the session's external tools, the receiver among
+/// them: the creator check admits the creator's template in this mob, and no
+/// other. A session the runtime did not build is refused.
+///
+/// RED on the old tree: no Core receiver existed (the runtime's creator check
+/// does not exist there, so the row does not compile); an authority-only
+/// binding reached only the host's own tools, and nothing in Core could read
+/// a creator's live authority.
+#[tokio::test]
+async fn a_creation_only_creator_is_admitted_through_the_runtime_receiver() {
+    use meerkat_runtime::mob_operator_authority::{
+        IdentityCreationScopeRefusal, identity_creation_only_mob_operator_authority,
+    };
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from(MEMBER),
+            None,
+        )
+        .await
+        .expect("spawn the creator");
+    let session_id = member_session(&handle, MEMBER).await;
+    let tools = recorded_member_tools(&service, &session_id).await;
+    assert!(
+        tool_names(&tools).is_empty(),
+        "the runtime's receiver lists no tool"
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&session_id, CREATION_TEMPLATE),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed),
+        "no build of the session has bound an authority yet"
+    );
+
+    let config = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    let mut request = crate::build::to_create_session_request(
+        &config,
+        meerkat_core::types::ContentInput::Text(String::new()),
+    );
+    // The host's member build hook: it mints from the build alone.
+    let build = request.build.as_mut().expect("the member's build");
+    let mob_id = build
+        .mob_member_binding
+        .as_ref()
+        .expect("the member's binding")
+        .mob_id
+        .clone();
+    let witness = build
+        .mob_incarnation
+        .expect("the build carries the runtime's witness");
+    build.mob_tool_authority_context = Some(
+        identity_creation_only_mob_operator_authority(mob_id, witness, [CREATION_TEMPLATE])
+            .expect("mint the creation-only authority"),
+    );
+    build.mob_operator_authority_only = true;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let rebuilt = meerkat::AgentBuildConfig::from_create_session_request(&request, event_tx);
+    let (_dir, _agent) = build_through_factory(rebuilt, None).await;
+
+    assert_eq!(
+        handle.admit_member_identity_creation(&session_id, CREATION_TEMPLATE),
+        Ok(())
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&session_id, "another-template"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&SessionId::new(), CREATION_TEMPLATE),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed),
+        "a session the runtime did not build"
+    );
+}
+
+/// Row (RED): the creator check reads only the creator session's own live
+/// authority. Two creators of one mob hold different creation scopes, each
+/// minted authority only by the host's member build hook. The second
+/// creator's sealed authority, which a caller could hold, admits the second
+/// template in this mob; the runtime's creator check for the first creator
+/// still refuses that template, since it takes no authority from its caller
+/// and reads the first creator's own. Each creator is admitted for its own
+/// template.
+///
+/// RED on the old tree: the only creator check took the authority from its
+/// caller, so a caller holding the second creator's sealed authority had the
+/// first creator's commit admitted (the runtime's creator check does not
+/// exist there, so the row does not compile).
+#[tokio::test]
+async fn a_caller_supplied_authority_is_never_used_for_the_creator_check() {
+    use meerkat_runtime::mob_operator_authority::{
+        IdentityCreationScopeRefusal, admit_identity_creation_from_template,
+        identity_creation_only_mob_operator_authority,
+    };
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    // The host's member build hook mints each creator its own template.
+    service.set_member_build_hook(Arc::new(|req: &mut CreateSessionRequest| {
+        let Some(build) = req.build.as_mut() else {
+            return;
+        };
+        let (Some(member), Some(witness)) =
+            (build.mob_member_binding.clone(), build.mob_incarnation)
+        else {
+            return;
+        };
+        let template = match member.member.as_str() {
+            "creator-a" => "template-a",
+            "creator-b" => "template-b",
+            _ => return,
+        };
+        build.mob_tool_authority_context = Some(
+            identity_creation_only_mob_operator_authority(member.mob_id, witness, [template])
+                .expect("mint the creator's scope"),
+        );
+        build.mob_operator_authority_only = true;
+    }));
+    for creator in ["creator-a", "creator-b"] {
+        handle
+            .spawn(
+                ProfileName::from("worker"),
+                AgentIdentity::from(creator),
+                None,
+            )
+            .await
+            .expect("spawn a creator");
+    }
+    let first = member_session(&handle, "creator-a").await;
+    let second = member_session(&handle, "creator-b").await;
+
+    let wider = last_member_build(&service, &AgentIdentity::from("creator-b"))
+        .await
+        .mob_tool_authority_context
+        .expect("the second creator's sealed authority");
+    assert_eq!(
+        admit_identity_creation_from_template(
+            Some(&wider),
+            handle.definition().id.as_str(),
+            handle.live_incarnation(),
+            "template-b"
+        ),
+        Ok(()),
+        "the second creator's authority admits its template"
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&first, "template-b"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed),
+        "the first creator's check never reads another session's authority"
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&first, "template-a"),
+        Ok(())
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&second, "template-b"),
+        Ok(())
+    );
 }

@@ -2135,7 +2135,10 @@ struct MockSessionService {
     create_requests: RwLock<Vec<CreateSessionRecord>>,
     /// The host's member build hook, run on each create request first.
     member_build_hook: std::sync::Mutex<Option<MemberBuildHook>>,
-    /// Records whether each create_session had external_tools configured.
+    /// Records whether each create_session's external tools list any tool.
+    /// Presence alone says nothing: every member build carries its external
+    /// tools inside the mob runtime's authority receiver, which lists none
+    /// of its own.
     create_with_external_tools: RwLock<Vec<bool>>,
     /// Records the exact host curator carried by each create_session request.
     create_with_compaction_curators: RwLock<Vec<Option<Arc<dyn meerkat_core::CompactionCurator>>>>,
@@ -4600,10 +4603,11 @@ impl MockSessionService {
             .as_ref()
             .and_then(|b| b.external_tools.as_ref())
             .cloned();
-        self.create_with_external_tools
-            .write()
-            .await
-            .push(external_tools.is_some());
+        self.create_with_external_tools.write().await.push(
+            external_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.tools().is_empty()),
+        );
         self.create_with_compaction_curators.write().await.push(
             req.build
                 .as_ref()
@@ -4613,11 +4617,16 @@ impl MockSessionService {
         if let Some(dispatcher) = external_tools {
             // A session service that builds its agent through the agent
             // factory binds the member's tools to the session's mob operator
-            // authority; this mock builds no agent, so it binds the request's.
+            // authority; this mock builds no agent, so it binds the request's
+            // as the factory does: none with mob tools disabled, unless the
+            // build is authority only.
             let authority = req
                 .build
                 .as_ref()
-                .filter(|build| !matches!(build.override_mob, ToolCategoryOverride::Disable))
+                .filter(|build| {
+                    build.mob_operator_authority_only
+                        || !matches!(build.override_mob, ToolCategoryOverride::Disable)
+                })
                 .and_then(|build| build.mob_tool_authority_context.clone())
                 .filter(
                     meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,

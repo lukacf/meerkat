@@ -18,6 +18,9 @@ export interface Viewport {
 export interface ZoomPan {
   viewport: Viewport;
   reset: () => void;
+  /// Pans the least needed to bring a box (in layout coordinates) into
+  /// view, so a node that takes keyboard focus off screen comes into view.
+  reveal: (box: RevealBox) => void;
   /// Pass to the SVG element via `ref={zoom.svgRef}`. The hook attaches
   /// a non-passive wheel listener so `preventDefault` works (React's
   /// synthetic onWheel is passive in modern React/Chromium).
@@ -26,6 +29,30 @@ export interface ZoomPan {
   onPointerMove: (e: React.PointerEvent<SVGSVGElement>) => void;
   onPointerUp: (e: React.PointerEvent<SVGSVGElement>) => void;
   isDragging: boolean;
+}
+
+/// A box in layout coordinates.
+export interface RevealBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/// The smallest pan that brings `box` inside a `width` by `height` view
+/// with `margin` to spare; a box too large for the view shows its top-left
+/// corner. The same viewport comes back when the box is already in view.
+export function revealViewport(v: Viewport, box: RevealBox, width: number, height: number, margin = 16): Viewport {
+  const axis = (t: number, start: number, size: number, extent: number): number => {
+    const low = t + start * v.scale;
+    const high = t + (start + size) * v.scale;
+    if (high - low + 2 * margin > extent || low < margin) return t + (margin - low);
+    if (high > extent - margin) return t - (high - (extent - margin));
+    return t;
+  };
+  const tx = axis(v.tx, box.x, box.w, width);
+  const ty = axis(v.ty, box.y, box.h, height);
+  return tx === v.tx && ty === v.ty ? v : { ...v, tx, ty };
 }
 
 const MIN_SCALE = 0.4;
@@ -77,6 +104,10 @@ export function useZoomPan(
   const reset = React.useCallback(() => {
     setViewport(fitRef.current);
   }, []);
+
+  const reveal = React.useCallback((box: RevealBox) => {
+    setViewport((prev) => revealViewport(prev, box, width, height));
+  }, [width, height]);
 
   // Layout effect so a new fit lands before paint (no identity-transform
   // frame between measuring the frame and applying its fit).
@@ -150,7 +181,7 @@ export function useZoomPan(
     setIsDragging(false);
   }, []);
 
-  return { viewport, reset, svgRef, onPointerDown, onPointerMove, onPointerUp, isDragging };
+  return { viewport, reset, reveal, svgRef, onPointerDown, onPointerMove, onPointerUp, isDragging };
 }
 
 export function viewportTransform(v: Viewport): string {

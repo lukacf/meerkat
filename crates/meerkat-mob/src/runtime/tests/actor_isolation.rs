@@ -2720,19 +2720,34 @@ async fn reload_after_a_lost_admission_acknowledgement_keeps_the_committed_input
         mob.adapter.is_durability_ready(mob.session(0)).await,
         "the fresh registration is durability-ready"
     );
+    let runtime_id = LogicalRuntimeId::for_session(mob.session(0));
     assert!(
         mob.store
-            .load_input_state(&LogicalRuntimeId::for_session(mob.session(0)), input_id)
+            .load_input_state(&runtime_id, input_id)
             .await
             .expect("read the committed input")
             .is_some(),
         "the reload keeps the committed input"
     );
-    mob.wait_for_executed_prompts(0, 1).await;
+    // A terminal input never runs again, and its run started before it
+    // became terminal: once the committed input's stored row is terminal,
+    // the prompts the member ran for it are final.
+    wait_until(
+        "the committed input reaches a terminal outcome on the reloaded member",
+        Duration::from_secs(5),
+        || async {
+            mob.store
+                .load_input_state(&runtime_id, input_id)
+                .await
+                .expect("read the committed input")
+                .is_some_and(|stored| stored.seed.terminal_outcome.is_some())
+        },
+    )
+    .await;
     assert_eq!(
         mob.executed_prompts(0).await,
         ["lost acknowledgement"],
-        "the committed input runs once on the reloaded member"
+        "the committed input ran exactly once on the reloaded member"
     );
 }
 

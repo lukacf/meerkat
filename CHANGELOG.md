@@ -75,6 +75,20 @@ them.
   release. Shell synchronization only: no machine input, owner fact, wire
   type or error variant changes.
 
+### Fixed
+
+- `meerkat-core`: an owner-change wait (`OwnerChangeChurn`) no longer
+  settles at or past its deadline. Its loop read the change in progress
+  before it checked the deadline, so a change that completed during the
+  last sleep before the deadline settled the wait at the deadline, and a
+  later wait of a churn whose deadline had passed settled at once when the
+  change cleared between its first read and the next: each granted a free
+  rebuild past `OWNER_CHANGE_WAIT_BOUND` or the caller's budget. The loop
+  now checks the deadline before every read, so a read at or after it
+  answers `NotSettled`. Every Core wait that rebuilds after
+  `ReprepareRequired` (`wait_for_settled_change`) and the new
+  `wait_after_stale_read` share the loop.
+
 ### Upgrade notes
 
 - No storage migration: this release changes no stored format. It opens

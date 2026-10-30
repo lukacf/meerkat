@@ -424,11 +424,11 @@ AuditRecoverRetiringReplay ==
 
 AuditRecoverRetired ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, p \in BOOLEAN, started \in BOOLEAN :
-        RecoverRosterMemberRetiredRunning(AuditIdentity, rid, g, p, started)
+        RecoverRosterMemberRetiredRunning(AuditIdentity, rid, g, p, started, TRUE, FALSE)
 
 AuditRecoverRetiredAlreadyAbsent ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, p \in BOOLEAN, started \in BOOLEAN :
-        RecoverRosterMemberRetiredCurrentAlreadyAbsent(AuditIdentity, rid, g, p, started)
+        RecoverRosterMemberRetiredCurrentAlreadyAbsent(AuditIdentity, rid, g, p, started, TRUE, FALSE)
 
 AuditRecoverRetiredStaleGeneration ==
     \E rid \in AuditRuntimes : RecoverRosterMemberRetiredStaleGeneration(AuditIdentity, rid)

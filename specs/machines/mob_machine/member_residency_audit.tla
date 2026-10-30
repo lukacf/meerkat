@@ -403,7 +403,7 @@ WBind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 WBindCurrent == RecoverMemberSessionBindingAlreadyCurrentRunning(Id1, Rid1, Sess1, None)
 WEndpoint == RecoverMemberPeerEndpointFreshRunning(Id1, Rid1, Sess1, E1Inproc)
 WRegisterPeer == RegisterMemberPeerRunning(Id1, Rid1, 0, 1, E1Inproc)
-WRecoverRetired == \E p \in BOOLEAN, started \in BOOLEAN : RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, p, started)
+WRecoverRetired == \E p \in BOOLEAN, started \in BOOLEAN : RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, p, started, TRUE, FALSE)
 \* The replayed restore failures (Broken setters).
 WRestoreFailure ==
     \/ RecoverMemberRestoreFailureRunning(Id1, AuditReason)
@@ -1154,7 +1154,7 @@ YWire ==
 
 \* Member 1's MemberRetired row: its same-session start preserved the
 \* binding, not the topology, so the replay ends the incarnation's edges.
-YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE)
+YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE, TRUE, FALSE)
 
 \* The end-of-replay roster topology convergence of the edge.
 YConverge ==
@@ -1189,9 +1189,11 @@ AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
 (* Properties.                                                             *)
 (***************************************************************************)
 
-\* The same-session terminal neither ends nor records a host's preparation
-\* cause: only the host's seat step ends a first-boot preparation, so a
-\* host-pending member's successor never wakes before that step.
+\* The same-session terminal neither ends nor records a host's first-boot
+\* preparation: only the host's seat step ends it, so a host-pending member's
+\* successor never wakes before that step. (The terminal ends a role hold
+\* when it commits another role; this run declares no role, and the
+\* identity entry audit's hold run checks that end.)
 AuditSameSessionTerminalKeepsHostMark ==
     [][QCommit => (member_host_preparation_causes' = member_host_preparation_causes)]_vars
 

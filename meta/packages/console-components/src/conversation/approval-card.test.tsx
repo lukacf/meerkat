@@ -80,13 +80,13 @@ describe("ApprovalCard", () => {
     expect(view.getByText("Request").closest("details")).toBe(details);
     expect(view.getByText("Action scope").closest("details")).toBe(details);
     expect(details.querySelector("pre")?.textContent).toBe(JSON.stringify(request.raw, null, 2));
-    expect(view.getByText("Router main").closest("details")).toBeNull();
+    expect(view.getByText("Router main").closest("details") === null).toBe(true);
     // The risk tier reads in words in its tone, with the tier code in the tooltip.
     const risk = view.getByText("High risk");
-    expect(risk.closest("details")).toBeNull();
+    expect(risk.closest("details") === null).toBe(true);
     expect(risk.getAttribute("data-tone")).toBe("crit");
     expect(risk.getAttribute("title")).toBe("Risk tier R3");
-    expect(view.queryByText("R3", { exact: true })).toBeNull();
+    expect(view.queryByText("R3", { exact: true }) === null).toBe(true);
     expect(view.container.querySelector("time")?.closest("details")).toBeNull();
     for (const action of ["approve", "reject", "escalate"]) {
       expect(view.getByTestId(`gating-action:request:1:${action}`).dataset.action).toBe(action);

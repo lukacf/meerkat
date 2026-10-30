@@ -116,7 +116,7 @@ describe("GatingInboxPanel recorded audit", () => {
     expect(within(row).getByText("Actor: Household agent")).toBeTruthy();
     expect(within(row).getByText("Approver: Duty approver")).toBeTruthy();
     // The verdict chip carries the decision; the facts do not repeat it.
-    expect(within(row).queryByText(`Decision: ${decisionWords}`)).toBeNull();
+    expect(within(row).queryByText(`Decision: ${decisionWords}`) === null).toBe(true);
     expect(row.textContent?.includes("Decision:")).toBe(false);
     expect(within(row).getByText(`Outcome: ${outcomeWords}`)).toBeTruthy();
     expect(within(row).getByText(verdict)).toBeTruthy();

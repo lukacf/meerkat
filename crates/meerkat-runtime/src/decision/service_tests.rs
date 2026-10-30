@@ -291,8 +291,20 @@ fn refusal(error: &DecisionError) -> DecisionRefusal {
 
 /// Hold, present and approve the routable test decision.
 fn approved(service: &DurableDecisionService, rendering: &DecisionRendering) -> DecisionId {
+    approved_subject(service, rendering, "artifact:build-7")
+}
+
+/// Hold, present and approve the routable decision of `subject`.
+fn approved_subject(
+    service: &DurableDecisionService,
+    rendering: &DecisionRendering,
+    subject: &str,
+) -> DecisionId {
     let decision_id = service
-        .hold(hold_request(rendering), true)
+        .hold(
+            hold_of(subject, requester(), None, rendering, DEADLINE),
+            true,
+        )
         .expect("hold")
         .decision_id;
     service
@@ -539,7 +551,7 @@ fn an_approved_decision_executes_once_across_a_restart() {
     assert_eq!(
         refusal(
             &second
-                .close_refused(&decision_id, &reference("too_late"))
+                .close_refused_after_restart(&decision_id, &reference("too_late"))
                 .expect_err("an executed decision is never closed refused")
         ),
         DecisionRefusal::NotApproved
@@ -551,18 +563,18 @@ fn a_retryable_refusal_keeps_the_approval() {
     let (_store, _clock, service) = fixture();
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
-    service
+    let permit = service
         .authorize_execution(&decision_id, &operation_id(), &request_digest())
         .expect("permit");
     let released = service
-        .release_execution(&decision_id)
+        .release_execution(permit)
         .expect("release the permit");
     assert_eq!(released.state.phase, DecisionPhase::Approved);
     assert!(!released.state.permit_issued);
     assert_eq!(
         refusal(
             &service
-                .release_execution(&decision_id)
+                .release_after_restart(&decision_id)
                 .expect_err("no permit is outstanding")
         ),
         DecisionRefusal::NotAuthorized
@@ -582,11 +594,11 @@ fn a_permanent_refusal_closes_and_owes_the_notice() {
     let (_store, _clock, service) = fixture();
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
-    service
+    let permit = service
         .authorize_execution(&decision_id, &operation_id(), &request_digest())
         .expect("permit");
     let closed = service
-        .close_refused(&decision_id, &reference("quota_exceeded"))
+        .close_refused(permit, &reference("quota_exceeded"))
         .expect("close");
     assert_eq!(closed.state.phase, DecisionPhase::ExecutionRefused);
     assert!(!closed.state.permit_issued);
@@ -688,6 +700,14 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     let candidate = admitted.for_candidate_launch();
     assert_eq!(candidate.write_mode(), DecisionWriteMode::CandidateLaunch);
     assert_eq!(admitted.write_mode(), DecisionWriteMode::Admitted);
+    // Permits the admitted owner issued: a candidate settles none of them.
+    let approved_id = approved_subject(&admitted, &rendering, "subject:approved");
+    let released_permit = admitted
+        .authorize_execution(&approved_id, &operation_id(), &request_digest())
+        .expect("permit");
+    let closed_permit = admitted
+        .authorize_execution(&approved_id, &operation_id(), &request_digest())
+        .expect("the same permit again");
 
     store.clear();
     let digest = rendering.subject_digest();
@@ -739,8 +759,14 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     );
     assert_eq!(
         candidate
-            .release_execution(&decision_id)
+            .release_execution(released_permit)
             .expect_err("release"),
+        DecisionError::CandidateLaunch
+    );
+    assert_eq!(
+        candidate
+            .release_after_restart(&approved_id)
+            .expect_err("release after a restart"),
         DecisionError::CandidateLaunch
     );
     assert_eq!(
@@ -751,8 +777,14 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     );
     assert_eq!(
         candidate
-            .close_refused(&decision_id, &reference("refused"))
+            .close_refused(closed_permit, &reference("refused"))
             .expect_err("close"),
+        DecisionError::CandidateLaunch
+    );
+    assert_eq!(
+        candidate
+            .close_refused_after_restart(&approved_id, &reference("refused"))
+            .expect_err("close after a restart"),
         DecisionError::CandidateLaunch
     );
     assert_eq!(
@@ -1134,17 +1166,63 @@ fn a_release_after_the_deadline_records_the_expiry() {
     let (_store, clock, service) = fixture();
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
-    service
+    let permit = service
         .authorize_execution(&decision_id, &operation_id(), &request_digest())
         .expect("permit");
     clock.set(DEADLINE);
     let released = service
-        .release_execution(&decision_id)
+        .release_execution(permit)
         .expect("release at the deadline");
     assert_eq!(released.state.phase, DecisionPhase::Expired);
     assert!(!released.state.permit_issued);
     assert_eq!(released.state.ended_at_ms, Some(DEADLINE));
     assert_eq!(released.state.notice, DecisionNotice::Owed);
+}
+
+#[test]
+fn recovery_settles_an_outstanding_permit_without_its_object() {
+    let store = Arc::new(CountingStore::default());
+    let clock = ManualClock::at(HELD_AT);
+    let rendering = rendering();
+    let first = service_over(&store, &clock);
+    let released = approved_subject(&first, &rendering, "subject:released");
+    let refused = approved_subject(&first, &rendering, "subject:refused");
+    // The executor is authorized for both and stops (a restart) before it
+    // commits or settles either: the permit objects are gone, the permits
+    // stay outstanding.
+    for decision_id in [&released, &refused] {
+        let _permit = first
+            .authorize_execution(decision_id, &operation_id(), &request_digest())
+            .expect("permit");
+    }
+    drop(first);
+
+    clock.set(DEADLINE + 1);
+    let second = service_over(&store, &clock);
+    assert_eq!(
+        refusal(
+            &second
+                .authorize_execution(&released, &operation_id(), &request_digest())
+                .expect_err("nothing new runs after the deadline")
+        ),
+        DecisionRefusal::SettlementOwed
+    );
+    // Settled first: its own record shows no commit under either permit, so
+    // it releases one and refuses the other, by id.
+    let expired = second
+        .release_after_restart(&released)
+        .expect("release the outstanding permit");
+    assert_eq!(expired.state.phase, DecisionPhase::Expired);
+    assert!(!expired.state.permit_issued);
+    let closed = second
+        .close_refused_after_restart(&refused, &reference("quota_exceeded"))
+        .expect("refuse the outstanding permit");
+    assert_eq!(closed.state.phase, DecisionPhase::ExecutionRefused);
+    assert!(!closed.state.permit_issued);
+    assert_eq!(closed.execution_refusal, Some(reference("quota_exceeded")));
+    for settled in [&expired, &closed] {
+        assert_eq!(settled.state.notice, DecisionNotice::Owed);
+    }
 }
 
 #[test]

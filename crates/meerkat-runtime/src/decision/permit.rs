@@ -8,25 +8,57 @@ use meerkat_core::approval::decision::{
 /// The machine's authorization to execute one approved decision's held
 /// request.
 ///
-/// Only [`DurableDecisionService::authorize_execution`] mints one, and only
-/// for an approved decision, with the held binding, before its deadline:
-/// the decision's machine records the permit as outstanding, and the
-/// decision then waits for its settlement instead of expiring. The
-/// operation's owner commits under it at most once and settles it:
-/// [`DurableDecisionService::record_executed`] when the commit landed,
-/// [`DurableDecisionService::release_execution`] when it did not, or
-/// [`DurableDecisionService::close_refused`] for a permanent refusal.
+/// Only [`DurableDecisionService::authorize_execution`] mints one, from the
+/// machine's authorization of an approved decision with the held binding
+/// before its deadline: the decision's machine records the permit as
+/// outstanding, and the decision then waits for its settlement instead of
+/// expiring. The operation's owner commits under it at most once and
+/// settles it: [`DurableDecisionService::record_executed`] when the commit
+/// landed, [`DurableDecisionService::release_execution`] when it did not,
+/// or [`DurableDecisionService::close_refused`] for a permanent refusal.
+/// The last two consume the permit, so a settled permit can never pass
+/// [`Self::binds`] or [`Self::admits_commit_at`] again.
 ///
 /// It carries the held binding, which an owner's commit compares with its
-/// own, the deadline, at or after which a commit refuses it
-/// ([`Self::admits_commit_at`]), and the decided consent the commit seals.
-/// It is not serializable: it never leaves the process that was granted it.
+/// own ([`Self::binds`]), the deadline, at or after which a commit refuses
+/// it ([`Self::admits_commit_at`]), and the decided consent the commit
+/// seals. It is not serializable: it never leaves the process that was
+/// granted it.
+///
+/// # The executor's obligations
+///
+/// The machine records that a permit is outstanding, not who holds it or
+/// whether a commit landed under it. Its owner, the executor, keeps these:
+///
+/// - **One executor per decision.** One executor (one process) holds the
+///   permit of a decision at a time. Authorizing again before the deadline
+///   answers an equal permit for that executor's own retry, never for a
+///   second executor.
+/// - **Never release after a commit.** Once a commit landed under the
+///   permit, its only settlement is `record_executed`, accepted at any
+///   time. A release or a refusal after a commit would let the decision
+///   expire, or end refused, while the committed operation seals its
+///   consent.
+/// - **Settle first on recovery.** After a restart, or after a settlement
+///   call that failed, the permit object is gone and the decision still
+///   waits. Before anything else for that decision, the executor reads its
+///   own record of the operation: a landed commit is recorded with
+///   `record_executed`; only when no commit landed does it release
+///   ([`DurableDecisionService::release_after_restart`]) or refuse
+///   ([`DurableDecisionService::close_refused_after_restart`]) the
+///   outstanding permit.
+///
+/// A dropped permit leaves its decision waiting (it never expires) until
+/// the executor settles it as above.
 ///
 /// [`DurableDecisionService::authorize_execution`]: super::DurableDecisionService::authorize_execution
 /// [`DurableDecisionService::record_executed`]: super::DurableDecisionService::record_executed
 /// [`DurableDecisionService::release_execution`]: super::DurableDecisionService::release_execution
 /// [`DurableDecisionService::close_refused`]: super::DurableDecisionService::close_refused
+/// [`DurableDecisionService::release_after_restart`]: super::DurableDecisionService::release_after_restart
+/// [`DurableDecisionService::close_refused_after_restart`]: super::DurableDecisionService::close_refused_after_restart
 #[derive(Debug, PartialEq, Eq)]
+#[must_use = "an issued permit waits for its settlement"]
 pub struct DecisionExecutionPermit {
     decision_id: DecisionId,
     operation_id: DecisionOperationId,
@@ -50,6 +82,11 @@ impl DecisionExecutionPermit {
             deadline_at_ms,
             consent,
         }
+    }
+
+    /// Consume the permit for its settlement: the decision it settles.
+    pub(super) fn into_decision_id(self) -> DecisionId {
+        self.decision_id
     }
 
     /// The decision this permit executes.

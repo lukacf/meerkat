@@ -231,6 +231,9 @@ owner then executes the held request at most once.
   released (the decision stays approved) or permanently refused. A permit
   outstanding at the deadline holds the decision until its settlement. Without
   one, an approved decision expires at its deadline and never runs after it.
+  The executor keeps three obligations the machine cannot see: one executor
+  per decision; after a commit, the only settlement is recording it; and after
+  a restart it settles first, from its own record of the operation.
 - **One notice.** An ended decision whose requester can be told owes it one
   notice, settled by its delivery receipt.
 

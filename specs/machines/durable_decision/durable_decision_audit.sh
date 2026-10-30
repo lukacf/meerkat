@@ -64,6 +64,15 @@
 #   - a release that leaves the permit outstanding (AuditReleaseClearsPermit);
 #   - a deadline observation that drops the outstanding permit, orphaning
 #     the owner's commit (AuditCommittedIsSettleable).
+# The executor's obligations are assumed, not checked: the machine records
+# that a permit is outstanding, not who holds it or whether a commit landed.
+# The audit models one executor per decision (one owner drives the permit),
+# that never releases or refuses a permit after its commit (it only records
+# the execution), and that settles first after a restart (it reads its own
+# commit record before releasing). AuditCommittedIsSettleable holds only
+# under them: a release after the commit orphans it (hold, approve,
+# authorize, commit, release). DecisionExecutionPermit and the settlement
+# calls of DurableDecisionService state the same obligations.
 # An anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.

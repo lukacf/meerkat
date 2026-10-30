@@ -82,6 +82,17 @@
 \* property into a copy of the generated model and requires TLC to refuse
 \* each with that property.
 \*
+\* The executor's obligations. The machine records that a permit is
+\* outstanding, not who holds it or whether a commit landed under it. The
+\* owner wrappers below encode what the operation's owner must keep, and the
+\* audit assumes it: one executor per decision (one owner drives the permit
+\* and AuditCommit); never a release or a refusal after the commit (only the
+\* execution is recorded); and settlement first after a restart (the owner
+\* reads its own commit record before it releases). AuditCommittedIsSettleable
+\* holds only under them: a release after the commit orphans it (hold,
+\* approve, authorize, commit, release). DecisionExecutionPermit and the
+\* settlement calls of DurableDecisionService state the same obligations.
+\*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* durable_decision_audit.sh:
 \*   specs/machines/durable_decision/durable_decision_audit.sh 6 --mutants

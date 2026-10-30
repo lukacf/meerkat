@@ -226,12 +226,17 @@ them.
   an expiry it observes), lists (projecting an expiry it does not record),
   and pages the owed and due indexes as stored. `authorize_execution`
   mints a `DecisionExecutionPermit` (the held binding, the deadline, the
-  decided consent) only for an approved decision before its deadline, and the
-  owner settles it with `record_executed` (accepted at any time),
-  `release_execution` or `close_refused`. A permit outstanding at the deadline
-  holds the decision until it is settled; without one an approved decision
-  expires at its deadline and never runs after it. Every ended decision of a
-  routable requester owes one notice, settled by `settle_notice`. An owner
+  decided consent) from the machine's authorization alone, only for an
+  approved decision before its deadline. Its one executor settles it with
+  `record_executed` (accepted at any time, and the only settlement after a
+  commit), `release_execution` or `close_refused`; the last two consume the
+  permit. After a restart the executor settles first: it reads its own record
+  of the operation, then records the commit, or settles the outstanding
+  permit by id with `release_after_restart` or `close_refused_after_restart`.
+  A permit outstanding at the deadline holds the decision until it is
+  settled; without one an approved decision expires at its deadline and
+  never runs after it. Every ended decision of a routable requester owes one
+  notice, settled by `settle_notice`. An owner
   narrowed for a candidate launch reads and writes nothing.
 
 - `meerkat-store`: `SqliteDecisionStore` keeps a persistence's decisions in

@@ -1171,18 +1171,48 @@ impl DurableDecisionService {
         issued_permit(&row, &authorization)
     }
 
-    /// Settle an outstanding permit under which no commit was made (a
-    /// retryable refusal, or a crash before the commit): the decision stays
-    /// approved, or, at or after its deadline, records its expiry.
+    /// Settle `permit`, under which no commit was made (a retryable refusal
+    /// of the attempt): the decision stays approved, or, at or after its
+    /// deadline, records its expiry. The call consumes the permit, so a
+    /// released permit can never be committed under.
+    ///
+    /// Never after a commit: once a commit landed under the permit, its only
+    /// settlement is [`Self::record_executed`]. One executor per decision
+    /// settles its own permit (see the obligations on
+    /// [`DecisionExecutionPermit`]).
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `NotAuthorized` or `NotApproved`;
     /// [`DecisionError::CandidateLaunch`]; store, clock and unreadable-row
-    /// failures.
+    /// failures. A failed call may leave the permit outstanding: the
+    /// executor settles it with [`Self::release_after_restart`] once its own
+    /// record shows no commit.
     pub fn release_execution(
+        &self,
+        permit: DecisionExecutionPermit,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.release(&permit.into_decision_id())
+    }
+
+    /// Settle the outstanding permit of `decision_id` that the executor no
+    /// longer holds (after a restart, or after a settlement call that
+    /// failed), as [`Self::release_execution`] does.
+    ///
+    /// Settle first: before anything else for the decision, the executor
+    /// reads its own record of the operation, and calls this only when no
+    /// commit landed under the permit; a landed commit is recorded with
+    /// [`Self::record_executed`].
+    ///
+    /// # Errors
+    /// As [`Self::release_execution`].
+    pub fn release_after_restart(
         &self,
         decision_id: &DecisionId,
     ) -> Result<StoredDecision, DecisionError> {
+        self.release(decision_id)
+    }
+
+    fn release(&self, decision_id: &DecisionId) -> Result<StoredDecision, DecisionError> {
         self.commit_row(decision_id, |loaded, now_ms| {
             let (effects, state) =
                 transition(loaded, DurableDecisionInput::ReleaseExecution { now_ms })?;
@@ -1193,7 +1223,8 @@ impl DurableDecisionService {
     /// Settle a commit of the held request under the outstanding permit:
     /// the decision is executed. Accepted at any time, the deadline
     /// included; the same settlement again changes nothing, so an owner's
-    /// normal path and its settlement after a crash are one call.
+    /// normal path and its settlement after a crash are one call. It is the
+    /// only settlement of a permit a commit landed under.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `BindingMismatch`, `NotAuthorized` or
@@ -1216,16 +1247,52 @@ impl DurableDecisionService {
         })
     }
 
-    /// Close an approved decision on the owner's typed permanent refusal of
-    /// the held request: the decision ends refused and owes its notice. At
-    /// or after the deadline with no permit outstanding, the approval has
-    /// lapsed: the expiry is recorded instead.
+    /// Close the approved decision of `permit` on the owner's typed
+    /// permanent refusal of the held request, under which no commit was
+    /// made: the decision ends refused and owes its notice. The call
+    /// consumes the permit. At or after the deadline with no permit
+    /// outstanding, the approval has lapsed: the expiry is recorded instead.
+    ///
+    /// Never after a commit: once a commit landed under the permit, its only
+    /// settlement is [`Self::record_executed`]. One executor per decision
+    /// settles its own permit (see the obligations on
+    /// [`DecisionExecutionPermit`]).
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `NotApproved` or `Expired`;
     /// [`DecisionError::CandidateLaunch`]; store, clock and unreadable-row
-    /// failures.
+    /// failures. A failed call may leave the permit outstanding: the
+    /// executor settles it with [`Self::close_refused_after_restart`] once
+    /// its own record shows no commit.
     pub fn close_refused(
+        &self,
+        permit: DecisionExecutionPermit,
+        refusal: &DecisionReference,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.close(&permit.into_decision_id(), refusal)
+    }
+
+    /// Close the approved decision `decision_id` on the owner's permanent
+    /// refusal when the executor no longer holds its permit (after a
+    /// restart, or after a settlement call that failed), as
+    /// [`Self::close_refused`] does.
+    ///
+    /// Settle first: before anything else for the decision, the executor
+    /// reads its own record of the operation, and calls this only when no
+    /// commit landed; a landed commit is recorded with
+    /// [`Self::record_executed`].
+    ///
+    /// # Errors
+    /// As [`Self::close_refused`].
+    pub fn close_refused_after_restart(
+        &self,
+        decision_id: &DecisionId,
+        refusal: &DecisionReference,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.close(decision_id, refusal)
+    }
+
+    fn close(
         &self,
         decision_id: &DecisionId,
         refusal: &DecisionReference,

@@ -447,8 +447,10 @@ commit is under `.github/` or `CHANGELOG.md`. Every published binary must
 embed the release version in either case.
 
 This CI-artifact exception does not bypass the semver gate. An ordinary
-explicit-`release_tag` package recovery still consumes main-push readiness
-evidence. When this gate applies, a manual dispatch with neither `release_tag`
+explicit-`release_tag` package recovery still consumes push readiness
+evidence (`meerkat-semver-attestation-main-<tree>`, from `main` or the
+release branch of the tag's version). When this gate applies, a manual
+dispatch with neither `release_tag`
 nor `semver_evidence_job_id` runs `make semver-breaks` directly. The separate
 completed-measurement recovery path requires `release_tag`,
 `semver_evidence_run_id`, and `semver_evidence_job_id`; its verifier checks

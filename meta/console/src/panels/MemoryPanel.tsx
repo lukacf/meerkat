@@ -43,6 +43,7 @@ import {
   type SelectOption,
   type Tone,
 } from "../../../packages/console-components/src/panel-kit";
+import { accessActionLabel, isKnownAccessAction } from "../lib/access-actions";
 import { describeMemoryTimelineEvent } from "../lib/adapters";
 import { describeMemoryEventForPeople } from "../lib/memory-event-words";
 import { errorMessage, jsonRpcErrorCode } from "../lib/errors";
@@ -908,7 +909,7 @@ export interface VerdictInputs {
     floors?: { records?: number; bytes?: number };
   } | null;
   overviewDenied?: boolean;
-  /// Names a scope in the tile copy ("Support Triage", "Team ops-team").
+  /// Names a scope in the tile copy ("Support Triage", "Ops team").
   /// Defaults to overviewScopeName without an agent directory.
   scopeName?: (scope: MemoryScopeOverview) => string;
   now?: number;
@@ -941,7 +942,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     summary: "Not checked automatically",
     lines: [
       "The same memory should not be injected into an agent again and again.",
-      "This console cannot check it automatically. The injection history on the Knowledge tab marks repeated injections.",
+      "This console cannot check it automatically. On the Knowledge tab, the list of memory given to agents marks repeats.",
     ],
     targetTab: "knowledge",
   });
@@ -954,7 +955,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
       "Memory written in an untrusted session stays quarantined.",
       inputs.recordsDenied
         ? RECORDS_NOT_READABLE
-        : "This console cannot check it automatically. The Pipeline tab marks proposals from tainted sessions.",
+        : "This console cannot check it automatically. The Pipeline tab marks proposals from untrusted sessions.",
     ],
     targetTab: "pipeline",
   });
@@ -1503,8 +1504,9 @@ export function countFramesBehind(live: ConsoleFrame[], frozen: ConsoleFrame[]):
   return live.filter((frame) => !frozenIds.has(frame.id)).length;
 }
 
-/// "State here" pivot payload for a live memory frame: the durable record the
-/// event talks about, if the payload names one.
+/// "Open record" pivot payload for a live memory frame (the Signals rail's
+/// "Open in Memory" uses the same): the durable record the event talks about,
+/// if the payload names one.
 export function memoryFramePivot(
   frame: Pick<ConsoleFrame, "event" | "data">,
 ): { recordId: string; realm?: string } | null {
@@ -1546,10 +1548,19 @@ function quarantineRationaleProblem(rationale: string): string | null {
 
 /// A message about a quarantine decision: a plain sentence, plus the record
 /// or promotion IDs it concerns, which render as copyable technical IDs
-/// after the sentence instead of inside it.
+/// after the sentence instead of inside it. `title` is the sentence's
+/// tooltip: the grant names behind an access refusal.
 export interface QuarantineNotice {
   text: string;
   ids: Array<{ label: string; value: string }>;
+  title?: string;
+}
+
+/// A record status said in a sentence ("discarded", "replaced"), for the
+/// statuses a refusal reports.
+function statusInSentence(status: unknown): string {
+  const known = STATUS_WORD[String(status) as MemoryRecordStatus["status"]];
+  return known ? known.toLowerCase() : humanizeEnum(String(status)).toLowerCase();
 }
 
 /// What a quarantine decision did. The panel then opens the record it left
@@ -1560,7 +1571,7 @@ function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): Quaran
   switch (result.outcome) {
     case "released":
       return {
-        text: "Released. A new active record holds this memory at observed trust, marked as once quarantined; the quarantined original is kept as tombstoned.",
+        text: "Released. A new active record holds this memory at observed trust, marked as once quarantined; the quarantined original is kept, marked as discarded.",
         ids: successorIds,
       };
     case "already_released":
@@ -1570,8 +1581,8 @@ function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): Quaran
       return {
         text:
           invalidated.length === 0
-            ? "Tombstoned; it will never be recalled."
-            : `Tombstoned; it will never be recalled. ${
+            ? "Discarded; it will never be recalled."
+            : `Discarded; it will never be recalled. ${
                 invalidated.length === 1
                   ? "The promotion waiting on it was cancelled"
                   : `The ${invalidated.length} promotions waiting on it were cancelled`
@@ -1580,11 +1591,15 @@ function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): Quaran
       };
     }
     case "already_tombstoned":
-      return { text: "Already tombstoned; nothing changed.", ids: [] };
+      return { text: "Already discarded; nothing changed.", ids: [] };
     default:
       return { text: `Decided: ${humanizeEnum(String(result.outcome)).toLowerCase()}.`, ids: [] };
   }
 }
+
+/// The grants a quarantine decision needs, for the refusal's tooltip.
+const QUARANTINE_DECISION_GRANTS =
+  "Grants: memory.quarantine.review, agent.view and agent.memory.read, plus agent.memory.write to release or agent.memory.delete to discard (tombstone)";
 
 /// A failed quarantine decision in words: the typed refusal reasons of
 /// meta/memory/quarantine/decide, the access denial, or the raw error.
@@ -1592,8 +1607,9 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
   const rpcError = (error as { rpcError?: { code?: unknown; data?: unknown } } | null)?.rpcError;
   if (rpcError?.code === -32030) {
     return {
-      text: "No grant. Deciding needs the quarantine review grant, plus view and memory read on this agent, and memory write to release or delete to tombstone.",
+      text: "No grant. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
       ids: [],
+      title: QUARANTINE_DECISION_GRANTS,
     };
   }
   const data = (rpcError?.data ?? null) as Record<string, unknown> | null;
@@ -1612,14 +1628,14 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
               text: "Refused: it was already released.",
               ids: [{ label: "Released as", value: String(data.released_as) }],
             }
-          : { text: `Refused: the record is ${String(data.status)}, not quarantined.`, ids: [] };
+          : { text: `Refused: the record is ${statusInSentence(data.status)}, not quarantined.`, ids: [] };
       case "gate_pending": {
         const expires =
           typeof data.expires_at_ms === "number" && data.expires_at_ms > 0
             ? `, or wait until it expires on ${formatAbsoluteTime(data.expires_at_ms)}`
             : "";
         return {
-          text: `Refused: a promotion of this record is waiting for approval. Decide it in Approvals${expires}. Tombstoning the record instead cancels that promotion.`,
+          text: `Refused: a promotion of this record is waiting for approval. Decide it in Approvals${expires}. Discarding the record instead cancels that promotion.`,
           ids: data.pending_id ? [{ label: "Waiting promotion", value: String(data.pending_id) }] : [],
         };
       }
@@ -1630,12 +1646,12 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
         };
       case "secret_detected":
         return {
-          text: `Refused: the content matches the ${String(data.class)} secret pattern; tombstone is the only exit.`,
+          text: `Refused: the content matches the ${String(data.class)} secret pattern; it can only be discarded.`,
           ids: [],
         };
       case "stale_update":
         return {
-          text: `Refused: the version this record replaces is ${String(data.prior_status)}; tombstone it instead.`,
+          text: `Refused: the version this record replaces is ${statusInSentence(data.prior_status)}; discard it instead.`,
           ids: data.prior ? [{ label: "Replaced version", value: String(data.prior) }] : [],
         };
       default:
@@ -1698,15 +1714,26 @@ export function trustChipTone(trust: MemoryTrust | undefined): Tone {
 
 const STATUS_WORD: Record<MemoryRecordStatus["status"], string> = {
   active: "Active",
-  superseded: "Superseded",
+  superseded: "Replaced",
   quarantined: "Quarantined",
-  tombstoned: "Tombstoned",
+  tombstoned: "Discarded",
 };
 
-/// A record status in one word: "Active", "Superseded".
+/// A record status in one word: "Active", "Replaced". The store's own
+/// words (superseded, tombstoned) stay in the tooltip, statusTitle.
 export function statusWord(status: MemoryRecordStatus | undefined): string {
   if (!status) return "Unknown";
   return STATUS_WORD[status.status] ?? humanizeEnum(status.status);
+}
+
+const STATUS_TITLE: Partial<Record<MemoryRecordStatus["status"], string>> = {
+  superseded: "Superseded: a newer version replaced this record.",
+  tombstoned: "Tombstoned: kept only as a deletion marker; it is never recalled.",
+};
+
+/// The tooltip of a status word: the store's term for it and what it means.
+export function statusTitle(status: MemoryRecordStatus | undefined): string | undefined {
+  return status ? STATUS_TITLE[status.status] : undefined;
 }
 
 export function statusChipTone(status: MemoryRecordStatus | undefined): Tone {
@@ -1772,12 +1799,22 @@ export function scopeKeyOf(scope: MemoryRecordScope): string {
   }
 }
 
-/// The owner of a scope by name: the agent's display name, the team or
-/// operator key as given (capitals are never invented), "Everyone".
+/// A team named from its key: "ops-team" reads "Ops team", "research" reads
+/// "Research team". The key itself stays the tooltip.
+export function teamName(key: string): string {
+  const words = humanizeEnum(key);
+  if (!words) return "Team";
+  return /\bteam$/i.test(words) ? words : `${words} team`;
+}
+
+/// The owner of a scope by name: the agent's display name, the team's name
+/// from its key, the operator key as given, "Everyone".
 export function scopeOwnerName(kind: string, key: string, nameOf: NameOf = stripAgentKeyPrefix): string {
   switch (kind) {
     case "identity":
       return nameOf(key) || key;
+    case "mob":
+      return teamName(key);
     case "realm":
       return "Everyone";
     default:
@@ -1786,11 +1823,13 @@ export function scopeOwnerName(kind: string, key: string, nameOf: NameOf = strip
 }
 
 /// A records group heading: the agent's name, or the kind of memory and
-/// its key ("Team memory · ops-team").
+/// whose it is ("Team memory · Ops team").
 export function scopeHeading(scope: MemoryRecordScope, nameOf: NameOf = stripAgentKeyPrefix): string {
   switch (scope.scope) {
     case "identity":
       return nameOf(scope.identity) || scope.identity;
+    case "mob":
+      return joinMeta(scopeKindLabel(scope.scope), teamName(scope.mob));
     case "realm":
       return "Shared memory";
     default:
@@ -1799,13 +1838,13 @@ export function scopeHeading(scope: MemoryRecordScope, nameOf: NameOf = stripAge
 }
 
 /// A store-totals scope named in a sentence: "Support Triage",
-/// "Team ops-team", "Shared memory".
+/// "Research team", "Shared memory".
 export function overviewScopeName(scope: MemoryScopeOverview, nameOf: NameOf = stripAgentKeyPrefix): string {
   switch (scope.scope_kind) {
     case "identity":
       return nameOf(scope.scope_key) || scope.scope_key;
     case "mob":
-      return `Team ${scope.scope_key}`;
+      return teamName(scope.scope_key);
     case "operator":
       return `Operator ${scope.scope_key}`;
     case "realm":
@@ -1815,7 +1854,7 @@ export function overviewScopeName(scope: MemoryScopeOverview, nameOf: NameOf = s
   }
 }
 
-/// A scope's record counts in words: "3 active, 1 superseded".
+/// A scope's record counts in words: "3 active, 1 replaced".
 export function scopeCountsText(counts: {
   active?: number;
   quarantined?: number;
@@ -1824,19 +1863,19 @@ export function scopeCountsText(counts: {
 }): string {
   const parts = [`${counts.active ?? 0} active`];
   if ((counts.quarantined ?? 0) > 0) parts.push(`${counts.quarantined} quarantined`);
-  if ((counts.superseded ?? 0) > 0) parts.push(`${counts.superseded} superseded`);
-  if ((counts.tombstoned ?? 0) > 0) parts.push(`${counts.tombstoned} tombstoned`);
+  if ((counts.superseded ?? 0) > 0) parts.push(`${counts.superseded} replaced`);
+  if ((counts.tombstoned ?? 0) > 0) parts.push(`${counts.tombstoned} discarded`);
   return parts.join(", ");
 }
 
-/// Where a proposal or promotion goes: an agent by name, "ops-team (team)",
-/// "everyone".
+/// Where a proposal or promotion goes: an agent by name, "Ops team",
+/// "admin@example.test (operator)", "everyone".
 export function targetName(kind: string, key: string, nameOf: NameOf = stripAgentKeyPrefix): string {
   switch (kind) {
     case "identity":
       return nameOf(key) || key;
     case "mob":
-      return `${key} (team)`;
+      return teamName(key);
     case "operator":
       return `${key} (operator)`;
     case "realm":
@@ -1892,6 +1931,16 @@ export function reviewVerdictLabel(verdict: string): string {
   return REVIEW_VERDICT_LABEL[verdict] ?? humanizeEnum(verdict);
 }
 
+/// The store's own words in a humanized label, said plainly: "tombstoned"
+/// reads "discarded", "superseded" reads "replaced".
+function plainStoreWords(words: string): string {
+  return words
+    .replace(/\btombstoned\b/g, "discarded")
+    .replace(/\btombstone\b/g, "discard")
+    .replace(/\bsuperseded\b/g, "replaced")
+    .replace(/\bsupersede\b/g, "replace");
+}
+
 /// A dream run's non-zero verdict counters as chips: "5 kept", "1
 /// quarantined". Counters about quarantine, blocks or dead weight warn.
 export function dreamVerdictChips(
@@ -1899,7 +1948,7 @@ export function dreamVerdictChips(
 ): Array<{ key: string; label: string; tone: Tone }> {
   return verdicts.map(([name, count]) => ({
     key: name,
-    label: `${count} ${humanizeEnum(name).toLowerCase()}`,
+    label: `${count} ${plainStoreWords(humanizeEnum(name).toLowerCase())}`,
     tone: /quarantin|blocked|dead|reject/.test(name) ? "warn" : "neutral",
   }));
 }
@@ -1909,8 +1958,8 @@ const OP_KIND_DONE: Record<string, string> = {
   promote: "promoted",
   merge: "merged",
   quarantine: "quarantined",
-  supersede: "superseded",
-  tombstone: "tombstoned",
+  supersede: "replaced",
+  tombstone: "discarded",
   update: "updated",
   release: "released",
 };
@@ -1921,12 +1970,13 @@ export function dreamOpKindsDisplay(opKinds: Record<string, number> | undefined)
   return Object.entries(opKinds)
     .filter(([, count]) => typeof count === "number" && count > 0)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([kind, count]) => `${count} ${OP_KIND_DONE[kind] ?? humanizeEnum(kind).toLowerCase()}`)
+    .map(([kind, count]) => `${count} ${OP_KIND_DONE[kind] ?? plainStoreWords(humanizeEnum(kind).toLowerCase())}`)
     .join(", ");
 }
 
 /// Whose memory a dream ran over, from its partition key
-/// ("identity:coordinator" reads "Coordinator").
+/// ("identity:coordinator" reads "Coordinator", "mob:ops-team" reads
+/// "Ops team").
 export function partitionName(partition: string | undefined, nameOf: NameOf = stripAgentKeyPrefix): string {
   if (!partition) return "";
   const separator = partition.indexOf(":");
@@ -1940,7 +1990,7 @@ export function partitionName(partition: string | undefined, nameOf: NameOf = st
     case "member":
       return nameOf(partition) || key;
     case "mob":
-      return `${key} (team)`;
+      return teamName(key);
     case "operator":
       return `${key} (operator)`;
     default:
@@ -1962,6 +2012,26 @@ export function knowledgeSegmentTitle(segment: KnowledgeSegment, agentName: stri
     default:
       return segment.label;
   }
+}
+
+/// A permission the reader lacks, as a sentence: "You need permission to
+/// review quarantined memory". The grant's own name is the tooltip
+/// (grantTitle), never the sentence.
+export function needsGrantText(grant: string): string {
+  if (!isKnownAccessAction(grant)) return "You need a permission you do not have";
+  const words = accessActionLabel(grant);
+  return `You need permission to ${words.charAt(0).toLowerCase()}${words.slice(1)}`;
+}
+
+/// The tooltip under a needsGrantText sentence: the grant's name.
+export function grantTitle(grant: string): string {
+  return `Grant: ${grant}`;
+}
+
+/// A realm named in a line: "ops space". Realms are the separate stores of
+/// state a gateway can serve; the word "realm" stays the tooltip.
+export function realmSpaceName(realm: string): string {
+  return `${realm} space`;
 }
 
 export const __memoryTest = {
@@ -2031,10 +2101,12 @@ export const __memoryTest = {
   trustDisplay,
   trustChipTone,
   statusWord,
+  statusTitle,
   statusChipTone,
   authorDisplay,
   scopeKindLabel,
   scopeKeyOf,
+  teamName,
   scopeOwnerName,
   scopeHeading,
   overviewScopeName,
@@ -2049,6 +2121,9 @@ export const __memoryTest = {
   dreamOpKindsDisplay,
   partitionName,
   knowledgeSegmentTitle,
+  needsGrantText,
+  grantTitle,
+  realmSpaceName,
 };
 
 // ── Presentational pieces ─────────────────────────────────────────────────
@@ -2077,14 +2152,17 @@ function MetaLine({ parts }: { parts: React.ReactNode[] }): React.JSX.Element {
 }
 
 /// Where a proposal or promotion goes, with the agent's name when it is
-/// an agent's memory.
+/// an agent's memory and the team's name (its key in the tooltip) when it
+/// is a team's.
 function ScopeTarget({ kind, scopeKey }: { kind: string; scopeKey: string }): React.JSX.Element {
   if (kind === "identity") return <AgentName id={scopeKey} />;
+  if (kind === "mob") return <span title={scopeKey}>{targetName(kind, scopeKey)}</span>;
   return <>{targetName(kind, scopeKey)}</>;
 }
 
 /// The facts line under a record title: its kind in words, then the trust
-/// and status chips. Rows leave out "Active", the default.
+/// and status chips. Rows leave out "Active", the default. A replaced
+/// record's Biography links the newer version.
 function RecordFacts({
   record,
   showActive = false,
@@ -2102,16 +2180,14 @@ function RecordFacts({
       <span className="memory-facts__kind">{kindLabel(record.kind)}</span>
       <Chip tone={trustChipTone(record.trust)}>{trustDisplay(record.trust)}</Chip>
       {status && !hideStatus && (showActive || status !== "active") ? (
-        <Chip tone={statusChipTone(record.status)}>{statusWord(record.status)}</Chip>
+        <Chip tone={statusChipTone(record.status)} title={statusTitle(record.status)}>
+          {statusWord(record.status)}
+        </Chip>
       ) : null}
-      {status === "superseded" && !hideStatus ? (
-        onOpenNewer ? (
-          <button type="button" className="memory-link" onClick={onOpenNewer}>
-            Open the newer version
-          </button>
-        ) : (
-          <span className="memory-facts__note">replaced by a newer version</span>
-        )
+      {status === "superseded" && !hideStatus && onOpenNewer ? (
+        <button type="button" className="memory-link" onClick={onOpenNewer}>
+          Open the newer version
+        </button>
       ) : null}
     </span>
   );
@@ -2152,7 +2228,7 @@ function RecordLink({
 function QuarantineNoticeText({ notice }: { notice: QuarantineNotice }): React.JSX.Element {
   return (
     <>
-      {notice.text}
+      {notice.title ? <span title={notice.title}>{notice.text}</span> : notice.text}
       {notice.ids.length > 0 ? (
         <span className="memory-notice-ids">
           {notice.ids.map((id) => (
@@ -2263,7 +2339,8 @@ function QuarantineDecisionBlock({
       <div className="memory-detail__content memory-review__body">
         <Notice tone="warn">
           Release makes this an active record in {owner} at observed trust. Because it was
-          quarantined, it can never reach verified trust. Tombstone discards it for good.
+          quarantined, it can never reach verified trust. Discard marks it deleted for good, so
+          it is never recalled.
         </Notice>
         <label className="memory-review__label" htmlFor={rationaleId}>
           Rationale, optional and kept in the audit log
@@ -2273,7 +2350,7 @@ function QuarantineDecisionBlock({
           className="cc-input memory-quarantine__rationale"
           aria-label="Rationale"
           data-testid="memory-quarantine-rationale"
-          placeholder="Why you release or tombstone it"
+          placeholder="Why you release or discard it"
           value={rationale}
           disabled={pending !== null}
           onChange={(event) => setRationale(event.target.value)}
@@ -2289,10 +2366,11 @@ function QuarantineDecisionBlock({
           <Button
             variant="danger"
             data-testid="memory-quarantine-tombstone"
+            title="Tombstone: keeps only a deletion marker; the record is never recalled."
             disabled={blocked}
             onClick={() => void decide("tombstone")}
           >
-            {pending === "tombstone" ? "Tombstoning…" : "Tombstone"}
+            {pending === "tombstone" ? "Discarding…" : "Discard"}
           </Button>
         </div>
         {notice ? (
@@ -2469,33 +2547,23 @@ function BiographyView({
                     label: "Evidence",
                     value: (
                       <span className="memory-evidence">
-                        {evidence.map((ref, index) => {
-                          const details = evidenceDetails(ref);
-                          return (
-                            <button
-                              type="button"
-                              className="memory-evidence__ref"
-                              key={`ev-${index}`}
-                              data-testid={`memory-evidence:${index}`}
-                              onClick={() => void openEvidence(ref, index)}
-                              disabled={!onLoadEvidence}
-                              title={onLoadEvidence ? "Open the conversation" : undefined}
-                            >
-                              <span className="memory-evidence__label">
-                                {evidenceDisplay(ref, conversationWith)}
-                              </span>
-                              {ref.session_id || details ? (
-                                <span className="memory-evidence__meta">
-                                  {ref.session_id ? (
-                                    <TechnicalId value={ref.session_id} copy={false} />
-                                  ) : null}
-                                  {ref.session_id && details ? " · " : null}
-                                  {details}
-                                </span>
-                              ) : null}
-                            </button>
-                          );
-                        })}
+                        {evidence.map((ref, index) => (
+                          // The session ID, generation and revision are in
+                          // the technical details below, not on the link.
+                          <button
+                            type="button"
+                            className="memory-evidence__ref"
+                            key={`ev-${index}`}
+                            data-testid={`memory-evidence:${index}`}
+                            onClick={() => void openEvidence(ref, index)}
+                            disabled={!onLoadEvidence}
+                            title={onLoadEvidence ? "Open the conversation" : undefined}
+                          >
+                            <span className="memory-evidence__label">
+                              {evidenceDisplay(ref, conversationWith)}
+                            </span>
+                          </button>
+                        ))}
                       </span>
                     ),
                   }
@@ -2561,7 +2629,9 @@ function BiographyView({
                 meta={
                   <>
                     <Chip tone={trustChipTone(entry.trust)}>{trustDisplay(entry.trust)}</Chip>
-                    <Chip tone={statusChipTone(entry.status)}>{statusWord(entry.status)}</Chip>
+                    <Chip tone={statusChipTone(entry.status)} title={statusTitle(entry.status)}>
+                      {statusWord(entry.status)}
+                    </Chip>
                     {current ? (
                       <span className="memory-chain__current">Current</span>
                     ) : (
@@ -2670,21 +2740,22 @@ function BiographyView({
               }
             : null,
           { label: "Author run", value: authorRun },
-          ...evidence.map((ref, index) =>
-            ref.session_id
+          // Each evidence reference's session, generation and revision: the
+          // evidence link above shows only the conversation and its messages.
+          ...evidence.map((ref, index) => {
+            const details = evidenceDetails(ref);
+            return ref.session_id || details
               ? {
                   label: evidence.length > 1 ? `Evidence ${index + 1}` : "Evidence",
                   value: (
                     <span className="memory-tech-list">
-                      <TechnicalId value={ref.session_id} label="Session ID" />
-                      {evidenceDetails(ref) ? (
-                        <span className="memory-tech-note">{evidenceDetails(ref)}</span>
-                      ) : null}
+                      {ref.session_id ? <TechnicalId value={ref.session_id} label="Session ID" /> : null}
+                      {details ? <span className="memory-tech-note">{details}</span> : null}
                     </span>
                   ),
                 }
-              : null,
-          ),
+              : null;
+          }),
           touchingRuns.length > 0
             ? {
                 label: "Dream runs",
@@ -2888,7 +2959,17 @@ function ScopeRow({
       onActivate={onOpen}
       lead={agent ? <AgentAvatar name={name} /> : <span className="memory-scope-mark" aria-hidden="true" />}
       title={agent ? <AgentName id={row.scopeKey} /> : name}
-      subtitle={joinMeta(scopeKindLabel(row.kind), multiRealm ? `realm ${row.realm}` : null, counts)}
+      // A team reads by its name; the key it is filed under is the tooltip.
+      titleAttr={row.kind === "mob" && row.scopeKey ? row.scopeKey : undefined}
+      subtitle={
+        <MetaLine
+          parts={[
+            scopeKindLabel(row.kind),
+            multiRealm ? <span title={`Realm ${row.realm}`}>{realmSpaceName(row.realm)}</span> : null,
+            counts,
+          ]}
+        />
+      }
       meta={
         <>
           {row.floorPressure ? (
@@ -2903,8 +2984,8 @@ function ScopeRow({
             segments={[
               { value: row.active, tone: "ok", label: `${row.active} active` },
               { value: row.quarantined, tone: "warn", label: `${row.quarantined} quarantined` },
-              { value: row.superseded, tone: "neutral", label: `${row.superseded} superseded` },
-              { value: row.tombstoned, tone: "locked", label: `${row.tombstoned} tombstoned` },
+              { value: row.superseded, tone: "neutral", label: `${row.superseded} replaced` },
+              { value: row.tombstoned, tone: "locked", label: `${row.tombstoned} discarded` },
             ]}
           />
           <span className="memory-size">{formatSize(row.bytes)}</span>
@@ -2915,15 +2996,17 @@ function ScopeRow({
 }
 
 /// Denied scopes vanish from the row-filtered listing; the one-row probes
-/// make them render as no-grant rows instead of silently not existing.
+/// make them render as no-grant rows instead of silently not existing. The
+/// missing grant reads as a sentence, its name the tooltip.
 function DeniedScopeRow({ kind }: { kind: "mob" | "operator" }): React.JSX.Element {
+  const grant = `${kind}.memory.read`;
   return (
     <ListRow
       className="memory-scope-row"
       testId={`memory-holdings-scope-denied:${kind}`}
       lead={<KitGlyph name="shield" className="memory-scope-lock" />}
       title={kind === "mob" ? "Team memory" : "Operator memory"}
-      subtitle={`Needs the ${kind}.memory.read grant`}
+      subtitle={<span title={grantTitle(grant)}>{needsGrantText(grant)}</span>}
       meta={<Chip tone="locked">No grant</Chip>}
     />
   );
@@ -3000,7 +3083,7 @@ function DreamRunRow({
           chips.length > 0 ? (
             <>
               {chips.map((chip) => (
-                <Chip key={chip.key} tone={chip.tone}>
+                <Chip key={chip.key} tone={chip.tone} title={chip.key}>
                   {chip.label}
                 </Chip>
               ))}
@@ -3243,10 +3326,10 @@ const SCOPE_FILTER_OPTIONS: SelectOption[] = [
 
 const STATUS_FILTER_OPTIONS: SelectOption[] = [
   { value: "", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "quarantined", label: "Quarantined" },
-  { value: "superseded", label: "Superseded" },
-  { value: "tombstoned", label: "Tombstoned" },
+  { value: "active", label: STATUS_WORD.active },
+  { value: "quarantined", label: STATUS_WORD.quarantined },
+  { value: "superseded", label: STATUS_WORD.superseded },
+  { value: "tombstoned", label: STATUS_WORD.tombstoned },
 ];
 
 const SORT_OPTIONS: SelectOption[] = [
@@ -3318,18 +3401,25 @@ export function MemoryPanel({
   const queryRecordsRef = React.useRef(onQueryRecords);
   queryRecordsRef.current = onQueryRecords;
   // Names people can type in the records search: each agent scope key the
-  // panel has seen, by its display name.
+  // panel has seen, by its display name, and each team key by the team name
+  // the headings show.
   const searchDirectory = useAgentDirectory();
   const searchCandidatesRef = React.useRef<Array<{ key: string; name: string }>>([]);
   searchCandidatesRef.current = React.useMemo(() => {
     const keys = new Set<string>();
+    const teams = new Set<string>();
     for (const record of records) {
       if (record.scope?.scope === "identity" && record.scope.identity) keys.add(record.scope.identity);
+      if (record.scope?.scope === "mob" && record.scope.mob) teams.add(record.scope.mob);
     }
     for (const scope of overview?.scopes ?? []) {
       if (scope.scope_kind === "identity" && scope.scope_key) keys.add(scope.scope_key);
+      if (scope.scope_kind === "mob" && scope.scope_key) teams.add(scope.scope_key);
     }
-    return Array.from(keys, (key) => ({ key, name: agentDisplayName(key, searchDirectory) }));
+    return [
+      ...Array.from(keys, (key) => ({ key, name: agentDisplayName(key, searchDirectory) })),
+      ...Array.from(teams, (key) => ({ key, name: teamName(key) })),
+    ];
   }, [records, overview, searchDirectory]);
   const pagerRef = React.useRef<ReturnType<typeof createMemoryRecordsPager> | null>(null);
   if (!pagerRef.current) {
@@ -3346,7 +3436,7 @@ export function MemoryPanel({
   const [latticeRunning, setLatticeRunning] = React.useState(false);
   const [knowledgeIdentity, setKnowledgeIdentity] = React.useState<string>("");
 
-  // A loaded Biography (e.g. via the SignalsRail "state here" pivot) lands
+  // A loaded Biography (e.g. via the Signals rail's "Open in Memory" pivot) lands
   // on the Records tab, where the detail pane lives. Keyed on the open
   // record, not the detail object: a Refresh of the same record writes a new
   // object and must not pull the operator back from another tab.
@@ -3540,7 +3630,7 @@ export function MemoryPanel({
     ? "Loading records"
     : recordsDenied
       ? "No access to records"
-      : joinMeta(recordCount, multiRealm ? plural(realms.length, "realm") : null);
+      : joinMeta(recordCount, multiRealm ? plural(realms.length, "space") : null);
   const tabs: Array<PanelTab<MemoryTab>> = MEMORY_TABS.map((candidate) => ({
     id: candidate,
     label: memoryTabLabel(candidate),
@@ -3653,7 +3743,9 @@ export function MemoryPanel({
                     </Button>
                   </span>
                 ) : (
-                  "Needs the memory.quarantine.review grant"
+                  <span title={grantTitle("memory.quarantine.review")}>
+                    {needsGrantText("memory.quarantine.review")}
+                  </span>
                 ),
               },
               {
@@ -3663,7 +3755,7 @@ export function MemoryPanel({
                   ? "No grant"
                   : `${proposals.length} waiting${
                       tainted > 0
-                        ? `, ${tainted} held because ${tainted === 1 ? "its source was" : "their sources were"} tainted`
+                        ? `, ${tainted} held because ${tainted === 1 ? "its source was" : "their sources were"} untrusted`
                         : ""
                     }`,
               },
@@ -3732,11 +3824,12 @@ export function MemoryPanel({
               }
             />
             {multiRealm ? (
+              // Realms read as spaces: the stores of state this gateway serves.
               <SelectField
-                label="Realm"
+                label="Space"
                 value={filter.realm || ""}
                 options={[
-                  { value: "", label: "All realms" },
+                  { value: "", label: "All spaces" },
                   ...realms.map((realm) => ({ value: realm, label: realm })),
                 ]}
                 testId="memory-filter:realm"
@@ -3764,7 +3857,8 @@ export function MemoryPanel({
         ) : null}
         {multiRealm && !filter.realm?.trim() ? (
           <Notice testId="memory-multi-realm-note">
-            This is one combined page across realms. Pick a realm to page through its records.
+            This page combines records from several spaces. Pick a space to page through its
+            records.
           </Notice>
         ) : null}
         {!loaded || pageLoading ? <LoadingState label="Loading records" rows={4} /> : null}
@@ -3826,10 +3920,16 @@ export function MemoryPanel({
                     <>
                       {group.scope.scope === "identity" ? (
                         <AgentName id={group.scope.identity} />
+                      ) : group.scope.scope === "mob" ? (
+                        <span title={group.scope.mob}>{scopeHeading(group.scope, nameOf)}</span>
                       ) : (
                         scopeHeading(group.scope, nameOf)
                       )}
-                      {multiRealm ? ` · ${group.scope.realm}` : null}
+                      {multiRealm ? (
+                        <span title={`Realm ${group.scope.realm}`}>
+                          {` · ${realmSpaceName(group.scope.realm)}`}
+                        </span>
+                      ) : null}
                     </>
                   }
                   count={group.records.length}
@@ -3917,14 +4017,14 @@ export function MemoryPanel({
           </>
         )}
         <PanelSection
-          label="Injection history"
+          label={<span title="Injection history">Memory given to agents</span>}
           count={!injectionsDenied && annotatedInjections.length > 0 ? annotatedInjections.length : null}
           testId="memory-knowledge-history"
         >
           {injectionsDenied ? (
-            <EmptyState inline kind="no-access" title="Injection history: no grant." />
+            <EmptyState inline kind="no-access" title="Memory given to agents: no grant." />
           ) : annotatedInjections.length === 0 ? (
-            <EmptyState inline title="Nothing has been injected yet." />
+            <EmptyState inline title="No memory has been given to an agent yet." />
           ) : (
             <RowList>
               {annotatedInjections.map(({ entry, dup }, index) => (
@@ -4008,7 +4108,7 @@ export function MemoryPanel({
         </ol>
         <Notice testId="memory-quarantine-note">
           {onDecideQuarantine
-            ? "Open a quarantined record to release or tombstone it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest."
+            ? "Open a quarantined record to release or discard it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest."
             : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory."}
         </Notice>
 
@@ -4048,9 +4148,9 @@ export function MemoryPanel({
                         <Chip
                           tone="warn"
                           testId={`memory-proposal-taint:${proposal.proposal_id}`}
-                          title="Proposed in a session that read untrusted input."
+                          title="Tainted: proposed in a session that read untrusted input."
                         >
-                          Tainted
+                          Untrusted source
                         </Chip>
                       ) : null}
                       {proposal.status && proposal.status !== "pending" ? (
@@ -4161,7 +4261,9 @@ export function MemoryPanel({
           </>
         ) : (
           <Notice tone="locked" testId="memory-pipeline-no-grant">
-            Quarantine: no grant. Seeing the queue needs the memory.quarantine.review grant.
+            <span title={grantTitle("memory.quarantine.review")}>
+              {`Quarantine: no grant. ${needsGrantText("memory.quarantine.review")} to see the queue.`}
+            </span>
           </Notice>
         )}
 

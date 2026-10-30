@@ -2010,7 +2010,7 @@ svg[data-svg="fit"],
 .signal__event:hover .signal__event-label {
   color: var(--ink);
 }
-/* "State here" pivot on live memory signals — opens the Memory panel at the
+/* "Open in Memory" pivot on live memory signals: opens the Memory panel at the
    record the frame names. */
 .signal__memory-pivot {
   align-self: flex-start;
@@ -3426,7 +3426,6 @@ svg[data-svg="fit"],
    narrow row ellipsizes instead of wrapping. */
 .memory-facts > * + * { margin-left: 6px; }
 .memory-facts__kind { color: var(--ink-muted); }
-.memory-facts__note { color: var(--ink-meta); }
 .memory-facts .memory-link { color: var(--info-ink); }
 
 /* Second lines under a row: a quarantine reason, a rationale, usefulness. */
@@ -3620,7 +3619,8 @@ svg[data-svg="fit"],
 }
 .memory-tech-note { font-size: 11px; color: var(--ink-meta); }
 
-/* Evidence: a conversation to open, its session ID secondary. */
+/* Evidence: a conversation to open; its session ID is in the technical
+   details. */
 .memory-evidence {
   display: flex;
   flex-direction: column;
@@ -3658,15 +3658,6 @@ svg[data-svg="fit"],
   color: var(--info-ink);
 }
 .memory-evidence__ref:disabled .memory-evidence__label { color: var(--ink); }
-.memory-evidence__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  max-width: 100%;
-  font-size: 11px;
-  color: var(--ink-meta);
-}
 .memory-excerpt {
   display: flex;
   flex-direction: column;

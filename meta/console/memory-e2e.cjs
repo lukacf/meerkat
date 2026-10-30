@@ -337,12 +337,19 @@ const openAccessFlows = [
 
       // Evidence click-through: the seeded ref names a session absent from
       // the console timeline, so it must degrade to the label-only fallback.
+      // The link reads as a conversation; its session ID and generation are
+      // in the Biography's collapsed technical details, not on the link.
       const evidenceRef = page.getByTestId(T.evidenceRef(0));
       await evidenceRef.waitFor({ timeout: 10_000 });
       const evidenceText = await evidenceRef.innerText();
       assert(
-        evidenceText.includes("sess-router-archived-1") && evidenceText.includes("generation 2"),
+        evidenceText.startsWith("Conversation") && !evidenceText.includes("sess-router-archived-1"),
         `evidence label: ${evidenceText}`,
+      );
+      const detailAllText = (await page.getByTestId(T.DETAIL).textContent()) ?? "";
+      assert(
+        detailAllText.includes("sess-router-archived-1") && detailAllText.includes("generation 2"),
+        "the evidence session ID and generation stay in the technical details",
       );
       await evidenceRef.click();
       await page.getByTestId(T.EVIDENCE_DEGRADED).waitFor({ timeout: 10_000 });
@@ -650,7 +657,7 @@ const openAccessFlows = [
       await page.getByTestId(T.LIVE_SEAM).waitFor({ timeout: 10_000 });
       assertNoRawJson(await strip.innerText(), "live strip");
 
-      // Rows whose payload names a record carry the "state here" pivot.
+      // Rows whose payload names a record carry the "Open record" pivot.
       const pivot = strip.locator('[data-testid^="memory-live-pivot:"]').first();
       await pivot.waitFor({ timeout: 10_000 });
       await pivot.click();
@@ -696,7 +703,7 @@ const grantFlows = [
         0,
         "nav:memory must not render without a memory read grant",
       );
-      // Gate finding: the rail's "state here" pivot must not outrun the
+      // Gate finding: the rail's "Open in Memory" pivot must not outrun the
       // nav gate. The seeded memory.* frames (system-attributed, globally
       // visible) still produce rail signals for this caller — wait for one,
       // then assert NO pivot button rendered anywhere.

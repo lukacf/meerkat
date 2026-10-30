@@ -40,13 +40,10 @@ svg {
 }
 /* Full-size SVGs opt out of the 16x16 icon reset */
 svg[data-svg="fit"],
-.topo__svg,
-.rf__arrow {
+.topo__svg {
   width: 100%; height: 100%;
   stroke-linecap: inherit; stroke-linejoin: inherit; stroke-width: inherit;
 }
-.rf__arrow { width: 40px; height: 12px; align-self: center; }
-.rf__arrow--drop { width: 12px; height: 24px; }
 
 .sprite-root {
   position: absolute;
@@ -782,84 +779,104 @@ svg[data-svg="fit"],
 }
 
 /* ── Routing ─────────────────────────────────────────────────── */
+/* Built on the panel kit: route rows, and the selected route's flow, policy
+   and recent deliveries beside them (stacked under them in a narrow pane, so
+   both stay in view). */
 .routing__body {
-  flex: 1; display: grid; grid-template-columns: 1fr 380px; min-height: 0;
-}
-.routing__table { overflow-y: auto; border-right: 1px solid var(--line); font-size: 12px; }
-.routing__row {
+  flex: 1 1 auto;
   display: grid;
-  grid-template-columns: 2fr 1fr 1.2fr 1.2fr 0.6fr 0.6fr;
-  gap: 12px; padding: 10px 16px; align-items: center;
-  border-bottom: 1px solid var(--line); cursor: pointer;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  min-width: 0;
+  min-height: 0;
 }
-.routing__row--head {
-  position: sticky; top: 0;
-  font-family: var(--disp); font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.1em;
-  color: var(--ink-dim); font-weight: 600;
-  background: var(--bg-elev-1); cursor: default;
-}
-.routing__row:hover { background: var(--bg-elev-2); }
-.routing__row.is-selected { background: var(--bg-sunken); box-shadow: inset 2px 0 0 var(--accent); }
-.routing__row[data-status="degraded"] .routing__intent { color: var(--warn); }
-.routing__intent { color: var(--ink); }
-
-.routing__flow {
-  padding: 18px 20px;
+.routing__body--list { grid-template-columns: minmax(0, 1fr); }
+.routing__list,
+.routing__detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
-  display: flex; flex-direction: column; gap: 18px;
+  padding-bottom: 24px;
 }
-.rf__title {
-  font-family: var(--disp); font-size: 11px;
-  text-transform: uppercase; letter-spacing: 0.1em;
-  color: var(--ink-dim); font-weight: 600;
+.routing__detail { border-left: 1px solid var(--line); }
+.routing__quiet {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-meta);
 }
-.rf__diagram { display: flex; flex-direction: column; gap: 0; align-items: stretch; }
-.rf__node {
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  padding: 10px 14px;
-  background: var(--bg-elev-2);
+.routing__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-[data-cc-variant="terminal"] .rf__node { border-radius: 0; }
-.rf__node--intent  { border-color: color-mix(in oklch, var(--focus) 50%, var(--line)); }
-.rf__node--handler { border-color: color-mix(in oklch, var(--accent) 50%, var(--line)); }
-.rf__node--handler[data-status="degraded"] {
-  border-color: color-mix(in oklch, var(--warn) 60%, var(--line));
-  background: color-mix(in oklch, var(--warn) 6%, var(--bg-elev-2));
+.routing__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 16px;
 }
-.rf__node--gate { border-color: color-mix(in oklch, var(--warn) 50%, var(--line)); }
-.rf__lbl {
-  font-family: var(--disp); font-size: 9.5px;
-  text-transform: uppercase; letter-spacing: 0.12em;
-  color: var(--ink-dim); font-weight: 600; margin-bottom: 2px;
+/* A dot per step and a rule joining them. */
+.routing__step::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-round);
+  background: var(--ink-dim);
 }
-.rf__val { font-size: 13px; color: var(--ink); font-weight: 500; }
-.rf__arrow { align-self: center; color: var(--ink-dim); width: 40px; height: 12px; margin: 2px 0; }
-.rf__arrow--drop { width: 12px; height: 24px; }
-.rf__stats {
-  display: flex; gap: 16px;
-  border-top: 1px solid var(--line); padding-top: 14px;
+.routing__step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 16px;
+  bottom: -10px;
+  width: 1px;
+  background: var(--line-strong);
+}
+.routing__step-label {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.routing__step-value {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow-wrap: anywhere;
 }
-.rf__stats > div { display: flex; flex-direction: column; gap: 2px; }
-.rf__stats dt {
-  font-family: var(--disp); font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--ink-dim); margin: 0;
+.routing__step-note {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ink-meta);
 }
-.rf__stats dd { margin: 0; font-size: 13px; color: var(--ink); font-weight: 500; font-family: var(--mono); }
-.rf__actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.rf__actions button {
-  padding: 6px 12px; font-size: 11.5px;
-  font-family: var(--disp); font-weight: 500;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  color: var(--ink-muted);
+.routing__delivery-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
-.rf__actions button:hover { background: var(--bg-elev-2); color: var(--ink); }
-.rf__actions .danger {
-  color: var(--crit);
-  border-color: color-mix(in oklch, var(--crit) 30%, var(--line));
+.routing__delivery-sub .cc-tech-id { flex: 0 1 auto; }
+.routing__delivery-attempts { flex: none; }
+@container cc-panel (max-width: 719px) {
+  .routing__body { display: block; overflow-y: auto; }
+  .routing__list,
+  .routing__detail { overflow: visible; padding-bottom: 0; }
+  .routing__detail {
+    padding-bottom: 24px;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
 }
 
 /* ── Logs ─────────────────────────────────────────────────────── */

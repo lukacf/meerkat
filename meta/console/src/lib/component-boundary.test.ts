@@ -258,22 +258,25 @@ test("the Topology Edges tag uses the text-safe meta ink, not the faint ink", ()
   assert.doesNotMatch(rule, /--ink-faint/);
 });
 
-test("stock console inline styles use only custom properties a stylesheet defines", () => {
+test("console and kit inline styles use only custom properties a stylesheet defines", () => {
   // An undefined custom property silently paints the inherited colour:
   // the composer's attachment error once used a var(--bad) nothing defines.
-  const panelsDir = path.join(root, "console", "src", "panels");
-  const sources = [
-    stockConsoleAppSource,
-    ...fs.readdirSync(panelsDir).filter((name) => name.endsWith(".tsx") && !name.includes(".test.")).map((name) => path.join(panelsDir, name)),
-  ];
+  // Every source file of the stock console and the kit, at any depth.
+  const consoleSrc = path.join(root, "console", "src");
+  const sources = [...sourceFiles(consoleSrc), ...sourceFiles(componentsSrc)]
+    .filter((file) => !/\.(test|bench)\./.test(path.basename(file)));
+  assert.ok(sources.includes(stockConsoleAppSource), "the guard reads ConsoleApp");
+  assert.ok(sources.some((file) => file.includes(`${path.sep}panels${path.sep}topology${path.sep}`)), "the guard reads nested panel files");
   const used = new Set<string>();
   for (const file of sources) {
     for (const match of fs.readFileSync(file, "utf8").matchAll(/var\((--[A-Za-z0-9_-]+)/g)) used.add(match[1]);
   }
-  const stylesheets = [
-    path.join(root, "console", "src", "console-host.css"),
-    ...fs.readdirSync(path.join(componentsSrc, "styles")).filter((name) => name.endsWith(".css")).map((name) => path.join(componentsSrc, "styles", name)),
-  ];
+  const cssFiles = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) return cssFiles(fullPath);
+    return entry.name.endsWith(".css") ? [fullPath] : [];
+  });
+  const stylesheets = [...cssFiles(consoleSrc), ...cssFiles(componentsSrc)];
   const defined = new Set<string>();
   for (const file of stylesheets) {
     for (const match of fs.readFileSync(file, "utf8").matchAll(/(--[A-Za-z0-9_-]+)\s*:/g)) defined.add(match[1]);

@@ -100,10 +100,12 @@ function outcomeWords(outcome: string | undefined): string {
   return outcome ? OUTCOME_WORDS[outcome] || humanizeEnum(outcome) : "";
 }
 
-/// The headline status of a recorded event: the human decision when there
-/// was one, else what happened, else the outcome.
+/// The human decisions a recorded event shows as its chip (recordVerdict),
+/// so its facts do not repeat them.
 const DECISION_VERDICTS = new Set(["approve", "reject", "escalate"]);
 
+/// The headline status of a recorded event: the human decision when there
+/// was one, else what happened, else the outcome.
 function recordVerdict(record: GatingAuditEntryView): { label: string; tone: Tone } | null {
   if (record.decision === "approve") return { label: "Approved", tone: "ok" };
   if (record.decision === "reject") return { label: "Rejected", tone: "crit" };

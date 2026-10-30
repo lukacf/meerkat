@@ -33,7 +33,10 @@ use meerkat_core::approval::decision::{
 /// - **One executor per decision.** One executor (one process) holds the
 ///   permit of a decision at a time. Authorizing again before the deadline
 ///   answers an equal permit for that executor's own retry, never for a
-///   second executor.
+///   second executor. Authorize again only when the previous permit object
+///   is gone (a crash, or a settlement call that failed): never hold two
+///   permits of one decision, since settling one leaves its twin able to
+///   pass [`Self::binds`] and [`Self::admits_commit_at`].
 /// - **Never release after a commit.** Once a commit landed under the
 ///   permit, its only settlement is `record_executed`, accepted at any
 ///   time. A release or a refusal after a commit would let the decision

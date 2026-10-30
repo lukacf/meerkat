@@ -1198,6 +1198,12 @@ impl DurableDecisionService {
     /// longer holds (after a restart, or after a settlement call that
     /// failed), as [`Self::release_execution`] does.
     ///
+    /// Only for recovery and retry: while the executor holds the permit, it
+    /// settles with [`Self::release_execution`] (or [`Self::close_refused`]).
+    /// The caller asserts that no live executor holds a permit object for
+    /// this decision (one executor per decision): a settlement by id clears
+    /// that holder's permit, and a commit it then makes is orphaned.
+    ///
     /// Settle first: before anything else for the decision, the executor
     /// reads its own record of the operation, and calls this only when no
     /// commit landed under the permit; a landed commit is recorded with
@@ -1256,7 +1262,9 @@ impl DurableDecisionService {
     /// Never after a commit: once a commit landed under the permit, its only
     /// settlement is [`Self::record_executed`]. One executor per decision
     /// settles its own permit (see the obligations on
-    /// [`DecisionExecutionPermit`]).
+    /// [`DecisionExecutionPermit`]). A permanent refusal found before any
+    /// authorization authorizes first ([`Self::authorize_execution`]), then
+    /// calls `close_refused` with that permit.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `NotApproved` or `Expired`;
@@ -1276,6 +1284,12 @@ impl DurableDecisionService {
     /// refusal when the executor no longer holds its permit (after a
     /// restart, or after a settlement call that failed), as
     /// [`Self::close_refused`] does.
+    ///
+    /// Only for recovery and retry: while the executor holds the permit, it
+    /// settles with [`Self::close_refused`] (or [`Self::release_execution`]).
+    /// The caller asserts that no live executor holds a permit object for
+    /// this decision (one executor per decision): a settlement by id clears
+    /// that holder's permit, and a commit it then makes is orphaned.
     ///
     /// Settle first: before anything else for the decision, the executor
     /// reads its own record of the operation, and calls this only when no

@@ -194,6 +194,7 @@ function TextField({
   onChange,
   placeholder,
   disabled,
+  readOnly,
   testId,
   inputRef,
   wide,
@@ -204,6 +205,8 @@ function TextField({
   onChange: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** Shown and copyable but not editable (an existing rule's ID). */
+  readOnly?: boolean;
   testId?: string;
   inputRef?: React.Ref<HTMLInputElement>;
   /** Spans the whole form row (lists of subjects). */
@@ -220,9 +223,10 @@ function TextField({
         className="cc-input"
         data-testid={testId}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => { if (!readOnly) onChange(event.target.value); }}
         placeholder={placeholder}
         disabled={disabled}
+        readOnly={readOnly}
         aria-describedby={hint ? hintId : undefined}
       />
       {hint ? <span id={hintId} className="access-panel__hint">{hint}</span> : null}
@@ -558,6 +562,10 @@ export function AccessPanel({
           label="Rule ID"
           testId="access-rule-id"
           value={ruleDraft.id}
+          // An existing rule keeps its ID: saving under a new ID would add a
+          // second rule and leave this one in force.
+          readOnly={editingRuleId !== null}
+          hint={editingRuleId !== null ? "An existing rule keeps its ID. To rename it, create a new rule and delete this one." : undefined}
           onChange={(value) => setRuleDraft({ ...ruleDraft, id: value })}
           placeholder="ops-view-all"
         />

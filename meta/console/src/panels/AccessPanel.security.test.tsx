@@ -448,3 +448,32 @@ describe("checked access edits", () => {
     expect(screen.queryByTestId("access-group-members")).toHaveValue("");
   });
 });
+
+describe("rule editor identity", () => {
+  const rule = { id: "ops-view-all", description: "Ops can see every agent", effect: "allow" as const, actions: ["agent.view"] };
+
+  it("locks the rule ID while an existing rule is edited, so saving cannot add a second rule", async () => {
+    const input = props();
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-edit:ops-view-all"));
+    const idField = screen.getByTestId("access-rule-id") as HTMLInputElement;
+    expect(idField.readOnly).toBe(true);
+    fireEvent.change(idField, { target: { value: "ops-view-specialists" } });
+    expect(idField.value).toBe("ops-view-all");
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    expect(input.onUpsertRule.mock.calls.length).toBe(1);
+    expect(input.onUpsertRule.mock.calls[0]?.[0]?.id).toBe("ops-view-all");
+  });
+
+  it("keeps the rule ID editable for a new rule", () => {
+    const input = props();
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    const idField = screen.getByTestId("access-rule-id") as HTMLInputElement;
+    expect(idField.readOnly).toBe(false);
+    fireEvent.change(idField, { target: { value: "ops-view-specialists" } });
+    expect(idField.value).toBe("ops-view-specialists");
+  });
+});

@@ -265,6 +265,11 @@
   line-height: 1;
 }
 .cc-input::placeholder { color: var(--_cc-foreground-meta); opacity: 1; }
+.cc-input[readonly] {
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+  cursor: default;
+}
 .cc-input:hover,
 .cc-select__control:hover { border-color: var(--_cc-border-strong); }
 .cc-input:focus-visible,

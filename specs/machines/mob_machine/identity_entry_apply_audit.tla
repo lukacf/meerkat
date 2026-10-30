@@ -41,7 +41,9 @@
 \*     entry custody and its membership commit) and its abort; the dormant
 \*     seat's refusal of a held or hosted entry; member 1 recovered and
 \*     retired by replay (ever created), declared held; the seal; Stop,
-\*     Resume and Complete, where the declaration and the seal refuse.
+\*     Resume, Complete and the forced destroy (which ends the held spawn's
+\*     ladder, its membership committed or not), where the declaration and
+\*     the seal refuse.
 \*   placed (PlacedSpec): one member host bound and the owner bridge, member 2
 \*     declared placed (hosted on its first use) and member 1 declared local
 \*     (owed its seat): the placed spawn ladder opened with or without entry
@@ -78,7 +80,8 @@
 \*     hold); AuditRoleHoldKeepsFirstBootRow (a declaration never replaces a
 \*     first-boot preparation).
 \*   held: AuditHeldDeclareExactlyOne and AuditSealExactlyOne (in the
-\*     Stopped and Completed phases too); AuditDormantSeatTakesOnlyOwedEntries
+\*     Stopped, Completed and Destroyed phases too);
+\*     AuditDormantSeatTakesOnlyOwedEntries
 \*     (action property: the dormant seat never seats an entry awaiting its
 \*     held creation or hosted on its first use).
 \*   placed: AuditPlacedDeclareExactlyOne; AuditLadderReservesEntryName (action
@@ -539,6 +542,8 @@ HeldNext ==
     \/ ResumeStopped
     \/ AuditQuiesceComplete
     \/ CompleteRunning
+    \/ AuditQuiesceDestroy
+    \/ DestroyFromAny
 
 HeldSpec == Init /\ [][HeldNext]_vars
 
@@ -567,11 +572,19 @@ AuditWitnessEverCreatedOwedSeat ==
     /\ Id1 \notin DOMAIN identity_to_runtime
     /\ Id1 \in DOMAIN identity_runtime_generations
     /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE)
+\* The forced destroy ends a ladder whose membership committed: no ladder
+\* outlives the members it named.
+AuditWitnessDestroyEndsCommittedLadder ==
+    /\ Id2 \in DOMAIN spawn_exec_phase
+    /\ spawn_exec_phase[Id2] = "MembershipCommitted"
+    /\ DestroyFromAny
+    /\ DOMAIN spawn_exec_phase' = {}
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting
 NotAuditWitnessHeldSpawnSeats == [][~AuditWitnessHeldSpawnSeats]_vars
 NotAuditWitnessHosted == ~AuditWitnessHosted
 NotAuditWitnessEverCreatedOwedSeat == [][~AuditWitnessEverCreatedOwedSeat]_vars
+NotAuditWitnessDestroyEndsCommittedLadder == [][~AuditWitnessDestroyEndsCommittedLadder]_vars
 
 (***************************************************************************)
 (* The placed run.                                                         *)

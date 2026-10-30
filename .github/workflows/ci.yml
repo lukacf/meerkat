@@ -935,8 +935,8 @@ jobs:
   # residency audit's witness runs, split from audits-g, whose whole-space
   # runs stay there (179 s and 212 s locally with 4 workers), and a ninth
   # and tenth (audits-l, audits-k) for the identity entry audit's entry part
-  # and its declared apply part (267 s and 300-305 s locally with 4
-  # workers); none of these four is measured on a hosted runner yet.
+  # and its declared apply part (267 s and 332 s locally with 4 workers);
+  # none of these four is measured on a hosted runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:

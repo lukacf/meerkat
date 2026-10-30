@@ -679,19 +679,22 @@ fi
 # member adopted, unlisted and retired (legacy); a seated entry declared
 # under another role or mode, a first-boot preparation and every WakeMember
 # cause (roles); held creation, the held spawn and entries hosted on their
-# first use, with Stop, Resume and Complete (held); one bound host and the
-# placed spawn ladder (placed). They check every generated invariant (the
-# declared apply's among them), exactly one arm answering every declaration
-# and seal, a Declared entry leaving only at the seal's retirement end, the
-# seal, a destroy or a reset, a candidate composition changing nothing, no
-# WakeMember or boot plan wake opening an attempt for a member with a host
-# preparation cause, the host's carry-out never ending a role hold, a
-# declaration never replacing a first-boot preparation, a
-# custody seat taking the archived session, the dormant seat taking only an
-# entry owed its seat, and a ladder opened for an entry's name holding its
-# custody. They require every listed arm to fire, a floor of distinct states
-# and their twenty-eight witnesses reached, and --mutants refuses seventeen
-# seeded defects, one per declared apply invariant and property.
+# first use, with Stop, Resume, Complete and the forced destroy, which ends
+# the held spawn's ladder whether its membership committed or not (held);
+# one bound host and the placed spawn ladder (placed). They check every
+# generated invariant (the declared apply's among them), exactly one arm
+# answering every declaration and seal, a Declared entry leaving only at the
+# seal's retirement end, the seal, a destroy or a reset, a candidate
+# composition changing nothing, no WakeMember or boot plan wake opening an
+# attempt for a member with a host preparation cause, the host's carry-out
+# never ending a role hold, a declaration never replacing a first-boot
+# preparation, a custody seat taking the archived session, the dormant seat
+# taking only an entry owed its seat, and a ladder opened for an entry's
+# name holding its custody.
+# They require every listed arm to fire, a floor of distinct states and
+# their twenty-nine witnesses reached, and --mutants refuses eighteen seeded
+# defects: one per declared apply invariant and property, and a forced
+# destroy that keeps a spawn ladder whose membership committed.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
@@ -888,8 +891,8 @@ run_machine_verify() {
 # push runs 41049255980 and 41005570193 (2026-10-30): together past 10
 # minutes;
 # audits-k = the identity entry audit's declared apply part with --mutants
-# (--part apply), alone: its five whole-space runs, 28 witnesses and 17
-# mutants took 300-305 s locally with 4 TLC workers. None of audits-g,
+# (--part apply), alone: its five whole-space runs, 29 witnesses and 18
+# mutants took 332 s locally with 4 TLC workers. None of audits-g,
 # audits-i, audits-k and audits-l has been measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the

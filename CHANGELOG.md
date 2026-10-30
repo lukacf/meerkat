@@ -525,6 +525,18 @@ them.
   session, refused while that rotation stands). The mob's destroy ends
   either.
 
+### Fixed
+
+- `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
+  (`DestroyFromAny`) drops every spawn ladder, as the mob destroy
+  (`DestroyMob`) already did. A ladder whose membership committed, its
+  activation still owed, no longer outlives the members the forced destroy
+  drops: the destroyed state broke the machine invariant
+  `spawn_exec_membership_commit_requires_runtime`, which a debug build
+  checks on every step. A late activation or abort of such a ladder takes
+  the destroyed mob's own arm, as before, and a mob created again under the
+  same id starts with no ladder, as before.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

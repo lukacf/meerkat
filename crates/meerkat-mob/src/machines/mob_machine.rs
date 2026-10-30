@@ -11144,6 +11144,48 @@ mod tests {
         );
     }
 
+    /// The forced destroy drops every spawn ladder with the members it
+    /// drops: a ladder whose membership committed, its activation still
+    /// owed, does not outlive its member, so
+    /// `spawn_exec_membership_commit_requires_runtime` holds in Destroyed,
+    /// and the late activation takes its Destroyed arm.
+    ///
+    /// RED: drop `spawn_exec_phase` from `DestroyFromAny`'s update: the
+    /// destroyed mob keeps a ladder at MembershipCommitted for a member it no
+    /// longer holds, and the invariant refuses the destroy (a debug build
+    /// panics in it).
+    #[test]
+    fn the_forced_destroy_drops_a_committed_spawn_ladder() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity("forced-destroy-ladder".to_string());
+        let runtime_id = AgentRuntimeId("forced-destroy-ladder:0".to_string());
+        seed_membership_committed_member(&mut authority, &identity, &runtime_id);
+        assert_eq!(
+            authority.state().spawn_exec_phase.get(&identity),
+            Some(&SpawnExecPhase::MembershipCommitted)
+        );
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Destroy,
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy)
+            .expect("the forced destroy completes");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Destroyed);
+        assert!(authority.state().identity_to_runtime.is_empty());
+        assert!(
+            authority.state().spawn_exec_phase.is_empty(),
+            "no spawn ladder outlives the destroy"
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CommitSpawnActivation {
+                agent_identity: identity,
+            },
+        )
+        .expect("the late activation takes its Destroyed arm");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Destroyed);
+    }
+
     /// A forced destroy that drops in-flight rotation intents follows the
     /// destroy's admission, whose RotationSessionsAbandoned names each
     /// rotation's next session for the shell to archive.

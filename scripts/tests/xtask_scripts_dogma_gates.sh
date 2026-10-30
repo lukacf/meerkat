@@ -381,14 +381,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # reachability witnesses violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its seven runs' floors, a coverage block in which each
-# covered action of every run generated a state, its forty-seven step
+# covered action of every run generated a state, its forty-eight step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy
 # mutants' generated invariants, its rotation, seat, respawn and
 # preserving-archive mutants' action properties, and its declared apply
-# mutants' generated invariants, totality invariants and action properties
-# violated.
+# mutants' generated invariants, totality invariants and action properties,
+# and its forced destroy mutant's generated invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -710,6 +710,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessHeldSpawnSeats is violated."' \
   'echo "Error: Invariant NotAuditWitnessHosted is violated."' \
   'echo "Error: Action property NotAuditWitnessEverCreatedOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyEndsCommittedLadder is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedCustody is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedWorker is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedCustodyAborted is violated."' \
@@ -734,6 +735,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditDormantSeatTakesOnlyOwedEntries is violated."' \
   'echo "Error: Invariant placed_entry_custody_is_hosted_on_first_use is violated."' \
   'echo "Error: Action property AuditLadderReservesEntryName is violated."' \
+  'echo "Error: Invariant spawn_exec_membership_commit_requires_runtime is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

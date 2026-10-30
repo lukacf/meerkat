@@ -65,11 +65,13 @@
 #   restamp, the migration, the rotation), a first-boot preparation, every
 #   WakeMember cause and the same-session rotation of a declared migration.
 #   held: held creation and the held spawn, entries hosted on their first
-#   use, the dormant seat's refusal of both, and Stop, Resume and Complete,
-#   where the declaration and the seal refuse. placed: one bound host and
-#   the placed spawn ladder with or without entry custody. They check every
-#   generated invariant (the declared apply's among them:
-#   unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
+#   use, the dormant seat's refusal of both, and Stop, Resume, Complete and
+#   the forced destroy (which ends the held spawn's ladder, its membership
+#   committed or not), where the declaration and the seal refuse. placed:
+#   one bound host and the placed spawn ladder with or without entry
+#   custody. They check every generated invariant (the declared apply's
+#   among them: unseated_entry_is_not_a_member,
+#   retiring_entry_is_a_declared_entry,
 #   held_creation_entry_was_never_created,
 #   archived_session_record_is_unseated,
 #   placed_entry_custody_is_hosted_on_first_use), exactly one arm answering
@@ -77,10 +79,9 @@
 #   retirement end, the seal, a destroy or a reset, a candidate composition
 #   changing nothing, no wake opening an attempt for a member with a host
 #   preparation cause, the host's carry-out never ending a role hold, a
-#   declaration never replacing a first-boot
-#   preparation, a custody seat taking the archived session, the dormant
-#   seat taking only an entry owed its seat, and a ladder opened for an
-#   entry's name holding its custody.
+#   declaration never replacing a first-boot preparation, a custody seat
+#   taking the archived session, the dormant seat taking only an entry owed
+#   its seat, and a ladder opened for an entry's name holding its custody.
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage). The runner
@@ -99,7 +100,8 @@
 # terminal that drops the entry, a dormant seat that ignores its ladder's
 # entry custody, a fresh-life respawn admitted for an entry and a
 # topology-preserving archive that takes an entry; in the apply part, one
-# per declared apply invariant and property (see the mutants below). An
+# per declared apply invariant and property, and a forced destroy that keeps
+# a spawn ladder whose membership committed (see the mutants below). An
 # anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.
@@ -138,11 +140,11 @@ in_part() {
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 entry_states=12960
-lifecycle_states=12041
-apply_states=1940
+lifecycle_states=12039
+apply_states=1936
 legacy_states=102
 roles_states=1224
-held_states=1000
+held_states=1203
 placed_states=136
 
 # Every arm each run must fire. TLC names an arm after the generated
@@ -350,6 +352,7 @@ held_covered_actions=(
   CompleteRunning
   BeginPlacedCompletionLifecycleQuiesceFresh
   BeginPlacedCompletionLifecycleQuiesceFreshStop
+  DestroyFromAny
   CommitDormantSeatRunning
   DeclareIdentityEntryKept
   DeclareIdentityEntrySeatOwed
@@ -359,9 +362,11 @@ held_covered_actions=(
   DeclareIdentityEntryRefusedNameHeldByWorker
   DeclareIdentityEntryMobNotRunningStopped
   DeclareIdentityEntryMobNotRunningCompleted
+  DeclareIdentityEntryMobNotRunningDestroyed
   SealDeclaredRosterSealed
   SealDeclaredRosterMobNotRunningStopped
   SealDeclaredRosterMobNotRunningCompleted
+  SealDeclaredRosterMobNotRunningDestroyed
 )
 
 placed_covered_actions=(
@@ -712,6 +717,7 @@ for witness in \
   "roles:Action property:FirstBootKeptOverRoleHold" "roles:Action property:RoleHoldDroppedAtArchive" \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
+  "held:Action property:DestroyEndsCommittedLadder" \
   "placed:Action property:PlacedCustody" "placed:Action property:PlacedWorker" \
   "placed:Action property:PlacedCustodyAborted"; do
   run="${witness%%:*}"
@@ -915,8 +921,10 @@ PY
 keep_var("DestroyMob", "identity_entry_origins")
 PY
 
-  # A forced destroy that keeps an open ladder's entry custody.
-  mutate lifecycle forced_destroy_keeps_custody "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+  # A forced destroy that keeps an open ladder's entry custody: the destroy
+  # ends the ladder, so the custody outlives it.
+  mutate lifecycle forced_destroy_keeps_custody \
+    "Invariant entry_custody_ladder_is_open|Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
 keep_var("DestroyFromAny", "spawn_exec_entry_custody")
 PY
 
@@ -1044,6 +1052,12 @@ PY
   mutate held spawn_commit_keeps_held_cause \
     "Invariant unseated_entry_is_not_a_member|Invariant held_creation_entry_was_never_created" <<'PY'
 keep_var("CommitSpawnMembershipFresh", "identity_entry_unseated")
+PY
+
+  # A forced destroy that keeps the spawn ladders' phases: a ladder whose
+  # membership committed outlives the member it named.
+  mutate held destroy_keeps_ladder_phase "Invariant spawn_exec_membership_commit_requires_runtime" <<'PY'
+keep_var("DestroyFromAny", "spawn_exec_phase")
 PY
 
   # The placed ladder holds the custody of an entry not hosted on its first

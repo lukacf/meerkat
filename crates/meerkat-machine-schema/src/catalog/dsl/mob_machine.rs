@@ -22409,6 +22409,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_unseated = EmptyMap;
                 self.identity_entry_retiring = EmptySet;
                 self.identity_entry_archived_sessions = EmptyMap;
+                // Spawn-exec phase ladder: total teardown, as DestroyMob's. The
+                // forced destroy drops every member, so no ladder survives into
+                // Destroyed: one whose membership committed would name a member
+                // no longer held (spawn_exec_membership_commit_requires_runtime),
+                // and every late CommitSpawnActivation or AbortSpawnExec takes
+                // its Destroyed arm.
+                self.spawn_exec_phase = EmptyMap;
                 // No spawn ladder acts for an identity entry after the
                 // destroy.
                 self.spawn_exec_entry_custody = EmptySet;

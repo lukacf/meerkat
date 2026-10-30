@@ -7,6 +7,7 @@
 
 pub(crate) mod boxed_future;
 pub(crate) mod identity_control_target;
+pub mod identity_creation;
 pub mod identity_first;
 #[cfg(all(test, target_os = "linux"))]
 mod test_mcp_fixture;

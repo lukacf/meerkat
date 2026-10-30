@@ -26206,6 +26206,11 @@ mod identity_creation_launch_tests {
     use crate::identity_creation::{
         IdentityCreationPolicy, PolicyRefusal, PolicyRefusalKind, RuntimeOptionPolicy,
     };
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    const INIT_CHILD: &str = "META_GATEWAY_IDENTITY_CREATION_INIT_CHILD";
+    const INIT_TEST: &str = "rpc_gateway::identity_creation_launch_tests::the_gateway_init_refuses_an_identity_creation_option_without_persistence";
 
     /// A native host that gives an identity creation policy, gives none, or
     /// refuses.
@@ -26438,5 +26443,91 @@ model = "gpt-5.5"
                 .is_none()
             );
         }
+    }
+
+    /// The real init, in a child process of this test binary: a launch
+    /// without `persistent_state` that gives `runtime_options.identity_creation`
+    /// is refused by init itself, typed, before anything durable happens.
+    #[test]
+    fn the_gateway_init_refuses_an_identity_creation_option_without_persistence() {
+        if std::env::var_os(INIT_CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let result = runtime.block_on(run_persistent_owned(None, None, false));
+            // Tokio's stdin read can outlive the gateway; do not wait for it.
+            runtime.shutdown_background();
+            assert!(
+                matches!(result, Err(GatewayRunError::Init(_))),
+                "init must refuse: {result:?}"
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().expect("isolated roots");
+        let root = directory.path();
+        let stdout_path = root.join("stdout.log");
+        let stderr_path = root.join("stderr.log");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", INIT_TEST, "--nocapture", "--test-threads=1"])
+            .env(INIT_CHILD, "1")
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("RUST_MIN_STACK", "33554432")
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(
+                std::fs::File::create(&stdout_path).expect("stdout file"),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(&stderr_path).expect("stderr file"),
+            ))
+            .spawn()
+            .expect("gateway child");
+        let params = json!({
+            "mob_config": "[mob]\nid = \"identity-creation-init\"\n\n[profiles.default]\nmodel = \"gpt-5.5\"\n",
+            "runtime_options": { "identity_creation": policy_value() }
+        });
+        let mut stdin = child.stdin.take().expect("child stdin");
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": "init", "method": "meta/init", "params": params})
+        )
+        .expect("write the init request");
+        stdin.flush().expect("flush the init request");
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("observe the child") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the gateway child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drop(stdin);
+        assert!(
+            status.success(),
+            "the gateway child failed: {}",
+            std::fs::read_to_string(&stderr_path).unwrap_or_default()
+        );
+        let stdout = std::fs::read_to_string(&stdout_path).expect("the child's stdout");
+        let response = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|line| line["id"] == "init")
+            .expect("an init response");
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("identity_creation: created identities are durable"),
+            "{response}"
+        );
     }
 }

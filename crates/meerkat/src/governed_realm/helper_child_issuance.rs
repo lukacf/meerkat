@@ -9,6 +9,11 @@
 //! either. A recovered child (an earlier attempt landed) is returned only
 //! after the same current checks; a historical record alone is never
 //! permission.
+//!
+//! Nothing waits under the reservation. On a dispatch's own path and on an
+//! entered operation's, the waiting form waits for another actor's hold of
+//! the reservation (or an owner change in progress) outside every lock, then
+//! issues again.
 
 use std::sync::Arc;
 
@@ -46,7 +51,10 @@ pub enum HelperChildIssuanceRefusal {
     /// their effects.
     Denied,
     /// The owners cannot say now (contention, a refusal to rebuild after an
-    /// owner change, clock or custody). No child was appended.
+    /// owner change, clock or custody). No child was appended. On the
+    /// dispatch and entered paths,
+    /// [`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`]
+    /// waits out contention and owner changes before it answers this.
     Unavailable,
     /// Whether a child was appended is unknown: the grant owner's append
     /// outcome was uncertain (the owner is then unavailable until restored),
@@ -197,39 +205,14 @@ impl GovernedHelperChildIssuance {
         let prepared = match &self.setup {
             Setup::Prepared(prepared) => prepared,
             Setup::Entered { operation, further } => {
-                return match operation.issue_child_if_current_within(further, &self.intent) {
-                    Ok(boxed) => work_owner_outcome(boxed),
-                    // A refused step (an ended dispatch, a source cancelled,
-                    // revoked or no longer retained, a decision needing more
-                    // review than was entered, an expired window, malformed
-                    // facts) appended nothing for this intent.
-                    Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
-                        if super::effect_leaf_denies(refusal) =>
-                    {
-                        Err(HelperChildIssuanceRefusal::Denied)
-                    }
-                    // Contention, a rebuild request or owners that cannot
-                    // answer now.
-                    Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
-                };
+                return entered_outcome(
+                    operation.issue_child_if_current_within(further, &self.intent),
+                );
             }
             Setup::Dispatch { operation, further } => {
-                return match operation.issue_child_if_current_within(further, &self.intent) {
-                    Ok(boxed) => work_owner_outcome(boxed),
-                    Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
-                        if super::effect_leaf_denies(refusal) =>
-                    {
-                        Err(HelperChildIssuanceRefusal::Denied)
-                    }
-                    // A review this dispatch cannot spend for the child (one
-                    // already spent, an ended dispatch, or a review this entry
-                    // cannot carry) is final for the dispatch, as on the
-                    // prepared path.
-                    Err(error) if super::review_settlement_denies(&error) => {
-                        Err(HelperChildIssuanceRefusal::Denied)
-                    }
-                    Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
-                };
+                return dispatch_outcome(
+                    operation.issue_child_if_current_within(further, &self.intent),
+                );
             }
         };
         prepared
@@ -251,6 +234,40 @@ impl GovernedHelperChildIssuance {
             .map_err(child_refusal)
     }
 
+    /// [`Self::issue_or_recover`], waiting, for a dispatch's own operation
+    /// ([`Self::from_dispatch`]) or a step of its entered operation
+    /// ([`Self::from_entered`]), out what refused the issuance to rebuild:
+    /// another actor's hold of the work owners' exclusion (an issuance with
+    /// its acknowledged append, another dispatch's final entry, a host's
+    /// owner change or held exclusion) or an owner change in progress. It
+    /// waits outside every lock, within the call's remaining tool time and
+    /// the owner-change bound, and issues again (see
+    /// [`meerkat_core::GovernedDispatchOperation::issue_child_if_current_within_after_owner_change`]);
+    /// the dispatch's review is spent once whatever it waits. Past those
+    /// bounds the refusal to rebuild answers `Unavailable`, as without
+    /// waiting. The prepared path ([`Self::new`]) never waits: it answers as
+    /// [`Self::issue_or_recover`].
+    ///
+    /// # Errors
+    /// See [`HelperChildIssuanceRefusal`].
+    pub async fn issue_or_recover_after_owner_change(
+        &self,
+    ) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
+        match &self.setup {
+            Setup::Prepared(_) => self.issue_or_recover(),
+            Setup::Entered { operation, further } => entered_outcome(
+                operation
+                    .issue_child_if_current_within_after_owner_change(further, &self.intent)
+                    .await,
+            ),
+            Setup::Dispatch { operation, further } => dispatch_outcome(
+                operation
+                    .issue_child_if_current_within_after_owner_change(further, &self.intent)
+                    .await,
+            ),
+        }
+    }
+
     /// The prepared path's conjunct ([`PreparedSetup::originating`]); a
     /// dispatch, or a step of its entered operation, is checked by its own
     /// work owners instead.
@@ -262,6 +279,47 @@ impl GovernedHelperChildIssuance {
                 Err(OperationAuthorizationError::Unavailable)
             }
         }
+    }
+}
+
+/// An entered step's answer for this intent.
+fn entered_outcome(
+    answer: Result<Box<dyn std::any::Any + Send>, meerkat_core::ToolError>,
+) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
+    match answer {
+        Ok(boxed) => work_owner_outcome(boxed),
+        // A refused step (an ended dispatch, a source cancelled, revoked or
+        // no longer retained, a decision needing more review than was
+        // entered, an expired window, malformed facts) appended nothing for
+        // this intent.
+        Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
+            if super::effect_leaf_denies(refusal) =>
+        {
+            Err(HelperChildIssuanceRefusal::Denied)
+        }
+        // Contention, a rebuild request or owners that cannot answer now.
+        Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
+    }
+}
+
+/// The dispatch path's answer for this intent.
+fn dispatch_outcome(
+    answer: Result<Box<dyn std::any::Any + Send>, meerkat_core::ToolError>,
+) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
+    match answer {
+        Ok(boxed) => work_owner_outcome(boxed),
+        Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
+            if super::effect_leaf_denies(refusal) =>
+        {
+            Err(HelperChildIssuanceRefusal::Denied)
+        }
+        // A review this dispatch cannot spend for the child (one already
+        // spent, an ended dispatch, or a review this entry cannot carry) is
+        // final for the dispatch, as on the prepared path.
+        Err(error) if super::review_settlement_denies(&error) => {
+            Err(HelperChildIssuanceRefusal::Denied)
+        }
+        Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
     }
 }
 

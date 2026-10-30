@@ -9,6 +9,14 @@
 //! for the change to complete before it rebuilds. Waiting only delays: the
 //! rebuild still requires a coherent observation and every current check, and
 //! no refusal is weakened.
+//!
+//! A governed step of a tool dispatch takes the work owners' exclusion
+//! without waiting. When another actor holds it (an owner change still being
+//! prepared, a held exclusion or another operation's final entry), the
+//! native work owner refuses to rebuild and reports that hold as a change in
+//! progress until it ends, so the step's waiting form waits here too, only
+//! after the step returned and released everything it took. This is shell
+//! synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};
 #[cfg(target_arch = "wasm32")]

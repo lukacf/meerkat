@@ -7,7 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::approval::ApprovalService;
 use crate::approval::review::{
@@ -32,6 +33,9 @@ use crate::{ToolDispatchContext, ToolError};
 /// steps record the entered tier they were given, answer a scripted refusal
 /// once, refuse a decision stricter than the entered tier, and otherwise run
 /// the operation or issue the `u32` intent; its plain path runs only at R1.
+/// While another actor holds its exclusion (`held`) every step, plain or
+/// entered, refuses to rebuild without waiting and the hold is named as an
+/// owner change in progress, as the native work owner does.
 struct Owner {
     tier: parking_lot::Mutex<OperationReviewTier>,
     sequence: AtomicU64,
@@ -40,6 +44,14 @@ struct Owner {
     entered_runs: AtomicUsize,
     plain_runs: AtomicUsize,
     issued: parking_lot::Mutex<Vec<u32>>,
+    held: AtomicBool,
+    /// Steps refused because `held` was set.
+    contended: AtomicUsize,
+    /// Steps still to refuse to rebuild with no change in progress named
+    /// (a holder that finished before the hint was read).
+    unnamed_rebuilds: AtomicUsize,
+    /// The next entered run's answer after its operation ran.
+    refuse_after_run: parking_lot::Mutex<Option<OperationAuthorizationError>>,
 }
 
 impl Owner {
@@ -52,6 +64,10 @@ impl Owner {
             entered_runs: AtomicUsize::new(0),
             plain_runs: AtomicUsize::new(0),
             issued: parking_lot::Mutex::new(Vec::new()),
+            held: AtomicBool::new(false),
+            contended: AtomicUsize::new(0),
+            unnamed_rebuilds: AtomicUsize::new(0),
+            refuse_after_run: parking_lot::Mutex::new(None),
         })
     }
 
@@ -68,12 +84,32 @@ impl Owner {
         self.sequence.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// This owner's exclusion, taken without waiting: refused to rebuild
+    /// while another actor holds it, or while an unnamed rebuild is due.
+    fn exclusion(&self) -> Result<(), OperationAuthorizationError> {
+        if self.held.load(Ordering::SeqCst) {
+            self.contended.fetch_add(1, Ordering::SeqCst);
+            return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+        }
+        if self
+            .unnamed_rebuilds
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+        }
+        Ok(())
+    }
+
     /// One entered step under this owner's own exclusion.
     fn step(&self, entered_tier: OperationReviewTier) -> Result<(), OperationAuthorizationError> {
         self.entered_tiers.lock().push(entered_tier);
         if let Some(error) = self.refuse_next.lock().take() {
             return Err(error);
         }
+        self.exclusion()?;
         if self.tier() > entered_tier {
             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
         }
@@ -117,6 +153,14 @@ impl PreparedOperationAuthorization for Decision {
 struct OwnerWork(Arc<Owner>);
 
 impl WorkAuthorization for OwnerWork {
+    /// The hold of this owner's exclusion, named while it lasts.
+    fn owner_change_in_progress(&self) -> Option<crate::authorization::OwnerChangeInProgress> {
+        self.0
+            .held
+            .load(Ordering::SeqCst)
+            .then(|| crate::authorization::OwnerChangeInProgress::new(uuid::Uuid::nil(), 1))
+    }
+
     fn prepare(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -146,6 +190,7 @@ impl WorkAuthorization for OwnerWork {
         if self.0.tier() != OperationReviewTier::R1 {
             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
         }
+        self.0.exclusion()?;
         self.0.plain_runs.fetch_add(1, Ordering::SeqCst);
         operation();
         Ok(())
@@ -162,7 +207,10 @@ impl WorkAuthorization for OwnerWork {
         self.0.step(entered_tier)?;
         self.0.entered_runs.fetch_add(1, Ordering::SeqCst);
         operation();
-        Ok(())
+        match self.0.refuse_after_run.lock().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn validate_child_issuance(
@@ -1014,4 +1062,332 @@ async fn no_step_runs_a_review_or_writes_the_approval_store() {
         .expect("an issuance step");
     assert_eq!(reviewer.0.load(Ordering::SeqCst), reviews);
     assert_eq!(store.puts.load(Ordering::SeqCst), puts);
+}
+
+// ---------------------------------------------------------------------------
+// Waiting steps: a step refused to rebuild while another actor holds the
+// work owners' exclusion waits for that hold outside every lock, within the
+// call's bounds, and is taken again. The review stays spent exactly once.
+// ---------------------------------------------------------------------------
+
+/// The host's operation refusal observer: every disposition, in order.
+#[derive(Default)]
+struct Dispositions(parking_lot::Mutex<Vec<crate::authorization::OperationRefusalDisposition>>);
+
+impl crate::authorization::OperationRefusalObserver for Dispositions {
+    fn observe(&self, observation: &crate::authorization::OperationRefusalObservation) {
+        self.0.lock().push(observation.disposition());
+    }
+}
+
+impl Dispositions {
+    /// Every wait reported, by whether it settled.
+    fn waits(&self) -> Vec<bool> {
+        self.0
+            .lock()
+            .iter()
+            .filter_map(|disposition| match disposition {
+                crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                    settled,
+                    ..
+                } => Some(*settled),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// `context` reporting to `observer`, as the agent attaches it to every
+/// dispatch.
+fn observed_by(context: &ToolDispatchContext, observer: &Arc<Dispositions>) -> ToolDispatchContext {
+    context
+        .clone()
+        .with_refusal_observer(Some(crate::authorization::RefusalObserverBinding::new(
+            Arc::clone(observer) as Arc<dyn crate::authorization::OperationRefusalObserver>,
+            crate::types::SessionId::new(),
+        )))
+}
+
+/// Another actor takes `owner`'s exclusion now and releases it after `held`.
+fn hold_for(owner: &Arc<Owner>, held: Duration) -> tokio::task::JoinHandle<()> {
+    owner.held.store(true, Ordering::SeqCst);
+    let owner = Arc::clone(owner);
+    tokio::spawn(async move {
+        tokio::time::sleep(held).await;
+        owner.held.store(false, Ordering::SeqCst);
+    })
+}
+
+/// A reviewed (R2) entered step meets another actor's hold of the work
+/// owners' exclusion. Its waiting form waits for the hold (one settled wait,
+/// reported as the call's), takes the step again and runs the operation
+/// once. The review was spent once, by the entry: no attempt spends, a later
+/// entry finds it spent, and `Used` is reported once.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_entered_step_waits_out_a_held_exclusion_and_spends_once() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, reviewer, observed) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+    let entered = context
+        .enter_governed_operation(call)
+        .expect("the one spend");
+
+    let started = tokio::time::Instant::now();
+    let release = hold_for(&owner, Duration::from_millis(50));
+    let mut ran = 0;
+    entered
+        .run_if_current_within_after_owner_change(&(), || ran += 1)
+        .await
+        .expect("the step runs once the hold ends");
+    release.await.expect("released");
+    assert_eq!(ran, 1, "the operation ran once");
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "it waited for the hold"
+    );
+    assert_eq!(
+        owner.contended.load(Ordering::SeqCst),
+        1,
+        "one attempt met the hold"
+    );
+    assert_eq!(owner.entered_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(dispositions.waits(), [true], "one settled wait");
+    assert_eq!(reviewer.0.load(Ordering::SeqCst), 1, "one review");
+    assert!(
+        matches!(
+            context.enter_governed_operation(call).map(drop),
+            Err(ToolError::ReviewUnsatisfied {
+                kind: ReviewUnsatisfiedKind::AlreadyConsumed,
+                ..
+            })
+        ),
+        "spent once, by the entry"
+    );
+    guard.complete();
+    drop(entered);
+    assert_eq!(observed.used(), 1, "Used once, after the effect");
+}
+
+/// A dispatch's own child issuance at R2 meets the held exclusion after its
+/// single consuming entry. The waiting form spends the review once, takes
+/// the issuance again through the entry's witness after one settled wait,
+/// and issues the child once; a later entry finds the review spent.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_dispatch_issuance_spends_once_and_issues_through_its_witness() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, reviewer, observed) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+
+    let release = hold_for(&owner, Duration::from_millis(50));
+    let issued = context
+        .governed_operation(call)
+        .expect("governed")
+        .issue_child_if_current_within_after_owner_change(&(), &7_u32)
+        .await
+        .expect("issued once the hold ends");
+    release.await.expect("released");
+    assert_eq!(*issued.downcast::<u32>().expect("typed"), 7);
+    assert_eq!(*owner.issued.lock(), vec![7], "issued once");
+    assert_eq!(owner.contended.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *owner.entered_tiers.lock(),
+        vec![OperationReviewTier::R2; 2],
+        "two attempts, both at the tier the entry spent"
+    );
+    assert_eq!(dispositions.waits(), [true], "one settled wait");
+    assert_eq!(reviewer.0.load(Ordering::SeqCst), 1, "one review");
+    assert!(
+        matches!(
+            context.enter_governed_operation(call).map(drop),
+            Err(ToolError::ReviewUnsatisfied {
+                kind: ReviewUnsatisfiedKind::AlreadyConsumed,
+                ..
+            })
+        ),
+        "spent once, by the waiting form's entry"
+    );
+    guard.complete();
+    assert_eq!(observed.used(), 1, "Used once, after the effect");
+}
+
+/// Held past the call's remaining tool time, the waiting form waits only
+/// until that time ends, never the full owner-change bound, reports one
+/// unsettled wait and answers the typed refusal to rebuild: the operation
+/// never ran.
+#[tokio::test(start_paused = true)]
+async fn past_the_calls_tool_time_a_waiting_step_answers_the_typed_rebuild_refusal() {
+    let owner = Owner::new(OperationReviewTier::R1);
+    let approvals = ApprovalService::new();
+    let (review, _, _) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let dispositions = Arc::new(Dispositions::default());
+    let tool_time = Duration::from_millis(300);
+    let context =
+        observed_by(&d.context, &dispositions).with_staging_wait(super::EntryStagingWait::new(
+            super::DispatchDeadline {
+                ends: Some(crate::time_compat::DeadlineInstant::now() + tool_time),
+            },
+            None,
+        ));
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+
+    // Held past the tool time: nothing releases it while the step waits.
+    owner.held.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let mut ran = false;
+    let answer = context
+        .governed_operation(call)
+        .expect("governed")
+        .run_if_current_within_after_owner_change(&(), || ran = true)
+        .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        answer,
+        Err(refused(OperationRefusalKind::ReprepareRequired)),
+        "the typed refusal to rebuild"
+    );
+    assert!(!ran, "the operation never ran");
+    assert_eq!(owner.plain_runs.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.contended.load(Ordering::SeqCst), 1);
+    assert!(
+        waited >= tool_time && waited < crate::authorization::OWNER_CHANGE_WAIT_BOUND,
+        "bounded by the tool time: {waited:?}"
+    );
+    assert_eq!(dispositions.waits(), [false], "one unsettled wait");
+}
+
+/// Owners that cannot answer give no refusal to rebuild: the waiting forms
+/// answer `OperationAuthorizationUnavailable` at once, even while a hold is
+/// in progress, with no wait and nothing run or issued.
+#[tokio::test(start_paused = true)]
+async fn an_unavailable_step_is_answered_at_once_and_never_waits() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, _, _) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let _guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+    let entered = context
+        .enter_governed_operation(call)
+        .expect("entered once");
+    owner.held.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+
+    *owner.refuse_next.lock() = Some(OperationAuthorizationError::Unavailable);
+    let mut ran = false;
+    assert_eq!(
+        entered
+            .run_if_current_within_after_owner_change(&(), || ran = true)
+            .await,
+        Err(ToolError::OperationAuthorizationUnavailable)
+    );
+    assert!(!ran);
+    *owner.refuse_next.lock() = Some(OperationAuthorizationError::Unavailable);
+    assert_eq!(
+        entered
+            .issue_child_if_current_within_after_owner_change(&(), &7_u32)
+            .await
+            .map(drop),
+        Err(ToolError::OperationAuthorizationUnavailable)
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO, "no wait");
+    assert!(dispositions.waits().is_empty(), "no wait reported");
+    assert!(owner.issued.lock().is_empty());
+    assert_eq!(
+        owner.contended.load(Ordering::SeqCst),
+        0,
+        "never taken again"
+    );
+}
+
+/// An attempt whose operation ran is the step's answer, whatever it says:
+/// after a work owner refuses to rebuild once the operation ran, there is no
+/// second attempt and no wait, and the operation ran once.
+#[tokio::test(start_paused = true)]
+async fn a_step_whose_operation_ran_is_never_taken_again() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, _, _) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let _guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+    let entered = context
+        .enter_governed_operation(call)
+        .expect("entered once");
+
+    *owner.refuse_after_run.lock() =
+        Some(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+    let mut ran = 0;
+    assert_eq!(
+        entered
+            .run_if_current_within_after_owner_change(&(), || ran += 1)
+            .await,
+        Err(refused(OperationRefusalKind::ReprepareRequired))
+    );
+    assert_eq!(ran, 1, "the operation ran once");
+    assert_eq!(owner.entered_runs.load(Ordering::SeqCst), 1, "one attempt");
+    assert!(dispositions.waits().is_empty(), "no wait after an effect");
+}
+
+/// A refusal to rebuild with no change in progress at the read (its holder
+/// finished before it) is taken once more without waiting, as a preparation
+/// rebuilds once: a step refused once runs on that rebuild, and one refused
+/// twice answers the typed refusal after its two attempts.
+#[tokio::test(start_paused = true)]
+async fn with_no_change_in_progress_a_waiting_step_rebuilds_once() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, _, _) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let _guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+    let entered = context
+        .enter_governed_operation(call)
+        .expect("entered once");
+    let started = tokio::time::Instant::now();
+
+    owner.unnamed_rebuilds.store(1, Ordering::SeqCst);
+    let mut ran = 0;
+    entered
+        .run_if_current_within_after_owner_change(&(), || ran += 1)
+        .await
+        .expect("its own rebuild runs");
+    assert_eq!(ran, 1);
+    assert_eq!(owner.entered_tiers.lock().len(), 2, "two attempts");
+
+    owner.unnamed_rebuilds.store(2, Ordering::SeqCst);
+    assert_eq!(
+        entered
+            .issue_child_if_current_within_after_owner_change(&(), &7_u32)
+            .await
+            .map(drop),
+        Err(refused(OperationRefusalKind::ReprepareRequired))
+    );
+    assert_eq!(
+        owner.entered_tiers.lock().len(),
+        4,
+        "two more attempts, then the refusal"
+    );
+    assert!(owner.issued.lock().is_empty());
+    assert!(
+        dispositions.waits().is_empty(),
+        "nothing was in progress to wait for"
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO);
 }

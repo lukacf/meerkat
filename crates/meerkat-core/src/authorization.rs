@@ -588,6 +588,15 @@ pub trait WorkAuthorization: Send + Sync {
     /// Wrappers check their own custody and forward; the default is
     /// unavailable. `operation` runs at most once and must not await.
     ///
+    /// The exclusion is taken without waiting. When another actor holds it
+    /// now, the native work owner refuses to rebuild (`ReprepareRequired`,
+    /// no verdict on the operation) and names the hold through
+    /// [`Self::owner_change_in_progress`] until it ends, so a caller can wait
+    /// for it outside every lock and ask again (the waiting forms of
+    /// `GovernedDispatchOperation` and `EnteredDispatchOperation`). Owners
+    /// that cannot answer at all, a poisoned publication included, are
+    /// `Unavailable`.
+    ///
     /// This is the generic composition boundary: the owner that answers is
     /// the context's own authorization chain by construction, and an
     /// implementor that does not override it refuses without running
@@ -647,7 +656,9 @@ pub trait WorkAuthorization: Send + Sync {
     /// `entered_tier` (the review this dispatch actually entered), and the
     /// grant owner's own reserved issuance with the decision's validity.
     /// The typed outcome is returned boxed. Wrappers check their own custody
-    /// and forward; the default is unavailable and issues nothing.
+    /// and forward; the default is unavailable and issues nothing. A held
+    /// exclusion refuses as for `run_if_current_within`, before anything is
+    /// decided or appended.
     fn issue_child_if_current_within(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -665,7 +676,11 @@ pub trait WorkAuthorization: Send + Sync {
     /// this work's own publication instance and nothing else. A wrapper of a
     /// run's work authorization forwards it. An owner without a publication
     /// answers `None`, and so does a poisoned publication, whose observations
-    /// stay unavailable; a refusal then takes its ordinary path.
+    /// stay unavailable; a refusal then takes its ordinary path. An owner
+    /// whose non-waiting exclusion refused a step because another actor held
+    /// it names that hold here until it ends, published or not (the native
+    /// work owner names every reservation of its publication's writer), so
+    /// the step's wait lasts until the holder releases it.
     fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
         None
     }

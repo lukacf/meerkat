@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-g
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-g|audits-i
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -12,19 +12,21 @@ set -euo pipefail
 #   audits-e        hand-written audit shard E
 #   audits-f        hand-written audit shard F
 #   audits-g        hand-written audit shard G
+#   audits-i        hand-written audit shard I
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the eight parts as separate targets (machine_verify_all_tlc_test,
+# Bazel runs the nine parts as separate targets (machine_verify_all_tlc_test,
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test,
 # machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test,
 # machine_verify_audits_e_tlc_test, machine_verify_audits_f_tlc_test,
-# machine_verify_audits_g_tlc_test) so the BuildBuddy machine-authority lane
-# runs them in parallel; together they are exactly `all`. CI's tlc-audits job
-# runs the seven audit shards, one job each.
+# machine_verify_audits_g_tlc_test, machine_verify_audits_i_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`. CI's tlc-audits job runs the eight audit shards, one job
+# each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-i) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -33,13 +35,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g, audits-i may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g, audits-i) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, audits-i, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -560,7 +562,7 @@ fi
 # MobMachine member residency (Dormant, Waking, Live) is empty in the ci
 # sweep, whose AgentIdentityValues are {}, so the residency invariants hold
 # there only vacuously. A hand-written audit over the same generated model
-# checks eight small runs over their whole reachable space, each under a cap
+# checks eleven small runs over their whole reachable space, each under a cap
 # of minted wake attempts and the member lifecycle audit's VIEW
 # (model_step_count and topology_epoch left out, checked first): one identity
 # through the build seed, the boot plan, the seal and the host carry-out; one
@@ -574,39 +576,55 @@ fi
 # Completed and Destroyed phases; one identity through an explicit resume; two
 # identities and one wiring edge; two identities from the spawn ladder's
 # Opened phase through the dormant seat, the embodied spawn, the release and
-# the rotation; and two identities woken beside each other. Under every
-# generated invariant plus the audit's own properties (no recovery or seat arm
-# overwrites a phase, an open attempt is never replaced and ends only Live,
-# Dormant or without a phase, every Waking member has an enabled closing arm of
-# every kind, a Lifecycle input never wakes), WakeMember totality, a local wake
-# that owes an endpoint closes Live only with it (and one owing no endpoint
-# cause always can), a boot plan that never leaves a member blocking the seal,
-# the release verdict helper and its agreement with the Released arm, the
-# attempt fence on the routed binding refusal, the fresh create only for an
-# unborn seat's session, the release epoch fence, no runtime retire routed for
-# a member with no registration, a settled retirement that can always archive
-# (under an admitted destroy no rotation or host carry-out holds it), no
-# rotation under an admitted destroy, a resume seat unborn exactly when no
-# build created its session, a rotation's terminal that records its next
-# incarnation exempt from the definition's wiring rules exactly when its own
-# input says so, a seat that records its member exempt exactly when its own
-# input says so, no exemption after the seal but a seat's, an explicit
-# resume that can always join a wake
-# in flight before its topology whatever readiness it settled, holds no member
-# work in its readiness or topology stages and reserves the members it
-# rebuilds only before its readiness, with the ASSUME over the wake refusal
-# helper. It runs with TLC coverage and requires every listed arm to fire and
-# a floor of distinct states per run, and requires its thirty-four witnesses
-# reached. Its --mutants mode (run by hand, outside the shard's budget)
-# refuses fifty-seven seeded defects, one per residency invariant and property.
+# the rotation; two identities woken beside each other; one identity, an
+# identity entry or not and host-pending or not, rotated onto its own session
+# (a respawn) beside its retirement starts, archives, wake, scoped release
+# verdict and the mob's destroy; one identity whose retirement start and
+# rotation are replayed and finished by the rotation's own terminal; and two
+# identities, wired and with an external peer, whose committed same-session
+# rotation's rows are replayed. Under every generated invariant plus the
+# audit's own properties (no recovery or seat arm overwrites a phase, an open
+# attempt is never replaced and ends only Live, Dormant or without a phase,
+# every Waking member has an enabled closing arm of every kind, a Lifecycle
+# input never wakes), WakeMember totality, a local wake that owes an endpoint
+# closes Live only with it (and one owing no endpoint cause always can), a
+# boot plan that never leaves a member blocking the seal, the release verdict
+# helper and its agreement with the Released arm, the attempt fence on the
+# routed binding refusal, the fresh create only for an unborn seat's session,
+# the release epoch fence, no runtime retire routed for a member with no
+# registration, a settled retirement that can always archive (under an
+# admitted destroy no rotation or host carry-out holds it), no rotation under
+# an admitted destroy, a resume seat unborn exactly when no build created its
+# session, a rotation's terminal that records its next incarnation exempt from
+# the definition's wiring rules exactly when its own input says so, a seat
+# that records its member exempt exactly when its own input says so, no
+# exemption after the seal but a seat's, an explicit resume that can always
+# join a wake in flight before its topology whatever readiness it settled,
+# holds no member work in its readiness or topology stages and reserves the
+# members it rebuilds only before its readiness, a same-session terminal that
+# keeps the member's session, endpoint, entry and host preparation mark and
+# never unseats it, a scoped release that answers Stale for any incarnation
+# but the current one, a replayed rotation its own terminal can always
+# finish, and a replay that keeps the edges a same-session terminal records
+# again, with the ASSUME over the wake refusal helper. It runs with TLC
+# coverage and requires every listed arm to fire and a floor of distinct
+# states per run, and requires its forty-four witnesses reached. Its
+# --mutants mode (run by hand, outside the shards' budget) refuses sixty-five
+# seeded defects, one per residency invariant and property. The lane runs it
+# in two parts: its whole-space runs in shard audits-g (--part spaces) and
+# its witness runs in shard audits-i (--part witnesses).
 member_residency_audit="${workspace_root}/specs/machines/mob_machine/member_residency_audit.sh"
 if [[ ! -x "${member_residency_audit}" ]]; then
   echo "error: member residency audit runner is missing from workspace runfiles: ${member_residency_audit}" >&2
   exit 1
 fi
 if run_part audits-g; then
-  echo "running member residency TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${member_residency_audit}"
+  echo "running bounded member residency whole-space TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${member_residency_audit}" --part spaces
+fi
+if run_part audits-i; then
+  echo "running bounded member residency witness TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${member_residency_audit}" --part witnesses
 fi
 
 # MobMachine identity entries (an identity the host declared as its own,
@@ -626,21 +644,24 @@ fi
 # takes the member residency audit's retire run with its member made an
 # entry (the replay of its row, or its reseat's ladder opened with entry
 # custody) through the dormant seat, the live and the archive-only
-# retirement to its archive terminal, the rotation and the mob's destroy
-# (DestroyMob and DestroyFromAny), under every generated invariant (every
-# unseat ends an entry; a destroyed mob holds no entry and no entry
-# custody), the retire run's own properties and three action properties (a
+# retirement to its archive terminal, the rotation, the legacy fresh-life
+# respawn and its refusal of an entry, and the mob's destroy (DestroyMob and
+# DestroyFromAny), under every generated invariant (every unseat ends an
+# entry; a destroyed mob holds no entry and no entry custody), the retire
+# run's own properties and four action properties (a
 # seat records an entry exactly when its ladder holds entry custody, a
 # rotation keeps the entry, an entry only by a custody seat or a replayed
-# row). Both run with TLC coverage and require every listed arm to fire, a
-# floor of distinct states and their twenty witnesses reached, and
-# --mutants refuses ten seeded defects: a reconcile that retires an entry, a
+# row; the legacy fresh-life respawn admitted only for a member that is no
+# entry). Both run with TLC coverage and require every listed arm to fire, a
+# floor of distinct states and their twenty-two witnesses reached, and
+# --mutants refuses eleven seeded defects: a reconcile that retires an entry, a
 # probe that answers an entry's name as a plain duplicate, an adoption
 # without the observation, the replay of an entry row on an unseated
 # identity, an archive and a destroy's member archive that keep the entry, a
 # DestroyMob that keeps the entries, a DestroyFromAny that keeps an open
-# ladder's entry custody, a rotation that drops the entry and a seat that
-# ignores its ladder's entry custody.
+# ladder's entry custody, a rotation that drops the entry, a seat that
+# ignores its ladder's entry custody and a fresh-life respawn admitted for an
+# entry.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
@@ -814,16 +835,22 @@ run_machine_verify() {
 # live-context causal-tail batch with --mutants 98-122, generation high-water
 # with --mutants 56-71: 423-511 s, plus the AuthMachine source-credential
 # publication audit, added after these measurements;
-# audits-g = member residency without its mutants, alone: on the push its
-# eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
-# before the job timeout cut it off, about 430 s in all, and about 525 s on
-# the pull request's runner, 1.22x slower on the rest of its shard. The
-# wiring exemption of side chats (2026-10-29) about doubled its seat, wake and
-# retire spaces (46248, 3198 and 11174 distinct states) and brought it to 34
-# witnesses: locally, with 4 TLC workers, the whole audit took 299 s (its
-# eight whole-space runs 140 s of TLC time, the seat run 67 s of it), where
-# the same lane took about 230 s before; the hosted shard has not been
-# measured again.
+# audits-g = member residency's whole-space runs (--part spaces), alone: on
+# the push, when the shard ran the whole audit, its eight whole-space runs
+# took 165 s and its first 23 of 32 witness runs 173 s before the job timeout
+# cut it off, about 430 s in all, and about 525 s on the pull request's
+# runner, 1.22x slower on the rest of its shard. The wiring exemption of side
+# chats (2026-10-29) about doubled its seat, wake and retire spaces (46248,
+# 3198 and 11174 distinct states) and brought it to 34 witnesses: locally,
+# with 4 TLC workers, the whole audit took 299 s (its eight whole-space runs
+# 140 s of TLC time, the seat run 67 s of it), where the same lane took about
+# 230 s before. With eleven whole-space runs and 44 witnesses (2026-10-30)
+# the whole audit took about 390 s locally with 4 TLC workers, past 10
+# minutes on a hosted runner, so its witness runs moved to a shard of their
+# own: its eleven whole-space runs took 179 s locally with 4 TLC workers;
+# audits-i = member residency's witness runs (--part witnesses), alone: its
+# 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
+# and model parse most of it. Neither hosted shard has been measured yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

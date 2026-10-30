@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # TLC audit of MobMachine member residency (Dormant, Waking, Live).
 #
-# usage: member_residency_audit.sh [--mutants] [extra tlc args...]
+# usage: member_residency_audit.sh [--mutants] [--part spaces|witnesses]
+#                                   [extra tlc args...]
+#
+# --part spaces runs only the whole-space runs, --part witnesses only the
+# witness runs (and, with --mutants, the mutants); with no --part it runs
+# both, in that order. The canonical lane runs the two parts in two shards.
 #
 # Derives the TLC configs from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's model
@@ -42,8 +47,9 @@
 #   the embodied spawn commit, the release and the rotation;
 # - wake2 (AuditWake2Spec): two identities woken beside each other;
 # - rotate-same (AuditRotateSameSpec): one identity, an identity entry or
-#   not, rotated onto its own session (a respawn) from any residency, its
-#   terminal owing a kickoff or not in Running and in Stopped, the
+#   not, host-pending or not, rotated onto its own session (a respawn) from
+#   any residency, its terminal owing a kickoff or not in Running and in
+#   Stopped, the host's seat step that ends the mark, the
 #   archive-only retirement starts and re-drives beside it, the plain
 #   archives, the next incarnation's wake, the scoped release verdict and the
 #   mob's destroy;
@@ -96,7 +102,9 @@
 # leaves a member with a pending same-session rotation unseated or unbound
 # (AuditSameSessionNeverUnseats), that no same-session rotation begins or
 # commits under an admitted destroy (AuditDestroyFencesSameSessionRotation),
-# that it keeps an identity entry (AuditSameSessionKeepsEntry), and that the
+# that it keeps an identity entry (AuditSameSessionKeepsEntry), that its
+# terminal keeps a host's preparation mark, which only the host's seat step
+# ends (AuditSameSessionTerminalKeepsHostMark), and that the
 # release verdict answers every scope by exactly one arm, Stale
 # exactly when the scope is not the current incarnation on its current
 # session (AuditScopedReleaseFenced). The recover-rotation run checks that a
@@ -124,10 +132,26 @@
 set -euo pipefail
 
 run_mutants=false
-if [[ "${1:-}" == "--mutants" ]]; then
-  run_mutants=true
-  shift
-fi
+part="all"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mutants)
+      run_mutants=true
+      shift
+      ;;
+    --part)
+      part="${2:-}"
+      if [[ "${part}" != "spaces" && "${part}" != "witnesses" ]]; then
+        echo "error: --part needs spaces or witnesses, got '${part}'" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 seed_states=3078
@@ -138,7 +162,7 @@ resume_states=4004
 edge_states=1148
 seat_states=46248
 wake2_states=1425
-rotate_same_states=3296
+rotate_same_states=5962
 recover_rotation_states=973
 replay_same_states=1400
 
@@ -357,6 +381,8 @@ wake2_covered_actions=(
 )
 
 rotate_same_covered_actions=(
+  SeedMemberResidencyRunning
+  ResolveMemberHostPreparationRunning
   BeginMemberRotationSameSessionRunning
   AuthorizeSpawnProfileRunning
   CommitMemberRotationSameSessionRunning
@@ -580,7 +606,8 @@ write_cfg() {
   AuditSameSessionTerminalKeepsSession
   AuditSameSessionNeverUnseats
   AuditDestroyFencesSameSessionRotation
-  AuditSameSessionKeepsEntry"
+  AuditSameSessionKeepsEntry
+  AuditSameSessionTerminalKeepsHostMark"
       run_invariants="
   AuditWakingClosable
   AuditScopedReleaseFenced"
@@ -728,17 +755,23 @@ check_space() {
 }
 
 tlc_args=("$@")
-check_space seed "${seed_states}" "${seed_covered_actions[@]}"
-check_space wake "${wake_states}" "${wake_covered_actions[@]}"
-check_space retire "${retire_states}" "${retire_covered_actions[@]}"
-check_space terminal "${terminal_states}" "${terminal_covered_actions[@]}"
-check_space resume "${resume_states}" "${resume_covered_actions[@]}"
-check_space edge "${edge_states}" "${edge_covered_actions[@]}"
-check_space seat "${seat_states}" "${seat_covered_actions[@]}"
-check_space wake2 "${wake2_states}" "${wake2_covered_actions[@]}"
-check_space rotate-same "${rotate_same_states}" "${rotate_same_covered_actions[@]}"
-check_space recover-rotation "${recover_rotation_states}" "${recover_rotation_covered_actions[@]}"
-check_space replay-same "${replay_same_states}" "${replay_same_covered_actions[@]}"
+if [[ "${part}" != "witnesses" ]]; then
+  check_space seed "${seed_states}" "${seed_covered_actions[@]}"
+  check_space wake "${wake_states}" "${wake_covered_actions[@]}"
+  check_space retire "${retire_states}" "${retire_covered_actions[@]}"
+  check_space terminal "${terminal_states}" "${terminal_covered_actions[@]}"
+  check_space resume "${resume_states}" "${resume_covered_actions[@]}"
+  check_space edge "${edge_states}" "${edge_covered_actions[@]}"
+  check_space seat "${seat_states}" "${seat_covered_actions[@]}"
+  check_space wake2 "${wake2_states}" "${wake2_covered_actions[@]}"
+  check_space rotate-same "${rotate_same_states}" "${rotate_same_covered_actions[@]}"
+  check_space recover-rotation "${recover_rotation_states}" "${recover_rotation_covered_actions[@]}"
+  check_space replay-same "${replay_same_states}" "${replay_same_covered_actions[@]}"
+fi
+if [[ "${part}" == "spaces" ]]; then
+  echo "member residency audit passed over the whole reachable space of its domains (whole-space runs)"
+  exit 0
+fi
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
@@ -765,6 +798,8 @@ for witness in \
   "rotate-same:Action property:DestroyEndsSameSession" \
   "rotate-same:Invariant:StaleScopeAfterRotation" \
   "rotate-same:Action property:EntryRotatedSameSession" \
+  "rotate-same:Action property:HostMarkKept" \
+  "rotate-same:Action property:HeldSuccessorRefused" \
   "recover-rotation:Action property:RecoveredFreshRotated" \
   "recover-rotation:Action property:RecoveredSameRotated" \
   "replay-same:Invariant:ReplayedKeptTopology" \
@@ -1216,6 +1251,11 @@ add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readines
   mutate rotate-same redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
     'drop_guard("RetireRunningReleasingArchiveOnly", "\"SameSession\"")' "$@"
+  # A same-session terminal that ends a host's preparation mark: the
+  # successor could wake before the host's seat step.
+  mutate rotate-same same_session_commit_ends_host_mark \
+    "Error: Action property AuditSameSessionTerminalKeepsHostMark is violated" \
+    'rewrite_frame("CommitMemberRotationSameSessionRunning", {"member_host_preparation_pending": "(member_host_preparation_pending \\ {agent_identity})"})' "$@"
   # The same releasing re-drive in a stopped mob (the guard's Stopped copy).
   mutate rotate-same stopped_redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
@@ -1242,4 +1282,8 @@ add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ 
     "Error: Invariant AuditKeptRowsReplayable is violated" \
     'add_guard("RecoverRosterWiringAlreadyRecovered", "FALSE")' "$@"
 fi
-echo "member residency audit passed over the whole reachable space of its domains"
+if [[ "${part}" == "witnesses" ]]; then
+  echo "member residency audit reached every witness (witness runs)"
+else
+  echo "member residency audit passed over the whole reachable space of its domains"
+fi

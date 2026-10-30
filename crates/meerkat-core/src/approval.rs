@@ -9,11 +9,16 @@
 //! persisted or restored, so a stored approval record can never reconstruct
 //! a review allow or spendable consent. Human consent for a retained R3
 //! candidate (see [`consent`]) is one such attempt plus its approval record.
+//!
+//! A durable decision (see [`decision`]) is a separate kind: one held
+//! operation with its own records, store and owner, sharing nothing with
+//! these approvals.
 
 pub mod consent;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod consent_test_support;
+pub mod decision;
 mod owner_loss;
 pub mod review;
 

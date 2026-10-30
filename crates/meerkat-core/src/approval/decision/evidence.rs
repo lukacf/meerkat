@@ -58,20 +58,22 @@ fn bounded_text(what: &'static str, text: String) -> Result<String, DecisionCont
 
 /// One authenticated human's decision on one durable decision, bound by the
 /// trusted host adapter to the event it authenticated: the ingress and event
-/// reference it arrived on, the approver id the human decides for, and the
-/// digest of the rendering the human saw, with the presentation the event
-/// carried, if any.
+/// reference it arrived on, the time the ingress observed the event, the
+/// approver id the human decides for, and the digest of the rendering the
+/// human saw, with the presentation the event carried, if any.
 ///
 /// The decider is a qualified human ([`AuthenticatedApprover`] refuses any
 /// other principal). Whether the decider may act for the approver id now is
 /// a separate, current eligibility check the owner service makes when the
-/// decision commits.
+/// decision commits. The decision machine refuses a decision observed
+/// before the decision's first presentation to the approver.
 #[derive(Debug, Clone)]
 pub struct AttestedDecision {
     approver: AuthenticatedApprover,
     decider: DecisionPrincipalKey,
     ingress: DecisionIngress,
     event_ref: DecisionReference,
+    observed_at_ms: u64,
     approver_id: ApproverId,
     presented_digest: Sha256Digest,
     presentation: Option<PresentationRecord>,
@@ -81,7 +83,9 @@ pub struct AttestedDecision {
 
 impl AttestedDecision {
     /// A human's decision, `approve` or reject, on the rendering whose digest
-    /// is `presented_digest`.
+    /// is `presented_digest`, which the trusted ingress observed at
+    /// `observed_at_ms` (UNIX milliseconds, the ingress's own reading of the
+    /// event, such as a chat provider's message time).
     ///
     /// # Errors
     /// [`DecisionContractError::UnqualifiedPrincipal`] when the approver's
@@ -90,6 +94,7 @@ impl AttestedDecision {
         approver: AuthenticatedApprover,
         ingress: DecisionIngress,
         event_ref: DecisionReference,
+        observed_at_ms: u64,
         approver_id: ApproverId,
         presented_digest: Sha256Digest,
         approve: bool,
@@ -100,6 +105,7 @@ impl AttestedDecision {
             decider,
             ingress,
             event_ref,
+            observed_at_ms,
             approver_id,
             presented_digest,
             presentation: None,
@@ -146,6 +152,13 @@ impl AttestedDecision {
         &self.event_ref
     }
 
+    /// When the trusted ingress observed the decision event, in UNIX
+    /// milliseconds.
+    #[must_use]
+    pub fn observed_at_ms(&self) -> u64 {
+        self.observed_at_ms
+    }
+
     /// The approver id the human decides for.
     #[must_use]
     pub fn approver_id(&self) -> &ApproverId {
@@ -188,6 +201,7 @@ impl AttestedDecision {
                 .map(|scope| scope.as_str().to_owned()),
             ingress: self.ingress.clone(),
             event_ref: self.event_ref.clone(),
+            observed_at_ms: Some(self.observed_at_ms),
             approver_id: self.approver_id.clone(),
             presented_digest: self.presented_digest.clone(),
             presentation: self.presentation.clone(),
@@ -317,6 +331,12 @@ pub enum DecisionEvidence {
         authentication_scope: Option<String>,
         ingress: DecisionIngress,
         event_ref: DecisionReference,
+        /// When the ingress observed the decision event, in UNIX
+        /// milliseconds. Absent in evidence recorded before decisions
+        /// carried it: such evidence decodes, and keeps its bytes and its
+        /// digest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_ms: Option<u64>,
         approver_id: ApproverId,
         presented_digest: Sha256Digest,
         #[serde(default, skip_serializing_if = "Option::is_none")]

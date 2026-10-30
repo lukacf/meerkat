@@ -193,7 +193,8 @@ mod tests {
         }
     }
 
-    /// Present the rendering to the approver id and approve the decision.
+    /// Present the rendering to the approver id and approve the decision,
+    /// observed at the presentation's own time.
     fn approve(decisions: &DurableDecisionService, decision_id: &DecisionId, at_ms: u64) {
         let rendering = rendering();
         decisions
@@ -219,6 +220,7 @@ mod tests {
             .expect("authenticated human"),
             DecisionIngress::new("console").expect("ingress"),
             reference("event-1"),
+            at_ms,
             approver_id(),
             rendering.subject_digest(),
             true,

@@ -822,8 +822,8 @@ const MACHINE_SPECS = [
           },
           {
             title: "Stage + Presentation",
-            note: "Who decides now, and whether a complete presentation of the held subject reached them.",
-            fields: ["stage", "presented_to_approver", "presented_to_reviewer"],
+            note: "Who decides now, and whether a complete presentation of the held subject reached them; a human decision observed before the approver's first presentation is refused.",
+            fields: ["stage", "first_presented_to_approver_at_ms", "presented_to_reviewer"],
           },
         ],
         right: [

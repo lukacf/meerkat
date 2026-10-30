@@ -35,6 +35,9 @@ use super::{
 
 const HELD_AT: u64 = 1_000;
 const DEADLINE: u64 = 61_000;
+/// When the ingress observed the rows' default decision event: just after
+/// the default presentation, shown at `HELD_AT`.
+const OBSERVED_AT: u64 = HELD_AT + 1;
 /// When the presentation-order rows show the decision to the approver:
 /// after the hold, so a decision can be observed before, at or after it.
 const PRESENTED_AT: u64 = HELD_AT + 100;
@@ -259,22 +262,10 @@ fn presentation(rendering: &DecisionRendering) -> PresentationRecord {
     )
 }
 
-/// `decider`'s attested decision on the rendering whose digest is `digest`.
+/// `decider`'s attested decision on the rendering whose digest is `digest`,
+/// observed just after the default presentation ([`OBSERVED_AT`]).
 fn attested(decider: &str, digest: Sha256Digest, approve: bool) -> AttestedDecision {
-    let approver = AuthenticatedApprover::new(
-        principal(PrincipalKind::Human, decider),
-        ApprovalAssurance::PersonAuthenticated,
-    )
-    .expect("authenticated human");
-    AttestedDecision::new(
-        approver,
-        DecisionIngress::new("console").expect("ingress"),
-        reference("event-1"),
-        approver_id(),
-        digest,
-        approve,
-    )
-    .expect("attested decision")
+    attested_at(decider, digest, approve, OBSERVED_AT)
 }
 
 /// The complete one-part presentation of `rendering` to the approver id,
@@ -300,10 +291,21 @@ fn attested_at(
     approve: bool,
     observed_at_ms: u64,
 ) -> AttestedDecision {
-    // An attested decision cannot carry its observed time yet, so the owner
-    // has nothing to order the decision by.
-    let _ = observed_at_ms;
-    attested(decider, digest, approve)
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, decider),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human");
+    AttestedDecision::new(
+        approver,
+        DecisionIngress::new("console").expect("ingress"),
+        reference("event-1"),
+        observed_at_ms,
+        approver_id(),
+        digest,
+        approve,
+    )
+    .expect("attested decision")
 }
 
 /// When the evidence of the decided `row` says its ingress observed the
@@ -390,7 +392,10 @@ fn a_decide_with_the_canonical_digest_after_a_complete_presentation_approves() {
     let presented = service
         .present(&decision_id, &presentation(&rendering))
         .expect("present");
-    assert!(presented.state.presented_to_approver);
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT)
+    );
     assert_eq!(presented.presentations, vec![presentation(&rendering)]);
 
     let decided = service
@@ -912,7 +917,10 @@ fn a_second_owner_conflict_reloads_once_then_reports_conflict() {
     let presented = service
         .present(&decision_id, &presentation(&rendering))
         .expect("one conflict reloads the row and applies the input again");
-    assert!(presented.state.presented_to_approver);
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT)
+    );
     assert_eq!(
         store.calls(),
         vec!["get", "replace_if_revision", "get", "replace_if_revision"]
@@ -1650,7 +1658,11 @@ fn a_review_escalates_to_the_human_and_refuses_another_reviewer() {
         .decide(&decision_id, &decision, &Eligibility::current())
         .expect("the human approves with the presentation it carried");
     assert_eq!(decided.state.phase, DecisionPhase::Approved);
-    assert!(decided.state.presented_to_approver);
+    assert_eq!(
+        decided.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT),
+        "the carried presentation is recorded with the time it was shown"
+    );
     assert_eq!(decided.presentations.len(), 2);
 }
 

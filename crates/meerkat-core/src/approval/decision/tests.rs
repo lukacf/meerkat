@@ -69,6 +69,7 @@ fn attested(approve: bool) -> AttestedDecision {
         approver,
         DecisionIngress::new("console").expect("ingress"),
         reference("event-1"),
+        7,
         approver_id(),
         Sha256Digest::of(b"the rendering"),
         approve,
@@ -277,6 +278,16 @@ fn evidence_digest_changes_with_any_evidence_field() {
     let base = human.digest().expect("digest");
     assert_eq!(base, human.digest().expect("digest"), "stable");
     assert_eq!(human.tier(), DecisionTier::Human);
+    assert!(
+        matches!(
+            &human,
+            DecisionEvidence::Human {
+                observed_at_ms: Some(7),
+                ..
+            }
+        ),
+        "the evidence records when the ingress observed the decision"
+    );
 
     let changed = |change: &dyn Fn(&mut DecisionEvidence)| {
         let mut evidence = human.clone();
@@ -284,7 +295,7 @@ fn evidence_digest_changes_with_any_evidence_field() {
         assert_ne!(evidence, human, "the change must change the evidence");
         evidence.digest().expect("digest")
     };
-    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 11] = [
+    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 13] = [
         ("decider", &|evidence| {
             if let DecisionEvidence::Human { decider, .. } = evidence {
                 *decider = key(PrincipalKind::Human, "bob");
@@ -317,6 +328,16 @@ fn evidence_digest_changes_with_any_evidence_field() {
         ("event", &|evidence| {
             if let DecisionEvidence::Human { event_ref, .. } = evidence {
                 *event_ref = reference("event-2");
+            }
+        }),
+        ("observed time", &|evidence| {
+            if let DecisionEvidence::Human { observed_at_ms, .. } = evidence {
+                *observed_at_ms = Some(8);
+            }
+        }),
+        ("no observed time", &|evidence| {
+            if let DecisionEvidence::Human { observed_at_ms, .. } = evidence {
+                *observed_at_ms = None;
             }
         }),
         ("approver id", &|evidence| {
@@ -483,7 +504,7 @@ fn stored(
         approver_id: format!("approver:{}", descriptor.approver_id),
         reviewer: None,
         stage: DecisionStage::Human,
-        presented_to_approver: false,
+        first_presented_to_approver_at_ms: None,
         presented_to_reviewer: false,
         evidence_digest: None,
         decided_at_ms: None,
@@ -708,6 +729,7 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         authentication_scope: Some("login-1".to_owned()),
         ingress: DecisionIngress::new("web").expect("ingress"),
         event_ref: reference("event-1"),
+        observed_at_ms: None,
         approver_id: approver_id(),
         presented_digest: rendering.subject_digest(),
         presentation: Some(PresentationRecord::complete(
@@ -723,6 +745,10 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         approve: true,
         reason: Some("looks right".to_owned()),
     };
+    let mut human_observed = human.clone();
+    if let DecisionEvidence::Human { observed_at_ms, .. } = &mut human_observed {
+        *observed_at_ms = Some(7);
+    }
     let review = DecisionEvidence::Review {
         reviewer: key(PrincipalKind::SharedAgent, "reviewer"),
         principal: principal(PrincipalKind::SharedAgent, "reviewer", "example.org"),
@@ -735,6 +761,11 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
     };
     for (evidence, json, digest) in [
         (&human, HUMAN_EVIDENCE_JSON, HUMAN_EVIDENCE_DIGEST),
+        (
+            &human_observed,
+            HUMAN_OBSERVED_EVIDENCE_JSON,
+            HUMAN_OBSERVED_EVIDENCE_DIGEST,
+        ),
         (&review, REVIEW_EVIDENCE_JSON, REVIEW_EVIDENCE_DIGEST),
     ] {
         let tier = evidence.tier();

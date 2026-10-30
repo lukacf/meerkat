@@ -5585,6 +5585,7 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
                     "NotAuthorized",
                     "SettlementOwed",
                     "NotOwed",
+                    "DecidedBeforePresentation",
                 ],
             ),
         ],
@@ -5598,9 +5599,11 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
 /// decider, another reviewer, another binding) needs two distinct keys, so
 /// both key types sample the two values `alpha` and `beta`; every input time
 /// ranges over `0..2`, which puts a hold's deadline before, at and after a
-/// later touch. Every arm is reached within six steps (the deepest: hold,
-/// approve, authorize, record, settle the notice, settle it again), so the
-/// CI run requires each of them to generate a state.
+/// later touch, and a presentation before, at and after a decision's
+/// observed time (a carried presentation's time is sampled as `1`). Every
+/// arm is reached within six steps (the deepest: hold, approve, authorize,
+/// record, settle the notice, settle it again), so the CI run requires each
+/// of them to generate a state.
 #[allow(clippy::expect_used)]
 fn durable_decision_tlc_model() -> crate::MachineTlcModel {
     let two_keys = || crate::MachineTlcProfile {

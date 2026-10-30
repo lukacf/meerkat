@@ -1644,6 +1644,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "DecideRefusedNotEligible",
                         "DecideRefusedSelfApproval",
                         "DecideRefusedPresentationIncomplete",
+                        "DecideRefusedDecidedBeforePresentation",
                         "DecideApproved",
                         "DecideRejected",
                         "DecideRefusedNotOpenApproved",
@@ -1821,7 +1822,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "durable_decision_human_decision",
-                    "durable_decision_machine.rs::each_decide_conjunct_alone_refuses and the_first_valid_decision_wins_and_end_phases_latch refuse a human decision for each missing conjunct alone (evidence, digest, approver, eligibility, the requester as decider, presentation, stage), record a complete presentation, and let the first valid decision win",
+                    "durable_decision_machine.rs::each_decide_conjunct_alone_refuses, the_first_valid_decision_wins_and_end_phases_latch and a_human_decision_is_ordered_after_its_first_presentation refuse a human decision for each missing conjunct alone (evidence, digest, approver, eligibility, the requester as decider, presentation, presentation order, stage), record a complete presentation with the earliest time it reached the approver, refuse a decision observed before that first presentation and accept one in the same millisecond, and let the first valid decision win",
                     CoverageClaims::none()
                         .transitions(&[
                             "DecideRefusedReviewStage",
@@ -1830,6 +1831,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DecideRefusedNotEligible",
                             "DecideRefusedSelfApproval",
                             "DecideRefusedPresentationIncomplete",
+                            "DecideRefusedDecidedBeforePresentation",
                             "DecideApproved",
                             "DecideRejected",
                             "PresentRefusedSubjectChanged",

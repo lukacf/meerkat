@@ -8957,32 +8957,6 @@ impl MeerkatMachine {
         observed_teardown_slot: Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
         disposition: crate::runtime_loop::RuntimeLoopTeardownDisposition,
     ) -> Result<RuntimeLoopTeardownWait, RuntimeDriverError> {
-        if disposition.requires_unregister() {
-            // A teardown slot is attachment-local while the runtime epoch is
-            // registration-local.  A dead A can be repaired by B without
-            // changing epochs, so an unlocked slot sample followed by an
-            // epoch-only unregister would let A tear down B.  Acquire M first,
-            // revalidate the exact slot under it, and retain M until Draining
-            // is committed.  Once Draining is visible no replacement can enter
-            // before the owned unregister saga takes over.
-            let Some(observed_epoch) = self
-                .begin_unregister_for_observed_runtime_loop_if_current(
-                    session_id,
-                    &observed_teardown_slot,
-                )
-                .await?
-            else {
-                return Ok(RuntimeLoopTeardownWait::Settled);
-            };
-            return self
-                .join_or_start_unregister_teardown_for_watcher(
-                    session_id,
-                    &observed_epoch,
-                    self.unregister_caller_wait_deadline(),
-                )
-                .await;
-        }
-
         let (
             generated_draining,
             observed_epoch,
@@ -9026,6 +9000,12 @@ impl MeerkatMachine {
             // answered now, typed, instead of waiting on a registration that
             // detached. The inputs stay durably admitted and run once the
             // session's runtime reloads.
+            //
+            // Checked before an unregister the loop's disposition asks for
+            // (a run whose completed terminal was recorded before it failed):
+            // that unregister would stage Draining over a registration whose
+            // durable writes the gate refuses, and the reload would then join
+            // the unregister instead of reloading.
             completions.lock().await.fail_all_waiters(
                 crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                     "the runtime of session {session_id} stopped serving before this input completed and must reload ({reload_required}); the input stays durably admitted and runs once the runtime reloads, so do not resubmit it"
@@ -9035,6 +9015,31 @@ impl MeerkatMachine {
                 evidence_digest: None,
                 reason: reload_required.to_string(),
             });
+        }
+        if disposition.requires_unregister() {
+            // A teardown slot is attachment-local while the runtime epoch is
+            // registration-local.  A dead A can be repaired by B without
+            // changing epochs, so an unlocked slot sample followed by an
+            // epoch-only unregister would let A tear down B.  Acquire M first,
+            // revalidate the exact slot under it, and retain M until Draining
+            // is committed.  Once Draining is visible no replacement can enter
+            // before the owned unregister saga takes over.
+            let Some(observed_epoch) = self
+                .begin_unregister_for_observed_runtime_loop_if_current(
+                    session_id,
+                    &observed_teardown_slot,
+                )
+                .await?
+            else {
+                return Ok(RuntimeLoopTeardownWait::Settled);
+            };
+            return self
+                .join_or_start_unregister_teardown_for_watcher(
+                    session_id,
+                    &observed_epoch,
+                    self.unregister_caller_wait_deadline(),
+                )
+                .await;
         }
         if generated_draining {
             return self

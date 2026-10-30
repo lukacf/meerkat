@@ -351,7 +351,10 @@ list.
 **CI** (`.github/workflows/ci.yml`) runs on pushes to `main` and to
 `release/**` integration branches, PRs, and manual dispatch (any other branch
 head runs once, via its PR; a release-branch push runs the same push-only
-lanes as `main`, without the attestation). It is Cargo-only on
+lanes as `main` and writes the exact-tree attestation too, which a tag trusts
+only from `main` or from the release branch of its own version, a
+[maintenance release](docs/guides/cd-and-distribution.md#maintenance-releases)).
+It is Cargo-only on
 GitHub-hosted runners. A pull request runs what fits the 20-minute cap from
 the start of the pre-push hook to a green `CI gate`; the push runs every lane,
 and its CI must be green before a release tag (`require_ci_green`):
@@ -622,8 +625,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   main push and nightly); the lane table is reported on every non-cancelled
   run, failed runs included; a push or a dispatch is a full validation run
   that only reports the budget (a failure to measure only warns there);
-  schema-4 attestation (backend `github-hosted-cargo`) on successful `main`
-  pushes. For a `release-projection` plan it re-verifies the reused parent
+  schema-4 attestation (backend `github-hosted-cargo`) on successful pushes
+  to `main` and to `release/**` branches. For a `release-projection` plan
+  it re-verifies the reused parent
   attempt with the parent's copies of the scripts (`ci-release-evidence.mjs
   verify`: a completed, successful push run of `ci.yml` on `main` at exactly
   HEAD's first parent, still the run's latest attempt, whose attestation
@@ -693,11 +697,13 @@ without that edge. Publication does not wait for the census yet: the release
 gate on a passing run at the release commit returns once a nightly run has
 passed and its duration is measured.
 
-The release tag path requires successful exact-main CI (schema-4 attestation)
+The release tag path requires successful exact-main CI (schema-4 attestation;
+for a maintenance release, the same push CI on `release/<version>`, the
+release branch of the tag's version)
 and then, while `MEERKAT_GCP_BUILDBUDDY_ENABLED` is `true`, runs the full
 BuildBuddy graph (`release_validate_buildbuddy_full`) as its validation gate;
 while it is off (the default) the tag skips `release_validate_cargo` only when
-its verified attestation proves that exact-main run ran every lane the job
+its verified attestation proves that run ran every lane the job
 repeats: the plan's `generated_contract` flag with a green `ratchets` job
 (main CI runs those ratchets only when its plan selects them) and a green
 `sdk-host` job (or a release-projection plan that reused a verified
@@ -716,30 +722,31 @@ complete manifest and the Homebrew formula.
 
 **Release semver readiness** (`.github/workflows/release-semver-readiness.yml`)
 is a separate workflow triggered by `Cargo.toml`/`CHANGELOG.md` changes on
-`main` pushes and PRs, or by manual dispatch. For unpublished candidate
+pushes to `main` and `release/**` branches and on PRs, or by manual dispatch. For unpublished candidate
 versions, it measures declared breaks and uploads exact-tree, exact-version
 evidence with 30-day configured retention. A post-release tree, whose notes
 sit under `## [Unreleased]` above the stamped workspace version, is measured
-against that version's own tag and gets no attestation. Only its successful `main`-push
-artifact, `meerkat-semver-attestation-main-<tree_sha>`, qualifies for the normal
-release semver gate; PR and manual artifacts are previews.
+against that version's own tag and gets no attestation. Only its successful push
+artifact, `meerkat-semver-attestation-main-<tree_sha>` (named so on a release-branch
+push too), qualifies for the normal release semver gate, and only from `main`
+or from the release branch of the tag's version; PR and manual artifacts are previews.
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
-| `require_ci_green` | Always | Requires successful exact-main CI for the release commit; tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
+| `require_ci_green` | Always | Requires successful exact-main CI for the release commit (a successful push run of `ci.yml` at exactly that commit on `main`, or on `release/<version>` for a maintenance release, `<version>` being the checked-out workspace version; no other branch, pull-request or dispatched run); tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted; its ref `main` or that release branch) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
 | `release_validate_buildbuddy_full` | Tag runs while `MEERKAT_GCP_BUILDBUDDY_ENABLED` is `true` | Runs the whole BuildBuddy/Bazel graph (`buildbuddy.yml`, `full-fresh`) on the release tree |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches; `release_validate_cargo` also on tags whose attestation does not prove its lanes ran, while the self-hosted graph is off | Validate release state through the selected lane; tag runs whose attestation covers those lanes (or with the graph on) reuse exact-tree CI and skip both jobs |
 | `release_validate_gate` | Tags and full/package dispatches | On tags require exact-tree CI plus the full BuildBuddy graph (graph on), or with the graph off pass on a verified attestation that covers the Cargo validation lanes (`release_validate_cargo` otherwise); on manual dispatches accept the selected validation lane; Web-only and asset-only recovery skip it |
-| `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version main-push readiness evidence on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
+| `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version push readiness evidence (from `main`, or from the release branch of the tag's version for a maintenance release) on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
 | `release_prebuild` | Tag runs | Finds a usable pre-tag prebuild of exactly the tag commit (`scripts/release-find-prebuild`: a `release.yml` dispatch on main at that commit whose `Release prebuild gate` passed, so its critical binaries and Web SDK package are ready while its trailing lanes may still run, and whose critical artifacts have not expired; a gate that has not concluded is waited for, unless a job it needs already failed, timed out or was cancelled); when found, the build jobs below are skipped and the publishers use that run's artifacts |
 | `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_critical_gate` | Tags without a prebuild, manual asset recovery, or a prebuild dispatch | The selected BuildBuddy or GitHub-hosted lane builds the critical platforms (Linux x86_64 and aarch64, macOS arm64); each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the critical gate requires the selected lane (or, when the archives come from a prebuild or `assets_run_id`, that every build job was skipped) |
 | `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_macos_x86_cross` / `build_binaries_gate` | Same | The trailing platforms on either backend: Windows cross-compiled from Linux with cargo-xwin and run on windows-2025-vs2026, Intel macOS cross-compiled on Apple silicon (`macos-15`); the full gate requires the selected critical lane plus every trailing job |
 | `build_web_sdk_package` | Tags without a prebuild, package/Web recovery without a reused artifact, or a prebuild dispatch | After `require_ci_green`, beside the release validation and the semver gate, builds the `@rkat/web` package artifact, stamps it with its commit, package and tarball digest, and attests it; Cargo runs four jobs while the tree's `scripts/release-web-sdk-rustc-wrapper` keeps the memory-heavy wasm32 crates off the catalog's rustc, or one job for a tree without a matching wrapper |
 | `release_prebuild_gate` | Prebuild dispatches | Passes once the critical binary build gate and the Web SDK package succeeded (the run's trailing lanes continue); the marker `release_prebuild` requires of a prebuild run |
 | `publish_critical_release_assets` | Tags | As soon as the critical gate passes, verifies and publishes exactly the Linux and macOS arm64 archives (add-only, no manifest); waits for no trailing job |
-| `publish_github_release` | Tags or manual asset recovery | The trailing publisher: after exact-main CI (`require_ci_green`) and the full gate, downloads artifacts (a prebuild's once that run's full binary build gate passed, verified exactly like an `assets_run_id` recovery), adds the archives not yet on the release (never replacing one), then writes the complete `checksums.sha256` + `index.json` once (refusing to change a published one) |
+| `publish_github_release` | Tags or manual asset recovery | The trailing publisher: after exact-commit CI (`require_ci_green`) and the full gate, downloads artifacts (a prebuild's once that run's full binary build gate passed, verified exactly like an `assets_run_id` recovery), adds the archives not yet on the release (never replacing one), then writes the complete `checksums.sha256` + `index.json` once (refusing to change a published one) |
 | `update_homebrew` | After the trailing publisher | Updates the Homebrew tap formula from the complete release's published checksums |
 | `publish_semver_baseline` / `attach_semver_baseline` | Tags or asset recovery, alongside publication | `publish_semver_baseline` generates rustdoc JSON for every publishable library crate on the release tag as soon as `require_ci_green` passes; `attach_semver_baseline` attaches it as `semver-rustdoc-<version>.tar.zst` once the GitHub release is published (add-only: a baseline already attached stays). It is the baseline the next release's semver gate compares against; no job waits for either |
 | `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 46 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
@@ -771,7 +778,9 @@ VERSION=v0.8.24 make release-assets
 
 `make release-workflow` is the full release mode, not a recovery shortcut.
 Recovery modes run the current workflow definition from `main` while binding
-artifacts and package metadata to the selected existing tag.
+artifacts and package metadata to the selected existing tag; a maintenance
+release's tag runs its own definition instead (`RELEASE_REF=vX.Y.Z`, see
+Releasing below).
 
 **Pre-tag prebuild** (`make release-prebuild VERSION=vX.Y.Z`, dry run with
 `RELEASE_WORKFLOW_DRY_RUN=true`): once the release commit is on `main`,
@@ -958,6 +967,22 @@ tag run then validates on the CI attestation and builds nothing. Keep
 version/changelog generation hook-owned; see the
 [release guide](docs/guides/cd-and-distribution.md#release-workflow) for the
 separate manual measurement and completed-measurement recovery paths.
+
+**Maintenance releases** ship a fix on top of an earlier release without
+`main`'s unreleased changes: branch `release/<version>` from that release's
+tag, merge the fix and the cargo-release bump there, and tag that branch's
+head, which never reaches `main` first. `require_ci_green` and
+`release_semver_gate` accept CI and readiness evidence from a push to
+`release/<version>` of the tag's own version next to `main`'s, and from no
+other branch. Give the release commit `CI-Plan: workspace`: a
+release-branch push diffs against its payload base and reuses no
+projection. It has no prebuild (`make release-prebuild` is `main`-only), so
+the tag run builds every binary, and its recovery dispatches run the tag's
+own workflow (`RELEASE_REF=vX.Y.Z VERSION=vX.Y.Z make release-assets`, and
+likewise for packages and the Web SDK) until `main` has the same rules.
+After publication merge the tag into `main` by pull request; never set
+`main`'s version to the released one without that merge. See the
+[release guide](docs/guides/cd-and-distribution.md#maintenance-releases).
 
 **What `./scripts/repo-cargo release patch --execute` does:**
 

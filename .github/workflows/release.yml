@@ -133,8 +133,9 @@ jobs:
       # publishes nothing, so it neither binds a tag nor waits for CI: the
       # tag run that may later publish its artifacts requires exact-main CI
       # itself, and reuses them only for exactly its own commit (see
-      # release_prebuild). It runs on main only, because only main's
-      # attestations are trusted by the tag run, and takes no publishing or
+      # release_prebuild). It runs on main only, because the tag run trusts
+      # only archives attested on main (a maintenance release tagged on
+      # release/<version> has no prebuild), and takes no publishing or
       # recovery input. It builds with the backend its tag run will select
       # (the owner's BuildBuddy lane while MEERKAT_RELEASE_BUILDBUDDY is true
       # or 1): on the other backend its critical lanes queue behind other
@@ -268,6 +269,13 @@ jobs:
           fi
           echo "Version ${version} matches release tag ${release_tag}"
 
+      # The release commit needs a successful push run of ci.yml at exactly
+      # that commit on main or on release/<version>, the release branch of
+      # the checked-out workspace version: a maintenance release is cut from
+      # an earlier release's tag and tagged on that branch without reaching
+      # main. No other branch qualifies, and neither does a pull-request or
+      # dispatched run. On a tag run the step above has bound the version to
+      # the tag.
       - name: Require successful exact-main CI
         id: ci_run
         if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
@@ -276,6 +284,7 @@ jobs:
           RELEASE_SHA: ${{ steps.release_ref.outputs.sha }}
         with:
           script: |
+            const fs = require("fs");
             const { owner, repo } = context.repo;
             const ref = process.env.RELEASE_SHA;
             const timeoutMs = 120 * 60 * 1000;
@@ -283,41 +292,69 @@ jobs:
             const started = Date.now();
             let supersededReported = false;
 
-            async function listExactMainRuns() {
-              const { data } = await github.rest.actions.listWorkflowRuns({
-                owner,
-                repo,
-                workflow_id: "ci.yml",
-                branch: "main",
-                event: "push",
-                head_sha: ref,
-                per_page: 100,
-              });
-              return data.workflow_runs.filter(
-                (run) =>
-                  run.head_sha === ref &&
-                  run.head_branch === "main" &&
-                  run.event === "push"
-              );
+            // workspace.package.version of the checked-out Cargo.toml, read
+            // as the version steps above read it.
+            let version = "";
+            let inWorkspacePackage = false;
+            for (const line of fs.readFileSync("Cargo.toml", "utf8").split("\n")) {
+              if (line.startsWith("[")) {
+                inWorkspacePackage = line.startsWith("[workspace.package]");
+              } else if (inWorkspacePackage) {
+                const match = /^version\s*=\s*"([^"]+)"/.exec(line);
+                if (match) {
+                  version = match[1];
+                  break;
+                }
+              }
+            }
+            if (!version) {
+              core.setFailed("Cannot read workspace.package.version from the checked-out Cargo.toml");
+              return;
+            }
+            const releaseBranch = `release/${version}`;
+            const branches = ["main", releaseBranch];
+
+            async function listExactCommitPushRuns() {
+              const runs = [];
+              for (const branch of branches) {
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: "ci.yml",
+                  branch,
+                  event: "push",
+                  head_sha: ref,
+                  per_page: 100,
+                });
+                runs.push(
+                  ...data.workflow_runs.filter(
+                    (run) =>
+                      run.head_sha === ref &&
+                      run.head_branch === branch &&
+                      run.event === "push"
+                  )
+                );
+              }
+              return runs;
             }
 
             for (;;) {
-              const runs = await listExactMainRuns();
+              const runs = await listExactCommitPushRuns();
               if (runs.length > 0) {
                 core.info(
                   runs
-                    .map((run) => `CI attempt ${run.run_attempt}: ${run.status}/${run.conclusion || "pending"} (${run.html_url})`)
+                    .map((run) => `CI attempt ${run.run_attempt} on ${run.head_branch}: ${run.status}/${run.conclusion || "pending"} (${run.html_url})`)
                     .join("\n")
                 );
               } else {
-                core.info(`No exact-main CI run found yet for ${ref}`);
+                core.info(`No push CI run on main or ${releaseBranch} found yet for ${ref}`);
               }
 
               const success = runs.find(
                 (run) => run.status === "completed" && run.conclusion === "success"
               );
               if (success) {
-                core.info(`Release commit ${ref} has successful exact-main CI: ${success.html_url}`);
+                core.info(`Release commit ${ref} has successful push CI on ${success.head_branch}: ${success.html_url}`);
                 core.setOutput("run_id", String(success.id));
                 core.setOutput("run_attempt", String(success.run_attempt));
                 return;
@@ -325,21 +362,23 @@ jobs:
 
               // ci.yml lets a newer main commit supersede (cancel) an older
               // commit's first attempt unless the commit message names a
-              // release ("chore: release v..."). A re-run attempt is never
-              // superseded, so re-running the cancelled run recovers.
+              // release ("chore: release v..."), and never supersedes a
+              // release/** push. A re-run attempt is never superseded, so
+              // re-running the cancelled run recovers.
               const superseded = runs.find(
                 (run) => run.status === "completed" && run.conclusion === "cancelled"
               );
               if (superseded && !supersededReported) {
                 supersededReported = true;
                 core.warning(
-                  `Exact-main CI on ${ref} was cancelled (superseded by a newer main commit): ${superseded.html_url}. ` +
-                    `Re-run it with: gh run rerun ${superseded.id} --repo ${owner}/${repo}`
+                  `Push CI on ${superseded.head_branch} at ${ref} was cancelled` +
+                    (superseded.head_branch === "main" ? " (superseded by a newer main commit)" : "") +
+                    `: ${superseded.html_url}. Re-run it with: gh run rerun ${superseded.id} --repo ${owner}/${repo}`
                 );
               }
 
               if (Date.now() - started >= timeoutMs) {
-                core.setFailed(`Timed out waiting for successful exact-main CI on release commit ${ref}`);
+                core.setFailed(`Timed out waiting for successful push CI on main or ${releaseBranch} at release commit ${ref}`);
                 return;
               }
 
@@ -376,12 +415,28 @@ jobs:
         run: |
           set -euo pipefail
           attestation="${RUNNER_TEMP}/meerkat-ci-attestation/attestation.json"
+          # The attested push ran on main or on the release branch of the
+          # checked-out workspace version (a maintenance release).
+          version="$(awk '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { in_workspace_package = 0 }
+            in_workspace_package && $1 == "version" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ -z "${version}" ]]; then
+            echo "Cannot read workspace.package.version from the checked-out Cargo.toml" >&2
+            exit 1
+          fi
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg commit_sha "${RELEASE_SHA}" \
             --arg tree_sha "${RELEASE_TREE}" \
             --arg workflow_run_id "${CI_RUN_ID}" \
             --arg workflow_run_attempt "${CI_RUN_ATTEMPT}" \
+            --arg release_branch_ref "refs/heads/release/${version}" \
             '.repository == $repository and
              .commit_sha == $commit_sha and
              .tree_sha == $tree_sha and
@@ -389,7 +444,7 @@ jobs:
              .workflow_run_id == $workflow_run_id and
              .workflow_run_attempt == $workflow_run_attempt and
              .event == "push" and
-             .ref == "refs/heads/main" and
+             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and
              ((.schema_version == 1 and .cargo_result == "success") or
               (.schema_version == 2 and
                .validation_backend == "gcp-buildbuddy" and
@@ -519,7 +574,7 @@ jobs:
 
   # Manual dispatches pick Cargo or the hosted BuildBuddy lane below. A tag
   # push skips this job only when its verified exact-tree CI attestation
-  # proves that the successful main CI run on exactly this tree ran every
+  # proves that the successful push CI run on exactly this tree ran every
   # check it repeats (require_ci_green's ci_covers_release_validation:
   # fmt-governance, the generated-contract ratchets, which run only when the
   # plan selected them, and the SDK suites). Otherwise, a legacy attestation
@@ -736,8 +791,8 @@ jobs:
             fi
             echo "Self-hosted GCP graph disabled (MEERKAT_GCP_BUILDBUDDY_ENABLED is not 'true'); full graph: ${buildbuddy_full_result}"
             if [[ "${ci_covers}" == "true" ]]; then
-              # The successful exact-main CI run on this tree is the tag's
-              # validation: require_ci_green verified its schema-4
+              # The successful exact-commit push CI run on this tree is the
+              # tag's validation: require_ci_green verified its schema-4
               # attestation and that it ran every lane Cargo validation
               # repeats.
               echo "Exact-tree CI attestation (schema ${ci_attestation_schema}) covers the Cargo validation lanes; Cargo release validation: ${cargo_result}"
@@ -920,11 +975,15 @@ jobs:
             '[.artifacts[] | select(.id == $artifact_id)] | first | .workflow_run.id' \
             <<<"${artifact_json}")"
           run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${workflow_run_id}")"
+          # Push evidence from main or from the release branch of this
+          # version (a maintenance release); pull-request and dispatch
+          # evidence carries the preview name and is never found here.
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg tree_sha "${tree_sha}" \
             --arg version "${version}" \
             --arg workflow_run_id "${workflow_run_id}" \
+            --arg release_branch_ref "refs/heads/release/${version}" \
             '.schema_version == 1 and
              .repository == $repository and
              .tree_sha == $tree_sha and
@@ -932,13 +991,14 @@ jobs:
              .workflow == "Release semver readiness" and
              .workflow_run_id == $workflow_run_id and
              .event == "push" and
-             .ref == "refs/heads/main" and
+             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and
              .result == "success"' \
             "${evidence}/attestation.json"
           jq -e \
+            --arg release_branch "release/${version}" \
             '.name == "Release semver readiness" and
              .event == "push" and
-             .head_branch == "main" and
+             (.head_branch == "main" or .head_branch == $release_branch) and
              .conclusion == "success"' \
             <<<"${run_json}" >/dev/null
           expected_report_sha="$(jq -r .report_sha256 "${evidence}/attestation.json")"
@@ -2497,8 +2557,8 @@ jobs:
     # publisher keeps the two uploads ordered, and `always()` above keeps
     # this authoritative path available if that publisher failed.
     # require_ci_green: every published archive, an asset recovery's from an
-    # earlier run included, belongs to a release commit whose exact-main CI
-    # succeeded (a prebuild run never waited for it).
+    # earlier run included, belongs to a release commit whose exact-commit
+    # push CI succeeded (a prebuild run never waited for it).
     needs:
       [
         require_ci_green,

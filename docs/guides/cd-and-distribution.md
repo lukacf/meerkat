@@ -22,7 +22,9 @@ critical platforms (Linux x86_64 and aarch64, macOS arm64) selects BuildBuddy on
 `MEERKAT_RELEASE_BUILDBUDDY` is `true` or `1`; other actors use the hosted
 fallback. Eligible manual dispatches select release validation and packaging
 under the [BuildBuddy rules below](#buildbuddy). Both release backends still
-require exact-main GitHub Actions CI (the Cargo-only pull-request lanes),
+require exact-main GitHub Actions CI (the Cargo-only pull-request lanes; for
+a [maintenance release](#maintenance-releases), the same push CI on its
+release branch),
 and the tag path additionally runs the full BuildBuddy graph as its
 validation gate while the self-hosted graph is enabled
 (`MEERKAT_GCP_BUILDBUDDY_ENABLED` is `true`); otherwise the tag skips the
@@ -82,7 +84,9 @@ package smoke tests.
 Local preflight is not the only publication prerequisite. The independent
 **Release semver readiness** workflow
 (`.github/workflows/release-semver-readiness.yml`) must also supply the normal
-tag path's exact-tree, exact-version evidence from a successful `main` push.
+tag path's exact-tree, exact-version evidence from a successful `main` push
+(for a [maintenance release](#maintenance-releases), from a push to its
+release branch).
 Its artifact has 30-day configured retention. Wait for both CI and readiness
 on the prepared release tree before tagging to avoid racing the release
 gate's artifact lookup; the [release workflow](#release-workflow) below
@@ -174,8 +178,8 @@ Where it runs:
 | Lane | Entry point |
 |------|-------------|
 | Local preflight | `make semver-breaks` (part of `make release-preflight`) |
-| Release semver readiness | Separate workflow on `Cargo.toml`/`CHANGELOG.md` changes to `main` or PRs, plus manual dispatch; measures unpublished candidates and uploads main-push evidence or preview evidence |
-| Release workflow | job `release_semver_gate`, required on tag publication and package recovery; normally consumes unexpired exact-tree, exact-version main-push readiness evidence; asset-only and Web-SDK-only recovery explicitly accept a skipped gate |
+| Release semver readiness | Separate workflow on `Cargo.toml`/`CHANGELOG.md` changes pushed to `main` or a `release/**` branch, or in PRs, plus manual dispatch; measures unpublished candidates and uploads push evidence or preview evidence |
+| Release workflow | job `release_semver_gate`, required on tag publication and package recovery; normally consumes unexpired exact-tree, exact-version push readiness evidence from `main` (or from the release branch of the tag's version, for a maintenance release); asset-only and Web-SDK-only recovery explicitly accept a skipped gate |
 | Parser self-test | `make semver-breaks-selftest`, included in local `make ci` and the separate reusable/manual Cargo workflow's `ratchets` job: unit-tests the report parser against committed real reports and the baseline selection against scratch repositories, without needing cargo-semver-checks installed |
 
 The judgement lives in `scripts/check_semver_breaks.py`, which is a pure
@@ -306,7 +310,9 @@ pins whatever digests it then carries.
    CI is already green.
    After `require_ci_green`, `release_semver_gate` looks
    up `meerkat-semver-attestation-main-<tree_sha>` and requires unexpired
-   evidence for that tree and version from a successful readiness `main` push.
+   evidence for that tree and version from a successful readiness `main` push
+   (or, for a [maintenance release](#maintenance-releases), a push to its
+   release branch).
 4. In parallel, verify registry credentials, consume declared-break evidence,
    and either find the complete prebuild of the tag commit or build the
    platform binaries and the Web SDK package artifact.
@@ -404,7 +410,8 @@ The current schema-4 CI attestation binds the repository, commit SHA, Git tree
 SHA, CI workflow run and attempt, branch, and event to backend
 `github-hosted-cargo`, its aggregate `validation_result`, the selected lane
 `plan`, and every lane's `component_results`. The release gate downloads it
-from the successful exact-main workflow run and verifies every required field
+from the successful exact-main workflow run (for a maintenance release, the
+push run on its release branch) and verifies every required field
 before tag-triggered publication starts. A release-projection run (plan mode
 `release-projection`) also records `reused_test_evidence`: the first-parent
 commit and tree and the CI run and attempt it reused. The release gate then
@@ -416,7 +423,8 @@ workspace, records every lane as successful and is not itself a reuse. The consu
 supported legacy schema-1 Cargo, schema-2 BuildBuddy, and schema-3
 BuildBuddy-plus-dense-Mob attestations; the current producer does not emit
 those formats.
-Manual recovery dispatches still require successful exact-main CI for the
+Manual recovery dispatches still require successful exact-main CI (for a
+maintenance release, the push CI on its release branch) for the
 selected release commit. When release validation applies, the dispatch runs
 the selected validation lane directly rather than requiring a retained **CI**
 attestation artifact. Narrow `assets`,
@@ -439,8 +447,10 @@ commit is under `.github/` or `CHANGELOG.md`. Every published binary must
 embed the release version in either case.
 
 This CI-artifact exception does not bypass the semver gate. An ordinary
-explicit-`release_tag` package recovery still consumes main-push readiness
-evidence. When this gate applies, a manual dispatch with neither `release_tag`
+explicit-`release_tag` package recovery still consumes push readiness
+evidence (`meerkat-semver-attestation-main-<tree>`, from `main` or the
+release branch of the tag's version). When this gate applies, a manual
+dispatch with neither `release_tag`
 nor `semver_evidence_job_id` runs `make semver-breaks` directly. The separate
 completed-measurement recovery path requires `release_tag`,
 `semver_evidence_run_id`, and `semver_evidence_job_id`; its verifier checks
@@ -461,6 +471,40 @@ RELEASE_WORKFLOW_DRY_RUN=true \
 `REGISTRY_DRY_RUN=true` changes registry publication inside a dispatched
 workflow; it is not a workflow dry run and does not suppress binary, GitHub
 Release, or Homebrew publication.
+
+### Maintenance releases
+
+A maintenance release ships a fix on top of an earlier release without the
+unreleased changes on `main`. It is cut from that release's tag as the
+branch `release/<version>`, named after the version it releases; the fix and
+the cargo-release bump are merged there, and the tag goes on that branch's
+head, which never reaches `main` before the tag.
+
+- A push to `release/<version>` writes the exact-tree CI attestation and,
+  for a `Cargo.toml` or `CHANGELOG.md` change, the readiness push evidence,
+  as a push to `main` does. `require_ci_green` accepts a successful push run
+  of `ci.yml` at exactly the release commit on `main` or on
+  `release/<version>`, where `<version>` is the checked-out workspace version
+  the tag is bound to, and requires the verified attestation's ref to be
+  one of those two; `release_semver_gate` requires the same of the readiness
+  evidence's ref and of its run's branch. No other branch qualifies, another
+  version's release branch included, and pull-request, dispatch and preview
+  runs never do.
+- A release-branch push diffs against its payload base and never reuses a
+  release projection's evidence, so give the release commit the trailer
+  `CI-Plan: workspace` to plan the whole workspace.
+- There is no pre-tag prebuild (`make release-prebuild` runs on `main` only),
+  so the tag run builds every binary.
+- Recovery dispatches run the tag's own workflow, which carries these rules:
+  `RELEASE_REF=vX.Y.Z VERSION=vX.Y.Z make release-assets`, and likewise
+  `release-packages` and `release-web-sdk` (inspect each first with
+  `RELEASE_WORKFLOW_DRY_RUN=true`). The default `main` ref accepts such a
+  tag only once `main` has the same rules, and `ASSETS_RUN_ID` reuse is for
+  `main` only.
+- After publication, merge the tag into `main` by pull request, so that
+  `main` carries the version, the stamped notes and the tag as an ancestor,
+  which the next post-release semver baseline needs. Never set `main`'s
+  version to the released one without that merge.
 
 ## BuildBuddy
 

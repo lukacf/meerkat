@@ -15,7 +15,9 @@ Reflowing a condition across lines, collapsing it onto one line, or rewriting
 an expression into an equivalent one all pass; gating a step off tag pushes,
 re-enabling the long measurement on tags, relaxing the 30 minute publication
 SLO, making the SDK packages wait on it, re-running Cargo validation on a
-tag whose exact-tree CI attestation already covers it, or letting a pre-tag
+tag whose exact-tree CI attestation already covers it, trusting CI or
+semver evidence from anything but a push to main or to the release branch
+of the tag's version, or letting a pre-tag
 prebuild publish anything or a tag publish a prebuild's artifacts without the
 attested-archive verification, making a job wait for the semver baseline
 rustdoc, or letting a dispatch save a cache (also inside a local action, or
@@ -29,12 +31,15 @@ run wherever `python3` does.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -591,7 +596,12 @@ def _job_enabled(block: list[str], job_name: str, context: EventContext) -> list
 
 
 def check_semver_evidence(text: str) -> list[str]:
-    """Tag releases consume exact-tree pre-tag evidence, never re-measure."""
+    """Tag releases consume exact-tree pre-tag evidence, never re-measure.
+
+    The evidence must come from a push to main or to the release branch of
+    the tag's version (a maintenance release), never from another branch, a
+    pull request or a dispatch.
+    """
     block = job_block(text, SEMVER_GATE_JOB)
     violations = _job_enabled(block, SEMVER_GATE_JOB, TAG_PUSH)
     steps = job_steps(block)
@@ -614,6 +624,7 @@ def check_semver_evidence(text: str) -> list[str]:
                 f"step `{step.name}` also runs on {HISTORICAL_EVIDENCE.label}, "
                 "which must verify the explicit measurement instead"
             )
+        violations.extend(_check_evidence_refs(step))
 
     for step in steps:
         if MEASUREMENT_COMMAND not in step.run:
@@ -1086,8 +1097,10 @@ def _reused_evidence(**overrides: str) -> dict:
     }
 
 
-def _coverage_of(step: Step, attestation: dict) -> tuple[int, dict[str, str]]:
-    """Run the attestation step on `attestation`; its exit and outputs."""
+def _run_attestation_step(step: Step, attestation: dict) -> tuple[int, dict[str, str], str]:
+    """Run a require_ci_green attestation step on `attestation`, in a scratch
+    checkout whose Cargo.toml carries BINDING_VERSION (the tag's version):
+    its exit, the outputs it wrote and its log."""
     context = EventContext(
         label=TAG_PUSH.label,
         event_name="push",
@@ -1100,6 +1113,9 @@ def _coverage_of(step: Step, attestation: dict) -> tuple[int, dict[str, str]]:
     )
     env = {key: render_strict(value, context) for key, value in step.env.items()}
     with tempfile.TemporaryDirectory(prefix="release-attestation-") as scratch:
+        Path(scratch, "Cargo.toml").write_text(
+            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8"
+        )
         directory = Path(scratch, "meerkat-ci-attestation")
         directory.mkdir()
         Path(directory, "attestation.json").write_text(json.dumps(attestation), encoding="utf-8")
@@ -1122,7 +1138,261 @@ def _coverage_of(step: Step, attestation: dict) -> tuple[int, dict[str, str]]:
         outputs = dict(
             line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line
         )
-        return result.returncode, outputs
+        return result.returncode, outputs, result.stdout + result.stderr
+
+
+def _coverage_of(step: Step, attestation: dict) -> tuple[int, dict[str, str]]:
+    """Run the attestation step on `attestation`; its exit and outputs."""
+    status, outputs, _ = _run_attestation_step(step, attestation)
+    return status, outputs
+
+
+# The pushes whose CI attestation or readiness evidence a tag of
+# BINDING_VERSION trusts: main, and release/<version>, the branch a
+# maintenance release of that version is tagged on. (label, ref).
+TRUSTED_PUSHES = (
+    ("a push to main", "refs/heads/main"),
+    (
+        f"a push to release/{BINDING_VERSION} (a maintenance release of the tag's version)",
+        f"refs/heads/release/{BINDING_VERSION}",
+    ),
+)
+# Pushes no tag of BINDING_VERSION trusts: another version's release branch,
+# near misses of the version's own, and other branches, some named after it.
+UNTRUSTED_PUSHES = (
+    ("a push to release/9.9.9 (another version's release branch)", "refs/heads/release/9.9.9"),
+    (f"a push to release/v{BINDING_VERSION}", f"refs/heads/release/v{BINDING_VERSION}"),
+    (f"a push to release/{BINDING_VERSION}-next", f"refs/heads/release/{BINDING_VERSION}-next"),
+    (f"a push to release/{BINDING_VERSION}/next", f"refs/heads/release/{BINDING_VERSION}/next"),
+    (f"a push to hotfix/{BINDING_VERSION}", f"refs/heads/hotfix/{BINDING_VERSION}"),
+    (f"a push to v{BINDING_VERSION} (a branch)", f"refs/heads/v{BINDING_VERSION}"),
+    ("a push to feature/next", "refs/heads/feature/next"),
+)
+TRUSTED_ONLY = (
+    f"only a push to main or to release/{BINDING_VERSION}, the release branch of the "
+    "tag's version, qualifies"
+)
+
+
+def _check_attestation_refs(ci_block: list[str]) -> list[str]:
+    """The CI attestation require_ci_green verifies names a trusted push.
+
+    It must come from a push to main or to the release branch of the
+    checked-out version (a maintenance release, tagged there without reaching
+    main); another branch, a tag, a pull request or a dispatch never
+    qualifies. The verifying step is the one whose output require_ci_green
+    exposes as the attestation schema, run on scratch attestations.
+    """
+    outputs = parse_mapping(ci_block, 4).get("outputs", "")
+    wiring = re.search(
+        rf"\b{ATTESTATION_SCHEMA_OUTPUT}:\s*\$\{{\{{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.[A-Za-z0-9_-]+\s*\}}\}}",
+        outputs,
+    )
+    if wiring is None:
+        return [f"job `{CI_GREEN_JOB}` does not expose `{ATTESTATION_SCHEMA_OUTPUT}` from a step output"]
+    verifiers = [step for step in job_steps(ci_block) if step.fields.get("id") == wiring.group(1)]
+    if len(verifiers) != 1:
+        return [f"job `{CI_GREEN_JOB}` has {len(verifiers)} steps with `id: {wiring.group(1)}`"]
+    verifier = verifiers[0]
+    violations: list[str] = []
+    if not step_runs(verifier, TAG_PUSH):
+        violations.append(f"step `{verifier.name}` does not run on {TAG_PUSH.label}")
+    refused = [
+        *((label, _attestation(ref=ref)) for label, ref in UNTRUSTED_PUSHES),
+        (f"the tag v{BINDING_VERSION}", _attestation(ref=f"refs/tags/v{BINDING_VERSION}")),
+        (
+            "a pull request into a release branch",
+            _attestation(event="pull_request", ref="refs/pull/1/merge"),
+        ),
+        (
+            f"a dispatch on release/{BINDING_VERSION}",
+            _attestation(event="workflow_dispatch", ref=f"refs/heads/release/{BINDING_VERSION}"),
+        ),
+    ]
+    for label, ref in TRUSTED_PUSHES:
+        status, _, log = _run_attestation_step(verifier, _attestation(ref=ref))
+        if status != 0:
+            violations.append(
+                f"step `{verifier.name}` refuses the CI attestation of {label}: "
+                + " | ".join(line for line in log.splitlines() if line.strip())
+            )
+    for label, attestation in refused:
+        status, _, _ = _run_attestation_step(verifier, attestation)
+        if status == 0:
+            violations.append(
+                f"step `{verifier.name}` accepts the CI attestation of {label}; {TRUSTED_ONLY}"
+            )
+    return violations
+
+
+def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]:
+    """Run the semver gate's evidence step on one readiness artifact.
+
+    The release tree is a scratch checkout of BINDING_VERSION. A stub `gh`
+    answers the step's API reads as GitHub would: the unexpired artifact
+    named after that tree, its zip (an attestation.json that `evidence`
+    overrides, and the report it hashes) and the run that uploaded it, which
+    `run` overrides. `python3` is this interpreter, which has tomllib.
+    Returns the step's exit and log.
+    """
+    env = {key: render_strict(value, TAG_PUSH) for key, value in step.env.items()}
+    script = render_strict(step.raw_run, TAG_PUSH)
+    with tempfile.TemporaryDirectory(prefix="release-semver-evidence-") as scratch:
+        checkout = Path(scratch, "checkout")
+        checkout.mkdir()
+        git_env = {
+            "HOME": scratch,
+            "GIT_AUTHOR_NAME": "evidence",
+            "GIT_AUTHOR_EMAIL": "evidence@example.invalid",
+            "GIT_COMMITTER_NAME": "evidence",
+            "GIT_COMMITTER_EMAIL": "evidence@example.invalid",
+        }
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", *args],
+                cwd=checkout,
+                env={"PATH": os.environ.get("PATH", ""), **git_env},
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        Path(checkout, "Cargo.toml").write_text(
+            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8"
+        )
+        git("init", "-q", "-b", "release")
+        git("add", "Cargo.toml")
+        git("commit", "-q", "-m", "release")
+        tree = git("rev-parse", "HEAD^{tree}")
+
+        api = Path(scratch, "api")
+        api.mkdir()
+        report = b"semver report\n"
+        document = {
+            "schema_version": 1,
+            "repository": "example/meerkat",
+            "tree_sha": tree,
+            "commit_sha": git("rev-parse", "HEAD"),
+            "version": BINDING_VERSION,
+            "workflow": "Release semver readiness",
+            "workflow_run_id": "21",
+            "workflow_run_attempt": "1",
+            "event": "push",
+            "ref": "refs/heads/main",
+            "result": "success",
+            "report_sha256": hashlib.sha256(report).hexdigest(),
+            **evidence,
+        }
+        with zipfile.ZipFile(api / "evidence.zip", "w") as archive:
+            archive.writestr("attestation.json", json.dumps(document))
+            archive.writestr("report.txt", report)
+        listing = {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 7,
+                    "name": f"{EVIDENCE_ARTIFACT_PREFIX}{tree}",
+                    "expired": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "workflow_run": {"id": 21},
+                }
+            ],
+        }
+        Path(api, "artifacts.json").write_text(json.dumps(listing), encoding="utf-8")
+        producer = {
+            "id": 21,
+            "name": "Release semver readiness",
+            "event": "push",
+            "head_branch": "main",
+            "conclusion": "success",
+            **run,
+        }
+        Path(api, "run.json").write_text(json.dumps(producer), encoding="utf-8")
+
+        tools = Path(scratch, "bin")
+        tools.mkdir()
+        gh = tools / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            f"api={shlex.quote(str(api))}\n"
+            'case "$1 $2" in\n'
+            f'  "api "*"/actions/artifacts?name={EVIDENCE_ARTIFACT_PREFIX}{tree}"*) cat "$api/artifacts.json" ;;\n'
+            '  "api "*"/actions/artifacts/7/zip") cat "$api/evidence.zip" ;;\n'
+            '  "api "*"/actions/runs/21") cat "$api/run.json" ;;\n'
+            '  *) echo "unexpected gh call: $*" >&2; exit 2 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
+        python = tools / "python3"
+        python.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+        python.chmod(0o755)
+        runner_temp = Path(scratch, "runner-temp")
+        runner_temp.mkdir()
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=checkout,
+            env={
+                **_runner_env(TAG_PUSH),
+                **git_env,
+                "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}",
+                "RUNNER_TEMP": str(runner_temp),
+                **env,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode, result.stdout + result.stderr
+
+
+def _check_evidence_refs(step: Step) -> list[str]:
+    """The readiness evidence the semver gate accepts names a trusted push.
+
+    Its attestation's ref and its run's branch must each be main or the
+    release branch of the tag's version (a maintenance release); evidence
+    from another branch, a pull request or a dispatch never qualifies.
+    """
+    violations: list[str] = []
+    for label, ref in TRUSTED_PUSHES:
+        status, log = _run_evidence_step(step, {"ref": ref}, {"head_branch": github_ref_name(ref)})
+        if status != 0:
+            violations.append(
+                f"step `{step.name}` refuses the readiness evidence of {label}: "
+                + " | ".join(line for line in log.splitlines() if line.strip())
+            )
+    refused = [
+        *(
+            (label, {"ref": ref}, {"head_branch": github_ref_name(ref)})
+            for label, ref in UNTRUSTED_PUSHES
+        ),
+        (
+            "a main-push attestation whose run ran on release/9.9.9",
+            {"ref": "refs/heads/main"},
+            {"head_branch": "release/9.9.9"},
+        ),
+        (
+            "a release/9.9.9 attestation whose run ran on main",
+            {"ref": "refs/heads/release/9.9.9"},
+            {"head_branch": "main"},
+        ),
+        (
+            "a pull request into a release branch",
+            {"event": "pull_request", "ref": "refs/pull/1/merge"},
+            {"event": "pull_request", "head_branch": f"release/{BINDING_VERSION}"},
+        ),
+        (
+            f"a dispatch on release/{BINDING_VERSION}",
+            {"event": "workflow_dispatch", "ref": f"refs/heads/release/{BINDING_VERSION}"},
+            {"event": "workflow_dispatch", "head_branch": f"release/{BINDING_VERSION}"},
+        ),
+    ]
+    for label, evidence, run in refused:
+        status, _ = _run_evidence_step(step, evidence, run)
+        if status == 0:
+            violations.append(f"step `{step.name}` accepts the readiness evidence of {label}; {TRUSTED_ONLY}")
+    return violations
 
 
 def check_tag_validation(text: str) -> list[str]:
@@ -1134,7 +1404,10 @@ def check_tag_validation(text: str) -> list[str]:
     whether it proves all of those ran (`ci_covers_release_validation`); only
     then, while the self-hosted graph is off, is the job skipped and does the
     gate pass on the attestation. Otherwise, a legacy attestation included,
-    the tag validates with Cargo, and manual dispatches keep their lane.
+    the tag validates with Cargo, and manual dispatches keep their lane. The
+    attestation itself must come from a push to main or to the release
+    branch of the tag's version (a maintenance release), never from another
+    branch, a pull request or a dispatch.
     """
     violations: list[str] = []
 
@@ -1206,6 +1479,10 @@ def check_tag_validation(text: str) -> list[str]:
     status, written = _coverage_of(producer, _attestation(component_results__ratchets="failure"))
     if status == 0 and written.get(output) == "true":
         violations.append(f"step `{producer.name}` reports coverage for an attestation it should refuse")
+
+    # 1b. The attestation itself comes from a push to main or to the release
+    #     branch of the tag's version, and from nothing else.
+    violations.extend(_check_attestation_refs(ci_block))
 
     # 2. The Cargo validation job is skipped exactly where the attestation
     #    stands in for it.

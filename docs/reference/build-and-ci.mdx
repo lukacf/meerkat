@@ -402,7 +402,8 @@ fit the budget together with the local pre-push hook. Dependents are covered
 on the push by `closure-check` (compile only) and the `closure-tests` rows,
 and by the full workspace lanes in nightly and on the release tag.
 
-The gate emits a schema-4 attestation for successful `main` pushes, binding
+The gate emits a schema-4 attestation for successful pushes to `main` and to
+`release/**` branches, binding
 the repository, exact commit SHA, Git tree SHA, workflow run and attempt,
 event, and ref. Its backend is `github-hosted-cargo`; `plan` records the
 selected mode and counts, and `component_results` records every lane result.

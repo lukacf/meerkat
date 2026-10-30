@@ -681,13 +681,16 @@ async fn a_session_moved_under_the_same_continuity_is_refused_by_native_admissio
 /// Shutdown closes the mob's admission before its teardown (held here on the
 /// member's session registration), so the scoped submit is refused with
 /// `AdmissionClosed`, which the bridge reports as `Rejected`: nothing was
-/// admitted, and nothing reaches the model.
+/// admitted, and nothing reaches the model. The Shutdown parks on the held
+/// registration transaction only for a member that has a runtime registration,
+/// which exists only after its first wake, so the member is woken first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivery_during_a_parked_shutdown_is_rejected() {
     let temp = tempfile::TempDir::new().unwrap();
     let state_path = temp.path().join("state");
     let (client, mut calls) = BarrierClient::new(true);
     let boot = Boot::start(&state_path, &unique_mob_id(), &client).await;
+    boot.wake().await;
     let scope = DeliveryScope::from_json_value(boot.status_scope().await).unwrap();
     let machine = boot
         .unified

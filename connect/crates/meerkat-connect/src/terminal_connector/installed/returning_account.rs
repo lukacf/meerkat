@@ -219,13 +219,14 @@ fn retained_routes_preserve_independent_evidence_and_never_guess_missing_authent
     }
     // An arbitrary process binding is not a native account entry. Only its
     // explicitly declared secret route is available, even with OAuth-like text.
+    // Binding fields are toolkit_package::Id values (no spaces).
     let root = tempfile::tempdir().unwrap();
     let mut package = Package::library(root.path());
     package.page["candidates"][0]["family"] = json!("selected-python");
     package.page["candidates"][0]["profile"] = json!("python");
     let declaration = json!({"profile":"python","selection_sha256":"2".repeat(64),"manifest_digest":"3".repeat(64),
         "effect_sha256":"4".repeat(64),"files":{"package.json":"5".repeat(64),"activation.json":"2".repeat(64)},
-        "declared_service":{"authentication":{"kind":"binding","owner":"process","requirement":"OAuth-like custom binding","credential_audience":"service"},
+        "declared_service":{"authentication":{"kind":"binding","owner":"process","requirement":"OAuth-like-custom-binding","credential_audience":"service"},
             "operation_tools":{"read":"slack_auth_test"},"environment_secret_slots":["FIXTURE_TOKEN"]}});
     let installed = package.readback["installation"].as_object_mut().unwrap();
     installed.remove("native_connector");

@@ -795,6 +795,31 @@ bounds.
   `ToolDispatchContext::owner_change_churn`
   gives a delegate operation of a tool call, such as the `web_search` helper's
   model request, the waiting state that reports as that call's.
+- `OwnerChangeChurn::wait_after_stale_read` is the wait for a host's pure
+  observation of the work's own publication (one that reads owners and runs
+  no effect, such as `LocalAuthorizationPublication::observe` around
+  `resolve_lineage_observed`) that still answered stale after its one rebuild
+  (`PublicationError::Changed`, `LineageResolutionRefusal::Changed`). Such a
+  read can be invalidated by a change it never sees in progress: a grant
+  issuance holds the grant owner's mutex across its acknowledged append, with
+  the publication's writer reserved and unpublished, so a lineage read that
+  reaches that mutex waits there and ends stale only once the issuance
+  published, often after it completed. The wait waits for any change in
+  progress, an unpublished reservation included, and with none in progress as
+  it starts it pauses 1 ms first. `Settled` means make the same observation
+  once more, afresh; `NotSettled` (past the deadline, or every free rebuild
+  spent) means stop and answer the read as stale, never as unavailable. Each
+  settled wait is one of the churn's three free rebuilds, within its one
+  deadline (2 s, clamped to the budget passed: in a tool body
+  `ToolDispatchContext::remaining_tool_time`), which its first wait arms. Take
+  a fresh churn for each decision point (`ToolDispatchContext::owner_change_churn`
+  in a tool body), hold nothing across the wait (no publication guard or
+  exclusion, no owner or host lock, no store transaction), and never wait
+  around an effect: read, claim or record an effect once, after the
+  observation answered. A current answer, a denial and a genuine
+  `Unavailable` never wait. Dropping the wait cancels it, with nothing to
+  release. The waiting forms of the governed steps below take the same wait
+  after a step refused to rebuild.
 - The runtime waits at a model request (one deadline per model call, set at its
   first wait to 2 s or to the remaining run budget if less; the budget is
   checked after every wait), at a governed tool dispatch's prepared entry, body
@@ -863,9 +888,33 @@ bounds.
 - `OwnerChangeWait::trace` records each wait as one `debug` event of target
   `meerkat::authz::owner_change_wait` with `site` (`model_request`,
   `compaction_summary`, `tool_dispatch`, `tool_entry`, `tool_policy_entry`,
-  `tool_step`, `tool_child_issuance` or `web_search_delegate`),
-  `operation_id`, `waited_ms` and `settled`. Each refused attempt keeps its
-  own audit record.
+  `tool_step`, `tool_child_issuance` or `web_search_delegate`, or the site a
+  host passes), `operation_id`, `waited_ms` and `settled`. Each refused
+  attempt keeps its own audit record.
+
+A host's pure check in a tool body, with the wait after a stale read:
+
+```rust
+let mut churn = context.owner_change_churn();
+let answer = loop {
+    let answer = check_binding(); // observe, and rebuild once on a stale read
+    let Some(work) = context.work_authorization() else { break answer };
+    if !matches!(answer, Err(CheckError::Stale))
+        || !churn
+            .wait_after_stale_read(
+                work.authorization().as_ref(),
+                context.remaining_tool_time(),
+                "host_check",
+                None,
+            )
+            .await
+            .settled()
+    {
+        break answer; // current, refused, unavailable, or stale past the bounds
+    }
+};
+// Read, claim or record the effect here, once.
+```
 
 ## Continue a reviewed call with governed helper steps
 

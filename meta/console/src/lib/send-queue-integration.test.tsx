@@ -9,6 +9,7 @@ import { consoleSendStorageKey, saveConsoleSendAttempts } from "./send-attempt-s
 import { createConsoleContextRecord } from "../../../packages/console-core/src/context-record";
 import { ACCEPTANCE_NOTICE_GRACE_MS, PendingStack, type PendingItem } from "../panels/PendingStack";
 import { idleSettleClock } from "./idle-reconcile";
+import { turnSender } from "./turn-origin";
 
 const identity = "identity:queue-agent";
 function seed(twoPanes = false) {
@@ -235,6 +236,28 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect(fake.loadExperience).toHaveBeenCalledTimes(3));
     await waitFor(() => expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe(""));
     expect(screen.queryByText("Trigger scope refresh")).toBeNull();
+  });
+
+  it("stops calling the previous principal's sends \"You asked\" after a same-URL account switch", async () => {
+    const send = vi.fn(async (input: { identity: string }) => ({ interaction_id: "accepted", identity: input.identity }));
+    const fake = transport(send as never);
+    const initial = await fake.loadExperience();
+    let serverScope = "principal-a";
+    fake.loadExperience = vi.fn(async () => ({ ...initial, storage_scope: serverScope }));
+    let receive: ((frame: never) => void) | undefined;
+    fake.subscribeTimeline = (_input, next) => { receive = next; return () => {}; };
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await compose("Principal A asks for a summary");
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const key = (send.mock.calls[0][0] as unknown as { idempotencyKey: string }).idempotencyKey;
+    const ownFrame = { origin: "console:pane", origin_kind: "operator", idempotency_key: key };
+    expect(turnSender(ownFrame)).toBe("you");
+    await waitFor(() => expect(receive).toBeTypeOf("function"));
+    const loads = vi.mocked(fake.loadExperience).mock.calls.length;
+    serverScope = "principal-b";
+    await act(async () => { receive?.({ id: "scope-refresh", event: "interaction_started", identity, interactionId: "refresh", timestampMs: 2, data: {} } as never); });
+    await waitFor(() => expect(vi.mocked(fake.loadExperience).mock.calls.length).toBeGreaterThan(loads + 1));
+    expect(turnSender(ownFrame)).toBe("operator");
   });
 
   it("reconciles a lost alias send receipt only after fresh owner resolution and exact canonical query", async () => {

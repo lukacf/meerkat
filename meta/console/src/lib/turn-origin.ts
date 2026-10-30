@@ -31,6 +31,12 @@ export function rememberOwnSend(key: string | null | undefined): void {
   }
 }
 
+/** Forget every remembered send. After an account switch in the same tab
+ * the earlier sends belong to the previous account, not to "You". */
+export function forgetOwnSends(): void {
+  ownSendKeys.clear();
+}
+
 export function isOwnSend(key: unknown): boolean {
   return typeof key === "string" && ownSendKeys.has(key.trim());
 }

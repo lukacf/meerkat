@@ -31,7 +31,7 @@ import {
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
 import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
-import { rememberOwnSend } from "./lib/turn-origin";
+import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -816,7 +816,9 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
     observedScope.current = { value };
     if (previous && previous.value !== value) {
       // A same-URL account switch ends all old subscriptions, locks, drafts
-      // and transcript state before the replacement authority loads.
+      // and transcript state before the replacement authority loads. The
+      // previous account's sends no longer read "You asked".
+      forgetOwnSends();
       setGeneration(current => current + 1);
       return false;
     }

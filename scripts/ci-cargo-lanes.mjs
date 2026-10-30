@@ -424,7 +424,9 @@ export const FEATURE_UNIT_SUITES = [
   // (the application gateway, the installed account, public service and
   // credential requests and their presenters). meerkat-connect builds
   // meerkat-mob through toolkit-mobkit's native host, so like its default
-  // unit lane this suite runs on the push only.
+  // unit lane this suite runs on the push only. Its process controls
+  // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
+  // the unit jobs export.
   { package: "meerkat-connect", id: "console", features: ["console"] },
 ];
 

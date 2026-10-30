@@ -2196,6 +2196,17 @@ for (const path of [
     planFor([connectLib]).main_feature_unit_shards.some((suite) => suite.package_flags === "-p meerkat-connect --features console"),
     "a Connect push runs its Console suite",
   );
+  // Its Console process controls (resources::local_round) run a synthetic
+  // protocol child under an explicitly selected Python and refuse to guess
+  // one, so every unit job selects it, whichever wave or event holds the row.
+  const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+    assert.match(
+      jobLines(unitJobs, job).join("\n"),
+      /^ {10}TOOLKIT_SHARED_TEST_PYTHON="\$\(command -v python3\)"\n {10}export TOOLKIT_SHARED_TEST_PYTHON$/m,
+      `${job} selects the Python of Connect's Console process controls`,
+    );
+  }
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

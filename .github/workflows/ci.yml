@@ -1196,6 +1196,11 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -1875,6 +1880,11 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -1961,6 +1971,11 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail

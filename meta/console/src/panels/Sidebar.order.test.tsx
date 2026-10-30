@@ -122,6 +122,42 @@ describe("Roster manual order", () => {
     expect(rows(view.container)).toEqual(["router"]);
   });
 
+  it("keeps the relative order when Group switches to None and back", () => {
+    const agents = [agent("a", "Alpha"), agent("b", "Bravo"), agent("m", "Mike", { group: "Ops" }), agent("z", "Zulu", { group: "Ops" })];
+    const view = render(<Sidebar {...props} agents={agents} />);
+    const group = () => view.getByTestId("sidebar-view-group");
+    expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
+    fireEvent.change(group(), { target: { value: "none" } });
+    expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
+
+    fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowUp", altKey: true });
+    expect(rows(view.container)).toEqual(["m", "a", "z", "b"]);
+    fireEvent.change(group(), { target: { value: "category" } });
+    expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
+    fireEvent.change(group(), { target: { value: "none" } });
+    expect(rows(view.container)).toEqual(["m", "a", "z", "b"]);
+  });
+
+  it("refuses a move while an activity filter is on, and sorts by last activity within it", () => {
+    const agents = [
+      agent("a", "Alpha", { response_phase: "generating", last_activity_ms: 10 }),
+      agent("b", "Bravo", { response_phase: "generating", last_activity_ms: 30 }),
+      agent("c", "Charlie", { response_phase: null, last_activity_ms: 50 }),
+    ];
+    const view = render(<Sidebar {...props} agents={agents} />);
+    fireEvent.click(view.getByRole("button", { name: "Working", exact: true }));
+    expect(rows(view.container)).toEqual(["a", "b"]);
+    expect(view.queryByTestId("sidebar-agent-grip:a") === null).toBe(true);
+    fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowDown", altKey: true });
+    expect(announced(view.container)).toBe("Clear the search and the activity filter to reorder agents.");
+    expect(localStorage.getItem(ORDER_KEY)).toBeNull();
+
+    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "activity" } });
+    expect(rows(view.container)).toEqual(["b", "a"]);
+    fireEvent.click(view.getByRole("button", { name: "All", exact: true }));
+    expect(rows(view.container)).toEqual(["c", "b", "a"]);
+  });
+
   it("lets the pin button take Enter without opening the agent", () => {
     const onSelect = vi.fn();
     const onTogglePinnedAgent = vi.fn();
@@ -167,6 +203,28 @@ describe("Roster pointer drag", () => {
     expect(rows(view.container)).toEqual(["a", "c", "b"]);
     expect(JSON.parse(localStorage.getItem(ORDER_KEY) || "[]")).toEqual(["agent:a", "agent:c", "agent:b"]);
     expect(announced(view.container)).toBe("Moved Charlie below Alpha.");
+  });
+
+  it("shows no drop line over a row of another container and drops nothing there", () => {
+    const agents = [
+      agent("p", "Planner"),
+      agent("w1", "Worker one", { labels: { spawned_by: "agent:p" } }),
+      agent("w2", "Worker two", { labels: { spawned_by: "agent:p" } }),
+      agent("q", "Queue"),
+    ];
+    const view = render(<Sidebar {...props} agents={agents} />);
+    // Queue is a root; the workers are Planner's children, another container.
+    Object.defineProperty(document, "elementFromPoint", {
+      value: vi.fn(() => view.getByTestId("sidebar-agent:w1")),
+      configurable: true,
+    });
+    expect(view.getByTestId("sidebar-agent:w1").getAttribute("data-sidebar-order-kind")).toBe("agent");
+    fireEvent.pointerDown(view.getByTestId("sidebar-agent-grip:q"), { button: 0, clientX: 4, clientY: 80 });
+    fireEvent.pointerMove(window, { clientX: 4, clientY: 20 });
+    expect(view.container.querySelectorAll("[data-drag-over]").length).toBe(0);
+    fireEvent.pointerUp(window);
+    expect(rows(view.container)).toEqual(["p", "w1", "w2", "q"]);
+    expect(localStorage.getItem(ORDER_KEY)).toBeNull();
   });
 
   it("previews the dragged agent's kind as its row shows it", () => {

@@ -1960,6 +1960,97 @@ async function runSidebarManualAgentOrderProof() {
   }
 }
 
+// A long roster scrolls: a keyboard move that lands off screen scrolls the
+// moved row into view, and a drag held at the list's bottom edge scrolls the
+// list; a cancelled drag drops nothing.
+async function runSidebarLongRosterOrderProof() {
+  const member = (id, label, extra = {}) => ({
+    agent_id: id,
+    member_id: id,
+    identity: id,
+    label,
+    kind: "identity",
+    role: "reviewer",
+    group: "Team",
+    state: "active",
+    addressable: true,
+    response_phase: null,
+    affordances: { can_send_message: true },
+    ...extra,
+  });
+  const helpers = Array.from({ length: 24 }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    return member(`team-big-${number}`, `Big helper ${number}`, { labels: { spawned_by: "team-big" } });
+  });
+  const server = await startMockConsoleServer({
+    extraSidebarAgents: [member("team-big", "Big Planner"), ...helpers, member("team-small", "Small Planner")],
+    agentListConfig: { group_by: ["group"], section_order: ["Team"] },
+  });
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const { eventually } = require("./acceptance-runtime.cjs");
+    const list = page.getByTestId("sidebar-agent-list");
+    const announcement = () => page.getByTestId("sidebar-reorder-live").textContent();
+    const scrollTop = () => list.evaluate((node) => node.scrollTop);
+    const inView = (testId) => page.evaluate((id) => {
+      const listNode = document.querySelector('[data-testid="sidebar-agent-list"]');
+      const row = document.querySelector(`[data-testid="${id}"]`);
+      if (!listNode || !row) return false;
+      const outer = listNode.getBoundingClientRect();
+      const inner = row.getBoundingClientRect();
+      return inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    }, testId);
+
+    await page.waitForSelector('[data-testid="sidebar-agent:team-big"]', { timeout: 30_000 });
+    assert.equal(await list.evaluate((node) => node.scrollHeight > node.clientHeight + 200), true, "the roster scrolls");
+
+    // Small Planner sits below Big Planner's 24 helpers. Scrolled to it, it
+    // moves up past Big Planner with Alt+ArrowUp and lands where Big Planner
+    // stood, off screen: the list scrolls it into view and it keeps focus.
+    await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await eventually(() => inView("sidebar-agent:team-small"), "Small Planner is on screen", 5_000);
+    assert.equal(await inView("sidebar-agent:team-big"), false, "Big Planner is off screen above");
+    await page.getByTestId("sidebar-agent:team-small").focus();
+    await page.keyboard.press("Alt+ArrowUp");
+    await eventually(async () => (await announcement()) === "Moved Small Planner above Big Planner.", "the move is announced", 5_000);
+    await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-agent:team-small",
+      "focus stays on the moved agent", 5_000);
+    await eventually(() => inView("sidebar-agent:team-small"), "the moved agent is scrolled into view", 5_000);
+
+    // A drag held at the list's bottom edge scrolls the list. The browser
+    // then cancels the pointer: the drag ends and nothing moves.
+    await list.evaluate((node) => { node.scrollTop = 0; });
+    await eventually(async () => (await scrollTop()) === 0, "the list is at the top", 5_000);
+    await page.getByTestId("sidebar-agent:team-big-01").hover();
+    const grip = await page.getByTestId("sidebar-agent-grip:team-big-01").boundingBox();
+    const box = await list.boundingBox();
+    assert(grip && box, "the grip and the list are on screen");
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 8, { steps: 8 });
+    await eventually(async () => (await scrollTop()) > 100, "holding a drag at the bottom edge scrolls the list", 5_000);
+    await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel")));
+    await eventually(async () => (await page.getByTestId("sidebar-drag-preview").count()) === 0, "the cancelled drag ends", 5_000);
+    await page.mouse.up();
+    assert.equal(await announcement(), "Moved Small Planner above Big Planner.", "the cancelled drag moved nothing");
+    assert.deepEqual(pageErrors, [], "no page errors");
+
+    process.stdout.write("browser sidebar long roster order ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
 async function runChatPaneAutoScrollProof() {
   const baseTs = Date.parse("2026-05-23T20:40:00.000Z");
   const historyFrames = Array.from({ length: 48 }, (_, index) => ({
@@ -4631,6 +4722,7 @@ const allScenarios = [
     ...require("./scenarios/history-replay-tool-order.cjs").scenarios,
     ...require("./scenarios/real-side-chats.cjs").scenarios,
     { id: "sidebar-manual-agent-order", family: "console", backend: "mock", run: runSidebarManualAgentOrderProof },
+    { id: "sidebar-long-roster-order", family: "console", backend: "mock", run: runSidebarLongRosterOrderProof },
   ];
 
 module.exports = { scenarios: allScenarios };

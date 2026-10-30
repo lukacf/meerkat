@@ -1454,6 +1454,42 @@ test("sidebar agent moves change only the moved siblings and list every shown ag
   }
 });
 
+test("sidebar agent moves go after a target, to the first place and to the last", () => {
+  const siblings = ["agent:a", "agent:b", "agent:c", "agent:d"];
+  const move = (dragged: string, target: string, where: "before" | "after", inputSource: "keyboard" | "pointer" = "pointer") =>
+    __sidebarTest.sidebarAgentOrderAfterMove({ stored: [], agents: [], present: siblings, siblings, dragged, target, where, inputSource });
+
+  assert.deepEqual(move("agent:a", "agent:c", "after"), ["agent:b", "agent:c", "agent:a", "agent:d"], "after a target");
+  assert.deepEqual(move("agent:d", "agent:a", "before"), ["agent:d", "agent:a", "agent:b", "agent:c"], "to the first place");
+  assert.deepEqual(move("agent:a", "agent:d", "after"), ["agent:b", "agent:c", "agent:d", "agent:a"], "to the last place");
+  assert.deepEqual(move("agent:b", "agent:c", "after", "keyboard"), ["agent:a", "agent:c", "agent:b", "agent:d"], "Alt+ArrowDown");
+  assert.deepEqual(move("agent:c", "agent:b", "before", "keyboard"), ["agent:a", "agent:c", "agent:b", "agent:d"], "Alt+ArrowUp");
+  assert.equal(move("agent:a", "agent:b", "before"), null, "a drop where the agent already is moves nothing");
+});
+
+test("sidebar side chats stay under their source and follow the stored order among themselves", () => {
+  const agents = [
+    teamAgent("alpha", "Alpha"),
+    teamAgent("side-one", "Alpha side one", { side_chat_of: "agent:alpha" }),
+    teamAgent("side-two", "Alpha side two", { side_chat_of: "agent:alpha" }),
+    teamAgent("beta", "Beta"),
+  ];
+  const rows = sortedRows(agents);
+  const containerOf = (id: string) => {
+    const row = rows.find((candidate) => candidate.kind === "agent" && candidate.row.agent.member_id === id);
+    return row?.kind === "agent" ? row.container : null;
+  };
+
+  assert.deepEqual(agentRowIds(rows), ["alpha", "side-one", "side-two", "beta"]);
+  assert.equal(containerOf("side-two"), __sidebarTest.sidebarAgentContainer("Team", null, "alpha"));
+  assert.equal(containerOf("side-one"), containerOf("side-two"));
+  assert.deepEqual(
+    agentRowIds(sortedRows(agents, { order: ["agent:beta", "agent:side-two", "agent:alpha", "agent:side-one"] })),
+    ["beta", "alpha", "side-two", "side-one"],
+    "the side chats follow the stored order under their source, and the source carries them",
+  );
+});
+
 test("sidebar agent rows share a container only with their siblings", () => {
   const planner = teamAgent("planner", "Planner");
   const agents = [

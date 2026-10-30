@@ -349,9 +349,7 @@ acting (a live runtime event, a message sent to it or a tool application),
 which `/console/experience` reports as `last_activity_ms`, or a newer event the
 console has since seen. History the console rebuilds, lifecycle records
 (respawn, retire, reset, delete), interaction failures and memory events do not
-count, and only the agent's newest 512 frames are looked at, so an agent whose
-last action is older than that reads as having no known activity. Reading it
-wakes no agent.
+count. Reading it wakes no agent.
 
 The browser keeps these preferences in local storage, per signed-in user and
 console: the manual order, the Group and Sort choices and the pins follow the

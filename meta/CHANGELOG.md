@@ -148,10 +148,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carry `last_activity_ms`, the newest time the console's frame log recorded
   the agent acting (a live runtime event, a console send or a tool
   application, not a lifecycle record, an interaction failure or a memory
-  event), found among the agent's newest 512 frames. It is advisory (absent
-  means unknown) and reading it wakes no agent. `ConsoleLogStore` gains
-  `latest_activity_times`, with a default that reports none; a store that
-  wraps another must forward it.
+  event). It is advisory (absent means unknown) and reading it wakes no
+  agent. `ConsoleLogStore` gains `latest_activity_times`, which finds each
+  named agent's newest acting frame however many frames are newer, with a
+  default that reports none; a store that wraps another must forward it. The
+  console aggregator reads an agent through it once, on its first read, and
+  then keeps its time in memory from the frames it appends.
 
 ### Changed
 

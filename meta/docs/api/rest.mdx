@@ -91,14 +91,12 @@ An agent row in `agent_sidebar.live_snapshot.agents`, and its rows in
 `identity_status` and `health_overview`, can carry `last_activity_ms`: the
 newest time, in milliseconds since the epoch, that the console's frame log
 recorded the agent acting (a live runtime event, a console send or a tool
-application), looked for among the agent's newest 512 frames. Frames rebuilt
-from session history or synthesized by the console do not count, and neither
-do lifecycle records (respawn, retire, reset, delete), interaction failures
-and memory events, which record something done to the agent. The field is
-advisory: a row without it has no known activity, which includes an agent
-whose newest acting frame is older than its newest 512 frames, and reading it
-wakes no agent. A row answered pending (below) keeps it, since the frame log
-answers it, not the read model.
+application). Frames rebuilt from session history or synthesized by the
+console do not count, and neither do lifecycle records (respawn, retire,
+reset, delete), interaction failures and memory events, which record
+something done to the agent. The field is advisory: a row without it has no
+known activity, and reading it wakes no agent. A row answered pending (below)
+keeps it, since the frame log answers it, not the read model.
 
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for

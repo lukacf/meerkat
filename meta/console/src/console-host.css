@@ -1490,59 +1490,81 @@ svg[data-svg="fit"],
 }
 .gpolicy__stats b { color: var(--ink); }
 
-.gitem {
-  display: grid;
-  grid-template-columns: 12px 80px 1fr auto 180px;
-  gap: 12px;
+/* Approvals (the gating inbox) is a kit panel. Its header keeps the pinned
+   .gating__head class, but not the legacy gating header styles above,
+   which other panels still use. */
+.cc-panel-head.gating__head {
   align-items: center;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
+  gap: 8px 14px;
+  padding: 14px var(--_cc-panel-pad-x) 4px;
+  border-bottom: 0;
 }
-.gitem:hover { background: var(--bg-elev-2); }
-.gitem.is-selected { background: var(--bg-elev-2); box-shadow: inset 3px 0 0 var(--accent); }
-.gitem__risk {
-  width: 8px; height: 8px; border-radius: var(--r-round);
-  justify-self: center;
-  background: var(--ink-dim);
+.cc-panel-head.gating__head .cc-panel-head__title {
+  font-size: var(--_cc-panel-fs-title);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
 }
-/* Risk tiers: r3 critical, r2 warning, lower tiers and unknown stay neutral. */
-.gitem[data-risk="r3"] .gitem__risk { background: var(--crit); }
-.gitem[data-risk="r2"] .gitem__risk { background: var(--warn); }
-.gating__audit-note { padding: 12px 24px; color: var(--ink-muted); font-size: 12px; }
-.gitem__id { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
-.gitem__action { font-size: 12.5px; color: var(--ink); font-weight: 500; }
-.gitem__payload { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); }
-.gitem__agent { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); }
-.gitem__waited { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); text-align: right; }
-.gitem__actions { display: flex; gap: 4px; justify-content: flex-end; }
-.gitem__actions button {
-  padding: 4px 10px; font-size: 11px; font-family: var(--disp); font-weight: 500;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  color: var(--ink-muted);
-}
-.gitem__actions button.approve { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 40%, var(--line)); }
-.gitem__actions button.reject  { color: var(--crit); border-color: color-mix(in oklch, var(--crit) 40%, var(--line)); }
-.gitem__actions button:hover { background: var(--bg-elev-1); }
-
-/* Gating narrow-pane overrides */
-.cc-dock-panel__content .gitem {
-  grid-template-columns: 8px 80px 1fr auto;
-  gap: 10px;
-  row-gap: 6px;
-  padding: 10px 16px;
-}
-.cc-dock-panel__content .gitem__waited {
-  grid-column: 2 / 4;
-  text-align: left;
-  color: var(--ink-faint);
-}
-.cc-dock-panel__content .gitem__actions {
-  grid-column: 4;
-  grid-row: 1 / span 2;
-  align-self: start;
+.gating-inbox__content > .cc-notice { margin: 10px var(--_cc-panel-pad-x) 0; }
+.gating-inbox__content > .cc-rows { margin-top: 10px; }
+.gating-inbox__cards {
+  display: flex;
   flex-direction: column;
-  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px var(--_cc-panel-pad-x) 0;
+}
+.gating-inbox__cards > [data-approval-id] { min-width: 0; outline: none; }
+.gating-inbox__cards .cc-approval { margin: 0; }
+/* Recorded events and requests without the approval resource: the action,
+   its decision and time, then the recorded facts, each one "Label: value"
+   span, wrapping between facts. The risk dot pairs with "Tier: ...". */
+.gitem .cc-row__sub {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.gitem__facts {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 2px;
+  min-width: 0;
+}
+/* Facts wrap between each other; one longer than the line wraps inside. */
+.gitem__fact { max-width: 100%; overflow-wrap: anywhere; }
+.gitem__fact + .gitem__fact::before {
+  content: "\00B7";
+  margin: 0 6px;
+  color: var(--ink-meta);
+}
+.gitem__waited { color: var(--ink-muted); }
+/* Rows run to several lines: the dot and the meta sit on the title line. */
+.gitem { align-items: start; }
+.gitem .cc-row__lead { height: 1.45em; }
+@container cc-panel (max-width: 359px) {
+  .gitem {
+    grid-template-columns: 18px minmax(0, 1fr);
+    grid-template-areas: "lead main" ". meta" ". actions";
+  }
+  .gitem .cc-row__meta { justify-content: flex-start; flex-wrap: wrap; }
+}
+/* Decisions on a pending request are the point of the row: always shown. */
+.gitem .cc-row__actions { opacity: 1; }
+.gitem.is-expanded { background: var(--bg-sunken); }
+.gitem__details {
+  padding: 4px var(--_cc-panel-pad-x) 12px calc(var(--_cc-panel-pad-x) + 28px);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.gitem__code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.gitem__none {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-meta);
 }
 
 /* Topology narrow-pane overrides */
@@ -4218,7 +4240,7 @@ svg[data-svg="fit"],
     grid-template-columns: 18px minmax(0, 1fr);
     grid-template-areas: "lead main" ". meta" ". actions";
   }
-  .workgraph-row .cc-row__meta { justify-content: flex-start; }
+  .workgraph-row .cc-row__meta { justify-content: flex-start; flex-wrap: wrap; }
   .workgraph-goal__title { min-width: 0; }
   .workgraph-goal__blocked,
   .workgraph-goal__tech.cc-tech { padding-left: 14px; }

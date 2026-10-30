@@ -31,15 +31,16 @@ describe("GatingInboxPanel shared resource", () => {
   ])("does not manufacture policy counts or rules from $name", ({ audit }) => {
     const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={vi.fn()} resource={snapshot("ready")} />);
     expect(view.container.querySelector(".gating__head")?.textContent).not.toMatch(/\d+ polic/);
-    fireEvent.click(view.getByRole("button", { name: "Policies", exact: true }));
+    fireEvent.click(view.getByRole("tab", { name: "Policies", exact: true }));
+    expect(view.getByRole("tab", { name: "Policies", exact: true }).getAttribute("aria-selected")).toBe("true");
     expect(view.getByRole("status").textContent).toBe("Policy details are not available in this console.");
     for (const invented of ["scope: *", "active", "paused", "Auto on low risk", "High rejection rate"]) {
       expect(view.queryByText(invented, { exact: true })).toBeNull();
     }
     expect(view.queryByText(/No .*policies/)).toBeNull();
-    expect(view.queryByText("deploy-release", { exact: true })).toBeNull();
-    expect(view.queryByText("delete-database", { exact: true })).toBeNull();
-    expect(view.queryByText("grant-access", { exact: true })).toBeNull();
+    expect(view.queryByTitle("deploy-release", { exact: true })).toBeNull();
+    expect(view.queryByTitle("delete-database", { exact: true })).toBeNull();
+    expect(view.queryByTitle("grant-access", { exact: true })).toBeNull();
   });
   it("preserves pending selection and audit access after viewing unavailable policies", () => {
     const audit = [
@@ -49,11 +50,11 @@ describe("GatingInboxPanel shared resource", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={vi.fn()} resource={snapshot("ready")} selectedPendingId="p1" />);
     fireEvent.click(view.getByTestId("gating-tab:policies"));
     fireEvent.click(view.getByTestId("gating-tab:audit"));
-    expect(view.getByText("automatic-check", { exact: true })).toBeTruthy();
-    expect(view.getByText("manual-review", { exact: true })).toBeTruthy();
+    expect(view.getByTitle("automatic-check", { exact: true })).toBeTruthy();
+    expect(view.getByTitle("manual-review", { exact: true })).toBeTruthy();
     fireEvent.click(view.getByTestId("gating-tab:auto"));
-    expect(view.getByText("automatic-check", { exact: true })).toBeTruthy();
-    expect(view.queryByText("manual-review", { exact: true })).toBeNull();
+    expect(view.getByTitle("automatic-check", { exact: true })).toBeTruthy();
+    expect(view.queryByTitle("manual-review", { exact: true })).toBeNull();
     fireEvent.click(view.getByTestId("gating-tab:pending"));
     expect(view.getByText("Publish reviewed changes")).toBeTruthy();
     expect(document.activeElement).toBe(view.container.querySelector('[data-approval-id="p1"]'));
@@ -78,41 +79,56 @@ describe("GatingInboxPanel recorded audit", () => {
   };
 
   it.each([
-    { risk_tier: "r0", outcome: "allowed" },
-    { risk_tier: "r1", outcome: "allowed" },
-    { risk_tier: "r2", outcome: "allowed_with_audit" },
-  ])("shows the recorded $risk_tier automatic allowance without inventing a risk scale", ({ risk_tier, outcome }) => {
+    { risk_tier: "r0", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral" },
+    { risk_tier: "r1", outcome: "allowed", outcomeWords: "Allowed", tone: "neutral" },
+    { risk_tier: "r2", outcome: "allowed_with_audit", outcomeWords: "Allowed with audit", tone: "warn" },
+  ])("shows the recorded $risk_tier automatic allowance without inventing a risk scale", ({ risk_tier, outcome, outcomeWords, tone }) => {
     const view = render(<GatingInboxPanel pending={[]} audit={[{ ...evaluated, risk_tier, outcome }]} onDecide={vi.fn()} />);
     fireEvent.click(view.getByTestId("gating-tab:auto"));
-    const row = view.getByText("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    // The raw action id is the title's tooltip; the title reads the action.
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(row.querySelector(".cc-row__title")?.textContent).toBe("Send message");
     expect(row.getAttribute("data-risk")).toBe(risk_tier);
+    expect(row.querySelector(".gitem__risk")?.getAttribute("data-tone")).toBe(tone);
     expect(within(row).getByText(`Tier: ${risk_tier.toUpperCase()}`)).toBeTruthy();
     expect(within(row).getByText("Actor: household-agent")).toBeTruthy();
-    expect(within(row).getByText(`Outcome: ${outcome}`)).toBeTruthy();
+    expect(within(row).getByText(`Outcome: ${outcomeWords}`)).toBeTruthy();
     expect(within(row).getByText("Decision: Not recorded")).toBeTruthy();
+    expect(within(row).getByText("Allowed automatically")).toBeTruthy();
+    expect(view.queryByText(outcome, { exact: true })).toBeNull();
     expect(view.getByText("Approval records do not confirm execution.")).toBeTruthy();
     expect(view.container.querySelector('[data-risk="low"]')).toBeNull();
   });
 
   it.each([
-    { event_type: "approval_decided", decision: "approve", outcome: "allowed" },
-    { event_type: "rejection_decided", decision: "reject", outcome: "safe_draft" },
-    { event_type: "escalation_decided", decision: "escalate", outcome: "pending_approval" },
-  ])("shows the R3 human $decision decision and its recorded outcome", ({ event_type, decision, outcome }) => {
-    const audit = [{ ...evaluated, audit_id: "human-decision", pending_id: "pending-1", event_type, risk_tier: "r3", outcome, detail: { approver_id: "luka", decision } }];
+    { event_type: "approval_decided", decision: "approve", outcome: "allowed", decisionWords: "Approve", outcomeWords: "Allowed", verdict: "Approved" },
+    { event_type: "rejection_decided", decision: "reject", outcome: "safe_draft", decisionWords: "Reject", outcomeWords: "Kept as a draft", verdict: "Rejected" },
+    { event_type: "escalation_decided", decision: "escalate", outcome: "pending_approval", decisionWords: "Escalate", outcomeWords: "Waiting for approval", verdict: "Escalated" },
+  ])("shows the R3 human $decision decision and its recorded outcome", ({ event_type, decision, outcome, decisionWords, outcomeWords, verdict }) => {
+    const audit = [{ ...evaluated, audit_id: "human-decision", pending_id: "pending-1", event_type, risk_tier: "r3", outcome, timestamp_ms: Date.now() - 2 * 60 * 60 * 1000, detail: { approver_id: "luka", decision } }];
     const onDecide = vi.fn();
     const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={onDecide} />);
     fireEvent.click(view.getByTestId("gating-tab:audit"));
-    const row = view.getByText("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
     expect(row.getAttribute("data-risk")).toBe("r3");
+    expect(row.querySelector(".gitem__risk")?.getAttribute("data-tone")).toBe("crit");
     expect(within(row).getByText("Tier: R3")).toBeTruthy();
     expect(within(row).getByText("Actor: household-agent")).toBeTruthy();
     expect(within(row).getByText("Approver: luka")).toBeTruthy();
-    expect(within(row).getByText(`Decision: ${decision}`)).toBeTruthy();
-    expect(within(row).getByText(`Outcome: ${outcome}`)).toBeTruthy();
+    expect(within(row).getByText(`Decision: ${decisionWords}`)).toBeTruthy();
+    expect(within(row).getByText(`Outcome: ${outcomeWords}`)).toBeTruthy();
+    expect(within(row).getByText(verdict)).toBeTruthy();
+    expect(within(row).getByText("2h ago").tagName).toBe("TIME");
+    // The ID column is gone: the IDs sit in the row's technical details.
+    expect(view.queryByText("human-decision", { exact: true })).toBeNull();
     expect(within(row).queryByRole("button")).toBeNull();
+    expect(row.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(row);
     expect(onDecide).not.toHaveBeenCalled();
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+    expect(view.getByText("Audit record ID")).toBeTruthy();
+    expect(view.getByTitle("human-decision").classList.contains("cc-tech-id")).toBe(true);
+    expect(view.getByTitle("pending-1").classList.contains("cc-tech-id")).toBe(true);
     fireEvent.click(view.getByTestId("gating-tab:auto"));
     expect(view.getByText("No auto items.")).toBeTruthy();
   });
@@ -142,15 +158,58 @@ describe("GatingInboxPanel recorded audit", () => {
     const onDecide = vi.fn();
     const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={onDecide} />);
     fireEvent.click(view.getByTestId("gating-tab:auto"));
-    expect(view.getByText("send-message", { exact: true })).toBeTruthy();
+    expect(view.getByTitle("send-message", { exact: true })).toBeTruthy();
     for (const action of ["automation-failed", "blocked-evaluation", "invented-decision"]) {
-      expect(view.queryByText(action, { exact: true })).toBeNull();
+      expect(view.queryByTitle(action, { exact: true })).toBeNull();
     }
-    expect(within(view.getByText("send-message", { exact: true }).closest<HTMLElement>(".gitem")!).queryByRole("button")).toBeNull();
+    expect(within(view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!).queryByRole("button")).toBeNull();
     expect(onDecide).not.toHaveBeenCalled();
     fireEvent.click(view.getByTestId("gating-tab:audit"));
     for (const action of ["automation-failed", "blocked-evaluation", "invented-decision"]) {
-      expect(view.getByText(action, { exact: true })).toBeTruthy();
+      expect(view.getByTitle(action, { exact: true })).toBeTruthy();
     }
+  });
+});
+
+describe("GatingInboxPanel frame and requests without the shared resource", () => {
+  it("names the counts in the header and refreshes from a header button", () => {
+    const onRefresh = vi.fn();
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")} onRefresh={onRefresh} />);
+    const head = view.container.querySelector(".gating__head");
+    expect(head?.textContent?.includes("1 pending · 0 allowed automatically")).toBe(true);
+    expect(view.getByRole("heading", { name: "Approvals" }).tagName).toBe("H2");
+    const refresh = view.getByRole("button", { name: "Refresh approvals", exact: true });
+    expect(head?.contains(refresh)).toBe(true);
+    fireEvent.click(refresh);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(view.getByRole("tab", { name: "Pending 1" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("does not show a pending count it does not know", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("loading"), requests: [] }} />);
+    expect(view.container.querySelector(".gating__head")?.textContent?.includes("pending")).toBe(false);
+    expect(view.getByTestId("gating-tab:pending").textContent).toBe("Pending");
+  });
+
+  it("decides a request from its row without opening the row", () => {
+    const pendingEntry = { pending_id: "pending-7", action_id: "deploy-release", actor_id: "release-manager", risk_tier: "r3", waited_ms: 18 * 60 * 1000, payload: { region: "eu-west" } };
+    const onDecide = vi.fn();
+    const view = render(<GatingInboxPanel pending={[pendingEntry]} audit={[]} onDecide={onDecide} />);
+    const row = view.getByTestId("gating-pending:pending-7");
+    expect(row.classList.contains("gitem")).toBe(true);
+    expect(row.querySelector(".cc-row__title")?.textContent).toBe("Deploy release");
+    expect(within(row).getByText("Tier: R3")).toBeTruthy();
+    expect(within(row).getByText("Actor: release-manager")).toBeTruthy();
+    expect(within(row).getByText("Waiting 18 min")).toBeTruthy();
+    fireEvent.click(view.getByTestId("gating-action:pending-7:approve"));
+    expect(onDecide).toHaveBeenCalledWith("pending-7", "approve");
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(view.getByTestId("gating-action:pending-7:reject"));
+    fireEvent.click(view.getByTestId("gating-action:pending-7:escalate"));
+    expect(onDecide.mock.calls.map((call) => call[1])).toEqual(["approve", "reject", "escalate"]);
+    view.rerender(<GatingInboxPanel pending={[pendingEntry]} audit={[]} onDecide={onDecide} readOnly />);
+    expect(view.queryByTestId("gating-action:pending-7:approve")).toBeNull();
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={onDecide} />);
+    expect(view.getByText("No pending items.")).toBeTruthy();
   });
 });

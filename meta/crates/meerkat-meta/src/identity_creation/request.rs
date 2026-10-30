@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use meerkat_core::ToolCatalogEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -218,13 +219,17 @@ impl PeerFacts {
 }
 
 /// What normalization reads besides the request: the requester, the mob's
-/// profiles and the existing identities the request names as peers.
+/// profiles, the host's registered callback tool catalog and the existing
+/// identities the request names as peers.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestContext<'a> {
     /// The requester.
     pub requester: &'a RequesterFacts,
     /// The mob's profiles.
     pub profiles: &'a MobProfiles,
+    /// The host's registered callback tool catalog, which the callbacks a
+    /// template names resolve in.
+    pub callbacks: &'a [ToolCatalogEntry],
     /// The existing identities the request names as peers, by identity.
     pub peers: &'a BTreeMap<String, PeerFacts>,
 }
@@ -1193,10 +1198,12 @@ pub fn normalize_create(
             spec.profile.as_deref(),
             spec.model.as_deref(),
             context.profiles,
+            context.callbacks,
         )
         .map_err(|kind| {
             let field = match kind {
                 IdentityRefusalKind::ModelNotAllowed { .. } => "model",
+                IdentityRefusalKind::TemplateNotAllowed { .. } => "template",
                 _ => "profile",
             };
             refused(kind, format!("{path}.{field}"))
@@ -1431,6 +1438,7 @@ pub fn normalize_update(
         Some(entry.profile.as_str()),
         Some(entry.model.as_str()),
         context.profiles,
+        context.callbacks,
     )
     .map_err(|_| refused(IdentityRefusalKind::TemplateBindingChanged, "template"))?
     .digest();

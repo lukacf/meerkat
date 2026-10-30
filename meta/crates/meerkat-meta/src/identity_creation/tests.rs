@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
+use meerkat_core::{ToolCatalogEntry, ToolDef};
 use serde_json::{Value, json};
 
 use super::escape::{escaped_line, is_hidden, is_markup, quoted, unescape_line, unquote};
@@ -21,17 +23,13 @@ fn policy_json() -> Value {
         "reserved_keys": {"labels": ["team", "clearance"], "context": ["project"]},
         "creators": [{"id": "leads", "profile": ["lead"], "templates": ["research", "open"]}],
         "limits": {"batch": 4},
-        "callback_catalogs": {"notes": [
-            {"name": "notes_read", "description": "Read notes", "input_schema": {"type": "object"}},
-            {"name": "notes_write", "description": "Write notes"}
-        ]},
         "templates": {
             "research": {
                 "title": "Research helper",
                 "profiles": ["assistant", "analyst"],
                 "models": "profile",
                 "accounts": ["binding:notes"],
-                "callbacks": "notes",
+                "callbacks": ["notes_read", "notes_write"],
                 "tools": {"floor": ["notes_read"], "ceiling": ["notes_read", "notes_write", "search"]},
                 "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
                 "preamble": "You were created by {creator}. Peers: {peers}. You are {display_name}: {purpose}.",
@@ -106,6 +104,22 @@ fn mob_profile_names() -> BTreeSet<String> {
     strings(["assistant", "analyst", "lead"])
 }
 
+/// A callback tool as the host registered it.
+fn callback_tool(name: &str, description: &str) -> ToolCatalogEntry {
+    ToolCatalogEntry::session_inline(
+        Arc::new(ToolDef::new(name, description, json!({"type": "object"}))),
+        true,
+    )
+}
+
+/// The host's registered callback tool catalog.
+fn registered() -> Vec<ToolCatalogEntry> {
+    vec![
+        callback_tool("notes_read", "Read notes"),
+        callback_tool("notes_write", "Write notes"),
+    ]
+}
+
 fn lead() -> RequesterFacts {
     RequesterFacts::agent(
         "lead-1",
@@ -166,10 +180,12 @@ fn create_with(
     specs: &[CreateIdentitySpec],
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     let profiles = profiles();
+    let callbacks = registered();
     let peers = peers();
     let context = RequestContext {
         requester,
         profiles: &profiles,
+        callbacks: &callbacks,
         peers: &peers,
     };
     normalize_create(policy, &context, envelope, specs)
@@ -364,15 +380,8 @@ fn a_valid_policy_parses_with_the_contract_defaults() {
     assert_eq!(research.max_bytes().supplied_context, 16_384);
     assert_eq!(research.models(), &ModelChoice::ProfileModel);
     assert_eq!(
-        research.callbacks().map(|catalog| catalog.id.as_str()),
-        Some("notes")
-    );
-    assert_eq!(
-        research.callbacks().map(|catalog| &catalog.digest),
-        policy
-            .callback_catalogs()
-            .get("notes")
-            .map(CallbackCatalog::digest)
+        research.callbacks(),
+        &strings(["notes_read", "notes_write"])
     );
     assert_eq!(
         policy.template("open").map(Template::profiles),
@@ -507,10 +516,10 @@ fn policy_validation_refuses_typed() {
             PolicyRefusalKind::Empty,
         ),
         policy_case(
-            |value| value["templates"]["research"]["callbacks"] = json!("nope"),
-            "templates.research.callbacks",
-            PolicyRefusalKind::UnknownCallbackCatalog {
-                catalog: "nope".to_owned(),
+            |value| value["templates"]["research"]["callbacks"] = json!(["notes read"]),
+            "templates.research.callbacks[0]",
+            PolicyRefusalKind::Invalid {
+                value: "notes read".to_owned(),
             },
         ),
         policy_case(
@@ -696,11 +705,11 @@ fn policy_validation_refuses_typed() {
         ),
         policy_case(
             |value| {
-                value["callback_catalogs"]["notes"][1]["input_schema"] = json!("a string");
+                value["templates"]["research"]["callbacks"] = json!(["notes_read", "notes_read"]);
             },
-            "callback_catalogs.notes[1].input_schema",
-            PolicyRefusalKind::Invalid {
-                value: "not an object".to_owned(),
+            "templates.research.callbacks[1]",
+            PolicyRefusalKind::Duplicate {
+                value: "notes_read".to_owned(),
             },
         ),
     ];
@@ -980,6 +989,7 @@ fn research_binding(value: &Value, profiles: &MobProfiles) -> TemplateBinding {
         Some("assistant"),
         None,
         profiles,
+        &registered(),
     )
     .expect("a binding")
 }
@@ -1028,9 +1038,9 @@ fn the_template_binding_digest_covers_the_sealed_template_facts() {
         }),
         binding_change(|value| value["templates"]["research"]["version"] = json!("2")),
         binding_change(|value| value["templates"]["research"]["preparation"] = json!("required")),
-        binding_change(|value| value["templates"]["research"]["callbacks"] = json!(null)),
+        binding_change(|value| value["templates"]["research"]["callbacks"] = json!([])),
         binding_change(|value| {
-            value["callback_catalogs"]["notes"][0]["description"] = json!("Read all notes");
+            value["templates"]["research"]["callbacks"] = json!(["notes_read"]);
         }),
     ];
     let mut digests = BTreeSet::from([base.digest()]);
@@ -1056,6 +1066,7 @@ fn the_template_binding_digest_covers_the_sealed_template_facts() {
         Some("analyst"),
         None,
         &profiles(),
+        &registered(),
     )
     .expect("a binding");
     assert_eq!(analyst.model, "gpt-5.5");
@@ -1093,33 +1104,41 @@ fn profile_and_model_resolve_from_the_template() {
     let research = policy.template("research").expect("research");
     let open = policy.template("open").expect("open");
     let profiles = profiles();
-    let default = resolve_binding(research, None, None, &profiles).expect("a default");
+    let callbacks = registered();
+    let default = resolve_binding(research, None, None, &profiles, &callbacks).expect("a default");
     assert_eq!(default.profile, "assistant");
     assert_eq!(default.model, "claude-opus-5-5");
     assert_eq!(
-        resolve_binding(research, Some("assistant"), Some("gpt-5.5"), &profiles).unwrap_err(),
+        resolve_binding(
+            research,
+            Some("assistant"),
+            Some("gpt-5.5"),
+            &profiles,
+            &callbacks
+        )
+        .unwrap_err(),
         IdentityRefusalKind::ModelNotAllowed {
             model: "gpt-5.5".to_owned()
         }
     );
     assert_eq!(
-        resolve_binding(research, Some("lead"), None, &profiles).unwrap_err(),
+        resolve_binding(research, Some("lead"), None, &profiles, &callbacks).unwrap_err(),
         IdentityRefusalKind::ProfileNotAllowed {
             profile: Some("lead".to_owned())
         }
     );
     assert_eq!(
-        resolve_binding(open, None, None, &profiles).unwrap_err(),
+        resolve_binding(open, None, None, &profiles, &callbacks).unwrap_err(),
         IdentityRefusalKind::ProfileNotAllowed { profile: None }
     );
     assert_eq!(
-        resolve_binding(open, Some("ghost"), None, &profiles).unwrap_err(),
+        resolve_binding(open, Some("ghost"), None, &profiles, &callbacks).unwrap_err(),
         IdentityRefusalKind::ProfileNotAllowed {
             profile: Some("ghost".to_owned())
         }
     );
     assert_eq!(
-        resolve_binding(open, Some("lead"), None, &profiles)
+        resolve_binding(open, Some("lead"), None, &profiles, &callbacks)
             .expect("any profile")
             .profile,
         "lead"
@@ -1130,18 +1149,179 @@ fn profile_and_model_resolve_from_the_template() {
     let listed = parse(&value);
     let research = listed.template("research").expect("research");
     assert_eq!(
-        resolve_binding(research, None, None, &profiles)
+        resolve_binding(research, None, None, &profiles, &callbacks)
             .expect("a default model")
             .model,
         "model-a"
     );
     assert_eq!(
-        resolve_binding(research, None, Some("model-b"), &profiles)
+        resolve_binding(research, None, Some("model-b"), &profiles, &callbacks)
             .expect("a listed model")
             .model,
         "model-b"
     );
-    assert!(resolve_binding(research, None, Some("model-c"), &profiles).is_err());
+    assert!(resolve_binding(research, None, Some("model-c"), &profiles, &callbacks).is_err());
+}
+
+#[test]
+fn a_template_callback_naming_an_unregistered_tool_is_refused_at_create() {
+    // Init checks the names only: a name the host has not registered is a
+    // valid policy.
+    let mut value = policy_json();
+    value["templates"]["research"]["callbacks"] = json!(["notes_read", "notes_archive"]);
+    let policy = parse(&value);
+    let research = policy.template("research").expect("research");
+
+    // Resolution against the registered catalog refuses the template.
+    let profiles = profiles();
+    let callbacks = registered();
+    assert_eq!(
+        resolve_binding(research, None, None, &profiles, &callbacks).unwrap_err(),
+        IdentityRefusalKind::TemplateNotAllowed {
+            template: "research".to_owned()
+        }
+    );
+
+    // A create is refused at its template; nothing is normalized.
+    let refusal =
+        create(&policy, &lead(), &[spec("helper")]).expect_err("an unregistered callback");
+    assert_eq!(
+        refusal.kind,
+        IdentityRefusalKind::TemplateNotAllowed {
+            template: "research".to_owned()
+        }
+    );
+    assert_eq!(refusal.field.as_deref(), Some("identities[0].template"));
+
+    // Once the host registers the tool, the template binds.
+    let mut with_archive = registered();
+    with_archive.push(callback_tool("notes_archive", "Archive notes"));
+    assert!(resolve_binding(research, None, None, &profiles, &with_archive).is_ok());
+
+    // An identity whose callback is no longer registered cannot rebuild its
+    // binding: its updates are refused until the host rebinds it.
+    let entry = entry_facts(current_binding());
+    let purpose = update_spec(UpdateSetSpec {
+        purpose: Some("Find better sources.".to_owned()),
+        ..UpdateSetSpec::default()
+    });
+    let without_write = [callback_tool("notes_read", "Read notes")];
+    assert_eq!(
+        update_in(&without_write, &lead(), &entry, &purpose)
+            .unwrap_err()
+            .kind,
+        IdentityRefusalKind::TemplateBindingChanged
+    );
+}
+
+#[test]
+fn a_changed_registered_callback_definition_changes_the_binding_digest() {
+    let policy = policy();
+    let research = policy.template("research").expect("research");
+    let profiles = profiles();
+    let bind = |callbacks: &[ToolCatalogEntry]| {
+        resolve_binding(research, Some("assistant"), None, &profiles, callbacks).expect("a binding")
+    };
+    let base = bind(&registered());
+    assert_eq!(
+        base.callbacks
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["notes_read", "notes_write"]
+    );
+    assert_eq!(
+        base.callbacks["notes_read"],
+        callback_definition_digest(&ToolDef::new(
+            "notes_read",
+            "Read notes",
+            json!({"type": "object"})
+        ))
+    );
+
+    // The catalog's order, its other entries and whether a tool is callable
+    // right now change nothing.
+    let mut reordered = registered();
+    reordered.reverse();
+    reordered.push(callback_tool("search_web", "Search the web"));
+    assert_eq!(bind(&reordered).digest(), base.digest());
+    let idle = [
+        ToolCatalogEntry::session_inline(
+            Arc::new(ToolDef::new(
+                "notes_read",
+                "Read notes",
+                json!({"type": "object"}),
+            )),
+            false,
+        ),
+        callback_tool("notes_write", "Write notes"),
+    ];
+    assert_eq!(bind(&idle).digest(), base.digest());
+
+    // A changed description or input schema of a bound callback changes the
+    // digest, each change its own.
+    let changed = [
+        callback_tool("notes_read", "Read every note"),
+        ToolCatalogEntry::session_inline(
+            Arc::new(ToolDef::new(
+                "notes_read",
+                "Read notes",
+                json!({"type": "object", "required": ["id"]}),
+            )),
+            true,
+        ),
+    ];
+    let mut digests = BTreeSet::from([base.digest()]);
+    for notes_read in changed {
+        let catalog = [notes_read, callback_tool("notes_write", "Write notes")];
+        let binding = bind(&catalog);
+        assert_ne!(
+            binding.callbacks["notes_read"],
+            base.callbacks["notes_read"]
+        );
+        assert_eq!(
+            binding.callbacks["notes_write"],
+            base.callbacks["notes_write"]
+        );
+        assert!(
+            digests.insert(binding.digest()),
+            "each change gives its own digest"
+        );
+    }
+
+    // An identity sealed under the old definition reads a changed binding:
+    // its updates are refused until the host rebinds it to the new one.
+    let entry = entry_facts(current_binding());
+    assert_eq!(entry.binding_digest, base.digest());
+    let redescribed = [
+        callback_tool("notes_read", "Read every note"),
+        callback_tool("notes_write", "Write notes"),
+    ];
+    let purpose = update_spec(UpdateSetSpec {
+        purpose: Some("Find better sources.".to_owned()),
+        ..UpdateSetSpec::default()
+    });
+    assert_eq!(
+        update_in(&redescribed, &lead(), &entry, &purpose)
+            .unwrap_err()
+            .kind,
+        IdentityRefusalKind::TemplateBindingChanged
+    );
+    let rebind = UpdateIdentitySpec {
+        rebind: true,
+        ..update_spec(UpdateSetSpec::default())
+    };
+    let normalized = update_in(
+        &redescribed,
+        &RequesterFacts::host("gateway"),
+        &entry,
+        &rebind,
+    )
+    .expect("the host rebinds");
+    let RequestAction::Update(updated) = &normalized.request.action else {
+        panic!("an update");
+    };
+    assert_eq!(updated.rebind, Some(bind(&redescribed).digest()));
 }
 
 fn tool_binding(floor: &[&str], ceiling: &[&str]) -> TemplateBinding {
@@ -1792,11 +1972,22 @@ fn update(
     entry: &CreatedEntryFacts,
     spec: &UpdateIdentitySpec,
 ) -> Result<NormalizedRequest, IdentityRefusal> {
+    update_in(&registered(), requester, entry, spec)
+}
+
+/// An update against the registered callback tool catalog `callbacks`.
+fn update_in(
+    callbacks: &[ToolCatalogEntry],
+    requester: &RequesterFacts,
+    entry: &CreatedEntryFacts,
+    spec: &UpdateIdentitySpec,
+) -> Result<NormalizedRequest, IdentityRefusal> {
     let profiles = profiles();
     let peers = peers();
     let context = RequestContext {
         requester,
         profiles: &profiles,
+        callbacks,
         peers: &peers,
     };
     normalize_update(&policy(), &context, RequestEnvelope::default(), entry, spec)

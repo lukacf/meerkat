@@ -542,8 +542,6 @@ pub enum PolicyRefusalKind {
     Duplicate { value: String },
     /// A template this policy does not declare.
     UnknownTemplate { template: String },
-    /// A callback catalog this policy does not declare.
-    UnknownCallbackCatalog { catalog: String },
     /// A profile the mob definition does not declare.
     UnknownProfile { profile: String },
     /// A floor tool outside the template's ceiling.
@@ -592,9 +590,6 @@ impl fmt::Display for PolicyRefusalKind {
             Self::Duplicate { value } => write!(formatter, "duplicate {value:?}"),
             Self::UnknownTemplate { template } => {
                 write!(formatter, "unknown template {template:?}")
-            }
-            Self::UnknownCallbackCatalog { catalog } => {
-                write!(formatter, "unknown callback catalog {catalog:?}")
             }
             Self::UnknownProfile { profile } => {
                 write!(

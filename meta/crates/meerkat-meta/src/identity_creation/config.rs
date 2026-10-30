@@ -12,10 +12,9 @@
 //!   "creators": [{"id": "leads", "profile": ["lead"], "templates": ["research"]}],
 //!   "limits": {"total": 0, "per_creator": 0, "peers_per_identity": 0,
 //!              "batch": 32, "open_decisions_per_creator": 3},
-//!   "callback_catalogs": {"notes": [{"name": "notes_read", "description": "..."}]},
 //!   "templates": {"research": {
 //!     "profiles": ["assistant"], "models": "profile", "accounts": [],
-//!     "callbacks": "notes", "tools": {"floor": [], "ceiling": ["notes_read", "search"]},
+//!     "callbacks": ["notes_read"], "tools": {"floor": [], "ceiling": ["notes_read", "search"]},
 //!     "excess": "strict", "authority_fields": {"team": {"values": ["a", "b"]}},
 //!     "preamble": "You were created by {creator}.", "preparation": "none",
 //!     "kickoff": "allowed", "namespace": "team",
@@ -57,10 +56,6 @@ pub struct IdentityCreationConfig {
     /// Creation limits; 0 is unlimited for every limit.
     #[serde(default)]
     pub limits: LimitsConfig,
-    /// The host callback catalogs templates bind, by id: each tool's name,
-    /// description and input schema.
-    #[serde(default)]
-    pub callback_catalogs: BTreeMap<String, Vec<CallbackToolConfig>>,
     /// The templates identities are created from, by id.
     #[serde(default)]
     pub templates: BTreeMap<String, TemplateConfig>,
@@ -143,21 +138,6 @@ impl Default for LimitsConfig {
     }
 }
 
-/// One tool of a host callback catalog.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct CallbackToolConfig {
-    /// The tool's name.
-    pub name: String,
-    /// What the tool does, as the model reads it.
-    #[serde(default)]
-    pub description: String,
-    /// The tool's input schema, a JSON object.
-    #[serde(default)]
-    pub input_schema: Option<Value>,
-}
-
 /// One template: a host-declared class over existing mob profiles.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,9 +164,12 @@ pub struct TemplateConfig {
     /// The account binding references the template's members act under.
     #[serde(default)]
     pub accounts: Vec<String>,
-    /// The id of the callback catalog the template binds, if any.
+    /// The callback tools the template binds: names in the host's
+    /// registered callback tool catalog. Their registered definitions
+    /// (name, description and input schema) are sealed in the template
+    /// binding.
     #[serde(default)]
-    pub callbacks: Option<String>,
+    pub callbacks: Vec<String>,
     /// The tool floor and ceiling.
     #[serde(default)]
     pub tools: ToolBoundsConfig,

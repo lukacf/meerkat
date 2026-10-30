@@ -3,15 +3,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use meerkat_core::{ToolCatalogEntry, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::config::PreparationMode;
 use super::digest::{Sha256Digest, canonical_digest};
-use super::policy::{CallbackCatalogRef, ModelChoice, ProfileChoice, Template};
+use super::policy::{ModelChoice, ProfileChoice, Template};
 use super::refusal::IdentityRefusalKind;
 
 const FORMAT_BINDING: &str = "meerkat.identity.template_binding.v1";
+const FORMAT_CALLBACK: &str = "meerkat.identity.callback.v1";
 const FORMAT_PROFILE: &str = "meerkat.identity.profile.v1";
 
 /// What a template binding seals of one mob profile.
@@ -82,10 +84,24 @@ fn is_empty_member(value: &Value) -> bool {
 /// The mob profiles a template may bind, by name.
 pub type MobProfiles = BTreeMap<String, ProfileFacts>;
 
+/// The digest of a registered callback tool's definition: its name,
+/// description and input schema. A template binding seals it for every
+/// callback the template names, so a host that changes a registered
+/// definition changes the binding of every identity that binds it.
+pub fn callback_definition_digest(tool: &ToolDef) -> Sha256Digest {
+    canonical_digest(&json!({
+        "format": FORMAT_CALLBACK,
+        "name": tool.name.as_str(),
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    }))
+}
+
 /// The exact template binding an identity seals for its life: the template
 /// and its install version, the bound profile and its digest, the model,
-/// the accounts, the callback catalog, the tool floor and ceiling, and the
-/// preparation rule. Its digest is what every build compares.
+/// the accounts, the registered definitions of its callback tools, the tool
+/// floor and ceiling, and the preparation rule. Its digest is what every
+/// build compares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -102,8 +118,9 @@ pub struct TemplateBinding {
     pub model: String,
     /// The account binding references.
     pub accounts: BTreeSet<String>,
-    /// The callback catalog.
-    pub callbacks: Option<CallbackCatalogRef>,
+    /// The callback tools the template names, by name: the digest of each
+    /// one's registered definition (`callback_definition_digest`).
+    pub callbacks: BTreeMap<String, Sha256Digest>,
     /// The tool floor.
     pub floor: BTreeSet<String>,
     /// The tool ceiling.
@@ -118,10 +135,6 @@ impl TemplateBinding {
     /// kickoff rule, namespace, excess mode, authority field declarations)
     /// are not in it.
     pub fn digest(&self) -> Sha256Digest {
-        let callbacks = self
-            .callbacks
-            .as_ref()
-            .map(|catalog| json!({ "catalog": catalog.id, "digest": catalog.digest.as_str() }));
         canonical_digest(&json!({
             "format": FORMAT_BINDING,
             "template": self.template,
@@ -129,22 +142,27 @@ impl TemplateBinding {
             "profile": { "name": self.profile, "digest": self.profile_digest.as_str() },
             "model": self.model,
             "accounts": self.accounts,
-            "callbacks": callbacks,
+            "callbacks": self.callbacks,
             "tools": { "floor": self.floor, "ceiling": self.ceiling },
             "preparation": self.preparation.token(),
         }))
     }
 }
 
-/// Resolve a request's profile and model against `template` and the mob's
-/// profiles, into the binding the identity seals. A request that names no
-/// profile takes the template's first listed one; one that names no model
-/// takes the template's first listed model, or the profile's own.
+/// Resolve a request's profile and model against `template`, the mob's
+/// profiles and the host's registered callback tool catalog, into the
+/// binding the identity seals. A request that names no profile takes the
+/// template's first listed one; one that names no model takes the
+/// template's first listed model, or the profile's own. Every callback the
+/// template names must be in `registered`; one that is not refuses the
+/// template, `template_not_allowed`. The catalog holds one entry per tool
+/// name, and its order and its other entries change nothing.
 pub fn resolve_binding(
     template: &Template,
     profile: Option<&str>,
     model: Option<&str>,
     profiles: &MobProfiles,
+    registered: &[ToolCatalogEntry],
 ) -> Result<TemplateBinding, IdentityRefusalKind> {
     let profile = match (profile, template.profiles()) {
         (Some(name), ProfileChoice::Any) => name,
@@ -187,6 +205,7 @@ pub fn resolve_binding(
             }
         },
     };
+    let callbacks = bound_callbacks(template, registered)?;
     Ok(TemplateBinding {
         template: template.id().to_owned(),
         version: template.version().map(str::to_owned),
@@ -194,11 +213,32 @@ pub fn resolve_binding(
         profile_digest: facts.digest.clone(),
         model: model.to_owned(),
         accounts: template.accounts().clone(),
-        callbacks: template.callbacks().cloned(),
+        callbacks,
         floor: template.floor().clone(),
         ceiling: template.ceiling().clone(),
         preparation: template.preparation(),
     })
+}
+
+/// The callbacks `template` names, resolved in the registered catalog: each
+/// with the digest of its registered definition.
+fn bound_callbacks(
+    template: &Template,
+    registered: &[ToolCatalogEntry],
+) -> Result<BTreeMap<String, Sha256Digest>, IdentityRefusalKind> {
+    template
+        .callbacks()
+        .iter()
+        .map(|name| {
+            registered
+                .iter()
+                .find(|entry| entry.tool.name.as_str() == name)
+                .map(|entry| (name.clone(), callback_definition_digest(&entry.tool)))
+                .ok_or_else(|| IdentityRefusalKind::TemplateNotAllowed {
+                    template: template.id().to_owned(),
+                })
+        })
+        .collect()
 }
 
 /// What the creator side contributes to a created identity's tools, at a

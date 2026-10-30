@@ -42,12 +42,11 @@ mod tests;
 pub use approval::{ApprovalPlan, PlanRequest, PlannedOutcome, plan_approval};
 pub use config::{
     ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
-    AuthorityFieldConfig, CallbackToolConfig, ChangeClass, ConsoleConfig, CreatorKind,
-    CreatorRuleConfig, CreatorSelectorConfig, DEFAULT_NAME_PATTERN, ExcessMode,
-    IdentityCreationConfig, KickoffRule, LimitsConfig, MAX_DECISION_TIMEOUT_MS, MaxBytesConfig,
-    ModelsConfig, NamingConfig, PeerOutcome, PeerRelation, PeerRuleConfig, PeersConfig,
-    PreparationMode, ProfilesConfig, ReservedKeysConfig, SelectorConfig, SlugConfig,
-    TemplateConfig, TimeoutsConfig, ToolBoundsConfig,
+    AuthorityFieldConfig, ChangeClass, ConsoleConfig, CreatorKind, CreatorRuleConfig,
+    CreatorSelectorConfig, DEFAULT_NAME_PATTERN, ExcessMode, IdentityCreationConfig, KickoffRule,
+    LimitsConfig, MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig, NamingConfig, PeerOutcome,
+    PeerRelation, PeerRuleConfig, PeersConfig, PreparationMode, ProfilesConfig, ReservedKeysConfig,
+    SelectorConfig, SlugConfig, TemplateConfig, TimeoutsConfig, ToolBoundsConfig,
 };
 pub use consequences::{
     CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal,
@@ -57,11 +56,10 @@ pub use digest::Sha256Digest;
 pub use parts::{CanonicalPart, canonical_parts, part_ranges, shows_every_part};
 pub use policy::{
     ApprovalPolicy, ApprovalRule, ApproverRule, AuthorityFieldRule, CORE_BATCH_MAX, CREATION_TOOLS,
-    CallbackCatalog, CallbackCatalogRef, CallbackTool, ConsoleCreation, CreationLimits,
-    CreatorRule, CreatorSelector, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, Limit,
-    META_RESERVED_LABEL_KEYS, ModelChoice, NamingPolicy, OutcomeRule, PeerPolicy, PeerRule,
-    ProfileChoice, RuntimeOptionPolicy, Selector, SlugRefusal, Template, TextLimits, Timeouts,
-    resolve_launch_policy,
+    ConsoleCreation, CreationLimits, CreatorRule, CreatorSelector, DEFAULT_PEER_RULE_ID,
+    IdentityCreationPolicy, Limit, META_RESERVED_LABEL_KEYS, ModelChoice, NamingPolicy,
+    OutcomeRule, PeerPolicy, PeerRule, ProfileChoice, RuntimeOptionPolicy, Selector, SlugRefusal,
+    Template, TextLimits, Timeouts, resolve_launch_policy,
 };
 pub use presentation::{CardBlock, CardEntry, CardError, CardValue, StructuredCard, ValueSegment};
 pub use refusal::{
@@ -82,6 +80,6 @@ pub use request::{
 };
 pub use template::{
     CREATOR_INSTRUCTIONS_HEADING, CreatorBound, MobProfiles, Preamble, PreambleInputs,
-    ProfileFacts, TemplateBinding, compose_member_instructions, effective_tools,
-    native_tool_policy, resolve_binding, sealed_upper_bound,
+    ProfileFacts, TemplateBinding, callback_definition_digest, compose_member_instructions,
+    effective_tools, native_tool_policy, resolve_binding, sealed_upper_bound,
 };

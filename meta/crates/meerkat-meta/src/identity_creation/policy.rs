@@ -10,11 +10,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::config::{
-    ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApproverConfig, CallbackToolConfig,
-    ChangeClass, CreatorKind, CreatorRuleConfig, CreatorSelectorConfig, ExcessMode,
-    IdentityCreationConfig, KickoffRule, MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig,
-    NamingConfig, PeerOutcome, PeerRelation, PeersConfig, PreparationMode, ProfilesConfig,
-    SelectorConfig, TemplateConfig, TimeoutsConfig,
+    ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApproverConfig, ChangeClass, CreatorKind,
+    CreatorRuleConfig, CreatorSelectorConfig, ExcessMode, IdentityCreationConfig, KickoffRule,
+    MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig, NamingConfig, PeerOutcome, PeerRelation,
+    PeersConfig, PreparationMode, ProfilesConfig, SelectorConfig, TemplateConfig, TimeoutsConfig,
 };
 use super::digest::{Sha256Digest, canonical_digest};
 use super::refusal::{PolicyRefusal, PolicyRefusalKind};
@@ -52,7 +51,6 @@ pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
 pub const DEFAULT_PEER_RULE_ID: &str = "default";
 
 const FORMAT_POLICY: &str = "meerkat.identity.policy.v1";
-const FORMAT_CALLBACK_CATALOG: &str = "meerkat.identity.callback_catalog.v1";
 const ID_MAX_BYTES: usize = 64;
 const KEY_MAX_BYTES: usize = 128;
 const NAME_MAX_BYTES: usize = 256;
@@ -164,49 +162,6 @@ impl CreatorRule {
     }
 }
 
-/// One tool of a validated callback catalog.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CallbackTool {
-    /// What the tool does.
-    pub description: String,
-    /// The tool's input schema.
-    pub input_schema: Option<Value>,
-}
-
-/// A validated callback catalog and its digest over every tool's name,
-/// description and input schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallbackCatalog {
-    tools: BTreeMap<String, CallbackTool>,
-    digest: Sha256Digest,
-}
-
-impl CallbackCatalog {
-    /// The catalog's tools, by name.
-    pub fn tools(&self) -> &BTreeMap<String, CallbackTool> {
-        &self.tools
-    }
-
-    /// The catalog's digest, which template bindings seal.
-    pub fn digest(&self) -> &Sha256Digest {
-        &self.digest
-    }
-}
-
-/// The callback catalog a template binds: its id and digest.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct CallbackCatalogRef {
-    /// The catalog's id.
-    pub id: String,
-    /// The catalog's digest.
-    pub digest: Sha256Digest,
-}
-
 /// The profiles a validated template binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileChoice {
@@ -272,7 +227,7 @@ pub struct Template {
     profiles: ProfileChoice,
     models: ModelChoice,
     accounts: BTreeSet<String>,
-    callbacks: Option<CallbackCatalogRef>,
+    callbacks: BTreeSet<String>,
     floor: BTreeSet<String>,
     ceiling: BTreeSet<String>,
     excess: ExcessMode,
@@ -322,9 +277,12 @@ impl Template {
         &self.accounts
     }
 
-    /// The callback catalog the template binds.
-    pub fn callbacks(&self) -> Option<&CallbackCatalogRef> {
-        self.callbacks.as_ref()
+    /// The callback tools the template binds, by name in the host's
+    /// registered callback tool catalog. Validation checks the names only;
+    /// a create and every build resolve them in the catalog
+    /// (`resolve_binding`).
+    pub fn callbacks(&self) -> &BTreeSet<String> {
+        &self.callbacks
     }
 
     /// The tool floor: a constant host grant.
@@ -679,7 +637,6 @@ pub struct IdentityCreationPolicy {
     reserved_context: BTreeSet<String>,
     creators: Vec<CreatorRule>,
     limits: CreationLimits,
-    callback_catalogs: BTreeMap<String, CallbackCatalog>,
     templates: BTreeMap<String, Template>,
     peers: PeerPolicy,
     naming: NamingPolicy,
@@ -710,12 +667,10 @@ impl IdentityCreationPolicy {
         let reserved_labels = keys(&config.reserved_keys.labels, "reserved_keys.labels")?;
         let reserved_context = keys(&config.reserved_keys.context, "reserved_keys.context")?;
         let limits = limits(&config)?;
-        let callback_catalogs = callback_catalogs(&config.callback_catalogs)?;
         let mut templates = BTreeMap::new();
         for (id, template) in &config.templates {
             let path = format!("templates.{id}");
-            let validated =
-                validate_template(id, template, &path, &reserved_labels, &callback_catalogs)?;
+            let validated = validate_template(id, template, &path, &reserved_labels)?;
             templates.insert(id.clone(), validated);
         }
         let creators = creator_rules(&config.creators, &templates)?;
@@ -732,7 +687,6 @@ impl IdentityCreationPolicy {
             reserved_context,
             creators,
             limits,
-            callback_catalogs,
             templates,
             peers,
             naming,
@@ -785,11 +739,6 @@ impl IdentityCreationPolicy {
     /// The limits.
     pub fn limits(&self) -> CreationLimits {
         self.limits
-    }
-
-    /// The callback catalogs, by id.
-    pub fn callback_catalogs(&self) -> &BTreeMap<String, CallbackCatalog> {
-        &self.callback_catalogs
     }
 
     /// The templates, by id.
@@ -946,8 +895,7 @@ fn too_long(path: impl Into<String>, length: usize, max: usize) -> PolicyRefusal
     )
 }
 
-/// `[A-Za-z0-9][A-Za-z0-9_.:-]*`, at most 64 bytes: rule, template and
-/// catalog ids.
+/// `[A-Za-z0-9][A-Za-z0-9_.:-]*`, at most 64 bytes: rule and template ids.
 fn is_id(value: &str) -> bool {
     is_ascii_word(value, ID_MAX_BYTES, |byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
@@ -1075,88 +1023,11 @@ fn limits(config: &IdentityCreationConfig) -> Result<CreationLimits, PolicyRefus
     })
 }
 
-fn callback_catalogs(
-    catalogs: &BTreeMap<String, Vec<CallbackToolConfig>>,
-) -> Result<BTreeMap<String, CallbackCatalog>, PolicyRefusal> {
-    let mut validated = BTreeMap::new();
-    for (id, tools) in catalogs {
-        let path = format!("callback_catalogs.{id}");
-        if !is_id(id) {
-            return Err(invalid(path, id));
-        }
-        let mut by_name = BTreeMap::new();
-        for (index, tool) in tools.iter().enumerate() {
-            let tool_path = format!("{path}[{index}]");
-            if !is_tool_name(&tool.name) {
-                return Err(invalid(format!("{tool_path}.name"), &tool.name));
-            }
-            if tool.description.len() > DESCRIPTION_MAX_BYTES {
-                return Err(too_long(
-                    format!("{tool_path}.description"),
-                    tool.description.len(),
-                    DESCRIPTION_MAX_BYTES,
-                ));
-            }
-            if tool
-                .input_schema
-                .as_ref()
-                .is_some_and(|schema| !schema.is_object())
-            {
-                return Err(invalid(
-                    format!("{tool_path}.input_schema"),
-                    "not an object",
-                ));
-            }
-            let previous = by_name.insert(
-                tool.name.clone(),
-                CallbackTool {
-                    description: tool.description.clone(),
-                    input_schema: tool.input_schema.clone(),
-                },
-            );
-            if previous.is_some() {
-                return Err(refusal(
-                    format!("{tool_path}.name"),
-                    PolicyRefusalKind::Duplicate {
-                        value: tool.name.clone(),
-                    },
-                ));
-            }
-        }
-        let digest = callback_catalog_digest(&by_name);
-        validated.insert(
-            id.clone(),
-            CallbackCatalog {
-                tools: by_name,
-                digest,
-            },
-        );
-    }
-    Ok(validated)
-}
-
-/// The digest of a callback catalog: every tool's name, description and
-/// input schema, in name order.
-fn callback_catalog_digest(tools: &BTreeMap<String, CallbackTool>) -> Sha256Digest {
-    let tools: Vec<Value> = tools
-        .iter()
-        .map(|(name, tool)| {
-            json!({
-                "name": name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-            })
-        })
-        .collect();
-    canonical_digest(&json!({ "format": FORMAT_CALLBACK_CATALOG, "tools": tools }))
-}
-
 fn validate_template(
     id: &str,
     config: &TemplateConfig,
     path: &str,
     reserved_labels: &BTreeSet<String>,
-    catalogs: &BTreeMap<String, CallbackCatalog>,
 ) -> Result<Template, PolicyRefusal> {
     if !is_id(id) {
         return Err(invalid(path, id));
@@ -1203,23 +1074,13 @@ fn validate_template(
     let accounts = unique_set(&config.accounts, &format!("{path}.accounts"), |account| {
         is_reference(account, REFERENCE_MAX_BYTES)
     })?;
-    let callbacks = match &config.callbacks {
-        None => None,
-        Some(catalog) => {
-            let Some(validated) = catalogs.get(catalog) else {
-                return Err(refusal(
-                    format!("{path}.callbacks"),
-                    PolicyRefusalKind::UnknownCallbackCatalog {
-                        catalog: catalog.clone(),
-                    },
-                ));
-            };
-            Some(CallbackCatalogRef {
-                id: catalog.clone(),
-                digest: validated.digest.clone(),
-            })
-        }
-    };
+    // Names only: whether the host registered them, and what their
+    // definitions are, is read at a create and at every build.
+    let callbacks = unique_set(
+        &config.callbacks,
+        &format!("{path}.callbacks"),
+        is_tool_name,
+    )?;
     let floor = unique_set(
         &config.tools.floor,
         &format!("{path}.tools.floor"),

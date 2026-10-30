@@ -42,7 +42,11 @@ describe("Today names memory events in plain words", () => {
       .toBe("identity:steward moved a memory record");
     expect(moved.tone).toBe("ok");
     expect(memory("memory.quarantine.verdict", { verdict: "tombstone" }).snippet).toBe("discarded");
-    expect(memory("memory.quarantine.verdict", { verdict: "promote" }).snippet).toBe("moved to team or operator memory");
+    expect(memory("memory.quarantine.verdict", { verdict: "promote" }).snippet).toBe("moved to team memory");
+    // The steward's open-loop nudge rides the verdict event, but nobody reviewed anything.
+    expect(sentence({ id: "n", event: "memory.quarantine.verdict", identity: "identity:steward", timestampMs: Date.now(), data: { verdict: "open_loop_escalated", record_id: "rec-1" } }))
+      .toBe("An open loop needs follow-up");
+    expect(memory("memory.quarantine.verdict", { verdict: "open_loop_escalated" }).snippet === undefined).toBe(true);
     expect(sentence({ id: "t", event: "memory.taint.transition", identity: "identity:steward", timestampMs: Date.now(), data: { kind: "tainted" } }))
       .toBe("identity:steward's session became untrusted");
   });

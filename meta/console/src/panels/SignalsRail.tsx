@@ -1,6 +1,6 @@
 import React from "react";
 import { stripPeerTransportScaffold } from "../lib/adapters";
-import { describeMemoryEventForPeople } from "../lib/memory-event-words";
+import { describeMemoryEventForPeople, isOpenLoopNudge } from "../lib/memory-event-words";
 import { describeFailure } from "../lib/failure-summary";
 import { memberKickoffNotice, memberKickoffPhaseLabel, type MemberKickoffNotice } from "@console-core";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../types";
@@ -414,7 +414,8 @@ function memorySignal(
     case "memory.harvest.completed":
       return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
-      return info("Quarantine verdict");
+      // The steward's open-loop nudge rides the verdict event.
+      return info(isOpenLoopNudge(frame.event, data) ? "Open loop needs follow-up" : "Quarantine verdict");
     case "memory.promotion.pending_gate":
       return info("Memory record waiting to move");
     default:

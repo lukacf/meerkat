@@ -1584,8 +1584,8 @@ function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): Quaran
             ? "Discarded; it will never be recalled."
             : `Discarded; it will never be recalled. ${
                 invalidated.length === 1
-                  ? "The move to team or operator memory waiting on it was cancelled"
-                  : `The ${invalidated.length} moves to team or operator memory waiting on it were cancelled`
+                  ? "The move to team memory waiting on it was cancelled"
+                  : `The ${invalidated.length} moves to team memory waiting on it were cancelled`
               } and can no longer publish.`,
         ids: invalidated.map((id) => ({ label: "Cancelled move", value: id })),
       };
@@ -1635,7 +1635,7 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
             ? `, or wait until it expires on ${formatAbsoluteTime(data.expires_at_ms)}`
             : "";
         return {
-          text: `Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals${expires}. Discarding the record instead cancels the move.`,
+          text: `Refused: this record is waiting for approval to move to team memory. Decide it in Approvals${expires}. Discarding the record instead cancels the move.`,
           ids: data.pending_id ? [{ label: "Waiting move", value: String(data.pending_id) }] : [],
         };
       }
@@ -4109,7 +4109,7 @@ export function MemoryPanel({
         </ol>
         <Notice testId="memory-quarantine-note">
           {onDecideQuarantine
-            ? "Open a quarantined record to release or discard it. Records waiting to move to team or operator memory are decided in Approvals; the memory steward's dream decides the rest."
+            ? "Open a quarantined record to release or discard it. Records waiting to move to team memory are decided in Approvals; the memory steward's dream decides the rest."
             : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory."}
         </Notice>
 

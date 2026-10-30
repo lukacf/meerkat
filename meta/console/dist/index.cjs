@@ -52904,9 +52904,13 @@ var VERDICT_WORDS = {
   tombstoned: "discarded",
   keep: "kept in quarantine",
   hold: "kept in quarantine",
-  promote: "moved to team or operator memory",
+  promote: "moved to team memory",
   promote_pending_gate: "sent for approval"
 };
+var OPEN_LOOP_NUDGE_VERDICT = "open_loop_escalated";
+function isOpenLoopNudge(event, data) {
+  return event === "memory.quarantine.verdict" && text10(data, "verdict") === OPEN_LOOP_NUDGE_VERDICT;
+}
 function quarantineVerdictWords(verdict) {
   return VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
 }
@@ -52931,6 +52935,10 @@ function describeMemoryEventForPeople(event, data, names = {}) {
       return data.gated === true ? "".concat(line, " after approval") : line;
     }
     case "memory.quarantine.verdict": {
+      if (isOpenLoopNudge(event, data)) {
+        const title = names.recordTitle?.(text10(data, "record_id"));
+        return title ? "\u201C".concat(title, "\u201D needs follow-up") : "An open loop needs follow-up";
+      }
       return withDetail("Quarantine verdict: ".concat(quarantineVerdictWords(text10(data, "verdict"))), text10(data, "rationale"));
     }
     case "memory.quarantine.release_blocked": {
@@ -53049,6 +53057,7 @@ function memoryLine(event, data, who) {
     case "memory.write.quarantined":
       return { segments: ["A memory write from ", who, " was quarantined"], snippet: reason, tone: "warn", kind };
     case "memory.quarantine.verdict": {
+      if (isOpenLoopNudge(event, data)) return { segments: ["An open loop needs follow-up"], tone: "neutral", kind };
       const verdict = textOf(data.verdict);
       return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? quarantineVerdictWords(verdict) : void 0, tone: "neutral", kind };
     }
@@ -55248,7 +55257,7 @@ function quarantineDecisionSummary(result) {
     case "tombstoned": {
       const invalidated = result.decision?.review?.invalidated_promotions ?? [];
       return {
-        text: invalidated.length === 0 ? "Discarded; it will never be recalled." : "Discarded; it will never be recalled. ".concat(invalidated.length === 1 ? "The move to team or operator memory waiting on it was cancelled" : "The ".concat(invalidated.length, " moves to team or operator memory waiting on it were cancelled"), " and can no longer publish."),
+        text: invalidated.length === 0 ? "Discarded; it will never be recalled." : "Discarded; it will never be recalled. ".concat(invalidated.length === 1 ? "The move to team memory waiting on it was cancelled" : "The ".concat(invalidated.length, " moves to team memory waiting on it were cancelled"), " and can no longer publish."),
         ids: invalidated.map((id) => ({ label: "Cancelled move", value: id }))
       };
     }
@@ -55286,7 +55295,7 @@ function quarantineDecisionErrorText(error48) {
       case "gate_pending": {
         const expires = typeof data.expires_at_ms === "number" && data.expires_at_ms > 0 ? ", or wait until it expires on ".concat(formatAbsoluteTime(data.expires_at_ms)) : "";
         return {
-          text: "Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals".concat(expires, ". Discarding the record instead cancels the move."),
+          text: "Refused: this record is waiting for approval to move to team memory. Decide it in Approvals".concat(expires, ". Discarding the record instead cancels the move."),
           ids: data.pending_id ? [{ label: "Waiting move", value: String(data.pending_id) }] : []
         };
       }
@@ -57003,7 +57012,7 @@ function MemoryPanel({
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? quarantineRecords.length : "no access" })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or discard it. Records waiting to move to team or operator memory are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
+      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or discard it. Records waiting to move to team memory are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
@@ -62743,7 +62752,7 @@ function memorySignal(frame, data, base, displayName) {
     case "memory.harvest.completed":
       return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
-      return info("Quarantine verdict");
+      return info(isOpenLoopNudge(frame.event, data) ? "Open loop needs follow-up" : "Quarantine verdict");
     case "memory.promotion.pending_gate":
       return info("Memory record waiting to move");
     default:

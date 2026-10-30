@@ -8150,6 +8150,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyStopInputDispositionKeepStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HoldInputControllerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldInputControllerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldInputControllerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldInputControllerRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldInputControllerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseInputControllerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseInputControllerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseInputControllerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseInputControllerRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseInputControllerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -8935,6 +8965,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmptyResumeRetirementResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `InputControllerReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
@@ -9100,6 +9133,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `staged_inputs_have_run_association`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `input_controller_holds_are_kept_unstaged_governed_inputs`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_boundary_delivery_only_for_queued_steer`

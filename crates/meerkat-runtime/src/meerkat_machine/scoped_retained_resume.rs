@@ -56,7 +56,13 @@ use crate::retained_work::{RetainedResumeError, RetainedResumeEvidence};
 /// controller client for a retained selection, composed by the embedding.
 /// Any asynchronous client setup has completed before the synchronous resume
 /// authentication asks; `Ok(None)` means no client is available for the
-/// selection, an error that its owner cannot say now.
+/// selection, an error that its owner cannot say now. The check answers
+/// `Ok(None)` as `Readiness(UnsupportedScope)`: a fresh resume stays owed,
+/// while an admitted resume whose client did not survive the store ends as a
+/// refused resume at once. An error makes the runtime hold such a resume,
+/// with its attempts, and ask again once per pause; once 30 seconds have
+/// passed since its first such answer, the next one ends it as a refused
+/// resume (see `NativeWorkAuthorizationHost::authenticate_retained_resume`).
 pub trait RetainedControllerOwner: Send + Sync {
     fn reacquire_controller(
         &self,

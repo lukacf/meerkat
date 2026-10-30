@@ -399,6 +399,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # mutant's invariant or property, its replay, archive and destroy mutants'
 # generated invariants, and its rotation and seat mutants' action
 # properties violated.
+# input_controller_hold_audit.sh requires its nine witnesses violated, and
+# with --mutants each seeded defect's property or the generated
+# input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -693,6 +696,20 @@ printf '%s\n' \
   'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
   'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldWhileRunCurrent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedThenStaged is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldEndsRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldRunWaits is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedRunResumes is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSettledDropsHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedRunRequeues is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResumeWaitsForDestination is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResumedUnderItsDestination is violated."' \
+  'echo "Error: Action property AuditHeldWorkNeverAdvances is violated."' \
+  'echo "Error: Action property AuditHoldAndReleaseTouchOnlyHolds is violated."' \
+  'echo "Error: Action property AuditResumedRunWaitsForDestination is violated."' \
+  'echo "Error: Action property AuditResumedRunBindsItsDestination is violated."' \
+  'echo "Error: Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -759,7 +776,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

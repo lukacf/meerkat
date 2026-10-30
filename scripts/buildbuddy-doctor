@@ -651,6 +651,7 @@ if grep -Fq '//crates/xtask:machine_verify_all_tlc_test' scripts/buildbuddy-baze
   grep -Fq '//crates/xtask:machine_verify_audits_e_tlc_test' scripts/buildbuddy-bazel-poc &&
   grep -Fq '//crates/xtask:machine_verify_audits_f_tlc_test' scripts/buildbuddy-bazel-poc &&
   grep -Fq '//crates/xtask:machine_verify_audits_g_tlc_test' scripts/buildbuddy-bazel-poc &&
+  grep -Fq '//crates/xtask:machine_verify_audits_h_tlc_test' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'name = "machine_verify_audits_a_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq 'name = "machine_verify_audits_b_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq 'name = "machine_verify_audits_c_tlc_test"' crates/xtask/BUILD.bazel &&
@@ -658,6 +659,7 @@ if grep -Fq '//crates/xtask:machine_verify_all_tlc_test' scripts/buildbuddy-baze
   grep -Fq 'name = "machine_verify_audits_e_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq 'name = "machine_verify_audits_f_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq 'name = "machine_verify_audits_g_tlc_test"' crates/xtask/BUILD.bazel &&
+  grep -Fq 'name = "machine_verify_audits_h_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'name = "machine_verify_all_tlc_test"' crates/xtask/BUILD.bazel &&
   grep -Fq 'machine-verify --all --skip-cargo-tests' crates/xtask/tests/machine_verify_all_tlc_test.sh &&

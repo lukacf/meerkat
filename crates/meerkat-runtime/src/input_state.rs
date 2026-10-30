@@ -79,11 +79,31 @@ pub enum InputAbandonReason {
     /// it older than that stop's max age, so it ended without running.
     /// Resubmitting it is now correct.
     RequeueExpired,
-    /// The input's run was left open when its host stopped, and the run was
-    /// not resumed: the host's resumed-run admission refused it, or the
-    /// runtime ended before the resume. Settled without a receipt, like
-    /// [`Self::ToolProcessInterrupted`]. Resubmitting it is correct only when
-    /// the host knows the work was not done elsewhere.
+    /// The input's resume was refused, so it ended without running. Either
+    /// its run was left open when its host stopped and is not resumed (the
+    /// host's resumed-run admission refused it, its first input is kept
+    /// governed work whose controller cannot be supplied again, or an input
+    /// of it is a kept resume refused as below), or the input itself is kept
+    /// governed work that a store kept (a graceful requeue stop kept it, or a
+    /// restart found it) and whose controller client did not survive the
+    /// store:
+    ///
+    /// - a governed resume of retained work whose installed host answers
+    ///   definitely that it supplies no controller for that work any more,
+    ///   does not answer within its budget, or whose destination its session
+    ///   has since superseded. A host that only cannot say now leaves it
+    ///   queued, with its attempts, until that budget runs out;
+    /// - a governed input admitted under its own authority association (a
+    ///   governed prompt, for example), whose client the host contract can
+    ///   supply again only with a fresh authentication of its caller. It ends
+    ///   before its attachment serves.
+    ///
+    /// Such an input ends before it is staged, and the runtime stages its
+    /// runtime-termination receipt in the same commit, as it does for a
+    /// settled run's inputs (rows 0.9.5 wrote for a settled run carry none).
+    /// Resubmitting it is correct only when the host knows the work was not
+    /// done elsewhere; a governed input is resubmitted with a fresh
+    /// authentication of its caller.
     ResumeRefused,
 }
 
@@ -1725,7 +1745,8 @@ pub(crate) fn input_terminal_completion_outcome(
 ///   by a restart that is settled instead of resumed. Since then the
 ///   settlement (`DriverEntry::settle_resumable_run_with_terminals`) stages
 ///   a runtime-termination batch for those inputs in the same commit, so a
-///   newer row has its receipt.
+///   newer row has its receipt, as a kept input refused on its own has
+///   (`DriverEntry::settle_refused_queued_resumes`).
 ///
 /// `Cancelled` and `MaxAttemptsExhausted` are also reached with a receipt
 /// (tracked cancel, attachment replacement, a failed run's batch); a row of

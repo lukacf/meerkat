@@ -112,8 +112,11 @@ impl StockResumePins {
 
     /// The retained-resume controller owner of `runtime`: its session's pin
     /// while the runtime entry of the registration it was made on exists,
-    /// otherwise one that has no client for any selection (the check then
-    /// answers the resume not ready). An ended pin is removed here.
+    /// otherwise one that has no client for any selection. The check then
+    /// answers `Readiness(UnsupportedScope)`: a fresh resume stays owed, while
+    /// a kept resume (its client did not survive the store, and a pin is
+    /// never carried over to a later registration) ends as a refused resume
+    /// at once. An ended pin is removed here.
     pub(crate) fn controller_owner(
         &self,
         runtime: &LogicalRuntimeId,

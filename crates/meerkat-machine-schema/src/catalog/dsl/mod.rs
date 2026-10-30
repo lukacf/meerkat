@@ -3393,6 +3393,12 @@ runtime_internal_inputs!(
         // of a recovered registration it placed.
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
+        // A kept governed input held while its host cannot say yet whether it
+        // supplies its controller client again, and released once it does:
+        // registration recovery and the runtime loop's re-ask apply them. No
+        // caller can ask for either.
+        HoldInputController,
+        ReleaseInputController,
         // The scoped tool grant gate: the visibility owner installs each
         // build's gate and applies the open set the grant service
         // adjudicated at each model-request boundary. No caller can ask for

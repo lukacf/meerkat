@@ -215,6 +215,171 @@ impl MeerkatMachine {
     }
 }
 
+/// The queued inputs [`DriverEntry::settle_refused_queued_resumes`] ended,
+/// each with the directed owner of its carrier when it is directed, and the
+/// error that stopped it before the rest, if one did. The ended ones are
+/// committed whatever came after: the caller publishes them either way.
+#[derive(Debug, Default)]
+pub(crate) struct SettledRefusedResumes {
+    pub(crate) settled: Vec<(InputId, Option<InputId>)>,
+    pub(crate) failure: Option<RuntimeDriverError>,
+}
+
+impl DriverEntry {
+    /// Ask the installed host again for the controller client of every kept
+    /// retained-resume row that holds none, and realize each answer on the
+    /// machine (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::ask_kept_resume_controllers`]).
+    pub(crate) fn ask_kept_resume_controllers(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Result<crate::retained_work::KeptResumeControllerAsks, RuntimeDriverError> {
+        self.shell_driver_mut().ask_kept_resume_controllers(now)
+    }
+
+    /// Whether the runtime loop has an ask to make for kept retained-resume
+    /// rows without a controller client at `now`.
+    pub(crate) fn kept_resume_controller_ask_due(
+        &self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> bool {
+        self.shell_driver().kept_resume_controller_ask_due(now)
+    }
+
+    /// When the runtime loop next asks again for the clients of the rows the
+    /// machine holds for their controller; `None` while it holds none.
+    pub(crate) fn controller_reask_due_at(&self) -> Option<meerkat_core::time_compat::Instant> {
+        self.shell_driver().controller_reask_due_at()
+    }
+
+    /// Whether the machine holds an input bound to `run_id` for its
+    /// controller.
+    pub(crate) fn run_inputs_controller_held(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver().run_inputs_controller_held(run_id)
+    }
+
+    /// Whether the run `run_id` marked resumable waits for its destination
+    /// (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::resumed_run_waits_for_destination`]).
+    pub(crate) fn resumed_run_waits_for_destination(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver()
+            .resumed_run_waits_for_destination(run_id)
+    }
+
+    /// Whether a kept retained-resume row without its controller client is
+    /// not held by the machine yet.
+    pub(crate) fn has_unheld_kept_resume_without_client(&self) -> bool {
+        self.shell_driver().has_unheld_kept_resume_without_client()
+    }
+
+    /// Hold every kept retained-resume row without its controller client
+    /// that the machine does not hold yet, without asking its host (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::hold_kept_resumes_without_client`]).
+    pub(crate) fn hold_kept_resumes_without_client(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.shell_driver_mut()
+            .hold_kept_resumes_without_client(now)
+    }
+
+    /// Whether `input_id` is a kept resume of retained work that holds no
+    /// controller client (yet).
+    pub(crate) fn kept_retained_resume_without_client(&self, input_id: &InputId) -> bool {
+        self.shell_driver()
+            .kept_retained_resume_without_client(input_id)
+    }
+
+    /// Whether `input_id` is a kept resume of retained work whose destination
+    /// its session has since superseded.
+    pub(crate) fn kept_retained_resume_destination_superseded(
+        &self,
+        input_id: &InputId,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.shell_driver()
+            .kept_retained_resume_destination_superseded(input_id)
+    }
+
+    /// The queued kept governed inputs with no way back to their controller
+    /// client, in admission order.
+    pub(crate) fn queued_kept_governed_inputs_without_controller(&self) -> Vec<InputId> {
+        self.shell_driver()
+            .queued_kept_governed_inputs_without_controller()
+    }
+
+    /// Whether the first input of the run marked resumable `run_id` is kept
+    /// governed work with no way back to its controller client.
+    pub(crate) fn resumed_run_first_input_lacks_controller(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver()
+            .resumed_run_first_input_lacks_controller(run_id)
+    }
+
+    /// End each still queued input of `input_ids` as a refused resume
+    /// (`Abandoned { ResumeRefused }`) through the machine's `AbandonInput`,
+    /// before any of them stages: kept retained-resume rows whose installed
+    /// host answered definitely that it supplies no controller for the
+    /// retained work they resume (or did not answer within their budget),
+    /// and kept governed inputs with no way back to their controller client.
+    /// Each ends in its own durable commit with the runless
+    /// runtime-termination carrier it is owed (`reason`), as an exact
+    /// queued-input cancellation ends one, and `owe` runs as soon as each
+    /// one commits, before the next is tried, so an error after it never
+    /// loses the announcement of a committed one. An input that is no longer
+    /// queued is left as it is. The caller publishes and resolves the ended
+    /// inputs once it releases the driver.
+    pub(crate) async fn settle_refused_queued_resumes(
+        &mut self,
+        input_ids: &[InputId],
+        reason: &str,
+        mut owe: impl FnMut(),
+    ) -> SettledRefusedResumes {
+        let mut outcome = SettledRefusedResumes::default();
+        for input_id in input_ids {
+            if self.input_phase(input_id) != Some(crate::input_state::InputLifecycleState::Queued) {
+                continue;
+            }
+            let prepared =
+                match self.prepare_sole_runless_runtime_termination(input_id, reason.to_string()) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        outcome.failure = Some(error);
+                        return outcome;
+                    }
+                };
+            match self
+                .abandon_queued_input(
+                    input_id,
+                    crate::input_state::InputAbandonReason::ResumeRefused,
+                )
+                .await
+            {
+                Ok(true) => {
+                    let directed_owner =
+                        DriverEntry::commit_prepared_sole_runless_termination(prepared);
+                    owe();
+                    outcome.settled.push((input_id.clone(), directed_owner));
+                }
+                Ok(false) => self.rollback_prepared_sole_runless_termination(prepared),
+                Err(error) => {
+                    self.rollback_prepared_sole_runless_termination(prepared);
+                    outcome.failure = Some(error);
+                    return outcome;
+                }
+            }
+        }
+        outcome
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1299,5 +1464,731 @@ mod tests {
             .expect("tracked read")
             .expect("the tracked read of K");
         assert_eq!(&tracked.state.input_id, delivery.input_id());
+    }
+
+    /// A kept resume row's controller client, asked for again, is classified
+    /// as the kept-row contract maps the host's answer: the recorded
+    /// selection's client pins; an actual verdict, a client for another
+    /// selection and an owner with no client for the resume
+    /// (`Readiness(UnsupportedScope)`) are definite refusals; every other
+    /// readiness answer, and a policy observation to refresh, cannot say now
+    /// and keeps the row's attempts.
+    #[tokio::test]
+    async fn a_reacquired_client_is_classified_by_the_kept_row_contract() {
+        use crate::retained_work::{
+            RetainedClientReacquisition, RetainedResumeError, classify_reacquired_client,
+        };
+        use crate::traits::ControllerReadinessFailure;
+        use meerkat_core::{OperationRefusalKind, OperationRefused};
+        let fixture = governed().await;
+        let elsewhere = governed().await;
+        let selection = fixture.host.selection().clone();
+        let identity = meerkat_core::retained_work::RetainedWorkIdentity::new(
+            fixture.runtime_id.to_string(),
+            meerkat_core::lifecycle::RunId::new(),
+            Vec::new(),
+            BTreeMap::new(),
+            Some(selection.clone()),
+        );
+        let client = |selection: &ControllerModelSelection| {
+            meerkat_core::ControllerModelClient::new(
+                selection.clone(),
+                Arc::new(Client(selection.clone())),
+            )
+        };
+        let refused = |kind| Err(RetainedResumeError::Refused(OperationRefused::new(kind)));
+        assert!(matches!(
+            classify_reacquired_client(&identity, Ok(client(&selection))),
+            RetainedClientReacquisition::Pinned(pinned) if pinned.selection() == &selection
+        ));
+        for (answer, what) in [
+            (
+                Ok(client(elsewhere.host.selection())),
+                "a client for another selection",
+            ),
+            (refused(OperationRefusalKind::Denied), "an actual denial"),
+            (
+                refused(OperationRefusalKind::MalformedFacts),
+                "malformed evidence",
+            ),
+            (
+                Err(RetainedResumeError::AuthorizationUnavailable),
+                "an actual authorization unavailability",
+            ),
+            (
+                Err(RetainedResumeError::Readiness(
+                    ControllerReadinessFailure::UnsupportedScope,
+                )),
+                "an owner with no client for the resume",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify_reacquired_client(&identity, answer),
+                    RetainedClientReacquisition::Refused
+                ),
+                "{what} is definite"
+            );
+        }
+        for (answer, expected) in [
+            (
+                refused(OperationRefusalKind::ReprepareRequired),
+                ControllerReadinessFailure::PolicyChanged,
+            ),
+            (
+                Err(RetainedResumeError::Readiness(
+                    ControllerReadinessFailure::PolicyUnavailable,
+                )),
+                ControllerReadinessFailure::PolicyUnavailable,
+            ),
+            (
+                Err(RetainedResumeError::Readiness(
+                    ControllerReadinessFailure::OriginalAdmissionPending,
+                )),
+                ControllerReadinessFailure::OriginalAdmissionPending,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify_reacquired_client(&identity, answer),
+                    RetainedClientReacquisition::NotReady(reason) if reason == expected
+                ),
+                "{expected:?} cannot say now"
+            );
+        }
+    }
+
+    /// Drop `input_id`'s controller client from its live row, as the store
+    /// does: a client never survives persistence.
+    async fn lose_client(fixture: &Governed, input_id: &InputId) {
+        let mut driver = fixture.driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *driver else {
+            panic!("storeless")
+        };
+        driver
+            .ledger_mut()
+            .get_mut(input_id)
+            .expect("live row")
+            .controller_client = None;
+    }
+
+    /// Whether `input_id`'s live row holds a controller client.
+    async fn holds_client(fixture: &Governed, input_id: &InputId) -> bool {
+        let driver = fixture.driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &*driver else {
+            panic!("storeless")
+        };
+        driver
+            .ledger()
+            .get(input_id)
+            .expect("live row")
+            .controller_client
+            .is_some()
+    }
+
+    /// Ask the host again, once, for `input_id`'s controller client, as the
+    /// runtime loop asks for a kept resume row without one, and pin a client
+    /// it supplies. `None` for a row with no retained-resume path.
+    async fn ask_again(
+        fixture: &Governed,
+        input_id: &InputId,
+    ) -> Option<crate::retained_work::RetainedClientReacquisition> {
+        let mut driver = fixture.driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *driver else {
+            panic!("storeless")
+        };
+        let answer = driver
+            .ledger()
+            .get(input_id)
+            .and_then(|row| driver.reacquire_retained_resume_client(row));
+        if let Some(crate::retained_work::RetainedClientReacquisition::Pinned(client)) = &answer {
+            driver
+                .ledger_mut()
+                .get_mut(input_id)
+                .expect("live row")
+                .controller_client = Some(client.clone());
+        }
+        answer
+    }
+
+    /// Admit, after a staged run of the original of `requester` finished, a
+    /// resume of that run's retained work, kept queued (nothing stages it
+    /// here). Returns the original and the resume's id.
+    async fn queued_resume(
+        fixture: &Governed,
+        requester: &str,
+        job: &str,
+    ) -> (RetainedInputAuthority, InputId) {
+        let original = admit_original(fixture, requester).await;
+        let run = stage_run(fixture, std::slice::from_ref(original.input_id())).await;
+        finish_run(fixture, run.run_id()).await;
+        let outcome = resume_with(fixture, run, job)
+            .await
+            .expect("the resume is admitted");
+        let AcceptOutcome::Accepted { state, .. } = outcome else {
+            panic!("accepted, got {outcome:?}")
+        };
+        (original, state.input_id)
+    }
+
+    /// A kept resume row (its client lost, as in the store) is asked for its
+    /// client again and pinned when its host supplies one, and is answered,
+    /// still without a client, refused for an owner with no client for it
+    /// and not ready for an owner that cannot say now. An ordinary governed
+    /// prompt has no such path: the host contract has no way to supply its
+    /// client without a fresh authentication of its caller, so it is never
+    /// asked for and stays without one (an attachment ends such a kept
+    /// prompt before it serves).
+    #[tokio::test]
+    async fn a_kept_resume_row_is_asked_for_its_client_again() {
+        use crate::retained_work::{RetainedClientReacquisition, RetainedResumeError};
+        use crate::traits::ControllerReadinessFailure;
+        let fixture = governed_staging().await;
+        let (_, resume) = queued_resume(&fixture, "caller-a", "fork_off:kept").await;
+        let prompt = admit_original(&fixture, "caller-b")
+            .await
+            .input_id()
+            .clone();
+        assert!(
+            holds_client(&fixture, &resume).await,
+            "an admitted resume holds the client its host supplied"
+        );
+
+        lose_client(&fixture, &resume).await;
+        lose_client(&fixture, &prompt).await;
+        let answer = ask_again(&fixture, &resume).await;
+        assert!(
+            matches!(answer, Some(RetainedClientReacquisition::Pinned(_))),
+            "{answer:?}"
+        );
+        assert!(
+            holds_client(&fixture, &resume).await,
+            "the host's client is pinned on the kept resume again"
+        );
+        let answer = ask_again(&fixture, &prompt).await;
+        assert!(answer.is_none(), "{answer:?}");
+        assert!(
+            !holds_client(&fixture, &prompt).await,
+            "a governed prompt has no re-pin path"
+        );
+
+        lose_client(&fixture, &resume).await;
+        fixture
+            .host
+            .refuse_retained_resume(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable,
+            ));
+        let answer = ask_again(&fixture, &resume).await;
+        assert!(
+            matches!(
+                answer,
+                Some(RetainedClientReacquisition::NotReady(
+                    ControllerReadinessFailure::PolicyUnavailable
+                ))
+            ),
+            "{answer:?}"
+        );
+        assert!(!holds_client(&fixture, &resume).await);
+
+        fixture
+            .host
+            .refuse_retained_resume(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::UnsupportedScope,
+            ));
+        let answer = ask_again(&fixture, &resume).await;
+        assert!(
+            matches!(answer, Some(RetainedClientReacquisition::Refused)),
+            "{answer:?}"
+        );
+        assert!(!holds_client(&fixture, &resume).await);
+    }
+
+    /// A kept resume row whose destination its session has since superseded
+    /// can never be admitted again: it is refused before its host is asked,
+    /// whatever the host would answer, as a fresh resume of it is.
+    #[tokio::test]
+    async fn a_kept_resume_whose_destination_moved_on_is_refused_before_its_host_is_asked() {
+        use crate::retained_work::RetainedResumeError;
+        use crate::traits::ControllerReadinessFailure;
+        let fixture = governed_staging().await;
+        let (original, resume) = queued_resume(&fixture, "caller-a", "fork_off:moved").await;
+        lose_client(&fixture, &resume).await;
+        let target = original.association().candidate().target.clone();
+        let registration = fixture
+            .machine
+            .current_session_registration_witness(&fixture.session_id)
+            .await
+            .expect("current registration");
+        fixture
+            .machine
+            .bind_scoped_context(&registration, &target)
+            .await
+            .expect("bind the original's destination");
+        let mut moved = target;
+        moved.context_generation += 1;
+        fixture
+            .machine
+            .bind_scoped_context(&registration, &moved)
+            .await
+            .expect("bind a later generation of it");
+        // The host itself would only answer that it cannot say now.
+        fixture
+            .host
+            .refuse_retained_resume(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable,
+            ));
+        let answer = ask_again(&fixture, &resume).await;
+        assert!(
+            matches!(
+                answer,
+                Some(crate::retained_work::RetainedClientReacquisition::Refused)
+            ),
+            "{answer:?}"
+        );
+    }
+
+    /// One queued input of a controller-hold state: in the Queue lane at
+    /// `sequence`, a content prompt, governed under its own batch key when
+    /// `governed`, and recovered by the registration when `kept`.
+    fn queued_input(
+        state: &mut crate::meerkat_machine::dsl::MeerkatMachineState,
+        input_id: &str,
+        sequence: u64,
+        governed: bool,
+        kept: bool,
+    ) {
+        use crate::meerkat_machine::dsl::{
+            InputLane, InputPhase, RecoveredRunApplyBoundary, RecoveredRuntimeExecutionKind,
+        };
+        let id = input_id.to_string();
+        state.input_phases.insert(id.clone(), InputPhase::Queued);
+        state.input_lane.insert(id.clone(), InputLane::Queue);
+        state
+            .input_recovery_lanes
+            .insert(id.clone(), InputLane::Queue);
+        state.input_admission_seq.insert(id.clone(), sequence);
+        state.input_attempt_counts.insert(id.clone(), 0);
+        state.input_is_prompt.insert(id.clone(), true);
+        state
+            .input_runtime_boundary
+            .insert(id.clone(), RecoveredRunApplyBoundary::RunStart);
+        state
+            .input_runtime_execution_kind
+            .insert(id.clone(), RecoveredRuntimeExecutionKind::ContentTurn);
+        if governed {
+            state
+                .input_authority_bindings
+                .insert(id.clone(), format!("binding-{input_id}"));
+            state
+                .input_authority_batch_keys
+                .insert(id.clone(), format!("batch-{input_id}"));
+        }
+        if kept {
+            state.recovered_admitted_inputs.insert(id);
+        }
+    }
+
+    /// One kept governed input bound to `run`, applied, as a run a stop or a
+    /// restart left open keeps it.
+    fn bound_kept_input(
+        state: &mut crate::meerkat_machine::dsl::MeerkatMachineState,
+        input_id: &str,
+        run: &crate::meerkat_machine::dsl::RunId,
+    ) {
+        use crate::meerkat_machine::dsl::{InputLane, InputPhase};
+        let id = input_id.to_string();
+        state.input_phases.insert(id.clone(), InputPhase::Applied);
+        state.input_run_associations.insert(id.clone(), run.clone());
+        state
+            .input_recovery_lanes
+            .insert(id.clone(), InputLane::Queue);
+        state.input_attempt_counts.insert(id.clone(), 1);
+        state
+            .input_authority_bindings
+            .insert(id.clone(), format!("binding-{input_id}"));
+        state
+            .input_authority_batch_keys
+            .insert(id.clone(), format!("batch-{input_id}"));
+        state.recovered_admitted_inputs.insert(id);
+    }
+
+    /// The machine's plans skip an input it holds for its controller: the
+    /// batch plan selects the later work of its lane instead, a requested
+    /// stage of the held input is refused, and the resumed-run plan refuses a
+    /// run with a held input. Once released, the input is the head of its lane
+    /// again and the run resumes.
+    #[test]
+    fn a_held_input_is_skipped_by_the_plans_and_later_work_runs_first() {
+        use crate::meerkat_machine::dsl::command_capabilities::{
+            AuthorizedResumedRun, AuthorizedRuntimeLoopBatch, AuthorizedStageForRun,
+            RuntimeLoopBatchSource,
+        };
+        use crate::meerkat_machine::dsl::{MeerkatMachineState, RunId};
+        let selected = |state: &MeerkatMachineState| {
+            AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state(state)
+                .map(|plan| plan.into_parts().1)
+        };
+        let mut state = MeerkatMachineState::default();
+        queued_input(&mut state, "kept", 1, true, true);
+        queued_input(&mut state, "later", 2, true, false);
+        assert_eq!(selected(&state), Some(vec!["kept".to_string()]));
+
+        state.input_controller_holds.insert("kept".to_string());
+        assert_eq!(
+            selected(&state),
+            Some(vec!["later".to_string()]),
+            "later work of the held input's lane goes first"
+        );
+        let run = RunId::from("current-run");
+        state.current_run_id = Some(run.clone());
+        assert!(
+            AuthorizedStageForRun::authorize_stage_for_run_from_state(
+                &state,
+                &["kept".to_string()],
+                &run,
+                RuntimeLoopBatchSource::Queue,
+            )
+            .is_none(),
+            "a held input is never staged"
+        );
+        assert!(
+            AuthorizedStageForRun::authorize_stage_for_run_from_state(
+                &state,
+                &["later".to_string()],
+                &run,
+                RuntimeLoopBatchSource::Queue,
+            )
+            .is_some()
+        );
+        state.current_run_id = None;
+        state.input_controller_holds.remove("kept");
+        assert_eq!(
+            selected(&state),
+            Some(vec!["kept".to_string()]),
+            "released, the input is the head of its lane again"
+        );
+
+        let open = RunId::from("open-run");
+        let mut resumable = MeerkatMachineState {
+            resumable_run_id: Some(open.clone()),
+            ..Default::default()
+        };
+        bound_kept_input(&mut resumable, "bound", &open);
+        resumable.input_controller_holds.insert("bound".to_string());
+        assert!(
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&resumable, &open).is_none(),
+            "a run does not resume while an input bound to it is held"
+        );
+        resumable.input_controller_holds.clear();
+        let (_, input_ids) =
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&resumable, &open)
+                .expect("released, the run resumes")
+                .into_parts();
+        assert_eq!(input_ids, vec!["bound".to_string()]);
+    }
+
+    /// The generated machine holds only kept governed work that waits
+    /// unstaged (`HoldInputController`), never stages a held input, releases
+    /// a held input with a wake (`InputControllerReleased`), drops the hold of
+    /// an input that ends, and does not resume a run with a held input; a
+    /// settled or released run drops its inputs' holds. Each step runs the
+    /// machine's invariants, among them
+    /// `input_controller_holds_are_kept_unstaged_governed_inputs`.
+    #[test]
+    fn the_machine_holds_a_kept_governed_input_until_its_controller_is_released() {
+        use crate::meerkat_machine::dsl::{
+            InputAbandonReason, MeerkatMachineAuthority, MeerkatMachineEffect, MeerkatMachineInput,
+            MeerkatMachineMutator, MeerkatMachineState, MeerkatPhase, RunId, SessionId,
+        };
+        let hold = |input_id: &str| MeerkatMachineInput::HoldInputController {
+            input_id: input_id.to_string(),
+        };
+        let release = |input_id: &str| MeerkatMachineInput::ReleaseInputController {
+            input_id: input_id.to_string(),
+        };
+        let registered = || MeerkatMachineState {
+            lifecycle_phase: MeerkatPhase::Idle,
+            session_id: Some(SessionId::from("held-session")),
+            ..Default::default()
+        };
+
+        let mut state = registered();
+        queued_input(&mut state, "kept", 1, true, true);
+        queued_input(&mut state, "staged", 2, true, true);
+        queued_input(&mut state, "live", 3, true, false);
+        queued_input(&mut state, "plain", 4, false, true);
+        let mut authority =
+            MeerkatMachineAuthority::recover_from_state(state).expect("a valid machine state");
+        let mut apply = |input| MeerkatMachineMutator::apply(&mut authority, input);
+        assert!(
+            apply(hold("live")).is_err(),
+            "work the registration did not recover is never held"
+        );
+        assert!(
+            apply(hold("plain")).is_err(),
+            "ungoverned work is never held"
+        );
+        apply(hold("kept")).expect("kept governed work waiting unstaged is held");
+        apply(hold("kept")).expect("holding a held input again changes nothing");
+        let run = RunId::from("current-run");
+        apply(MeerkatMachineInput::Prepare {
+            session_id: SessionId::from("held-session"),
+            run_id: run.clone(),
+        })
+        .expect("a run starts");
+        assert!(
+            apply(MeerkatMachineInput::StageForRun {
+                input_id: "kept".to_string(),
+                run_id: run.clone(),
+            })
+            .is_err(),
+            "a held input never stages"
+        );
+        assert!(
+            apply(MeerkatMachineInput::MarkApplied {
+                input_id: "kept".to_string(),
+            })
+            .is_err(),
+            "a held input is never applied"
+        );
+        apply(MeerkatMachineInput::StageForRun {
+            input_id: "staged".to_string(),
+            run_id: run.clone(),
+        })
+        .expect("later work stages");
+        assert!(
+            apply(hold("staged")).is_err(),
+            "staged work is not waiting unstaged: it is never held"
+        );
+        let released = apply(release("kept")).expect("the held input is released");
+        assert!(
+            released
+                .effects()
+                .iter()
+                .any(|effect| matches!(effect, MeerkatMachineEffect::InputControllerReleased)),
+            "the release wakes the runtime"
+        );
+        assert!(
+            apply(release("kept")).is_err(),
+            "only a held input is released"
+        );
+        apply(hold("kept")).expect("held again");
+        apply(MeerkatMachineInput::AbandonInput {
+            input_id: "kept".to_string(),
+            reason: InputAbandonReason::ResumeRefused,
+            attempt_count: 0,
+        })
+        .expect("a refused resume ends it");
+        assert!(
+            authority.state().input_controller_holds.is_empty(),
+            "an input that ends drops its hold"
+        );
+
+        let open = RunId::from("open-run");
+        let mut resumable = registered();
+        resumable.resumable_run_id = Some(open.clone());
+        bound_kept_input(&mut resumable, "bound", &open);
+
+        let mut resumed =
+            MeerkatMachineAuthority::recover_from_state(resumable.clone()).expect("valid");
+        MeerkatMachineMutator::apply(&mut resumed, hold("bound"))
+            .expect("an input bound to the run marked resumable is held");
+        MeerkatMachineMutator::apply(
+            &mut resumed,
+            MeerkatMachineInput::Prepare {
+                session_id: SessionId::from("held-session"),
+                run_id: open.clone(),
+            },
+        )
+        .expect("the marked run starts");
+        assert!(
+            MeerkatMachineMutator::apply(
+                &mut resumed,
+                MeerkatMachineInput::ResumeRun {
+                    run_id: open.clone(),
+                },
+            )
+            .is_err(),
+            "a run does not resume while an input bound to it is held"
+        );
+
+        let mut settled =
+            MeerkatMachineAuthority::recover_from_state(resumable.clone()).expect("valid");
+        MeerkatMachineMutator::apply(&mut settled, hold("bound")).expect("held");
+        MeerkatMachineMutator::apply(
+            &mut settled,
+            MeerkatMachineInput::SettleResumableRun {
+                run_id: open.clone(),
+                reason: InputAbandonReason::ResumeRefused,
+            },
+        )
+        .expect("the marked run settles");
+        assert!(
+            settled.state().input_controller_holds.is_empty(),
+            "a settled run drops its inputs' holds"
+        );
+
+        let mut released_run =
+            MeerkatMachineAuthority::recover_from_state(resumable).expect("valid");
+        MeerkatMachineMutator::apply(&mut released_run, hold("bound")).expect("held");
+        MeerkatMachineMutator::apply(
+            &mut released_run,
+            MeerkatMachineInput::ReleaseResumableRun {
+                run_id: open.clone(),
+            },
+        )
+        .expect("the marked run is released");
+        assert!(
+            released_run.state().input_controller_holds.is_empty(),
+            "a released run drops its inputs' holds"
+        );
+    }
+
+    /// A run marked resumable, with `bound` (an input applied in it, with the
+    /// destination `target`) and `stray` (a queued input that still names the
+    /// run, as a discarded live join or a recovered queued row does, with the
+    /// destination `stray_target` when set), on a registered session.
+    fn resumable_with_stray(
+        bound: &str,
+        target: Option<&str>,
+        stray: &str,
+        stray_target: Option<&str>,
+    ) -> (
+        crate::meerkat_machine::dsl::MeerkatMachineState,
+        crate::meerkat_machine::dsl::RunId,
+    ) {
+        use crate::meerkat_machine::dsl::{MeerkatMachineState, MeerkatPhase, RunId, SessionId};
+        let open = RunId::from("open-run");
+        let mut state = MeerkatMachineState {
+            lifecycle_phase: MeerkatPhase::Idle,
+            session_id: Some(SessionId::from("resumed-session")),
+            resumable_run_id: Some(open.clone()),
+            ..Default::default()
+        };
+        bound_kept_input(&mut state, bound, &open);
+        if let Some(target) = target {
+            state
+                .input_context_targets
+                .insert(bound.to_string(), target.to_string());
+        }
+        queued_input(&mut state, stray, 2, true, false);
+        state
+            .input_run_associations
+            .insert(stray.to_string(), open.clone());
+        if let Some(stray_target) = stray_target {
+            state
+                .input_context_targets
+                .insert(stray.to_string(), stray_target.to_string());
+        }
+        (state, open)
+    }
+
+    /// Prepare and resume `run` on the machine recovered from `state`: the
+    /// machine's state once the run resumed, or `None` when `ResumeRun` was
+    /// refused.
+    fn resume(
+        state: crate::meerkat_machine::dsl::MeerkatMachineState,
+        run: &crate::meerkat_machine::dsl::RunId,
+    ) -> Option<crate::meerkat_machine::dsl::MeerkatMachineState> {
+        use crate::meerkat_machine::dsl::{
+            MeerkatMachineAuthority, MeerkatMachineInput, MeerkatMachineMutator, SessionId,
+        };
+        let mut authority =
+            MeerkatMachineAuthority::recover_from_state(state).expect("a valid machine state");
+        MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::Prepare {
+                session_id: SessionId::from("resumed-session"),
+                run_id: run.clone(),
+            },
+        )
+        .expect("the marked run starts");
+        MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::ResumeRun {
+                run_id: run.clone(),
+            },
+        )
+        .ok()
+        .map(|_| authority.state().clone())
+    }
+
+    /// A resumed run runs under the destination and batch of the input bound
+    /// to it, never of a queued input that only still names the run (a
+    /// discarded live join keeps its association, and recovery restores a
+    /// queued row's last run). Here the stray input sorts after the bound one
+    /// and names another destination and batch. RED while `ResumeRun` took
+    /// the destination of every input associated with the run: the stray
+    /// input came last and the run took its destination and batch.
+    #[test]
+    fn a_resumed_run_takes_its_bound_inputs_destination_not_a_stray_queued_inputs() {
+        let (state, open) = resumable_with_stray(
+            "bound-a",
+            Some("the-runs-destination"),
+            "stray-z",
+            Some("another-destination"),
+        );
+        let resumed = resume(state, &open).expect("the marked run resumes");
+        assert_eq!(
+            resumed.authority_staged_run.as_ref(),
+            Some(&open),
+            "the resumed run is the staged run"
+        );
+        assert_eq!(
+            resumed.run_context_binding.as_deref(),
+            Some("the-runs-destination"),
+            "the run's destination is its bound input's, not the stray input's"
+        );
+        assert_eq!(
+            resumed.authority_staged_batch.as_deref(),
+            Some("batch-bound-a"),
+            "the run's authority batch is its bound input's, not the stray input's"
+        );
+    }
+
+    /// The destination wait counts the governed inputs bound to the run only.
+    /// On a document that requires a destination and has none bound, a run
+    /// whose bound input is ungoverned resumes, whatever governed queued
+    /// input still names it; with a governed bound input it waits. The
+    /// machine's guard, its resumed-run plan and the runtime's mirror agree.
+    /// RED while they counted every input associated with the run: the
+    /// stray governed input held the run back.
+    #[test]
+    fn the_destination_wait_counts_only_the_governed_inputs_bound_to_the_run() {
+        use crate::meerkat_machine::dsl::command_capabilities::{
+            AuthorizedResumedRun, resumed_run_destination_attached,
+        };
+        let (mut state, open) = resumable_with_stray("bound-a", None, "stray-z", None);
+        state.input_authority_bindings.remove("bound-a");
+        state.input_authority_batch_keys.remove("bound-a");
+        state.scoped_context_required = true;
+        assert!(
+            resumed_run_destination_attached(&state, &open),
+            "no governed input is bound to the run"
+        );
+        assert!(
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&state, &open).is_some(),
+            "the resumed-run plan does not wait for the destination"
+        );
+        assert!(
+            resume(state.clone(), &open).is_some(),
+            "the machine resumes the run"
+        );
+
+        state
+            .input_authority_bindings
+            .insert("bound-a".to_string(), "binding-bound-a".to_string());
+        state
+            .input_authority_batch_keys
+            .insert("bound-a".to_string(), "batch-bound-a".to_string());
+        assert!(
+            !resumed_run_destination_attached(&state, &open),
+            "a governed input bound to the run waits for the destination"
+        );
+        assert!(
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&state, &open).is_none(),
+            "the resumed-run plan waits"
+        );
+        assert!(resume(state, &open).is_none(), "the machine waits");
     }
 }

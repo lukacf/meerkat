@@ -133,8 +133,10 @@ fn model_rejects_malformed_enum_payload_and_set_members() {
 
 #[test]
 fn all_other_canonical_owners_keep_implicit_model_defaults() {
+    // The durable decision machine declares an explicit model to give its
+    // two key types two values each and to require every arm in its CI run.
     for schema in meerkat_machine_schema::canonical_machine_schemas() {
-        if schema.machine.as_str() != "GrantAuthorityMachine" {
+        if !["GrantAuthorityMachine", "DurableDecisionMachine"].contains(&schema.machine.as_str()) {
             assert!(
                 schema.tlc_model.is_none(),
                 "{} unexpectedly opted in",

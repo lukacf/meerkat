@@ -721,6 +721,7 @@ test_suite(
         "//crates/meerkat-machine-schema:delivery_status_classification_totality_test",
         "//crates/meerkat-machine-schema:docs_machine_authority_alignment_test",
         "//crates/meerkat-machine-schema:draining_registration_fence_test",
+        "//crates/meerkat-machine-schema:durable_decision_machine_test",
         "//crates/meerkat-machine-schema:forked_participant_lifecycle_machine_test",
         "//crates/meerkat-machine-schema:generation_guard_call_sites_test",
         "//crates/meerkat-machine-schema:gpt_live_authority_contract_test",

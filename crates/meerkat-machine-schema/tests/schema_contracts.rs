@@ -53,6 +53,12 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "GrantAuthorityMachine",
             // Approval lifecycle owns approval status/result truth.
             "ApprovalLifecycleMachine",
+            // Durable decision owns ONE held decision: the hold and its sealed
+            // binding, the attested decision bound to the subject digest, the
+            // execution permit and the executed fact, expiry, withdrawal and
+            // the owed requester notice. Record-scoped and clock-free, so the
+            // store persists one machine state per decision.
+            "DurableDecisionMachine",
             // Detached jobs own fenced attempt, lease, retry/loss,
             // terminality, and delivery-acknowledgement truth.
             "DetachedJobMachine",

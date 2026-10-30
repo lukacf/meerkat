@@ -53,6 +53,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_auth_machine(),
         dsl::dsl_grant_authority_machine(),
         dsl::dsl_approval_lifecycle_machine(),
+        dsl::dsl_durable_decision_machine(),
         dsl::dsl_detached_job_machine(),
         dsl::dsl_runtime_delivery_machine(),
         dsl::dsl_session_document_machine(),
@@ -101,6 +102,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "ApprovalLifecycleMachine",
             dsl::APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "DurableDecisionMachine",
+            dsl::DURABLE_DECISION_PRODUCTION_RUST_CRATE,
+            dsl::DURABLE_DECISION_PRODUCTION_RUST_MODULE,
         ),
         MachineProductionOwnerRelation::new(
             "DetachedJobMachine",

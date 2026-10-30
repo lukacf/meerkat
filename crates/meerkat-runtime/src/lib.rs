@@ -52,6 +52,7 @@ pub mod comms_trust_reconcile;
 pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;
+pub mod decision;
 pub mod delivery_inbox;
 pub mod driver;
 pub(crate) mod effect;
@@ -1141,6 +1142,11 @@ pub mod machine_schema_exports {
     pub fn auth_machine_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::auth_machine_schema_metadata()
             .attach_to(crate::auth_machine::dsl::AuthMachineState::schema())
+    }
+
+    pub fn durable_decision_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::durable_decision_schema_metadata()
+            .attach_to(crate::decision::dsl::DurableDecisionMachineState::schema())
     }
 }
 pub use instruction_activation_admission::{

@@ -94,6 +94,13 @@ for grant_input in crates/meerkat-authorization/src/grants/mod.rs crates/meerkat
     bad "machine-authority-changed ignored grant authority input $grant_input"
   fi
 done
+for decision_input in crates/meerkat-runtime/src/decision/dsl.rs crates/meerkat-runtime/src/decision/service.rs; do
+  if scripts/machine-authority-changed -- "$decision_input" >/dev/null; then
+    ok "machine-authority-changed protects durable decision input $decision_input"
+  else
+    bad "machine-authority-changed ignored durable decision input $decision_input"
+  fi
+done
 for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
   if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
     ok "machine-posters-changed routes poster input $poster_input to the poster gate"

@@ -152,6 +152,12 @@ fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
             production_schema: meerkat_runtime::machine_schema_exports::auth_machine_schema,
         },
         SchemaParityCase {
+            machine: "DurableDecisionMachine",
+            catalog_schema:
+                meerkat_machine_schema::catalog::dsl::dsl_durable_decision_machine_production_schema,
+            production_schema: meerkat_runtime::machine_schema_exports::durable_decision_schema,
+        },
+        SchemaParityCase {
             machine: "MobMachine",
             catalog_schema: dsl_mob_machine_production_schema,
             production_schema: meerkat_mob::machine_schema_exports::mob_machine_schema,

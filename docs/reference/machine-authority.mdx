@@ -42,6 +42,7 @@ The canonical registry is `canonical_machine_schemas()` in
 | `AuthMachine` | `meerkat-runtime::auth_machine::dsl` | Per-binding auth lease and OAuth flow lifecycle. |
 | `GrantAuthorityMachine` | `meerkat-authorization::grants::dsl` | Process-local grant issuance, attenuation, revocation and current full-lineage resolution. Embeddings supply authenticated callers and controller mutation custody; this owner alone does not enable native operation enforcement or durable grant recovery. |
 | `ApprovalLifecycleMachine` | `meerkat-core::generated::approval_lifecycle` | Approval request and decision lifecycle legality. `ApprovalService` and its configured store own records and optional persistence; this machine does not imply an automatic in-loop tool gate. |
+| `DurableDecisionMachine` | `meerkat-runtime::decision::dsl` | One durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision, the execution permit and the executed fact, expiry, withdrawal, and the one notice an ended decision owes its requester. Record-scoped (one machine state per decision) and clock-free (time arrives as the host's observation). Its owner service and decision store own the records and their persistence. |
 | `DetachedJobMachine` | `meerkat-jobs::machines::detached_job` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
 | `RuntimeDeliveryMachine` | `meerkat-runtime::delivery_inbox::dsl` | Stable durable-inbox identity, monotonic delivery/feed sequence assignment, exact replay, and ordered application cursor. |
 | `SessionDocumentMachine` | `meerkat-core::generated::session_document` | Session document, transcript, pending-continuation lifecycle, the session lifecycle terminal fact for all profiles, cold-read source disposition, and durable-tail recovery classification. |
@@ -54,9 +55,10 @@ The canonical registry is `canonical_machine_schemas()` in
 | `TemporaryCouncilLifecycleMachine` | `meerkat-mob::machines::temporary_council_lifecycle` | One temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed versus coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict. Record-scoped (one machine state per council) and clock-free. |
 
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. The other
-canonical machines protect narrower domain facts: auth and approval, schedules
-and occurrences, detached jobs and runtime delivery, session document and turn
-admission, and WorkGraph lifecycle, attention, and execution. WorkGraph is an
+canonical machines protect narrower domain facts: auth, approval and durable
+decisions, schedules and occurrences, detached jobs and runtime delivery,
+session document and turn admission, and WorkGraph lifecycle, attention, and
+execution. WorkGraph is an
 optional subsystem authority for durable agent commitments, dependency-aware
 claim state, and goal attention bindings. `WorkExecutionLifecycleMachine` owns
 the cross-system obligation for one execution attempt without absorbing either

@@ -35,6 +35,7 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
 pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod detached_job;
+pub mod durable_decision;
 pub mod forked_participant_lifecycle;
 pub mod grant_authority;
 pub mod meerkat_machine;
@@ -173,6 +174,8 @@ pub const GRANT_AUTHORITY_PRODUCTION_RUST_MODULE: &str = "grants::dsl";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
+pub const DURABLE_DECISION_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const DURABLE_DECISION_PRODUCTION_RUST_MODULE: &str = "decision::dsl";
 pub const DETACHED_JOB_PRODUCTION_RUST_CRATE: &str = "meerkat-jobs";
 pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
@@ -5524,4 +5527,105 @@ pub fn dsl_grant_authority_production_schema() -> MachineSchema {
         GRANT_AUTHORITY_PRODUCTION_RUST_CRATE,
         GRANT_AUTHORITY_PRODUCTION_RUST_MODULE,
     )
+}
+
+/// Canonical DurableDecisionMachine: one durable decision's hold, attested
+/// decision, execution permit and executed fact, expiry, withdrawal and owed
+/// requester notice. Record-scoped and clock-free.
+pub fn dsl_durable_decision_machine() -> MachineSchema {
+    durable_decision_schema_metadata()
+        .attach_to(durable_decision::DurableDecisionMachineState::schema())
+}
+
+pub fn dsl_durable_decision_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_durable_decision_machine(),
+        DURABLE_DECISION_PRODUCTION_RUST_CRATE,
+        DURABLE_DECISION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the durable decision record machine: its two
+/// opaque key types, its stage, notice and review verdict vocabularies, and
+/// the typed refusal its verdict effect carries.
+pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string("DecisionParty"),
+            NamedTypeBinding::string("DecisionDigest"),
+            NamedTypeBinding::string_enum("DurableDecisionStage", &["Human", "Review"]),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionNotice",
+                &["NotRequired", "NotDue", "Owed", "Delivered", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionReviewVerdict",
+                &["Allow", "Deny", "Escalate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionRefusal",
+                &[
+                    "InvalidWindow",
+                    "SelfReview",
+                    "HoldConflict",
+                    "NotOpen",
+                    "Expired",
+                    "SubjectChanged",
+                    "PresentationIncomplete",
+                    "WrongAudience",
+                    "ReviewStage",
+                    "HumanStage",
+                    "EvidenceRequired",
+                    "NotEligible",
+                    "SelfApproval",
+                    "WrongReviewer",
+                    "NotRequester",
+                    "NotApproved",
+                    "BindingMismatch",
+                    "NotAuthorized",
+                    "SettlementOwed",
+                    "NotOwed",
+                ],
+            ),
+        ],
+        vec![],
+    )
+    .with_tlc_model(durable_decision_tlc_model())
+}
+
+/// The durable decision machine's explicit TLC model. Every refusal that
+/// compares two keys (a changed subject, another approver, the requester as
+/// decider, another reviewer, another binding) needs two distinct keys, so
+/// both key types sample the two values `alpha` and `beta`; every input time
+/// ranges over `0..2`, which puts a hold's deadline before, at and after a
+/// later touch. Every arm is reached within six steps (the deepest: hold,
+/// approve, authorize, record, settle the notice, settle it again), so the
+/// CI run requires each of them to generate a state.
+#[allow(clippy::expect_used)]
+fn durable_decision_tlc_model() -> crate::MachineTlcModel {
+    let two_keys = || crate::MachineTlcProfile {
+        named_values: ["DecisionParty", "DecisionDigest"]
+            .into_iter()
+            .map(|name| {
+                (
+                    crate::identity::NamedTypeId::parse(name).expect("valid named-type slug"),
+                    vec![
+                        crate::TlcValue::String("alpha".to_owned()),
+                        crate::TlcValue::String("beta".to_owned()),
+                    ],
+                )
+            })
+            .collect(),
+    };
+    crate::MachineTlcModel {
+        ci: two_keys(),
+        deep: two_keys(),
+        ci_limits: crate::MachineTlcStateLimits {
+            step_limit: 6,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        },
+        require_ci_transition_coverage: true,
+    }
 }

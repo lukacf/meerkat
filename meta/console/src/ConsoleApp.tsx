@@ -118,6 +118,7 @@ import {
   resolveAmbiguousConsoleTopologyMutation,
   type ConsoleTopologyControlCapabilities,
   type ConsoleTopologyRpcOperation,
+  topologyAgentChatActions,
   topologyNodeAgent,
 } from "./lib/topology";
 import { findPaneResizeRoot } from "./lib/pane-resize";
@@ -3914,6 +3915,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     dock.openTarget(target, intent);
   }
 
+  /**
+   * A Topology role chip opens the agent beside the map: it focuses a pane
+   * that already shows the agent, or reuses the chat pane next to Topology,
+   * and splits the Topology pane only when neither exists.
+   */
+  function openAgentBesideTopology(agent: ConsoleAgent, topologyPanelId: string) {
+    const target = buildDockTarget(agent);
+    void refreshIdentityTimelineNow(target.identity || target.memberId).catch(
+      () => {},
+    );
+    for (const action of topologyAgentChatActions<MetaDockTarget>(dock.state, topologyPanelId, target)) {
+      dock.dispatch(action);
+    }
+  }
+
   function openDockTarget(
     target: MetaDockTarget,
     intent:
@@ -5615,9 +5631,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRequestMutation={(intent) => onTopologyMutation(intent)}
           onRetryOperation={(receipt) => onRetryTopologyOperation(receipt)}
           onSelectAgent={(id) => {
-            // Opens beside the Topology pane instead of replacing it.
             const agent = topologyNodeAgent(agents, id);
-            if (agent) openAgentChat(agent, "split_right");
+            if (agent) openAgentBesideTopology(agent, panel.id);
           }}
         />
       );

@@ -3020,6 +3020,38 @@ async function runTopologyUnavailableBrowserProof() {
   }
 }
 
+async function runTopologyRoleChipPaneReuseBrowserProof() {
+  const server = await startMockConsoleServer({ includeToolOnlyWorker: true });
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    await page.getByTestId("topology-view:roles").click();
+    const panes = page.locator('[data-testid^="pane:"]');
+    for (const identity of ["identity:luka", "legacy-router", "tool-only-worker"]) {
+      await page.getByTestId(`topology-node:${identity}`).click();
+      await page.getByTestId(`chat-pane:${identity}`).waitFor({ timeout: 10_000 });
+      assert.equal(await panes.count(), 2, `opening ${identity} from Topology must keep two panes`);
+      assert.equal(await page.locator('[data-testid^="pane:"] [data-testid="topology-panel"]').count(), 1);
+      assert.equal(await page.locator('[data-testid^="chat-pane:"]').count(), 1, "one chat pane beside Topology");
+      assert.equal(
+        await page.locator(".pane.is-focused").getByTestId(`chat-pane:${identity}`).count(),
+        1,
+        "the chat pane takes focus",
+      );
+    }
+    await page.getByTestId("topology-node:tool-only-worker").click();
+    assert.equal(await panes.count(), 2, "a chip for the agent already shown focuses its pane");
+    process.stdout.write("browser topology role chips reuse one chat pane ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
 async function runTopologyDeniedPairBrowserProof() {
   const server = await startMockConsoleServer({
     topologyControl: {
@@ -4478,6 +4510,7 @@ const allScenarios = [
     // Appended last: sharding is by list position, so earlier scenarios keep their shards.
     ...require("./scenarios/history-replay-tool-order.cjs").scenarios,
     ...require("./scenarios/real-side-chats.cjs").scenarios,
+    { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
   ];
 
 module.exports = { scenarios: allScenarios };

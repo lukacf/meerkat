@@ -1,5 +1,9 @@
-import { topologyEdgeKey } from "@console-core";
+import { collectConsoleDockPanelIds, topologyEdgeKey } from "@console-core";
 import type {
+  ConsoleDockAction,
+  ConsoleDockNode,
+  ConsoleDockState,
+  ConsoleDockTarget,
   ConsoleTopologyControlCapabilities,
   TopologyActionCapability,
   TopologyConnectionState,
@@ -125,6 +129,67 @@ export function topologyNodeAgent<A extends { identity?: string; member_id: stri
 ): A | undefined {
   const identity = parseConsoleTopologyEndpointKey(id)?.identity ?? id;
   return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
+}
+
+type AgentChatDockTarget = ConsoleDockTarget & { kind: "agent-chat"; memberId?: string; identity?: string };
+
+function agentChatTarget(target: ConsoleDockTarget | null | undefined): AgentChatDockTarget | null {
+  return target && target.kind === "agent-chat" ? target as AgentChatDockTarget : null;
+}
+
+function sameAgentChat(left: AgentChatDockTarget, right: AgentChatDockTarget): boolean {
+  const keys = (target: AgentChatDockTarget) => [target.identity, target.memberId]
+    .filter((key): key is string => typeof key === "string" && key.length > 0);
+  const rightKeys = keys(right);
+  return keys(left).some((key) => rightKeys.includes(key));
+}
+
+/** The pane that shares a split with `panelId`, when that neighbour is a single pane. */
+function splitNeighbourPanelId(node: ConsoleDockNode, panelId: string): string | null {
+  if (node.kind !== "split") return null;
+  const { first, second } = node;
+  if (first.kind === "panel" && first.panelId === panelId) return second.kind === "panel" ? second.panelId : null;
+  if (second.kind === "panel" && second.panelId === panelId) return first.kind === "panel" ? first.panelId : null;
+  return splitNeighbourPanelId(first, panelId) ?? splitNeighbourPanelId(second, panelId);
+}
+
+/**
+ * Dock actions for a Topology role chip, so browsing agents from the map
+ * keeps one chat pane beside it instead of adding a pane per click:
+ * 1. a pane in the Topology pane's tab already shows the agent: focus it;
+ * 2. the pane next to Topology (the one a chip opened) shows a chat or
+ *    nothing: show the agent there;
+ * 3. otherwise split the Topology pane and open the chat on its right.
+ * A neighbour showing any other panel is never replaced.
+ */
+export function topologyAgentChatActions<TTarget extends ConsoleDockTarget>(
+  state: ConsoleDockState<TTarget>,
+  topologyPanelId: string,
+  target: TTarget,
+): ConsoleDockAction<TTarget>[] {
+  const chat = agentChatTarget(target);
+  const tab = state.tabs.find((candidate) => collectConsoleDockPanelIds(candidate.layout).includes(topologyPanelId));
+  if (chat && tab) {
+    const tabPanelIds = collectConsoleDockPanelIds(tab.layout);
+    const showing = state.panels.find((panel) => {
+      if (panel.id === topologyPanelId || !tabPanelIds.includes(panel.id)) return false;
+      const shown = agentChatTarget(panel.target);
+      return shown !== null && sameAgentChat(shown, chat);
+    });
+    if (showing) return [{ type: "focus_panel", panelId: showing.id }];
+    const neighbourId = splitNeighbourPanelId(tab.layout, topologyPanelId);
+    const neighbour = neighbourId ? state.panels.find((panel) => panel.id === neighbourId) : undefined;
+    if (neighbour && (neighbour.target == null || agentChatTarget(neighbour.target))) {
+      return [
+        { type: "set_panel_target", panelId: neighbour.id, target },
+        { type: "focus_panel", panelId: neighbour.id },
+      ];
+    }
+  }
+  return [
+    { type: "focus_panel", panelId: topologyPanelId },
+    { type: "open_target", target, intent: "split_right" },
+  ];
 }
 
 function endpointAuthority(

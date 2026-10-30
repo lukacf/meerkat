@@ -35,48 +35,41 @@ impl ProfileFacts {
     }
 
     /// The facts of an inline mob profile. The digest is over the profile's
-    /// serialized form with null, false, empty-text, empty-list and
-    /// empty-map members left out, so a Core release that adds a profile
-    /// field which serializes to one of those keeps every digest. A field
-    /// added with any other default changes them, and the identities whose
-    /// template binds the profile then read Broken until the host rebinds
-    /// them.
+    /// serialized form without its top-level members that equal that
+    /// member's default (the profile read from its model alone), so a Core
+    /// release that adds a profile field keeps every digest while the field
+    /// is left at its default. Nothing below the top level is pruned: a
+    /// schema, provider params or a tool configuration is digested whole,
+    /// so a change anywhere inside one changes the digest, and the
+    /// identities whose template binds the profile then read Broken until
+    /// the host rebinds them. The model is always digested.
     pub fn of_profile(profile: &meerkat_mob::Profile) -> Result<Self, serde_json::Error> {
         let value = serde_json::to_value(profile)?;
+        let defaults = serde_json::to_value(serde_json::from_value::<meerkat_mob::Profile>(
+            json!({ "model": profile.model }),
+        )?)?;
         Ok(Self {
             model: profile.model.clone(),
             digest: canonical_digest(&json!({
                 "format": FORMAT_PROFILE,
-                "profile": without_empty_members(value),
+                "profile": without_default_members(value, &defaults),
             })),
         })
     }
 }
 
-/// `value` with every object member whose value is null, false, an empty
-/// string, an empty array or an empty object left out, at every depth.
-fn without_empty_members(value: Value) -> Value {
+/// `value`'s top-level members, without those other than `model` that equal
+/// the same member of `defaults`. Nested values are kept whole.
+fn without_default_members(value: Value, defaults: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let kept: Map<String, Value> = map
                 .into_iter()
-                .map(|(key, item)| (key, without_empty_members(item)))
-                .filter(|(_, item)| !is_empty_member(item))
+                .filter(|(key, member)| key == "model" || defaults.get(key) != Some(member))
                 .collect();
             Value::Object(kept)
         }
-        Value::Array(items) => Value::Array(items.into_iter().map(without_empty_members).collect()),
         other => other,
-    }
-}
-
-fn is_empty_member(value: &Value) -> bool {
-    match value {
-        Value::Null | Value::Bool(false) => true,
-        Value::String(text) => text.is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        Value::Bool(true) | Value::Number(_) => false,
     }
 }
 

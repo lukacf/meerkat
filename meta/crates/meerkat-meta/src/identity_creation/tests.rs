@@ -1161,6 +1161,38 @@ fn profile_facts_digest_the_inline_profile() {
 }
 
 #[test]
+fn profile_facts_detect_changes_inside_option_and_schema_values() {
+    let digest = |value: Value| {
+        let profile: meerkat_mob::Profile = serde_json::from_value(value).expect("a profile");
+        ProfileFacts::of_profile(&profile).expect("facts").digest
+    };
+    let schema = json!({"type": "object", "properties": {"a": {"type": "string"}}});
+    let mut closed = schema.clone();
+    closed["additionalProperties"] = json!(false);
+    assert_ne!(
+        digest(json!({"model": "gpt-5.5", "output_schema": closed})),
+        digest(json!({"model": "gpt-5.5", "output_schema": schema})),
+        "removing additionalProperties false changes the digest"
+    );
+    assert_ne!(
+        digest(json!({
+            "model": "gpt-5.5",
+            "provider_params": {"provider_tag": {"provider": "open_ai", "prompt_cache_enabled": false}}
+        })),
+        digest(json!({
+            "model": "gpt-5.5",
+            "provider_params": {"provider_tag": {"provider": "open_ai"}}
+        })),
+        "removing prompt_cache_enabled false changes the digest"
+    );
+    assert_ne!(
+        digest(json!({"model": "gpt-5.5"})),
+        digest(json!({"model": "gpt-5.4"})),
+        "the model is always digested"
+    );
+}
+
+#[test]
 fn profile_and_model_resolve_from_the_template() {
     let policy = policy();
     let research = policy.template("research").expect("research");

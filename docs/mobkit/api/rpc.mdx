@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [c8dc87990c60](https://github.com/lukacf/meerkat/commit/c8dc87990c60c67b2248130555145fa1dada4ed5) on 2026-10-29; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [68afc342a858](https://github.com/lukacf/meerkat/commit/68afc342a858e9d8067a7453d6bdb370fb60e745) on 2026-10-30; MobKit version 0.9.6 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -286,7 +286,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open` and `meta/console/recover_send`; for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/mobkit/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/mobkit/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 `meta/init` refuses the members' native realm and auth binding
@@ -969,7 +969,7 @@ manifest cannot be read.
 |--------|--------|--------|
 | `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the roster's `runtime_mode_override` for the identity; `null` when its profile's mode applies), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
-| `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation |
+| `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation. A member that no identity of the gateway holds and no host adopted (a Console side chat, a member made on the worker plane) is retired instead, by Core's retire: it leaves the roster with its `spawned_by` descendants, work in flight is interrupted rather than refused with `-32052`, and the answer carries no `cleanup_warning`. A member a host adopted is refused (`-32053`) whether or not an identity of the gateway holds it |
 | `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
 | `meta/reset` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, cleanup_warning}`. Starts the identity on a fresh session at a new generation, in one Core rotation: Core retires the current incarnation and seats the identity on the fresh empty session in the same step, so it is never without a member. Meta materializes nothing: the fresh life starts on the identity's next delivery or, when its spec owes a kickoff (an autonomous identity's kickoff turn, or an initial message), on that kickoff, which Core runs exactly once on the new session. Core's rotation ends the identity's wiring with its incarnation, so Meta wires its managed edges (the roster's and the topology controller's) again at once, bounded; a re-wire that fails is logged and the next reconcile retries it. A cross-mob edge (`wire_cross_mob_by_identity`) ends with the incarnation it named: wire it again for the new one. A reset Core refuses before any of it starts (the mob is not running, or another lifecycle operation of the member is in progress) answers `-32052` and is not carried out later. If Core committed the fresh session but its binding cannot be read back, the reset answers an internal error (`-32603`) that says so: read the identity's status, and do not repeat the reset. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
 | `meta/delete_identity` | `{identity}` | `{identity, cleanup_warning}`; see below |
@@ -2583,6 +2583,149 @@ The SDKs read it with `MobHandle.schedule_tools()` (Python) and
 | `tools[].description` | `string` | Meerkat's model-facing description |
 | `tools[].inputSchema` | `object` | The tool's JSON input schema |
 </Accordion>
+
+### Console schedules (Console)
+
+`meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
+`meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` keep
+an agent's **console schedules**: messages a Console caller defines once and
+the Console sends to the agent later, at the times of a durable schedule in
+the gateway's schedule store. Served on `POST /console/rpc` only, as
+`meta/fork_member` is. The Console's `meta/capabilities` lists
+`meta/schedule/list` where the runtime's schedule host keeps the store, and
+the writes where the console is also writable and a schedule firing host
+sends the gateway's schedules. Every method names the agent as `identity`,
+as `meta/console/send` does. Additive methods, no `contract_version` bump.
+
+The list needs `agent.view` on the agent and every write needs `agent.send`
+(`-32030`): a schedule is a deferred send. A write takes exactly the gate
+`meta/console/send` takes on this route, for the caller as the console
+resolves it, signed in or not: a writable console (`-32010`), a valid public
+alias, and `agent.send` under the live access policy. A candidate launch
+refuses the writes (`-32047`).
+
+<Accordion title="Parameters">
+| Method | Params |
+|--------|--------|
+| `meta/schedule/list` | `{identity}` |
+| `meta/schedule/create` | `{identity, content, trigger, name?}` |
+| `meta/schedule/update` | `{identity, schedule_id, content?, trigger?, name?}` |
+| `meta/schedule/pause` | `{identity, schedule_id}` |
+| `meta/schedule/resume` | `{identity, schedule_id}` |
+| `meta/schedule/delete` | `{identity, schedule_id}` |
+</Accordion>
+
+`content` is the message, a non-empty string. `trigger` is Meerkat's schedule
+trigger, as the schedule tools take it, tagged by `type`: `once`
+(`due_at_utc`), `interval` (`start_at_utc`, `every_seconds`, optional
+`end_at_utc`) or `calendar` (`timezone` and the `minute`, `hour`,
+`day_of_month`, `month` and `day_of_week` fields, each `{"kind": "any"}` or
+`{"kind": "values", "values": [...]}`). An interval repeats at most once a
+minute (`every_seconds` of at least 60). An update keeps each of `content`,
+`trigger` and `name` it does not name.
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `schedule_id` | `string` | The schedule |
+| `identity` | `string` | The agent it sends to |
+| `name` | `string \| null` | Its name |
+| `content` | `string` | The message it sends |
+| `trigger` | `object` | When it sends |
+| `phase` | `string` | `active` or `paused` |
+| `revision` | `integer` | Its revision; every write moves it on |
+| `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller, and when withheld |
+| `sender_hidden` | `boolean` | `true` when `sender` is withheld: the caller may view the agent but not send to it |
+| `defined_at_utc` | `string` | When its sender defined it |
+| `created_at_utc`, `updated_at_utc` | `string` | When it was created and last changed |
+| `next_due_at_utc` | `string \| null` | Its next planned send while it is active |
+</Accordion>
+
+`meta/schedule/list` answers `{identity, schedules}`, the agent's console
+schedules, oldest first. Create, update, pause and resume answer the
+schedule; delete answers `{identity, schedule_id, deleted: true}`.
+
+**The sender.** A create, an update and a resume record the caller as the
+schedule's sender: the principal the console's send would use for that
+caller (a verified signed-in human, another authenticated principal, or the
+open Console's shared account), with the provider and issuer its token
+verified under, and the subject only for a verified human. A pause or a
+delete leaves the sender as it is. A resume records its caller while the
+schedule is still paused, so no send goes out as the earlier sender. Only
+a caller who may send to the agent sees who its schedules send as: a caller
+who may only view it gets `sender: null` and `sender_hidden: true`.
+
+**Each fire is a console send by its sender.** At each due time the Console
+first admits the recorded sender as it admits a live request by it, under
+its decisions then: an anonymous sender only while the Console requires no
+sign-in; a principal only under the issuer the Console trusts then, past its
+provider policy and allowlist where sign-in is required, and past its
+session fence, so Console sessions revoked (`meta/console/revoke_sessions`)
+after the schedule was defined end its sends, for a service identity as for
+a human. It then sends `content` to the agent exactly as `meta/console/send`
+does once its caller is admitted, as the sender: the candidate-launch
+refusal, a writable console, `agent.send` for the sender under the access
+policy at that time, an addressable agent, and governance. The send is
+deduplicated under its occurrence's delivery key in the sender's send scope,
+as a live send by the sender is, so a redelivered occurrence sends once. It
+reaches the agent with origin `console:schedule` and the scheduler turn
+origin.
+
+**Changes made meanwhile.** An update and a resume write at the revision
+they read: one that raced another change answers `-32009`
+(`schedule_revision_conflict`) and changes nothing, so it never puts back
+what the other change replaced. Read the schedule again and repeat it.
+
+A refused or failed send fails that occurrence (`delivery_failed` in the
+schedule store), and the schedule keeps its later times. That covers a
+sender who lost `agent.send`, a console that turned read-only, and an agent
+the console no longer knows (a deleted identity, or a member without one
+that was retired): the schedule stays listed until it is deleted. An
+identity released with `meta/retire` is materialized by the fire, as by any
+console send.
+
+| Code | `data.kind` | When |
+|------|-------------|------|
+| `-32001` | `schedule_not_found` | The schedule does not exist, was deleted, is no console schedule, or is another agent's |
+| `-32001` | `unknown_identity` | A create, update or resume names an agent the console does not know |
+| `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
+| `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
+| `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
+| `-32009` | `schedule_revision_conflict` | An update or resume raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
+| `-32602` | none | A blank `content`, an interval under 60 seconds, an invalid `trigger` (an unknown time zone among them), or a resume of a schedule that is not paused. Pausing a paused schedule answers it as it is |
+
+Known limits:
+
+- **Governed agents.** An agent whose input is governed takes no console
+  schedule: the create is refused (`governed_target`), and the fires of a
+  schedule whose agent became governed fail the same way.
+- **The agent's own schedule tools.** Console schedules are the Console's:
+  an agent's schedule tools neither list nor change them (a verb on a
+  schedule whose kind they cannot read is refused), they cannot create a
+  schedule that names the host runnable (`meta.console.scheduled_send`), and
+  an application cannot register a host runnable or callback under that
+  name. A schedule a Rust embedder writes to the store directly is not
+  checked. The Console lists console schedules only.
+- **One Console sends them.** Fires go through the Console router built
+  last, under its decisions and visibility policy. A schedule host on a
+  gateway that serves no Console and drains the same store fails their
+  fires: a fire waits for a Console only in the first 30 seconds after the
+  gateway's schedule host starts, and otherwise fails at once. Replacing the Console's log store, and
+  shutdown, end the fires until a Console router is built again.
+- **Dedupe across a restart.** A gateway whose console send dedupe store is
+  in memory forgets a fire's key when it restarts, so an occurrence
+  redelivered after a crash can send twice.
+- **Unobserved admission.** A fire whose admission the Console could not
+  observe (a timeout) is recorded failed, although the message may have been
+  admitted; it is never sent twice under its key.
+- **No fire history in the Console.** A failed fire is recorded on its
+  occurrence in the schedule store and in the gateway's log, not in the list.
+- **Edits from an older view.** An update is checked against the revision
+  the gateway read for that call, so an edit made from an older view of a
+  schedule still replaces a newer one.
+- **Names reused.** A schedule of an agent that is deleted stays until it is
+  deleted, and fires into a new agent declared later under the same name,
+  as its sender, while that sender may still send to it.
 
 ### Scheduling migration
 

@@ -42,12 +42,12 @@ const HOST_WORKER_THREAD: &str = "member-host-worker";
 /// The name of the threads of Core's process-wide machine cleanup runtime.
 const MACHINE_CLEANUP_THREAD: &str = "meerkat-machine-cleanup";
 /// The worker stack of the host runtime in [`member_tool_stack_probe_child`]:
-/// 16 MiB, as an embedding host may give its own workers.
-const HOST_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
-/// The frame the stack probe touches: more than Core's 8 MiB host worker
-/// budget, which the machine cleanup runtime's threads take without a stack
-/// knob, and less than the host's 16 MiB workers.
-const STACK_PROBE_FRAME_BYTES: usize = 12 * 1024 * 1024;
+/// 32 MiB, as an embedding host may give its own workers.
+const HOST_WORKER_STACK_BYTES: usize = 32 * 1024 * 1024;
+/// The frame the stack probe touches: more than the 16 MiB the machine
+/// cleanup runtime's threads take without a stack knob, and less than the
+/// host's 32 MiB workers.
+const STACK_PROBE_FRAME_BYTES: usize = 24 * 1024 * 1024;
 /// Arms [`member_tool_stack_probe_child`]. Without it the fixture does
 /// nothing, so a run of ignored tests stays harmless.
 const STACK_CHILD_ENV: &str = "MEERKAT_TEST_MEMBER_HOST_STACK_CHILD";
@@ -332,14 +332,16 @@ fn output_tail(path: &Path) -> String {
     lines[lines.len().saturating_sub(80)..].join("\n")
 }
 
-/// An embedding host whose runtime gives its workers 16 MiB, with neither
+/// An embedding host whose runtime gives its workers 32 MiB, with neither
 /// `RKAT_WORKER_STACK_BYTES` nor `RUST_MIN_STACK` set, runs a runtime-backed
-/// member whose host tool touches a 12 MiB frame, through one scripted turn,
+/// member whose host tool touches a 24 MiB frame, through one scripted turn,
 /// and the turn completes on the host's workers. While member turns ran on
-/// the machine cleanup runtime, whose threads take 8 MiB without a knob, the
-/// process aborted with a stack overflow on `meerkat-machine-cleanup`. A
-/// stack overflow aborts the whole process, so the scenario runs in a child
-/// process, and this test asserts that the child exits successfully.
+/// the machine cleanup runtime, whose threads take 16 MiB without a knob
+/// (they took 8 MiB before the process runtimes' own default rose), the
+/// process aborted with a stack overflow on `meerkat-machine-cleanup` once a
+/// tool's frame was deeper than that. A stack overflow aborts the whole
+/// process, so the scenario runs in a child process, and this test asserts
+/// that the child exits successfully.
 #[test]
 fn a_member_tool_frame_the_hosts_workers_hold_completes_without_a_stack_knob() {
     let output_dir = tempfile::tempdir().expect("child output dir");
@@ -390,7 +392,7 @@ fn a_member_tool_frame_the_hosts_workers_hold_completes_without_a_stack_knob() {
 
 /// The child process of
 /// [`a_member_tool_frame_the_hosts_workers_hold_completes_without_a_stack_knob`]:
-/// a host runtime with 16 MiB workers runs the scenario, and the member's
+/// a host runtime with 32 MiB workers runs the scenario, and the member's
 /// tool touches the stack probe frame.
 #[test]
 #[ignore = "child-process fixture of a_member_tool_frame_the_hosts_workers_hold_completes_without_a_stack_knob"]

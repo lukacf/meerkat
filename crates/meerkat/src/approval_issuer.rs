@@ -116,38 +116,165 @@ impl ApprovalIssuerSelection {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use meerkat_core::approval::decision::{
-        ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPrincipalKey,
-        DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionSubjectKey, Sha256Digest,
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use meerkat_core::approval::consent::{
+        AuthenticatedApprover, ConsentEligibility, ConsentIneligible,
     };
-    use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
-    use meerkat_runtime::decision::{DecisionError, DecisionWriteMode};
+    use meerkat_core::approval::decision::{
+        ApproverId, AttestedDecision, DecisionHoldRequest, DecisionId, DecisionIngress,
+        DecisionKind, DecisionNotice, DecisionOperationId, DecisionPhase, DecisionPrincipalKey,
+        DecisionReference, DecisionRenderer, DecisionRendering, DecisionRequestBody,
+        DecisionSubjectKey, PresentationAudience, PresentationRecord, Sha256Digest,
+    };
+    use meerkat_core::{
+        ApprovalAssurance, ApprovalListFilter, PrincipalKind, PrincipalRef, TrustDomainId,
+    };
+    use meerkat_runtime::decision::{
+        DecisionClock, DecisionClockError, DecisionError, DecisionWriteMode,
+        DurableDecisionService, SystemDecisionClock,
+    };
+    use meerkat_store::SqliteDecisionStore;
     use meerkat_store::approval_decision_store::APPROVAL_DECISIONS_FILE;
 
     use super::ApprovalIssuerSelection;
 
-    fn hold_request() -> DecisionHoldRequest {
-        let requester = PrincipalRef::in_domain(
-            PrincipalKind::PersonalAgent,
-            "builder",
+    fn principal(kind: PrincipalKind, id: &str) -> PrincipalRef {
+        PrincipalRef::in_domain(
+            kind,
+            id,
             TrustDomainId::new("example.org").expect("trust domain"),
         )
-        .expect("principal");
+        .expect("principal")
+    }
+
+    fn approver_id() -> ApproverId {
+        ApproverId::new("team:owners").expect("approver id")
+    }
+
+    fn reference(value: &str) -> DecisionReference {
+        DecisionReference::new(value).expect("reference")
+    }
+
+    fn rendering() -> DecisionRendering {
+        DecisionRendering::new("Release build 7.").expect("rendering")
+    }
+
+    /// The hold of `subject` until `deadline_at_ms`.
+    fn hold_of(subject: &str, deadline_at_ms: u64) -> DecisionHoldRequest {
         DecisionHoldRequest {
             kind: DecisionKind::new("release").expect("kind"),
-            subject_key: DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
+            subject_key: DecisionSubjectKey::new(subject).expect("subject key"),
             operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
             request_digest: Sha256Digest::of(br#"{"build":7}"#),
-            requester: DecisionPrincipalKey::of(&requester).expect("principal key"),
-            approver_id: ApproverId::new("team:owners").expect("approver id"),
+            requester: DecisionPrincipalKey::of(&principal(
+                PrincipalKind::PersonalAgent,
+                "builder",
+            ))
+            .expect("principal key"),
+            approver_id: approver_id(),
             reviewer: None,
-            deadline_at_ms: u64::MAX / 2,
+            deadline_at_ms,
             request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
                 .expect("request body"),
-            rendering: DecisionRendering::new("Release build 7.").expect("rendering"),
+            rendering: rendering(),
             renderer: DecisionRenderer::new("render.v1").expect("renderer"),
             expected_subject_digest: None,
         }
+    }
+
+    fn hold_request() -> DecisionHoldRequest {
+        hold_of("artifact:build-7", u64::MAX / 2)
+    }
+
+    /// Eligibility that is always current.
+    struct Eligible;
+
+    impl ConsentEligibility for Eligible {
+        fn check_current(&self) -> Result<(), ConsentIneligible> {
+            Ok(())
+        }
+    }
+
+    /// Present the rendering to the approver id and approve the decision.
+    fn approve(decisions: &DurableDecisionService, decision_id: &DecisionId, at_ms: u64) {
+        let rendering = rendering();
+        decisions
+            .present(
+                decision_id,
+                &PresentationRecord::complete(
+                    PresentationAudience::Approver {
+                        approver_id: approver_id(),
+                    },
+                    &rendering,
+                    None,
+                    reference("console"),
+                    reference("message-1"),
+                    at_ms,
+                ),
+            )
+            .expect("present");
+        let decision = AttestedDecision::new(
+            AuthenticatedApprover::new(
+                principal(PrincipalKind::Human, "alice"),
+                ApprovalAssurance::PersonAuthenticated,
+            )
+            .expect("authenticated human"),
+            DecisionIngress::new("console").expect("ingress"),
+            reference("event-1"),
+            approver_id(),
+            rendering.subject_digest(),
+            true,
+        )
+        .expect("attested decision");
+        let approved = decisions
+            .decide(decision_id, &decision, &Eligible)
+            .expect("approve");
+        assert_eq!(approved.state.phase, DecisionPhase::Approved);
+    }
+
+    fn approval_request() -> meerkat_core::ApprovalRequest {
+        meerkat_core::ApprovalRequest {
+            requester: meerkat_core::ApprovalPrincipalId::new("human:alice").expect("principal"),
+            owner: meerkat_core::ApprovalOwnerRef::Runtime,
+            resource: meerkat_core::ApprovalResourceRef {
+                kind: meerkat_core::ApprovalResourceKind::Runtime,
+                id: meerkat_core::ApprovalResourceId::new("local"),
+            },
+            proposed_action: meerkat_core::ApprovalProposedAction {
+                kind: meerkat_core::ApprovalActionKind::Other,
+                summary: "manual gate".to_string(),
+                body: None,
+            },
+            risk: meerkat_core::ApprovalRisk::Medium,
+            request_body: None,
+            allowed_decisions: std::collections::BTreeSet::from([
+                meerkat_core::ApprovalDecision::Approve,
+                meerkat_core::ApprovalDecision::Deny,
+            ]),
+            expires_at: None,
+            metadata: meerkat_core::SurfaceMetadata::default(),
+            request_provenance: None,
+        }
+    }
+
+    struct ManualClock(AtomicU64);
+
+    impl DecisionClock for ManualClock {
+        fn now_ms(&self) -> Result<u64, DecisionClockError> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    fn file_digest(path: &Path) -> Sha256Digest {
+        Sha256Digest::of(&std::fs::read(path).expect("read the decisions file"))
+    }
+
+    fn sorted(mut ids: Vec<DecisionId>) -> Vec<DecisionId> {
+        ids.sort();
+        ids
     }
 
     #[test]
@@ -190,5 +317,209 @@ mod tests {
             decisions.owed(None, 10),
             Err(DecisionError::Unavailable(_))
         ));
+    }
+
+    /// Rollback and roll-forward in process. Under the rollback the approval
+    /// issuer (whose `approvals.json` format is unchanged) opens the same
+    /// store path and never touches the decisions file; rolled forward, an
+    /// open decision past its deadline expires at its first touch and owes
+    /// its notice, and an approved one before its deadline stays owed.
+    #[test]
+    fn roll_forward_expires_open_and_keeps_approved_owed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let selection = ApprovalIssuerSelection::Persistent {
+            store_path: temp.path().to_path_buf(),
+        };
+        let clock = Arc::new(ManualClock(AtomicU64::new(1_000)));
+        let owner = || {
+            let clock: Arc<dyn DecisionClock> = clock.clone();
+            DurableDecisionService::with_clock(
+                Arc::new(SqliteDecisionStore::in_store_path(temp.path())),
+                clock,
+            )
+        };
+        let before = owner();
+        let open = before
+            .hold(hold_of("subject:open", 61_000), true)
+            .expect("hold")
+            .decision_id;
+        let approved = before
+            .hold(hold_of("subject:approved", 10_000_000), true)
+            .expect("hold")
+            .decision_id;
+        approve(&before, &approved, 1_000);
+        drop(before);
+        let issued = selection
+            .open()
+            .request(approval_request())
+            .expect("an approval beside the decisions");
+        let file = temp.path().join(APPROVAL_DECISIONS_FILE);
+        let written = file_digest(&file);
+
+        // Rolled back: the approval issuer serves the same store path.
+        let approvals = selection.open();
+        let listed = approvals
+            .list(ApprovalListFilter::default())
+            .expect("approvals stay available");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|record| record.approval_id.clone())
+                .collect::<Vec<_>>(),
+            vec![issued.approval_id]
+        );
+        assert_eq!(
+            file_digest(&file),
+            written,
+            "the decisions file is untouched"
+        );
+
+        // Rolled forward past the open decision's deadline.
+        clock.0.store(100_000, Ordering::SeqCst);
+        let after = owner();
+        assert_eq!(
+            after
+                .due(None, 10)
+                .expect("due")
+                .decisions
+                .into_iter()
+                .map(|row| row.decision_id)
+                .collect::<Vec<_>>(),
+            vec![open.clone()]
+        );
+        let expired = after
+            .get(&open)
+            .expect("the first touch records the expiry");
+        assert_eq!(expired.state.phase, DecisionPhase::Expired);
+        assert_eq!(expired.state.notice, DecisionNotice::Owed);
+        assert_eq!(
+            after.get(&approved).expect("read").state.phase,
+            DecisionPhase::Approved
+        );
+        assert_eq!(
+            sorted(
+                after
+                    .owed(None, 10)
+                    .expect("owed")
+                    .decisions
+                    .into_iter()
+                    .map(|row| row.decision_id)
+                    .collect()
+            ),
+            sorted(vec![open, approved])
+        );
+    }
+
+    /// The rollback fixture directory the lane names, with `leg`.
+    fn rollback_fixture(leg: &str) -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
+                .expect("MEERKAT_ROLLBACK_FIXTURE_DIR names the fixture directory"),
+        )
+        .join(leg)
+    }
+
+    /// Rollback, lane-run leg (R-CC-RB1): needs the published Core 0.9.7.
+    ///
+    /// This build writes the fixture: a store path at
+    /// `$MEERKAT_ROLLBACK_FIXTURE_DIR/decisions-under-097` with one approval
+    /// in `approvals.json`, an open decision whose deadline passes a second
+    /// after the write and an approved one in `approval_decisions.sqlite3`,
+    /// and `expected.json` naming the approval, the two decisions and the
+    /// decisions file's sha256. The lane then opens the store path with the
+    /// published Core 0.9.7 (its approval issuer and `approval/list`) and
+    /// checks: the approval is listed exactly as before, approvals stay
+    /// available, and the decisions file's digest is unchanged. The harness
+    /// that runs the published crates is a release gate.
+    #[test]
+    #[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 opens"]
+    fn decision_file_written_by_098_is_ignored_by_published_core_097() {
+        let dir = rollback_fixture("decisions-under-097");
+        std::fs::create_dir_all(&dir).expect("create the fixture directory");
+        let selection = ApprovalIssuerSelection::Persistent {
+            store_path: dir.clone(),
+        };
+        let issued = selection
+            .open()
+            .request(approval_request())
+            .expect("an approval");
+        let now_ms = SystemDecisionClock.now_ms().expect("the host clock");
+        let decisions = selection.open_decisions();
+        let open = decisions
+            .hold(hold_of("subject:open", now_ms + 1_000), true)
+            .expect("hold")
+            .decision_id;
+        let approved = decisions
+            .hold(
+                hold_of("subject:approved", now_ms + 30 * 24 * 60 * 60 * 1_000),
+                true,
+            )
+            .expect("hold")
+            .decision_id;
+        approve(&decisions, &approved, now_ms);
+        drop(decisions);
+        let expected = serde_json::json!({
+            "approval_ids": [issued.approval_id.to_string()],
+            "open_decision": open.as_str(),
+            "approved_decision": approved.as_str(),
+            "decisions_file_sha256": file_digest(&dir.join(APPROVAL_DECISIONS_FILE)).as_str(),
+        });
+        std::fs::write(
+            dir.join("expected.json"),
+            serde_json::to_vec_pretty(&expected).expect("encode"),
+        )
+        .expect("write the expectations");
+    }
+
+    /// Roll-forward, lane-run leg (R-CC-RB2): runs after the published Core
+    /// 0.9.7 served the fixture of
+    /// [`decision_file_written_by_098_is_ignored_by_published_core_097`].
+    /// The decisions file is byte-identical to what this build wrote; the
+    /// open decision, past its deadline, expires at its first touch and owes
+    /// its notice; the approved one stays approved and owed.
+    #[test]
+    #[ignore = "lane:rollback - reads the fixture back after the published Core 0.9.7 ran"]
+    fn roll_forward_after_097_expires_open_and_keeps_approved_owed() {
+        let dir = rollback_fixture("decisions-under-097");
+        let expected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join("expected.json")).expect("read the expectations"),
+        )
+        .expect("decode the expectations");
+        let field = |name: &str| -> String {
+            expected[name]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected.json names {name}"))
+                .to_owned()
+        };
+        assert_eq!(
+            file_digest(&dir.join(APPROVAL_DECISIONS_FILE)).as_str(),
+            field("decisions_file_sha256"),
+            "Core 0.9.7 left the decisions file untouched"
+        );
+        let open = DecisionId::new(field("open_decision")).expect("decision id");
+        let approved = DecisionId::new(field("approved_decision")).expect("decision id");
+        let decisions = ApprovalIssuerSelection::Persistent {
+            store_path: dir.clone(),
+        }
+        .open_decisions();
+        let expired = decisions.get(&open).expect("read");
+        assert_eq!(expired.state.phase, DecisionPhase::Expired);
+        assert_eq!(expired.state.notice, DecisionNotice::Owed);
+        assert_eq!(
+            decisions.get(&approved).expect("read").state.phase,
+            DecisionPhase::Approved
+        );
+        assert_eq!(
+            sorted(
+                decisions
+                    .owed(None, 10)
+                    .expect("owed")
+                    .decisions
+                    .into_iter()
+                    .map(|row| row.decision_id)
+                    .collect()
+            ),
+            sorted(vec![open, approved])
+        );
     }
 }

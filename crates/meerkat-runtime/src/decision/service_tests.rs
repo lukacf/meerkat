@@ -759,6 +759,46 @@ fn a_decide_with_no_presentation_keeps_the_presentation_incomplete_refusal() {
     }
 }
 
+/// A presentation time of 0 is no reading: a presentation recorded at 0 is
+/// refused `presentation_incomplete` and records nothing, and a decision
+/// carrying a presentation at 0 is refused the same way, even after a
+/// presentation was recorded.
+#[test]
+fn a_presentation_time_of_zero_is_no_presentation() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+    let refused = service
+        .present(&decision_id, &presentation_at(&rendering, 0))
+        .expect_err("a presentation at 0 is no reading");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let carrying = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+        .with_presentation(presentation_at(&rendering, 0));
+    let refused = service
+        .decide(&decision_id, &carrying, &Eligibility::current())
+        .expect_err("a decision carrying a presentation at 0");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+
+    let presented = service
+        .present(&decision_id, &presentation_at(&rendering, PRESENTED_AT))
+        .expect("present");
+    let refused = service
+        .decide(&decision_id, &carrying, &Eligibility::current())
+        .expect_err("a recorded presentation does not excuse the untimed one");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(
+        store.stored(&decision_id),
+        presented,
+        "the refusal changes nothing"
+    );
+}
+
 #[test]
 fn an_approved_decision_executes_once_across_a_restart() {
     let store = Arc::new(CountingStore::default());

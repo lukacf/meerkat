@@ -982,6 +982,53 @@ fn a_human_decision_is_ordered_after_its_first_presentation() {
     }
 }
 
+/// A presentation time of 0 is no reading of when the approver was shown
+/// the decision: a presentation recorded at 0 is refused
+/// `PresentationIncomplete` and records nothing, and a decision carrying a
+/// presentation at 0 is refused the same way, a recorded presentation
+/// notwithstanding.
+#[test]
+fn a_presentation_time_of_zero_is_no_presentation() {
+    let mut authority = authority_in(Phase::Open);
+    let before = authority.state().clone();
+    let refused = apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, 0, HELD_AT + 1),
+    );
+    assert_eq!(
+        refusal(&refused),
+        DurableDecisionRefusal::PresentationIncomplete
+    );
+    assert_eq!(authority.state(), &before, "nothing is recorded");
+
+    for recorded in [false, true] {
+        let mut authority = authority_in(Phase::Open);
+        if recorded {
+            apply(
+                &mut authority,
+                present_at(APPROVER, SUBJECT, true, HELD_AT + 1, HELD_AT + 1),
+            );
+        }
+        let before = authority.state().clone();
+        for approve in [true, false] {
+            let refused = apply(
+                &mut authority,
+                Decision {
+                    carried_presentation_at_ms: Some(0),
+                    ..Decision::valid(approve)
+                }
+                .input(),
+            );
+            assert_eq!(
+                refusal(&refused),
+                DurableDecisionRefusal::PresentationIncomplete,
+                "recorded {recorded}, approve {approve}"
+            );
+            assert_eq!(authority.state(), &before, "the refusal changes nothing");
+        }
+    }
+}
+
 // ===========================================================================
 // Deadline
 // ===========================================================================
@@ -1532,6 +1579,13 @@ fn recover_from_state_refuses_each_torn_shape() {
             "reviewer_presentation_needs_a_reviewer",
             State {
                 presented_to_reviewer: true,
+                ..open.clone()
+            },
+        ),
+        (
+            "first_presentation_is_a_reading",
+            State {
+                first_presented_to_approver_at_ms: Some(0),
                 ..open.clone()
             },
         ),

@@ -197,7 +197,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shown by its display name or, without one, by its identity in words
   (`router:main` reads "Router main"), the same on every surface, and raw
   identities, keys, grants and IDs moved to tooltips, copy actions and
-  technical details. Approval risk tiers read in words (R0 Minimal, R1 Low,
+  technical details. The Topology's Roles view is rooted at the team the
+  console serves, named from its id in words (`ops-team` reads "Ops team"),
+  or "Team" when a shared console holds several. Approval risk tiers read
+  in words (R0 Minimal, R1 Low,
   R2 Elevated, R3 High): the chip reads "High risk", the audit "Risk: High
   (R3)", and a missing tier "Unknown". The panels say the memory store's
   terms in everyday words (a record is "given to agents", "replaced" or

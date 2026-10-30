@@ -54,6 +54,8 @@ export interface TopologyPanelProps {
   onSelectAgent?: (agentId: string) => void;
   /** The team's display name for the role view's root ("Team" without one). */
   teamName?: string;
+  /** The team's key (its id), the role view root's tooltip. */
+  teamKey?: string;
 }
 
 type EdgeMode = "all" | "focus";
@@ -90,6 +92,7 @@ export function TopologyPanel({
   onRequestBulkAction,
   onSelectAgent,
   teamName,
+  teamKey,
 }: TopologyPanelProps): React.JSX.Element {
   const hasConnectionView = Boolean(management && management.policy.mode !== "disabled");
   const [uncontrolledView, setUncontrolledView] = React.useState<TopologyPanelView>(() => {
@@ -250,6 +253,7 @@ export function TopologyPanel({
             activity={activity}
             onSelectAgent={onSelectAgent}
             teamName={teamName}
+            teamKey={teamKey}
           />
         ) : null}
         {view === "connections" && management ? (

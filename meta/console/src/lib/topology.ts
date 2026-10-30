@@ -22,6 +22,7 @@ import type {
 export type { ConsoleTopologyControlCapabilities } from "@console-core";
 
 import type { ConsoleAgent, ConsoleTopologyNode } from "../types";
+import { SHARED_CONSOLE_RUNTIME_ID } from "./panel-runtime";
 
 export interface RuntimeTopologyEndpoint {
   authority?: string | null;
@@ -130,6 +131,25 @@ export function topologyNodeAgent<A extends { identity?: string; member_id: stri
 ): A | undefined {
   const identity = parseConsoleTopologyEndpointKey(id)?.identity ?? id;
   return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
+}
+
+/**
+ * The id of the team (the mob) whose members the Topology shows, from what
+ * the experience already carries: the runtime's own mob id (`runtime_id`),
+ * or, on a shared console, the mob of its one registered runtime
+ * (`panel_runtimes`). Undefined when a shared console holds several teams or
+ * none, or nothing names one, so the Roles root reads "Team".
+ */
+export function topologyTeamKey(
+  experience: {
+    runtime_id?: string;
+    panel_runtimes?: ReadonlyArray<{ label?: string }>;
+  } | null | undefined,
+): string | undefined {
+  const runtimeId = experience?.runtime_id?.trim();
+  if (runtimeId && runtimeId !== SHARED_CONSOLE_RUNTIME_ID) return runtimeId;
+  const runtimes = experience?.panel_runtimes;
+  return runtimes?.length === 1 ? runtimes[0]?.label?.trim() || undefined : undefined;
 }
 
 type AgentChatDockTarget = ConsoleDockTarget & { kind: "agent-chat"; memberId?: string; identity?: string };

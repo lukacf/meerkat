@@ -22,6 +22,7 @@ import {
   topologyAgentChatActions,
   topologyNodeAgent,
   topologyPlanParams,
+  topologyTeamKey,
 } from "./topology";
 
 const AUTHORITY = "incident-command-center";
@@ -626,6 +627,28 @@ test("a topology node selects its roster agent from an endpoint key or a plain i
   assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|payments-sre")?.label, "Payments SRE");
   assert.equal(topologyNodeAgent(agents, "member-sre")?.label, "Payments SRE");
   assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|unknown") === undefined, true);
+});
+
+test("the topology's team is the runtime's own mob, or a shared console's one runtime's", () => {
+  // A runtime's console: its experience names the runtime's mob.
+  assert.equal(topologyTeamKey({ runtime_id: "ops-team" }), "ops-team");
+  assert.equal(topologyTeamKey({ runtime_id: " ops-team " }), "ops-team");
+  // A shared console names no team itself; its one registered runtime does.
+  const runtime = (label: string) => ({ key: `runtime-${label}`, label, namespace: label, memory: false, workgraph: false });
+  assert.equal(
+    topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [runtime("foresight-studio")] }),
+    "foresight-studio",
+  );
+  // Several teams, none, or nothing that names one: the root reads "Team".
+  assert.equal(
+    topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [runtime("alpha"), runtime("beta")] }),
+    undefined,
+  );
+  assert.equal(topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [] }), undefined);
+  assert.equal(topologyTeamKey({ runtime_id: "console-aggregator" }), undefined);
+  assert.equal(topologyTeamKey({ runtime_id: "  " }), undefined);
+  assert.equal(topologyTeamKey({}), undefined);
+  assert.equal(topologyTeamKey(null), undefined);
 });
 
 type DockTarget = ConsoleDockTarget & { memberId?: string; identity?: string };

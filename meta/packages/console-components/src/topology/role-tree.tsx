@@ -24,6 +24,8 @@ interface RoleTreeProps {
   onSelectAgent?: (agentId: string) => void;
   /** The root's name: the team's display name when the host has one. */
   teamName?: string;
+  /** The team's key (its id), the root's tooltip, as a role's key is its heading's. */
+  teamKey?: string;
 }
 
 const STATE_COLOUR: Record<string, string> = {
@@ -47,6 +49,7 @@ export function RoleTree({
   activity,
   onSelectAgent,
   teamName,
+  teamKey,
 }: RoleTreeProps): React.JSX.Element {
   const graph = React.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
   const roleIndex = React.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
@@ -93,7 +96,7 @@ export function RoleTree({
             ▸
           </span>
           <span className="topo-roletree__dot" style={{ background: "var(--ok)" }} />
-          <span className="topo-roletree__label">{teamName?.trim() || "Team"}</span>
+          <span className="topo-roletree__label" title={teamKey?.trim() || undefined}>{teamName?.trim() || "Team"}</span>
           <span className="topo-roletree__count">{graph.agents.length} agents · {graph.roles.length} roles</span>
           {rootBusy && <span className="topo-roletree__busy" aria-label="agents working" />}
         </button>

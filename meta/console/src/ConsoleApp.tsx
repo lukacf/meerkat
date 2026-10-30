@@ -15,7 +15,7 @@ import {
   type IdleWatermark,
 } from "./lib/idle-reconcile";
 import React from "react";
-import { selectedPanelRuntime, scopedPanelParams, framesForPanelRuntime, loadPanelRuntimeSelection, savePanelRuntimeSelection } from "./lib/panel-runtime";
+import { SHARED_CONSOLE_RUNTIME_ID, selectedPanelRuntime, scopedPanelParams, framesForPanelRuntime, loadPanelRuntimeSelection, savePanelRuntimeSelection } from "./lib/panel-runtime";
 import "@console-components/styles";
 import "./console-host.css";
 
@@ -122,6 +122,7 @@ import {
   type ConsoleTopologyRpcOperation,
   topologyAgentChatActions,
   topologyNodeAgent,
+  topologyTeamKey,
 } from "./lib/topology";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
@@ -202,6 +203,7 @@ import {
   MemoryPanel,
   memoryFramePivot,
   memorySectionOutcome,
+  teamName,
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
@@ -2703,7 +2705,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     setRailCollapsed(configured);
   }, [experience?.console_config?.rail?.collapsed]);
 
-  const hasMobControlSurface = experience?.runtime_id !== "console-aggregator";
+  const hasMobControlSurface = experience?.runtime_id !== SHARED_CONSOLE_RUNTIME_ID;
   const frontendReadOnly = React.useMemo(() => resolveConsoleReadOnlyOverride(), []);
   // When access control is enforcing, `can_send_messages` is intersected
   // with the caller's per-agent send grants, so it can be false simply
@@ -5642,7 +5644,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
         />
       );
-    if (target.kind === "topology")
+    if (target.kind === "topology") {
+      // The Roles root names the team the map shows, by its mob id in words
+      // and the id as its tooltip: never the console's or the sidebar's
+      // title, which name the console. "Team" when no one team is known.
+      const teamKey = topologyTeamKey(experience);
       return (
         <TopologyPanel
           nodes={normalizedTopology?.nodes || experience?.topology?.live_snapshot?.nodes || []}
@@ -5657,11 +5663,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
           }}
-          // No console or sidebar title here: those name the console, not the
-          // team. The experience carries no team display name, so the Roles
-          // root reads "Team".
+          teamName={teamKey ? teamName(teamKey) : undefined}
+          teamKey={teamKey}
         />
       );
+    }
     if (target.kind === "health")
       return renderHealthPanel(
         experience?.health_overview?.live_snapshot?.identities || [],

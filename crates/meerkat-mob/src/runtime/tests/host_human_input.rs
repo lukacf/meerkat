@@ -1930,6 +1930,20 @@ async fn open_stop_host_holding(
     label: Option<&str>,
     held: &[AgentIdentity],
 ) -> StopHost {
+    open_stop_host_composed(root, client, label, held, false).await
+}
+
+/// [`open_stop_host_holding`], and with `llm_reconfigure` the session-LLM
+/// reconfigure host a product surface installs on the service's runtime
+/// before the mob opens, so a member's input can carry a per-turn model
+/// override.
+async fn open_stop_host_composed(
+    root: &std::path::Path,
+    client: &ScriptedClient,
+    label: Option<&str>,
+    held: &[AgentIdentity],
+    llm_reconfigure: bool,
+) -> StopHost {
     let factory = meerkat::AgentFactory::new(root.join("factory-store"))
         .user_config_root(root.join("config"))
         .runtime_root(root.join("runtime"))
@@ -1952,6 +1966,13 @@ async fn open_stop_host_holding(
         meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&db)
             .expect("co-tenant canonical runtime store"),
     );
+    let llm_reconfigure_blueprint = llm_reconfigure.then(|| {
+        meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHostBlueprint::new(
+            &builder,
+            root.join("runtime").join("llm-reconfigure-state.json"),
+            Arc::new(std::sync::RwLock::new(builder.default_llm_client.clone())),
+        )
+    });
     let service = Arc::new(
         Service::new(
             builder,
@@ -1969,6 +1990,15 @@ async fn open_stop_host_holding(
             )),
         ),
     );
+    if let Some(blueprint) = llm_reconfigure_blueprint {
+        let runtime = service
+            .canonical_runtime_adapter()
+            .expect("the session service's runtime owner");
+        let reconfigure_service: Arc<
+            dyn meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureService,
+        > = service.clone();
+        blueprint.install(&runtime, reconfigure_service);
+    }
     let storage = MobStorage::persistent(root.join("mob.db")).expect("persistent mob storage");
     let handle = match label {
         Some(label) => {
@@ -5191,6 +5221,181 @@ async fn a_host_runtime_that_stops_mid_turn_leaves_the_run_for_the_next_start() 
         "a host runtime that stops mid-turn is a crash for its member: the surviving runtime \
          loop ends without writing, and the next host runs the interrupted input once and the \
          queued one after it"
+    );
+}
+
+/// The model the per-turn override of
+/// [`an_input_to_an_idle_member_after_its_host_runtime_stopped_waits_for_the_next_start`]
+/// names: an OpenAI model other than the member's own, so the override
+/// reconfigures the session's live LLM client.
+const OVERRIDE_MODEL: &str = "gpt-5.4";
+/// The prompt of that row's input.
+const OVERRIDE_PROMPT: &str = "Answer this one with the overriding model.";
+
+/// The runtime a host ran its mob on stops while a member is idle, and the
+/// process keeps running. Another part of the process then admits an input
+/// to the member's runtime, with a per-turn model override.
+///
+/// The member's session task ended with the stopped runtime, so the input
+/// cannot run there: the stop is a crash for the member, not a failure of
+/// the input. Applying the override reconfigures the live actor ahead of the
+/// turn; without a check before that step, the runtime loop would record the
+/// input as a failed run, retry it and abandon it. With the check, the loop
+/// stops serving the session within its bound, the registration waits for a
+/// reload, the input stays non-terminal and the event log is unchanged, and
+/// a new host on another runtime of the same process runs the input once,
+/// with its override, and records no failed run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_input_to_an_idle_member_after_its_host_runtime_stopped_waits_for_the_next_start() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let (_root, root_path) = stop_root();
+    let client = ScriptedClient::new(true);
+    // The first host runs the mob on a runtime of its own.
+    let incarnation = CrashableMobIncarnation::new();
+    let (host, member) = {
+        let root_path = root_path.clone();
+        let client = client.clone();
+        incarnation
+            .install(async move {
+                let host = open_stop_host_composed(
+                    &root_path,
+                    &client,
+                    Some("idle-runtime-stop"),
+                    &[],
+                    true,
+                )
+                .await;
+                let (identity, session_id, _entry) = spawn_stop_member(&host).await;
+                let comms = host
+                    .service
+                    .comms_runtime(&session_id)
+                    .await
+                    .map(|runtime| Arc::downgrade(&runtime))
+                    .expect("the member's comms runtime");
+                (host, (identity, session_id, comms))
+            })
+            .await
+    };
+    let (identity, session_id, comms) = member;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let events_at_stop = stop_events(&root_path, &session_id).await.len();
+
+    incarnation.crash().await;
+    let StopHost {
+        handle,
+        runtime_store,
+        adapter,
+        service,
+    } = host;
+    // Another part of the process, which outlives the host's runtime, sends
+    // the idle member an input with a per-turn model override.
+    let prompt = meerkat_runtime::input::PromptInput::new(
+        OVERRIDE_PROMPT,
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    OVERRIDE_MODEL,
+                )),
+                ..Default::default()
+            },
+        ),
+    );
+    let input_id = prompt.header.id.clone();
+    let (_admitted, waiter) = adapter
+        .accept_input_with_completion(&session_id, meerkat_runtime::input::Input::Prompt(prompt))
+        .await
+        .expect("the input is admitted");
+    let loop_ended = tokio::time::timeout(WAIT, async {
+        while adapter
+            .session_has_live_executor_attachment(&session_id)
+            .await
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let reload_required = adapter
+        .durability_reload_required(&session_id)
+        .await
+        .is_some();
+    let phase_after_stop = runtime_store
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .expect("runtime-owned input read")
+        .expect("the input keeps its durable row")
+        .seed
+        .phase;
+    let input_left_open = matches!(
+        phase_after_stop,
+        InputLifecycleState::Queued | InputLifecycleState::Staged
+    );
+    let events_unchanged = stop_events(&root_path, &session_id).await.len() == events_at_stop;
+    drop(waiter);
+    // A process exit frees the member's comms name; this process keeps the
+    // stopped host's in-memory session state, so the route is retired here
+    // for the next host, as the crash rows do.
+    if let Some(runtime) = comms.upgrade() {
+        runtime.retire_inproc_route();
+    }
+    let mob_id = handle.mob_id().clone();
+    drop((handle, adapter, service, runtime_store));
+    await_supervisor_route_release(&mob_id).await;
+
+    let restarted_client = ScriptedClient::new(true);
+    let restarted = open_stop_host_composed(&root_path, &restarted_client, None, &[], true).await;
+    tokio::time::timeout(WAIT, restarted.handle.ensure_member_live(&identity))
+        .await
+        .expect("the member's wake finishes")
+        .expect("wake the member on the new host");
+    let consumed = tokio::time::timeout(WAIT, async {
+        loop {
+            let phase = restarted
+                .runtime_store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .expect("runtime-owned input read")
+                .expect("the input keeps its durable row")
+                .seed
+                .phase;
+            if phase == InputLifecycleState::Consumed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    // The log is complete once the shutdown returns (see the crash row).
+    tokio::time::timeout(WAIT, restarted.handle.shutdown())
+        .await
+        .expect("mob shutdown finishes")
+        .expect("mob shutdown");
+    let run_failures = stop_events(&root_path, &session_id)
+        .await
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::RunFailed { .. }))
+        .count();
+    assert_eq!(
+        (
+            (
+                loop_ended,
+                reload_required,
+                input_left_open,
+                events_unchanged
+            ),
+            (
+                consumed,
+                requests_carrying(&client.requests(), OVERRIDE_PROMPT),
+                requests_carrying(&restarted_client.requests(), OVERRIDE_PROMPT),
+                run_failures,
+            ),
+        ),
+        ((true, true, true, true), (true, 0, 1, 0)),
+        "an input that reaches an idle member after its host runtime stopped waits for the next \
+         start: the surviving runtime loop records no failed run, and the next host runs the \
+         input once"
     );
 }
 

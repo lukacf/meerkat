@@ -27913,6 +27913,104 @@ mod tests {
         );
     }
 
+    /// The runtime a session runtime was built on stops while its session is
+    /// idle, and the process keeps running. Another runtime of the process
+    /// then sends the session a turn with a per-turn model override.
+    ///
+    /// The session's actor ended with the stopped runtime, so the turn cannot
+    /// run there: the stop is a crash for the session, not a failure of the
+    /// turn. The override's LLM hot swap, and the reads ahead of it, need the
+    /// live actor; without a check before them, the runtime loop would record
+    /// the turn as a failed run, retry it and abandon it. With the check, the
+    /// session's registration waits for a reload with the turn's input still
+    /// owed, and a session runtime started again over the same stores runs
+    /// it once.
+    #[test]
+    fn a_turn_after_its_hosts_runtime_stopped_waits_for_the_next_start() {
+        const OVERRIDE_PROMPT: &str = "a turn sent after the host's runtime stopped";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let host = rpc_host_runtime();
+        let (runtime, session_id) = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "the first turn").await;
+            (runtime, session_id)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        let override_requests = || {
+            recorder
+                .requests()
+                .iter()
+                .filter(|request| {
+                    let dump = format!("{request:?}");
+                    dump.contains(OVERRIDE_PROMPT) && !dump.contains(AFTER_RESTART)
+                })
+                .count()
+        };
+        // Another runtime of the same process, which outlives the host's.
+        let process = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the process's other runtime");
+        let observed = process.block_on(async {
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    OVERRIDE_PROMPT.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    Some(crate::handlers::turn::TurnOverrides {
+                        model: Some("claude-opus-4-8".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await;
+            let turn_failed = matches!(turn, Ok(Err(_)));
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let before_restart = override_requests();
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(recorder.clone()));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = override_requests();
+            restarted.shutdown().await;
+            (turn_failed, reload_required, before_restart, after_restart)
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (true, true, 0, 1),
+            "a turn sent after the host's runtime stopped waits for the next start: the \
+             surviving runtime loop records no failed run, and the restarted session runtime \
+             runs it once"
+        );
+    }
+
     /// The live open consumes the staged prompt and persists that with its
     /// row, so the persisted pending flag is clear after the first turn, and
     /// a restart does not deliver the prompt again: the transcript keeps

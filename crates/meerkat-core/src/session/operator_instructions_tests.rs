@@ -531,3 +531,57 @@ fn entry_chronology_refuses_a_broken_supersedes_chain() {
         "refusals change nothing"
     );
 }
+
+/// S5: only a run start and a compaction fold write entry rows. A generic
+/// rewrite (and a restore, which commits through the same guard) cannot
+/// erase one, move one, or mint one, even a row that would continue the
+/// entry chronology.
+#[test]
+fn generic_rewrite_cannot_mint_move_or_erase_entry_rows() {
+    use crate::{TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection};
+
+    fn assert_refused(session: &mut Session, start: usize, end: usize, replacement: Vec<Message>) {
+        let before = session.messages().to_vec();
+        let error = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start, end },
+                replacement,
+                TranscriptRewriteReason::new("attempt an entry rewrite"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect_err("the rewrite is refused");
+        assert!(
+            matches!(
+                &error,
+                TranscriptEditError::InvalidTranscriptShape(message)
+                    if message.contains("operator instruction entr")
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            session.messages(),
+            before.as_slice(),
+            "a refusal changes nothing"
+        );
+    }
+
+    // [head prompt, delta 1, user turn, delta 2]
+    let mut session = session_with_two_deltas();
+    let rows = session.messages().to_vec();
+    assert_eq!(entry_rows(&rows).len(), 2);
+
+    // Erase the newest entry.
+    assert_refused(&mut session, 3, 4, Vec::new());
+    // Move it before the user turn it follows.
+    assert_refused(&mut session, 2, 4, vec![rows[3].clone(), rows[2].clone()]);
+    // Mint a snapshot of what is in effect, with the next entry sequence.
+    let snapshot = mint_operator_instruction_snapshot(
+        header(session.id(), 3),
+        vec![active("app.example", "tone", 2, "Answer in a casual tone.")],
+        at(),
+    )
+    .unwrap()
+    .expect("a non-empty set renders a snapshot");
+    assert_refused(&mut session, 4, 4, vec![Message::System(snapshot)]);
+}

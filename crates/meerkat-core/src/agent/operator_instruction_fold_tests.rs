@@ -966,7 +966,15 @@ async fn a_fork_child_fold_takes_out_inherited_rows_and_keeps_envelope_5() {
         .set_build_state(meerkat_core::SessionBuildState::default())
         .expect("test session build state should serialize");
     assert_eq!(entry_identities(child_session.messages()).len(), 1);
-    assert!(child_session.instruction_target_state().unwrap().is_none());
+    assert_eq!(
+        child_session
+            .instruction_target_state()
+            .unwrap()
+            .expect("a fork that copies entry rows records the instruction state")
+            .owner(),
+        &meerkat_core::InstructionTargetOwner::Unowned,
+        "the child has no target of its own"
+    );
     let child_client = Arc::new(FoldClient::default());
     let child_compactor = Arc::new(ArmedCompactor::default());
     let mut child = build_agent(

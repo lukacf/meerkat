@@ -35,6 +35,11 @@ struct RunProbe {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
     gated: std::sync::atomic::AtomicBool,
+    /// The next run is refused before it starts, as a run-start veto or a
+    /// refusal of the turn's input refuses it.
+    refuse_next_run: std::sync::atomic::AtomicBool,
+    /// The next System append of a turn fails.
+    fail_next_system_append: std::sync::atomic::AtomicBool,
 }
 
 impl RunProbe {
@@ -44,6 +49,16 @@ impl RunProbe {
 
     fn set_gated(&self, gated: bool) {
         self.gated.store(gated, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn refuse_next_run(&self) {
+        self.refuse_next_run
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn fail_next_system_append(&self) {
+        self.fail_next_system_append
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -58,6 +73,9 @@ struct ProbeAgent {
     identity: SessionLlmIdentity,
     probe: Arc<RunProbe>,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
+    /// What the last run start's entry changed, until the session task
+    /// reports whether its run started.
+    run_start_application: Option<meerkat_core::RunStartInstructionApplication>,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -91,6 +109,7 @@ impl SessionAgentBuilder for ProbeBuilder {
             },
             probe: Arc::clone(&self.probe),
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
+            run_start_application: None,
         })
     }
 }
@@ -114,8 +133,17 @@ impl ProbeAgent {
     }
 
     /// One run: its input row, its request (what the model would read),
-    /// the held gate, then the answer.
+    /// the held gate, then the answer. A refused run starts nothing.
     async fn run(&mut self, prompt: String) -> Result<RunResult, AgentError> {
+        if self
+            .probe
+            .refuse_next_run
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AgentError::ConfigError(
+                "the run is refused before it starts".to_string(),
+            ));
+        }
         self.session
             .push(Message::User(meerkat_core::types::UserMessage::text(
                 prompt,
@@ -215,6 +243,15 @@ impl SessionAgent for ProbeAgent {
     }
 
     fn append_system_messages(&mut self, contents: Vec<String>) -> Result<(), AgentError> {
+        if self
+            .probe
+            .fail_next_system_append
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AgentError::ConfigError(
+                "the turn's System append is refused".to_string(),
+            ));
+        }
         for content in contents {
             self.session.append_system_message(content);
         }
@@ -247,9 +284,32 @@ impl SessionAgent for ProbeAgent {
         run_start: InstructionRunStart,
         run_id: Option<meerkat_core::lifecycle::RunId>,
     ) -> Result<RunStartInstructionOutcome, AgentError> {
+        let (outcome, application) = self
+            .session
+            .apply_run_start_instructions_reversibly(
+                run_start,
+                InstructionLowering::MidConversation,
+                run_id,
+            )
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        self.run_start_application = application;
+        Ok(outcome)
+    }
+
+    fn conclude_run_start_operator_instructions(
+        &mut self,
+        run_started: bool,
+    ) -> Result<bool, AgentError> {
+        let Some(application) = self.run_start_application.take() else {
+            return Ok(false);
+        };
+        if run_started {
+            return Ok(false);
+        }
         self.session
-            .apply_run_start_instructions(run_start, InstructionLowering::MidConversation, run_id)
-            .map_err(|error| AgentError::InternalError(error.to_string()))
+            .revert_run_start_instructions(application)
+            .map_err(AgentError::InternalError)?;
+        Ok(true)
     }
 }
 
@@ -419,4 +479,90 @@ async fn ephemeral_service_refuses_durability_unavailable() {
         service.read_session_instructions(&id).await,
         Err(SessionInstructionError::DurabilityUnavailable)
     ));
+}
+
+/// A turn whose run never starts leaves no operator-instruction entry
+/// naming it: a run refused before it starts, and a turn whose own System
+/// append fails after its run start. The change stays pending, and the
+/// next fresh run start applies it once, right before the run's own input.
+#[tokio::test]
+async fn a_turn_whose_run_never_starts_leaves_no_entry_and_the_next_run_start_applies_it() {
+    let probe = Arc::new(RunProbe::default());
+    let service = EphemeralSessionService::new(
+        ProbeBuilder {
+            probe: Arc::clone(&probe),
+        },
+        1,
+    );
+    let id = service
+        .create_session(create_request())
+        .await
+        .expect("create a deferred session")
+        .session_id;
+    let receipt = service
+        .set_session_instruction_control(&id, write_tone())
+        .await
+        .expect("the write records");
+    assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+
+    probe.refuse_next_run();
+    service
+        .start_turn(&id, turn("refused"))
+        .await
+        .expect_err("the run is refused before it starts");
+    let session = service.export_session(&id).await.expect("export");
+    assert!(
+        !session.messages().iter().any(is_entry),
+        "no entry names a run that never started: {:?}",
+        session.messages()
+    );
+
+    probe.fail_next_system_append();
+    let mut with_system_prompt = turn("system append refused");
+    with_system_prompt.system_prompt = Some("Keep answers short.".to_string());
+    service
+        .start_turn(&id, with_system_prompt)
+        .await
+        .expect_err("the turn's System append fails");
+    let session = service.export_session(&id).await.expect("export");
+    assert!(
+        !session.messages().iter().any(is_entry),
+        "no entry names a run that never started: {:?}",
+        session.messages()
+    );
+    assert!(probe.requests().is_empty(), "no run reached the model");
+
+    service
+        .start_turn(&id, turn("next"))
+        .await
+        .expect("the next turn runs");
+    let requests = probe.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let entry_index = request
+        .iter()
+        .position(is_entry)
+        .expect("the next fresh run start applies the pending change");
+    assert_eq!(
+        entry_index + 2,
+        request.len(),
+        "the entry immediately precedes the run's own input"
+    );
+    assert_eq!(
+        request.iter().filter(|message| is_entry(message)).count(),
+        1
+    );
+    let Message::System(entry) = &request[entry_index] else {
+        unreachable!()
+    };
+    assert!(entry.content.contains("Answer formally."));
+    let session = service.export_session(&id).await.expect("export");
+    assert_eq!(
+        session
+            .messages()
+            .iter()
+            .filter(|message| is_entry(message))
+            .count(),
+        1
+    );
 }

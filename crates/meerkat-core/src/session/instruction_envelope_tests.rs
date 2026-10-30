@@ -9,7 +9,9 @@ use super::operator_instructions::{
     OperatorInstructionChangeContent, OperatorInstructionEntryHeader,
     mint_operator_instruction_delta,
 };
-use super::{SESSION_INSTRUCTION_STATE_KEY, Session};
+use super::{
+    InstructionTargetOwner, SESSION_INSTRUCTION_STATE_KEY, Session, TranscriptReplacement,
+};
 use crate::generated::session_persistence_version_authority as current;
 use crate::session_store::{SessionHead, TranscriptStrandId};
 use crate::types::{InstructionKey, InstructionNamespace, Message, UserMessage};
@@ -171,5 +173,91 @@ fn head_canonical_accepts_envelope_5_heads_for_write() {
     assert!(
         released.require_current_envelope_for_write().is_err(),
         "a successor never keeps the released v3 envelope"
+    );
+}
+
+fn is_entry(message: &Message) -> bool {
+    matches!(message, Message::System(system) if system.instruction_entry.is_some())
+}
+
+/// The recorded instruction state is the whole presence answer: appending
+/// an entry row records it, and a session without it is not read for entry
+/// rows (no transcript scan on a save path).
+#[test]
+fn the_state_key_alone_marks_a_document_with_instruction_facts() {
+    let mut session = session_with_entry();
+    assert!(
+        session
+            .metadata()
+            .contains_key(SESSION_INSTRUCTION_STATE_KEY),
+        "appending an entry row records the instruction state"
+    );
+    assert!(session.carries_operator_instruction_facts());
+
+    session.metadata.remove(SESSION_INSTRUCTION_STATE_KEY);
+    assert!(session.messages().iter().any(is_entry));
+    assert!(
+        !session.carries_operator_instruction_facts(),
+        "the answer reads the state key, never the transcript"
+    );
+    assert_eq!(session.persisted_envelope_version(), 4);
+}
+
+/// A fork child that copies entry rows records an unowned instruction
+/// state (no target of its own, nothing pending), so it keeps the key the
+/// presence answer reads and is still written at envelope 5. A fork whose
+/// prefix copies no entry row records nothing.
+#[test]
+fn a_fork_child_that_copies_entry_rows_records_the_unowned_state_and_writes_envelope_5() {
+    // [prompt, user, entry, user]
+    let mut source = session_with_entry();
+    source.push(Message::User(UserMessage::text("and then?")));
+    let replaced = source
+        .fork_replacing(
+            3,
+            TranscriptReplacement::Message {
+                message: Message::User(UserMessage::text("and after that?")),
+            },
+        )
+        .expect("an edited fork");
+    for (how, child) in [
+        ("fork", source.fork()),
+        ("fork_at", source.fork_at(3)),
+        ("fork_replacing", replaced),
+    ] {
+        assert!(
+            child.messages().iter().any(is_entry),
+            "{how}: the child copies the entry row"
+        );
+        let state = child
+            .instruction_target_state()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{how}: the child records the instruction state"));
+        assert_eq!(
+            state.owner(),
+            &InstructionTargetOwner::Unowned,
+            "{how}: the child has no target of its own"
+        );
+        assert!(child.carries_operator_instruction_facts(), "{how}");
+        assert_eq!(
+            envelope_version(&child.to_persisted_bytes().unwrap()),
+            5,
+            "{how}: the child is still written at envelope 5"
+        );
+    }
+
+    let before_the_entry = source.fork_at(2);
+    assert!(!before_the_entry.messages().iter().any(is_entry));
+    assert!(
+        before_the_entry
+            .instruction_target_state()
+            .unwrap()
+            .is_none()
+    );
+    assert!(!before_the_entry.carries_operator_instruction_facts());
+    assert_eq!(
+        envelope_version(&before_the_entry.to_persisted_bytes().unwrap()),
+        4,
+        "a fork without entry rows stays at envelope 4"
     );
 }

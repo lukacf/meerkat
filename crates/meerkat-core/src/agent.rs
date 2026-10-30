@@ -28,6 +28,8 @@ mod observation_barrier_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod operator_instruction_fold_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_run_start_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
 mod operator_instruction_turn_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]

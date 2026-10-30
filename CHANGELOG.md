@@ -395,6 +395,12 @@ them.
   literal must set it; one that ends with
   `..MobOperatorAuthorityFacts::default()` keeps compiling.
 
+- `meerkat-core`, `meerkat`: `service::SessionBuildOptions` gains the
+  public fields `mob_operator_authority_only` and `mob_incarnation` (see
+  Added), and `meerkat`'s `AgentBuildConfig` gains the same fields, so a
+  struct literal needs them; `Default` and `AgentBuildConfig::new` fill them
+  with `false` and `None`, which keep every existing build unchanged.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -736,6 +742,28 @@ them.
   `mint_mob_operator_authority_from_facts` grants. Nothing mints the scope
   yet, so behaviour is unchanged. The scope and the check are Rust-only; the
   wire contracts do not carry them.
+
+- `meerkat-core`, `meerkat`, `meerkat-mob`, `meerkat-runtime`: two seams for
+  minting an agent creator's identity creation scope in its build. A build
+  can bind its mob operator authority without mounting any mob operator
+  tool surface: with `SessionBuildOptions::mob_operator_authority_only` (and
+  `AgentBuildConfig::mob_operator_authority_only`) set, the build's mob tools
+  resolve to disabled, whatever its mob override says, and a generated
+  authority is still bound to the session's external tools, where a host's
+  own tools read it.
+  `mob_operator_authority::identity_creation_only_mob_operator_authority`
+  mints the authority such a creator holds: the creation scope for its
+  templates in one mob, bound to the mob's incarnation, and nothing else (no
+  manage or spawn-profile scope, create and profile-mutation authority off).
+  So a creator whose profile disables mob tools keeps its creation scope and
+  gets no mob tools. Every member build a mob runtime performs, a fresh
+  spawn, a restore or a wake, now carries that runtime's own incarnation
+  witness in `SessionBuildOptions::mob_incarnation` (and
+  `AgentBuildConfig::mob_incarnation`), so a host's member build hook mints
+  the member's scope for the mob as it runs, a creator restored at boot
+  before the host holds the mob's handle included. The witness is never
+  persisted, and a placed member built on a host that does not run its mob
+  carries none.
 
 ### Changed
 

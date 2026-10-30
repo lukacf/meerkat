@@ -524,7 +524,7 @@
           "data": {
             "kind": "candidate_launch"
           },
-          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
+          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the console schedule writes (meta/schedule/create, update, pause, resume and delete), the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
         }
       },
       "policy_error_inventory": "policy_error_refs supplement each endpoint or method's local errors array. Endpoint references are conditional on the dispatched method, not all requests.",
@@ -976,6 +976,240 @@
                 -32603
               ],
               "note": "-32055 is a typed refusal: data.kind fork_source_unavailable (cause running, no_session for a seat that was never woken, which the fork does not wake, remote_read_unavailable or authority_unavailable), nothing forked; fork_source_changed (agent_identity, source_member_id), a side chat forked from another session of the source than the fork's checks read (a reset or a respawn ran in between); or unwired_seat_unavailable (wiring.rule seated_with_peers), a seated side chat with peer edges after all. For the last two the side chat is retired again and data.retired says whether that succeeded. -32001 is a source the console's visibility policy hides (identity_hidden_by_policy). Under a member auth binding a source whose session records another binding or none answers -32602 member_auth_binding_uncarried, nothing forked. -32037 is meerkat's fork_instruction_refused under the refuse policy. A committed fork whose seat failed keeps meerkat's fork_member_provision_failed data with its fork_session_id."
+            }
+          ]
+        },
+        "meta/schedule/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity"
+            ],
+            "note": "identity names the agent as meta/console/send names it (a public alias; a runtime member id the console knows is read as its identity). Gated on agent.view for the agent (-32030). Offered in meta/capabilities where the runtime's schedule host keeps console schedules; elsewhere the method answers -32601. Console-only: the stdin gateway does not dispatch the meta/schedule/* methods."
+          },
+          "success": {
+            "body": "console_schedule_list",
+            "required_fields": [
+              "identity",
+              "schedules"
+            ],
+            "note": "schedules lists the agent's console schedules, oldest first, each a console_schedule: schedule_id, identity, name (or null), content, trigger (the scheduler's trigger, tagged by type: once, interval or calendar), phase (active or paused), revision, sender (the principal the schedule sends as, null for an anonymous caller), defined_at_utc, created_at_utc, updated_at_utc and next_due_at_utc (the next planned send of an active schedule, else null). The agent's own schedules (its schedule tools) and other schedules of the store are not listed, and the agent's schedule tools neither list nor change console schedules."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32601,
+                -32602,
+                -32004,
+                -32000
+              ],
+              "note": "-32601 where the gateway keeps no console schedules; -32602 for a missing or invalid identity; -32004 data.kind schedule_host_unavailable when the schedule store is unavailable; -32000 (data.error internal_error) when the console cannot read its agents or the store."
+            }
+          ]
+        },
+        "meta/schedule/create": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "content",
+              "trigger"
+            ],
+            "optional_fields": [
+              "name"
+            ],
+            "note": "A deferred send of content (a non-empty string) to the agent identity names, at the trigger's times: the scheduler's trigger, tagged by type (once {due_at_utc}, interval {start_at_utc, every_seconds, end_at_utc?} or calendar {timezone, minute, hour, day_of_month, month, day_of_week, year?}, each calendar field {kind: any} or {kind: values, values}). Gated as meta/console/send is on this route, for the caller as the console resolves it, signed in or not: a writable console (-32010), a valid public alias, and agent.send for the agent under the live access policy (-32030). The schedule records that caller as its sender: the principal the console send would use, with its issuer and subject only for a verified signed-in human."
+          },
+          "success": {
+            "body": "console_schedule",
+            "required_fields": [
+              "schedule_id",
+              "identity",
+              "name",
+              "content",
+              "trigger",
+              "phase",
+              "revision",
+              "sender",
+              "next_due_at_utc"
+            ],
+            "note": "The schedule as meta/schedule/list answers it. Each due time is sent as a console send by the recorded sender, judged when it fires through the same gate as a live send: a writable console, agent.send for the sender under the access policy then, an addressable agent whose input is not governed, and, for a signed-in human sender, Console sessions not revoked since the schedule was defined. A refused or failed send fails that occurrence (delivery_failed) and the schedule keeps its later times; a retired or removed agent fails its sends the same way, and the schedule stays until it is deleted. A send is deduplicated under its occurrence's delivery key in the sender's send scope, as a live send by the sender is, so a redelivered occurrence is sent once while the console's dedupe store holds the key (an in-memory store forgets it on restart). Sends carry origin console:schedule and the scheduler turn origin."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32002,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content or an invalid trigger (the scheduler's validation, an unknown time zone among them)."
+            }
+          ]
+        },
+        "meta/schedule/update": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "schedule_id"
+            ],
+            "optional_fields": [
+              "content",
+              "trigger",
+              "name"
+            ],
+            "note": "Changes the console schedule schedule_id of the agent identity names: its content, trigger or name, each kept when absent. Gated as meta/schedule/create. The update records the caller as the schedule's sender, whatever it changes, and judges the agent again as a create does."
+          },
+          "success": {
+            "body": "console_schedule",
+            "required_fields": [
+              "schedule_id",
+              "identity",
+              "name",
+              "content",
+              "trigger",
+              "phase",
+              "revision",
+              "sender",
+              "next_due_at_utc"
+            ],
+            "note": "The changed schedule. Every update moves the schedule to a new revision and plans its next times again."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32002,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. The other refusals are meta/schedule/create's."
+            }
+          ]
+        },
+        "meta/schedule/pause": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "schedule_id"
+            ],
+            "note": "Stops the console schedule's sends until it is resumed. Gated on a writable console and agent.send for the agent; the sender stays as it is."
+          },
+          "success": {
+            "body": "console_schedule",
+            "required_fields": [
+              "schedule_id",
+              "identity",
+              "name",
+              "content",
+              "trigger",
+              "phase",
+              "revision",
+              "sender",
+              "next_due_at_utc"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. -32602 for a schedule the scheduler's lifecycle refuses to pause (one already paused)."
+            }
+          ]
+        },
+        "meta/schedule/resume": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "schedule_id"
+            ],
+            "note": "Resumes a paused console schedule. Gated as meta/schedule/create: the resume records the caller as the schedule's sender while it is still paused, so no send goes out as the earlier sender, and judges the agent again as a create does."
+          },
+          "success": {
+            "body": "console_schedule",
+            "required_fields": [
+              "schedule_id",
+              "identity",
+              "name",
+              "content",
+              "trigger",
+              "phase",
+              "revision",
+              "sender",
+              "next_due_at_utc"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32002,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. -32602 for a schedule that is not paused. The other refusals are meta/schedule/create's."
+            }
+          ]
+        },
+        "meta/schedule/delete": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "schedule_id"
+            ],
+            "note": "Deletes the console schedule and its planned sends. Gated on a writable console and agent.send for the agent."
+          },
+          "success": {
+            "body": "console_schedule_deleted",
+            "required_fields": [
+              "identity",
+              "schedule_id",
+              "deleted"
+            ],
+            "note": "deleted is true."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's."
             }
           ]
         },

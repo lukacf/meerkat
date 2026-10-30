@@ -107,6 +107,12 @@ export const CONSOLE_COMMAND_NAMES = {
   resetIdentity: "resetIdentity",
   stopMemberRun: "stopMemberRun",
   forkMember: "forkMember",
+  listSchedules: "listSchedules",
+  createSchedule: "createSchedule",
+  updateSchedule: "updateSchedule",
+  pauseSchedule: "pauseSchedule",
+  resumeSchedule: "resumeSchedule",
+  deleteSchedule: "deleteSchedule",
   listRoutingRoutes: "listRoutingRoutes",
   listDeliveryHistory: "listDeliveryHistory",
   listGatingPending: "listGatingPending",
@@ -202,6 +208,50 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   // `agent_identity` explicitly; the source is the conversation's agent.
   [CONSOLE_COMMAND_NAMES.forkMember]: {
     method: CONSOLE_RPC_METHODS.forkMember,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  // Console schedules: deferred sends to the target's agent; params
+  // carry `identity` (filled from the target when absent).
+  [CONSOLE_COMMAND_NAMES.listSchedules]: {
+    method: CONSOLE_RPC_METHODS.scheduleList,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  [CONSOLE_COMMAND_NAMES.createSchedule]: {
+    method: CONSOLE_RPC_METHODS.scheduleCreate,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  [CONSOLE_COMMAND_NAMES.updateSchedule]: {
+    method: CONSOLE_RPC_METHODS.scheduleUpdate,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  [CONSOLE_COMMAND_NAMES.pauseSchedule]: {
+    method: CONSOLE_RPC_METHODS.schedulePause,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  [CONSOLE_COMMAND_NAMES.resumeSchedule]: {
+    method: CONSOLE_RPC_METHODS.scheduleResume,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  [CONSOLE_COMMAND_NAMES.deleteSchedule]: {
+    method: CONSOLE_RPC_METHODS.scheduleDelete,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
       "meta/identity-chat",
       "meta/identity-inspect",
@@ -731,6 +781,12 @@ const identityCommandMethods = new Set<string>([
   CONSOLE_RPC_METHODS.retireIdentity,
   CONSOLE_RPC_METHODS.respawnIdentity,
   CONSOLE_RPC_METHODS.resetIdentity,
+  CONSOLE_RPC_METHODS.scheduleList,
+  CONSOLE_RPC_METHODS.scheduleCreate,
+  CONSOLE_RPC_METHODS.scheduleUpdate,
+  CONSOLE_RPC_METHODS.schedulePause,
+  CONSOLE_RPC_METHODS.scheduleResume,
+  CONSOLE_RPC_METHODS.scheduleDelete,
 ]);
 
 function identityForCommandTarget(target: ConsoleWorkbenchTarget): string | null {

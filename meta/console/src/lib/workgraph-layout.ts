@@ -117,6 +117,20 @@ export function workGraphStatusWord(status: string | null | undefined): string {
   return WORK_STATUS_WORDS[key] || humanizeEnum(key);
 }
 
+const EDGE_WORDS: Record<string, string> = {
+  blocks: "blocks",
+  related: "related",
+  supersedes: "replaces",
+  derived_from: "derived from",
+};
+
+/// A link between two work items in words, for the graph's edge labels:
+/// "blocks", "replaces" (supersedes), "derived from". Unknown kinds are
+/// humanized, never shown raw.
+export function workGraphEdgeWord(kind: string): string {
+  return EDGE_WORDS[kind] || humanizeEnum(kind).toLowerCase();
+}
+
 /// created_at then id - the tree panel's comparator, so both views agree.
 function compareIds(byId: Map<string, WorkGraphWireItem>, left: string, right: string): number {
   const leftKey = byId.get(left)?.created_at || "";

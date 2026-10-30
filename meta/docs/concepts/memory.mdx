@@ -293,7 +293,7 @@ The store operation behind it is `StewardStore::review_quarantined`, which the b
 
 ## Console Memory panel
 
-When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel: trust through inspectability. Its reads are served by ten `meta/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants. Its one mutation is the quarantine decision above, offered as Release and Tombstone on a quarantined record's detail view:
+When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel: trust through inspectability. Its reads are served by ten `meta/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants. Its one mutation is the quarantine decision above, offered as Release and Discard (the `tombstone` verdict) on a quarantined record's detail view:
 
 | Method | Returns |
 |--------|---------|

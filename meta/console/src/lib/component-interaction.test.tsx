@@ -481,9 +481,9 @@ test("MemoryPanel reads in names and words; IDs live in tooltips and technical d
     assert.equal(text(group).includes("Coordinator"), true, text(group));
     assert.equal(text(group).includes(record.id), false, "no record ID on the list row");
 
-    // Biography: the evidence reads as a conversation; the session ID stays in
-    // the button as a technical ID (its full value visually hidden), and the
-    // record ID moves into the collapsed technical details.
+    // Biography: the evidence reads as a conversation; the session ID and
+    // generation are not on it but in the collapsed technical details, with
+    // the record ID.
     await render(panel({
       realm: "default",
       record: { ...record, body: "Release train cutoff is Thursday 17:00 UTC.", content_hash: "sha256:9f2c" },
@@ -491,9 +491,9 @@ test("MemoryPanel reads in names and words; IDs live in tooltips and technical d
       injections: [{ record_id: record.id, identity: "coordinator", surface: "build", at_ms: now - hour }],
     }));
     const evidence = text("[data-testid='memory-evidence:0']");
-    assert.equal(evidence.includes("Conversation with Coordinator, messages 12-18"), true, evidence);
-    assert.equal(evidence.includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), true, evidence);
-    assert.equal(evidence.includes("generation 4"), true, evidence);
+    assert.equal(evidence, "Conversation with Coordinator, messages 12-18");
+    assert.equal(evidence.includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), false, evidence);
+    assert.equal(evidence.includes("generation 4"), false, evidence);
     assert.equal(text("[data-testid='memory-detail-born']").includes("Coordinator (agent)"), true);
     assert.equal(text("[data-testid='memory-detail-life']").includes("Given to Coordinator at startup"), true);
     const technical = host.querySelector("[data-testid='memory-detail'] details.cc-tech");
@@ -501,6 +501,8 @@ test("MemoryPanel reads in names and words; IDs live in tooltips and technical d
     assert.equal(technical?.hasAttribute("open"), false, "technical details start collapsed");
     assert.equal((technical?.textContent || "").includes(record.id), true);
     assert.equal((technical?.textContent || "").includes("sha256:9f2c"), true);
+    assert.equal((technical?.textContent || "").includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), true);
+    assert.equal((technical?.textContent || "").includes("generation 4"), true);
     const headline = text("[data-testid='memory-detail'] header");
     assert.equal(headline.includes(record.id), false, "the ID is not part of the headline");
     assert.deepEqual(warnings, []);

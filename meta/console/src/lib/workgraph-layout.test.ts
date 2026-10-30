@@ -8,6 +8,7 @@ import {
   layoutWorkGraph,
   workGraphEdgeMidpoint,
   workGraphEdgePath,
+  workGraphEdgeWord,
 } from "./workgraph-layout";
 import type { WorkGraphWireItem } from "../types";
 
@@ -224,4 +225,12 @@ test("dependency edges preserve structural parent placement and cycles remain de
   assert.equal(cyclic.edges.length, 2);
   assert.deepEqual(layoutWorkGraph(items.slice().reverse(), cycle.slice().reverse()).nodes, cyclic.nodes);
   assert.ok(cyclic.width < WORKGRAPH_GRAPH_COL_WIDTH * items.length && Number.isFinite(cyclic.height));
+});
+
+test("workgraph links read in words, never as raw kinds", () => {
+  assert.equal(workGraphEdgeWord("blocks"), "blocks");
+  assert.equal(workGraphEdgeWord("related"), "related");
+  assert.equal(workGraphEdgeWord("supersedes"), "replaces");
+  assert.equal(workGraphEdgeWord("derived_from"), "derived from");
+  assert.equal(workGraphEdgeWord("duplicate_of"), "duplicate of");
 });

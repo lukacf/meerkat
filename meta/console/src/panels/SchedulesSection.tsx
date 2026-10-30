@@ -3,6 +3,7 @@ import React from "react";
 import {
   CONSOLE_SCHEDULE_COMMANDS,
   describeSchedulePhase,
+  describeScheduleSender,
   describeScheduleTrigger,
   emptyScheduleDraft,
   formatScheduleTime,
@@ -86,10 +87,10 @@ export function SchedulesSection({
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
-  // A sender that is an agent reads by its display name; other senders (the
-  // console's own principals) read as they are.
+  // A sender that is an agent reads by its display name, a console identity
+  // in words; other senders (the console's own principals) read as they are.
   const directory = useAgentDirectory();
-  const senderName = (sender: string) => directory.lookup(sender)?.label ?? sender;
+  const senderLabel = (sender: string) => directory.lookup(sender)?.label;
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<ScheduleForm | null>(null);
   const runRef = React.useRef(run);
@@ -307,8 +308,12 @@ export function SchedulesSection({
           </p>
         ) : null}
         {schedule.senderHidden ? null : (
-          <p className="console-schedules__meta" data-testid={`schedule-sender:${id}`}>
-            {schedule.sender ? `Sends as ${senderName(schedule.sender)}` : "Sends as this console"}
+          <p
+            className="console-schedules__meta"
+            data-testid={`schedule-sender:${id}`}
+            title={schedule.sender || undefined}
+          >
+            {`Sends as ${describeScheduleSender(schedule.sender, senderLabel)}`}
           </p>
         )}
         {editing.canChange ? (

@@ -9,6 +9,7 @@ import {
   consoleScheduleEditing,
   consoleScheduleOffer,
   describeInterval,
+  describeScheduleSender,
   describeScheduleTrigger,
   emptyScheduleDraft,
   localDateTimeInput,
@@ -362,4 +363,17 @@ test("a refusal reads by its kind, and server text shows only for invalid params
   assert.equal(scheduleIsGone(rpcError(-32001, { kind: "schedule_not_found" })), true);
   assert.equal(scheduleIsGone(rpcError(-32001, { kind: "unknown_identity" })), false);
   assert.equal(scheduleIsGone(new Error("x")), false);
+});
+
+test("a schedule's sender reads in words; a console identity is never shown as its key", () => {
+  assert.equal(describeScheduleSender("console:shared"), "the shared console identity");
+  assert.equal(describeScheduleSender("console:night_shift"), "the night shift console identity");
+  assert.equal(describeScheduleSender(null), "this console");
+  assert.equal(describeScheduleSender("  "), "this console");
+  // An agent sender reads by its name; any other principal as it is.
+  assert.equal(describeScheduleSender("identity:alpha", (key) => (key === "identity:alpha" ? "Alpha" : undefined)), "Alpha");
+  assert.equal(describeScheduleSender("operator@example.test"), "operator@example.test");
+  for (const sender of ["console:shared", "console:night_shift"]) {
+    assert.doesNotMatch(describeScheduleSender(sender), /console:/, sender);
+  }
 });

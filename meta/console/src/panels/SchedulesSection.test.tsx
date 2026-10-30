@@ -122,7 +122,10 @@ describe("SchedulesSection", () => {
 
     expect(view.getByTestId("schedule-when:sch_1").textContent).toBe("Every 2 hours from 2030-01-01T09:00:00Z");
     expect(view.getByTestId("schedule-next:sch_1").textContent).toBe("Next: 2030-01-01T11:00:00Z");
-    expect(view.getByTestId("schedule-sender:sch_1").textContent).toBe("Sends as console:shared");
+    expect(view.getByTestId("schedule-sender:sch_1").textContent).toBe("Sends as the shared console identity");
+    // The raw sender key is the tooltip, never the visible text.
+    expect(view.getByTestId("schedule-sender:sch_1").textContent?.includes("console:shared")).toBe(false);
+    expect(view.getByTestId("schedule-sender:sch_1").getAttribute("title")).toBe("console:shared");
     expect(view.getByTestId("schedule-phase:sch_2").textContent).toBe("Paused");
     expect(view.getByTestId("schedule:sch_2").textContent).toContain("Untitled schedule");
     expect(view.getByTestId("schedule-sender:sch_2").textContent).toBe("Sends as this console");

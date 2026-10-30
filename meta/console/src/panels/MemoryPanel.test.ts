@@ -76,10 +76,12 @@ const {
   trustDisplay,
   trustChipTone,
   statusWord,
+  statusTitle,
   statusChipTone,
   authorDisplay,
   scopeKindLabel,
   scopeKeyOf,
+  teamName,
   scopeOwnerName,
   scopeHeading,
   overviewScopeName,
@@ -94,6 +96,9 @@ const {
   dreamOpKindsDisplay,
   partitionName,
   knowledgeSegmentTitle,
+  needsGrantText,
+  grantTitle,
+  realmSpaceName,
 } = __memoryTest;
 
 function record(overrides: Partial<MemoryPanelRecord> & Pick<MemoryPanelRecord, "id" | "scope">): MemoryPanelRecord {
@@ -537,22 +542,24 @@ test("verdict strip mounts six tiles; checks this console cannot run say so", ()
   assert.equal(byId.get("echo-safety")?.summary, "Not checked automatically");
   assert.match(
     byId.get("echo-safety")?.lines.join(" ") || "",
-    /injection history on the Knowledge tab marks repeated injections/,
+    /On the Knowledge tab, the list of memory given to agents marks repeats/,
   );
   assert.equal(byId.get("taint-wall")?.status, "unverifiable");
   assert.equal(byId.get("taint-wall")?.summary, "Not checked automatically");
   assert.match(
     byId.get("taint-wall")?.lines.join(" ") || "",
-    /Pipeline tab marks proposals from tainted sessions/,
+    /Pipeline tab marks proposals from untrusted sessions/,
   );
   assert.equal(byId.get("store-floor")?.status, "unverifiable");
   assert.equal(byId.get("store-floor")?.summary, "Store totals are not available");
   assert.equal(verdictStatusLabel("unverifiable"), "UNVERIFIABLE");
   // Tile copy is plain words: no method names, surfaces, invariants or
-  // page-walk talk, and no dash used as punctuation.
+  // page-walk talk, no store terms (injection history, tainted), and no
+  // dash used as punctuation.
   for (const tile of tiles) {
     const copy = [tile.label, tile.summary, ...tile.lines].join(" ");
     assert.doesNotMatch(copy, /panel\/|surface \d|invariant|page-walk|\u2014|\u2013/, `${tile.id}: ${copy}`);
+    assert.doesNotMatch(copy, /injection history|tainted/i, `${tile.id}: ${copy}`);
   }
 });
 
@@ -1255,7 +1262,7 @@ test("store-floor tile flips from unverifiable to a data-driven verdict", () => 
     }),
   ).get("store-floor");
   assert.equal(both?.summary, "2 scopes are near their limit");
-  assert.ok(both?.lines.includes("Near the limit: router, Team research."), JSON.stringify(both?.lines));
+  assert.ok(both?.lines.includes("Near the limit: router, Research team."), JSON.stringify(both?.lines));
   assert.ok(both?.lines.includes("The per-scope limit is not reported."), JSON.stringify(both?.lines));
 });
 
@@ -1496,6 +1503,7 @@ test("quarantine decision summaries say what happened and carry the record IDs a
   const releaseNotice = quarantineDecisionSummary(released);
   summaries.push(releaseNotice);
   assert.match(releaseNotice.text, /^Released\. A new active record holds this memory at observed trust/);
+  assert.match(releaseNotice.text, /the quarantined original is kept, marked as discarded\.$/);
   // The successor's ID moved out of the sentence into its own copyable ID.
   assert.deepEqual(releaseNotice.ids, [{ label: "New record", value: "mem-q-released" }]);
   const replay = quarantineDecisionSummary({ ...released, outcome: "already_released" });
@@ -1504,7 +1512,7 @@ test("quarantine decision summaries say what happened and carry the record IDs a
   assert.deepEqual(replay.ids, [{ label: "New record", value: "mem-q-released" }]);
   const tombstoned = quarantineDecisionSummary({ ...released, outcome: "tombstoned", successor: null });
   summaries.push(tombstoned);
-  assert.equal(tombstoned.text, "Tombstoned; it will never be recalled.");
+  assert.equal(tombstoned.text, "Discarded; it will never be recalled.");
   assert.deepEqual(tombstoned.ids, []);
   const withPromotion = (invalidated: string[]) =>
     quarantineDecisionSummary({
@@ -1526,9 +1534,11 @@ test("quarantine decision summaries say what happened and carry the record IDs a
   assert.deepEqual(two.ids.map((id) => id.value), ["gate-1", "gate-2"]);
   const again = quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null });
   summaries.push(again);
-  assert.equal(again.text, "Already tombstoned; nothing changed.");
+  assert.equal(again.text, "Already discarded; nothing changed.");
   for (const notice of summaries) {
     assert.doesNotMatch(notice.text, /mem-q|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+    // The store's word for it stays out of the sentence too.
+    assert.doesNotMatch(notice.text, /tombston/i, `store terms stay out of the sentence: ${notice.text}`);
   }
 });
 
@@ -1560,7 +1570,7 @@ test("quarantine decision errors render typed refusals without echoing content",
   notices.push(gate);
   assert.equal(
     gate.text,
-    "Refused: a promotion of this record is waiting for approval. Decide it in Approvals. Tombstoning the record instead cancels that promotion.",
+    "Refused: a promotion of this record is waiting for approval. Decide it in Approvals. Discarding the record instead cancels that promotion.",
   );
   assert.deepEqual(gate.ids, [{ label: "Waiting promotion", value: "gate-1" }]);
   const expiring = quarantineDecisionErrorText(
@@ -1569,7 +1579,7 @@ test("quarantine decision errors render typed refusals without echoing content",
   notices.push(expiring);
   assert.match(
     expiring.text,
-    /Decide it in Approvals, or wait until it expires on .*2026.*\. Tombstoning the record instead cancels that promotion\./,
+    /Decide it in Approvals, or wait until it expires on .*2026.*\. Discarding the record instead cancels that promotion\./,
   );
   const conflict = quarantineDecisionErrorText(
     refused({ reason: "successor_conflict", successor_id: "mem-q-released" }),
@@ -1579,7 +1589,7 @@ test("quarantine decision errors render typed refusals without echoing content",
   assert.deepEqual(conflict.ids, [{ label: "Conflicting record", value: "mem-q-released" }]);
   const secret = quarantineDecisionErrorText(refused({ reason: "secret_detected", class: "aws-access-key-id" }));
   notices.push(secret);
-  assert.match(secret.text, /aws-access-key-id secret pattern; tombstone is the only exit/);
+  assert.match(secret.text, /aws-access-key-id secret pattern; it can only be discarded/);
   const mismatch = quarantineDecisionErrorText(refused({ reason: "content_mismatch" }));
   notices.push(mismatch);
   assert.match(mismatch.text, /Reload it and review again/);
@@ -1596,15 +1606,24 @@ test("quarantine decision errors render typed refusals without echoing content",
     refused({ reason: "stale_update", prior: "mem-p", prior_status: "tombstoned" }),
   );
   notices.push(stale);
-  assert.match(stale.text, /the version this record replaces is tombstoned; tombstone it instead/);
+  assert.match(stale.text, /the version this record replaces is discarded; discard it instead/);
   assert.deepEqual(stale.ids, [{ label: "Replaced version", value: "mem-p" }]);
+  const supersededRecord = quarantineDecisionErrorText(refused({ reason: "not_quarantined", status: "superseded" }));
+  notices.push(supersededRecord);
+  assert.match(supersededRecord.text, /the record is replaced, not quarantined/);
   const denied = quarantineDecisionErrorText(
     Object.assign(new Error("access denied: agent.memory.write"), { rpcError: { code: -32030 } }),
   );
   notices.push(denied);
   assert.match(denied.text, /^No grant/);
+  // The permissions read as words; their grant names are the tooltip.
+  assert.match(denied.text, /you need permission to review quarantined memory/);
+  assert.match(denied.title ?? "", /memory\.quarantine\.review/);
+  assert.match(denied.title ?? "", /agent\.memory\.delete/);
   for (const notice of notices) {
     assert.doesNotMatch(notice.text, /mem-q|mem-p|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+    // Grant names and the store's terms stay out of the sentence.
+    assert.doesNotMatch(notice.text, /[a-z]+\.memory\.|memory\.quarantine|tombston|supersed/i, `plain words: ${notice.text}`);
   }
   assert.deepEqual(quarantineDecisionErrorText(new Error("network down")), { text: "network down", ids: [] });
 });
@@ -1630,9 +1649,14 @@ test("sizes, kinds, trust and status read as words", () => {
   // The superseding record's ID stays out of the status word; the Biography
   // offers the newer version as a link and keeps its ID in the technical
   // details ("Replaced by").
-  assert.equal(statusWord({ status: "superseded", by: "mem-9" }), "Superseded");
+  assert.equal(statusWord({ status: "superseded", by: "mem-9" }), "Replaced");
+  assert.equal(statusWord({ status: "tombstoned" }), "Discarded");
   assert.equal(statusWord({ status: "quarantined", reason: "conflict" }), "Quarantined");
   assert.equal(statusWord(undefined), "Unknown");
+  // The store's own words are the tooltip, with what they mean.
+  assert.match(statusTitle({ status: "superseded", by: "mem-9" }) ?? "", /^Superseded: a newer version replaced this record/);
+  assert.match(statusTitle({ status: "tombstoned" }) ?? "", /^Tombstoned: kept only as a deletion marker/);
+  assert.equal(statusTitle({ status: "active" }), undefined);
   assert.equal(statusChipTone({ status: "active" }), "ok");
   assert.equal(statusChipTone({ status: "quarantined" }), "warn");
   assert.equal(statusChipTone({ status: "tombstoned" }), "neutral");
@@ -1679,24 +1703,31 @@ test("scopes read as whose memory it is", () => {
   assert.equal(scopeKindLabel("operator"), "Operator memory");
   assert.equal(scopeKindLabel("realm"), "Shared memory");
   assert.equal(scopeOwnerName("identity", "identity:ada", names), "Ada");
-  assert.equal(scopeOwnerName("mob", "ops-team"), "ops-team");
+  // A team reads by a name made from its key; the key is the tooltip.
+  assert.equal(scopeOwnerName("mob", "ops-team"), "Ops team");
+  assert.equal(scopeOwnerName("mob", "research"), "Research team");
+  assert.equal(teamName("ops-team"), "Ops team");
+  assert.equal(teamName("research"), "Research team");
+  assert.equal(teamName("release_engineering"), "Release engineering team");
+  assert.equal(teamName(""), "Team");
+  assert.equal(scopeOwnerName("operator", "admin@example.test"), "admin@example.test");
   assert.equal(scopeOwnerName("realm", ""), "Everyone");
   assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:luka" }), "luka");
   assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:ada" }, names), "Ada");
-  assert.equal(scopeHeading({ scope: "mob", realm: "default", mob: "ops-team" }), "Team memory · ops-team");
+  assert.equal(scopeHeading({ scope: "mob", realm: "default", mob: "ops-team" }), "Team memory · Ops team");
   assert.equal(scopeHeading({ scope: "operator", realm: "default", operator: "op-1" }), "Operator memory · op-1");
   assert.equal(scopeHeading({ scope: "realm", realm: "default" }), "Shared memory");
   assert.equal(scopeKeyOf({ scope: "operator", realm: "default", operator: "op-1" }), "op-1");
   assert.equal(scopeKeyOf({ scope: "realm", realm: "default" }), "");
   assert.equal(overviewScopeName(overviewScope({ scope_kind: "identity", scope_key: "router" })), "router");
-  assert.equal(overviewScopeName(overviewScope({ scope_kind: "mob", scope_key: "research" })), "Team research");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "mob", scope_key: "research" })), "Research team");
   assert.equal(overviewScopeName(overviewScope({ scope_kind: "realm", scope_key: "" })), "Shared memory");
-  assert.equal(scopeCountsText({ active: 3, superseded: 1 }), "3 active, 1 superseded");
-  assert.equal(scopeCountsText({ active: 1, quarantined: 2, tombstoned: 1 }), "1 active, 2 quarantined, 1 tombstoned");
+  assert.equal(scopeCountsText({ active: 3, superseded: 1 }), "3 active, 1 replaced");
+  assert.equal(scopeCountsText({ active: 1, quarantined: 2, tombstoned: 1 }), "1 active, 2 quarantined, 1 discarded");
   assert.equal(scopeCountsText({}), "0 active");
   assert.equal(targetName("identity", "agent:support-triage"), "support-triage");
   assert.equal(targetName("identity", "identity:ada", names), "Ada");
-  assert.equal(targetName("mob", "ops-team"), "ops-team (team)");
+  assert.equal(targetName("mob", "ops-team"), "Ops team");
   assert.equal(targetName("operator", "admin@example.test"), "admin@example.test (operator)");
   assert.equal(targetName("realm", ""), "everyone");
 });
@@ -1718,12 +1749,18 @@ test("dream runs read as whose memory they tidied and what changed", () => {
     dreamOpKindsDisplay({ promote: 3, merge: 2, quarantine: 1, noop: 0 }),
     "3 promoted, 2 merged, 1 quarantined",
   );
+  // The store's own op names read as plain words.
+  assert.equal(dreamOpKindsDisplay({ supersede: 2, tombstone: 1 }), "2 replaced, 1 discarded");
   assert.equal(dreamOpKindsDisplay({ reshuffle: 2 }), "2 reshuffle");
   assert.equal(dreamOpKindsDisplay(undefined), "");
+  assert.deepEqual(
+    dreamVerdictChips([["quarantine_tombstoned", 2]]).map((chip) => chip.label),
+    ["2 quarantine discarded"],
+  );
   const names = (key: string) => (key === "identity:coordinator" ? "Coordinator" : "");
   assert.equal(partitionName("identity:coordinator", names), "Coordinator");
   assert.equal(partitionName("identity:coordinator"), "coordinator");
-  assert.equal(partitionName("mob:ops-team"), "ops-team (team)");
+  assert.equal(partitionName("mob:ops-team"), "Ops team");
   assert.equal(partitionName("operator:admin@example.test"), "admin@example.test (operator)");
   assert.equal(partitionName("realm"), "everyone");
   assert.equal(partitionName("custom:thing"), "custom:thing");
@@ -1743,4 +1780,24 @@ test("knowledge segments read in words while their testid keys stay raw", () => 
   assert.equal(knowledgeSegmentTitle(team, "Router"), "Team memory");
   assert.equal(knowledgeSegmentTitle(operator, "Router"), "Operator memory");
   assert.equal(knowledgeSegmentTitle(shared, "Router"), "Shared memory");
+});
+
+test("a missing grant reads as a sentence; the grant's name is only the tooltip", () => {
+  assert.equal(
+    needsGrantText("memory.quarantine.review"),
+    "You need permission to review quarantined memory",
+  );
+  assert.equal(needsGrantText("mob.memory.read"), "You need permission to read team memory");
+  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read operator memory");
+  // A grant this console has no words for never puts its key in the sentence.
+  assert.equal(needsGrantText("custom.unknown.grant"), "You need a permission you do not have");
+  for (const grant of ["memory.quarantine.review", "mob.memory.read", "operator.memory.read", "custom.unknown.grant"]) {
+    assert.doesNotMatch(needsGrantText(grant), /\.|grant/, grant);
+    assert.equal(grantTitle(grant), `Grant: ${grant}`);
+  }
+});
+
+test("realms read as spaces in lines; the word realm stays the tooltip", () => {
+  assert.equal(realmSpaceName("ops"), "ops space");
+  assert.equal(realmSpaceName("default"), "default space");
 });

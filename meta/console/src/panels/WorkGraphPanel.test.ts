@@ -396,17 +396,26 @@ test("workgraph statuses and binding modes read as words, never raw enums", () =
   assert.equal(workGraphStatusWord("completed"), "Completed");
   assert.equal(workGraphStatusWord(undefined), "Open");
   assert.equal(workGraphStatusWord("needs_review"), "Needs review");
-  assert.equal(workGraphModeWord("coordinate"), "Coordinating");
-  assert.equal(workGraphModeWord("falsify"), "Testing");
-  assert.equal(workGraphModeWord(undefined), "Pursuing");
+  // Modes say what the agent does with the goal, never the mode's name.
+  assert.equal(workGraphModeWord("coordinate"), "Leading the work");
+  assert.equal(workGraphModeWord("falsify"), "Testing the work");
+  assert.equal(workGraphModeWord(undefined), "Doing the work");
+  assert.equal(workGraphModeWord("pursue"), "Doing the work");
+  assert.equal(workGraphModeWord("review"), "Reviewing the work");
+  assert.equal(workGraphModeWord("judge"), "Judging the work");
+  assert.equal(workGraphModeWord("observe"), "Watching the work");
   assert.equal(workGraphModeWord("escalate_upward"), "Escalate upward");
+  for (const mode of ["coordinate", "pursue", "review", "falsify", "judge", "observe"]) {
+    assert.doesNotMatch(workGraphModeWord(mode), /coordinat|pursu|falsif|observ/i, mode);
+  }
 });
 
 test("workgraph binding states read as words with a nearby pause end", () => {
   const now = Date.parse("2026-07-08T12:00:00Z");
   assert.equal(workGraphBindingStateText({}, now), "Active");
   assert.equal(workGraphBindingStateText({ status: { state: "active" } }, now), "Active");
-  assert.equal(workGraphBindingStateText({ status: { state: "superseded" } }, now), "Superseded");
+  assert.equal(workGraphBindingStateText({ status: { state: "superseded" } }, now), "Replaced");
+  assert.equal(workGraphBindingStateText({ status: { state: "stopped" } }, now), "Stopped");
   assert.equal(workGraphBindingStateText({ status: { state: "paused" } }, now), "Paused");
   assert.equal(workGraphBindingStateText({ status: { state: "paused", until: "not-a-valid-time" } }, now), "Paused");
   // The same day reads as the clock alone.
@@ -501,10 +510,49 @@ test("workgraph activity reads as sentences about item titles, without item ids"
     workGraphEventSentence({ kind: "closed", item_id: "item-1", payload: { item: { status: "completed" } } }, context),
     "Freeze the release branch was completed",
   );
+  // Attention events say which agent works toward the goal, never "attention".
   assert.equal(
     workGraphEventSentence({ kind: "attention_updated", payload: { attention: { work_ref: { item_id: "item-1" }, status: { state: "paused" } } } }, context),
-    "Attention on Freeze the release branch was paused",
+    "Freeze the release branch was paused for its agent",
   );
+  const directory = createAgentDirectory([{ id: "identity:coordinator", label: "Coordinator" }]);
+  const named = { ...context, directory };
+  const onGoal = (state?: string) => ({
+    work_ref: { item_id: "item-1" },
+    target: { kind: "owner", owner_key: { kind: "identity", id: "coordinator" } },
+    ...(state ? { status: { state } } : {}),
+  });
+  assert.equal(
+    workGraphEventSentence({ kind: "attention_created", payload: { attention: onGoal() } }, named),
+    "Coordinator was put on Freeze the release branch",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "attention_paused", payload: { attention: onGoal("paused") } }, named),
+    "Freeze the release branch was paused for Coordinator",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "attention_updated", payload: { attention: onGoal("stopped") } }, named),
+    "Coordinator was taken off Freeze the release branch",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "attention_updated", payload: { attention: onGoal("active") } }, named),
+    "Coordinator's part in Freeze the release branch changed",
+  );
+  // A session the roster does not know is "an agent", never its ID.
+  assert.equal(
+    workGraphEventSentence({
+      kind: "attention_created",
+      payload: { attention: { work_ref: { item_id: "item-1" }, target: { kind: "session", session_id: "session-01JBX4N0Q3T9K2W8Y6ZR5M7C1D" } } },
+    }, named),
+    "An agent was put on Freeze the release branch",
+  );
+  for (const kind of ["attention_created", "attention_paused", "attention_updated"]) {
+    assert.doesNotMatch(
+      workGraphEventSentence({ kind, payload: { attention: onGoal() } }, named),
+      /attention/i,
+      kind,
+    );
+  }
   assert.equal(
     workGraphEventSentence({ kind: "linked", payload: { edge: { kind: "blocks", from_id: "item-1", to_id: "gone" } } }, context),
     "Freeze the release branch now blocks another work item",
@@ -547,7 +595,9 @@ test("workgraph goals render as cards holding their attention and items; plain i
   assert.ok(card.includes('data-testid="workgraph-panel-item:root"'));
   assert.ok(card.includes("1 of 3 done"), "the goal shows progress over its items");
   assert.ok(card.includes('data-testid="workgraph-panel-binding:b-1"'), "attention sits in its goal's card");
-  assert.ok(card.includes("Coordinating"));
+  // The mode reads as what the agent does; the mode's name is the tooltip.
+  assert.ok(card.includes('title="Attention mode: coordinate">Leading the work</span>'));
+  assert.ok(!/Coordinating|Pursuing/.test(card));
   assert.ok(card.includes('data-testid="workgraph-panel-item:child-run"'));
   // An unknown session reads as words; its id stays in the technical details.
   assert.ok(card.includes("Agent session"));
@@ -670,4 +720,41 @@ test("workgraph graph nodes are keyboard reachable buttons named by title and st
   assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
   assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
   assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
+});
+
+test("workgraph agents on goals and graph links read in plain words", () => {
+  // A binding whose item is not in the snapshot lists under the other goals.
+  const html = renderPanel(panelData({
+    attention: [{
+      binding_id: "b-off",
+      work_ref: { item_id: "not-in-snapshot" },
+      mode: "review",
+      status: { state: "superseded" },
+    }],
+  }));
+  assert.ok(html.includes('<span title="Attention bindings">Agents on other goals</span>'));
+  assert.ok(!/Other attention|>Attention</.test(html));
+  assert.ok(html.includes('title="Attention mode: review">Reviewing the work</span>'));
+  assert.ok(html.includes("Replaced"));
+  assert.ok(!html.includes("Superseded"));
+
+  const graph = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
+    items: [
+      item("draft", "2026-07-08T08:00:00Z"),
+      item("final", "2026-07-08T08:10:00Z"),
+      item("notes", "2026-07-08T08:20:00Z"),
+    ],
+    edges: [
+      { kind: "supersedes", from_id: "final", to_id: "draft" },
+      { kind: "derived_from", from_id: "notes", to_id: "final" },
+    ],
+    attention: [],
+  }));
+  const labels = Array.from(
+    graph.matchAll(/data-testid="workgraph-graph-edge-label"[^>]*>([^<]*)<\/text>/g),
+    (match) => match[1],
+  ).sort();
+  assert.deepEqual(labels, ["derived from", "replaces"]);
+  // The raw kinds stay on the edges for selectors and styles.
+  assert.ok(graph.includes('data-kind="supersedes"') && graph.includes('data-kind="derived_from"'));
 });

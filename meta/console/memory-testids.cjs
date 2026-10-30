@@ -36,7 +36,7 @@ module.exports = {
 
   // ── Filter bar + paging (Records tab) ──
   FILTER: "memory-filter", // toolbar container
-  FILTER_INPUT: "memory-filter-input", // <input> agent or scope key (Enter or blur applies)
+  FILTER_INPUT: "memory-filter-input", // <input> agent or team name, or a scope key (Enter or blur applies)
   FILTER_SCOPE: "memory-filter:scope", // <select> ""|identity|mob|operator|realm
   FILTER_STATUS: "memory-filter:status", // <select> ""|active|quarantined|superseded|tombstoned
   FILTER_REALM: "memory-filter:realm", // <select>, renders only when realms.length > 1
@@ -63,8 +63,9 @@ module.exports = {
   // data-dimmed).
   chainEntry: (memoryId) => `memory-chain:${memoryId}`,
   // Evidence click-through: `memory-evidence:${index}` buttons per ref ("Conversation
-  // with <agent>, messages a-b", then the session ID and generation). The
-  // result renders memory-evidence-excerpt (transcript window),
+  // with <agent>, messages a-b"; the session ID and generation are in the
+  // Biography's technical details). The result renders
+  // memory-evidence-excerpt (transcript window),
   // memory-evidence-degraded ("not found in the recent timeline window":
   // the reference stays, the copy never claims the session is gone), or
   // memory-evidence-empty (session found, range has no messages).
@@ -144,7 +145,8 @@ module.exports = {
 
   // ── Quarantine decision (Biography of a quarantined identity record) ──
   // Renders only when meta/memory/quarantine/decide is advertised to the
-  // caller on a mutable console. Release/Tombstone send the detail's
+  // caller on a mutable console. Release and Discard (the tombstone
+  // verdict; QUARANTINE_TOMBSTONE keeps its name) send the detail's
   // content_hash; a refusal or denial renders QUARANTINE_ERROR in place, a
   // decision opens the resulting Biography with QUARANTINE_OUTCOME.
   QUARANTINE_DECIDE: "memory-quarantine-decide",
@@ -198,7 +200,7 @@ module.exports = {
   SIGNALS_RAIL: "signals-rail",
   signal: (signalId) => `signal:${signalId}`, // memory.* frames map to signals
   signalsFilter: (presetId) => `signals-filter:${presetId}`,
-  // "State here" pivot inside single-item memory signal rows: opens the
+  // "Open in Memory" pivot inside single-item memory signal rows: opens the
   // Memory panel and loads the record Biography when the frame payload
   // names a record_id. (Clicking the row body does the same via onSelect;
   // multi-item groups expand first, and their per-event buttons fire

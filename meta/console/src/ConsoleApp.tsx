@@ -1331,8 +1331,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const runtimeControl = (
       <SelectField
         className="runtime-panel-control"
-        label="Mob"
-        ariaLabel={`${kind === "memory" ? "Memory" : "Work Graph"} mob`}
+        label="Team"
+        ariaLabel={`${kind === "memory" ? "Memory" : "Work Graph"} team`}
         value={panelRuntimeKey}
         options={[
           ...(runtimes.some(runtime => runtime.key === panelRuntimeKey) ? [] : [{ value: panelRuntimeKey, label: "Runtime unavailable" }]),
@@ -5097,7 +5097,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }, [sidebarButtons]);
   const loadMemoryRecordDetailRef = React.useRef(loadMemoryRecordDetail);
   loadMemoryRecordDetailRef.current = loadMemoryRecordDetail;
-  // "State here" pivot: a live memory signal opens the Memory panel, and
+  // "Open in Memory" pivot: a live memory signal opens the Memory panel, and
   // lands on the record's Biography when the frame names one. Offered only
   // when the server-projected experience grants memory.can_read; the
   // affordance must never outrun the nav gate.

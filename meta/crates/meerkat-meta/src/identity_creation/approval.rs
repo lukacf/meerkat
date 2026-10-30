@@ -10,7 +10,9 @@
 //! deciding rule's approver; when that rule names none, nobody can decide
 //! and the request is refused `approval_unavailable` before anything is
 //! held. Authority fields need a human decision and are refused under any
-//! other outcome.
+//! other outcome. Only setting one does: an update that removes authority
+//! fields narrows the identity's authority, and gets its change classes'
+//! outcome like any other narrowing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,7 +93,9 @@ pub struct PlanRequest<'a> {
     pub templates: &'a BTreeSet<String>,
     /// Whether the request needs at least a human decision.
     pub raise: bool,
-    /// An authority field the request sets, if any.
+    /// An authority field the request sets, if any. Removing authority
+    /// fields sets none: it narrows, and needs no human decision of its
+    /// own.
     pub authority_field: Option<&'a str>,
 }
 

@@ -2101,6 +2101,25 @@ fn authority_fields_need_a_human_decision() {
     assert!(render(&normalized.request).as_str().contains(
         "- \"team:helper\" authority field \"clearance\" = \"elevated\" becomes authority\n"
     ));
+
+    // Removing authority fields narrows: it gets its change class's
+    // outcome, here the default allow, and needs no human decision.
+    let mut narrowing = policy_json();
+    narrowing["approval"]["rules"][2]["change"] = json!(["capability", "peers"]);
+    narrowing["approval"]["default"] = json!({"kind": "allow"});
+    let narrowing = parse(&narrowing);
+    let removal = update_spec(UpdateSetSpec {
+        authority_fields: Some(BTreeMap::new()),
+        ..UpdateSetSpec::default()
+    });
+    let normalized = update_with(
+        &narrowing,
+        &lead(),
+        &entry_facts(current_binding()),
+        &removal,
+    )
+    .expect("a narrowing");
+    assert_eq!(normalized.plan.kind(), ApprovalKind::Allow);
 }
 
 #[test]
@@ -3476,6 +3495,23 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
                 feature: "an authority field schema".to_owned(),
             }),
             json!({"kind": "unsupported", "feature": "an authority field schema"}),
+        ),
+        (
+            IdentityRefusal::new(IdentityRefusalKind::ConstructionRefused {
+                kind: "controller_route_refused".to_owned(),
+            }),
+            json!({"kind": "construction_refused", "construction": "controller_route_refused"}),
+        ),
+        (
+            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            })
+            .at("identities[0].descriptive_labels"),
+            json!({
+                "kind": "invalid_request",
+                "problem": "malformed",
+                "field": "identities[0].descriptive_labels"
+            }),
         ),
     ];
     for (refusal, data) in cases {

@@ -8060,12 +8060,18 @@ impl MobBuilder {
     /// [`MobHandle::rotate_member`] call with the same spec finishes it on the
     /// same session, once ([`MobHandle::redrive_retirement`] re-drives it
     /// too). A rotation whose start row predates the record is re-driven as
-    /// a plain retirement, whose terminal waits for the host's call. A
+    /// a plain retirement, whose terminal waits for the host's call. Until
+    /// the host acts, the member stays Retiring: its wakes are refused, any
+    /// other rotation of it is refused retryable, and a plain retire answers
+    /// [`MobError::MemberRetirementStuck`] with that cause; a caller other
+    /// than the host leaves the rotation held
+    /// ([`MobHandle::rotation_held_for_host`] reads whether it is). A
     /// same-session rotation (a respawn) is the mob's own: the start finishes
-    /// it whatever this set says. Until the host acts, the member stays
-    /// Retiring: its wakes are refused, any other rotation of it is refused
-    /// retryable, and a plain retire answers
-    /// [`MobError::MemberRetirementStuck`] with that cause.
+    /// it whatever this set says, and the member keeps its mark. Its
+    /// successor is seated Dormant, and its wakes are refused until the
+    /// host's seat step for it (a [`MobHandle::seat_dormant_members`] of the
+    /// identity on its kept session answers `AlreadySeated` and ends the
+    /// mark): the host wakes first.
     pub fn with_host_pending_members(
         mut self,
         members: impl IntoIterator<Item = AgentIdentity>,

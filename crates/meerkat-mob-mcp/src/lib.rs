@@ -5863,15 +5863,23 @@ impl MobMcpState {
         // retirement. A retirement an earlier attempt left stuck stays owned
         // by the mob and a plain retire only reports it (meerkat 0.8.51), so
         // the archive re-drives it once, then retires the rest of the tree if
-        // the stuck one was a descendant.
+        // the stuck one was a descendant. A rotation held for its host (a
+        // host-pending member's FreshSession rotation, which the host's own
+        // rotate_member finishes) is not re-driven here: the archive is not
+        // the host, so it leaves the rotation held and answers the stuck
+        // retirement, as any other caller's retire does.
         let retired = self.mob_retire(&mob_id, identity.clone()).await;
-        let Err(MobError::MemberRetirementStuck { member_id, .. }) = retired else {
-            return retired;
+        let member_id = match &retired {
+            Err(MobError::MemberRetirementStuck { member_id, .. }) => member_id.clone(),
+            _ => return retired,
         };
-        self.admitted_handle_for(&mob_id, ControlScope::Retire)
-            .await?
-            .redrive_retirement(member_id.clone())
+        let handle = self
+            .admitted_handle_for(&mob_id, ControlScope::Retire)
             .await?;
+        if handle.rotation_held_for_host(&member_id)? {
+            return retired;
+        }
+        handle.redrive_retirement(member_id.clone()).await?;
         if member_id == identity {
             Ok(())
         } else {
@@ -22226,6 +22234,191 @@ mod tests {
             !svc.session_exists(&bridge_session_id).await,
             "the re-driven retirement archives the member session"
         );
+    }
+
+    /// Archiving a member's session while the member's FreshSession rotation
+    /// is held for its host leaves the rotation held, as a retire by any
+    /// caller other than the host does. The member is host-pending (its host
+    /// keeps its own record of the rotation and re-issues it): the rotation's
+    /// archive failed, the mob restarted with the member marked host-pending,
+    /// and the start held the rotation for the host. The archive answers the
+    /// stuck retirement, typed, with the cause that names the host's wait.
+    /// Nothing is re-driven: the member keeps its retiring generation and its
+    /// session, and the host's re-issue then finishes the rotation once.
+    ///
+    /// RED: let the archive re-drive a held rotation (drop the
+    /// `rotation_held_for_host` check in `retire_member_by_bridge_session_id`):
+    /// the archive finishes the rotation onto its next session and answers
+    /// success, and the host's re-issue rotates the member a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_archive_of_a_member_session_leaves_a_rotation_held_for_its_host() {
+        const STEP: Duration = Duration::from_secs(10);
+        let identity = AgentIdentity::from("worker-1");
+        let spec = || {
+            SpawnMemberSpec::new("worker", identity.clone())
+                .with_runtime_mode(MobRuntimeMode::TurnDriven)
+        };
+        let svc = Arc::new(MockSessionSvc::new());
+        let storage = MobStorage::in_memory();
+        let first = tokio::time::timeout(
+            STEP,
+            MobBuilder::new(
+                explicit_definition("archive-held-rotation"),
+                storage.clone(),
+            )
+            .with_session_service(svc.clone())
+            .allow_ephemeral_sessions(true)
+            .with_network_member_comms()
+            .create(),
+        )
+        .await
+        .expect("the create answers")
+        .expect("create the mob");
+        tokio::time::timeout(STEP, first.spawn_spec(spec()))
+            .await
+            .expect("the spawn answers")
+            .expect("spawn the member");
+        let old_session = first
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("the member's session");
+        // The rotation's retirement durably starts and its archive fails:
+        // the rotation stands, stuck, and the member stays Retiring.
+        svc.fail_archive(old_session.clone(), "forced member archive failure")
+            .await;
+        tokio::time::timeout(STEP, first.rotate_member(spec()))
+            .await
+            .expect("the rotation answers")
+            .expect_err("the rotation's archive fails");
+        tokio::time::timeout(STEP, first.shutdown())
+            .await
+            .expect("the shutdown answers")
+            .expect("retire the predecessor supervisor route");
+        drop(first);
+        svc.clear_archive_failure(&old_session).await;
+        let restarted = Arc::new(svc.cold_restart().await);
+        let resumed = tokio::time::timeout(
+            STEP,
+            Box::pin(
+                MobBuilder::for_resume(storage)
+                    .with_session_service(restarted.clone())
+                    .allow_ephemeral_sessions(true)
+                    .with_network_member_comms()
+                    .with_host_pending_members([identity.clone()])
+                    .notify_orchestrator_on_resume(false)
+                    .resume(),
+            ),
+        )
+        .await
+        .expect("the restart answers")
+        .expect("the restart succeeds");
+        assert!(
+            resumed
+                .rotation_held_for_host(&identity)
+                .expect("read the published machine state"),
+            "the start holds the host-pending member's rotation for its host"
+        );
+        let state = Arc::new(
+            MobMcpState::new(restarted.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        state
+            .mob_insert_handle(resumed.mob_id().clone(), resumed.clone())
+            .await;
+
+        // The archive's retire answers the held rotation's stuck retirement,
+        // typed, naming the host's wait.
+        let refused =
+            tokio::time::timeout(STEP, state.retire_member_by_bridge_session_id(&old_session))
+                .await
+                .expect("the retire answers")
+                .expect_err("the archive leaves the held rotation to its host");
+        match &refused {
+            MobError::MemberRetirementStuck {
+                member_id, cause, ..
+            } => {
+                assert_eq!(member_id, &identity);
+                assert!(
+                    matches!(
+                        cause.as_ref(),
+                        MobError::LifecycleOperationPending { intent }
+                            if intent.contains("rotate_member")
+                    ),
+                    "the stuck retirement names the host's wait: {cause}"
+                );
+            }
+            other => panic!("expected the held rotation's stuck retirement, got {other:?}"),
+        }
+        // The session archive surface answers the same, and keeps the
+        // session.
+        let surfaced = tokio::time::timeout(
+            STEP,
+            crate::agent_tools::archive_session_with_mob_cleanup(
+                restarted.clone(),
+                Arc::clone(&state),
+                &old_session,
+            ),
+        )
+        .await
+        .expect("the archive answers")
+        .expect_err("the session archive leaves the held rotation to its host");
+        let text = surfaced.to_string();
+        assert!(
+            text.contains("is stuck at") && text.contains("rotate_member"),
+            "the archive surfaces the held rotation's stuck retirement: {text}"
+        );
+
+        // Nothing re-drove the rotation: it stays held, and the member keeps
+        // its retiring generation and its session.
+        assert!(
+            resumed
+                .rotation_held_for_host(&identity)
+                .expect("read the published machine state"),
+            "the archive leaves the rotation held for its host"
+        );
+        assert_eq!(
+            resumed
+                .get_member(&identity)
+                .await
+                .expect("roster read")
+                .map(|entry| entry.generation),
+            Some(meerkat_mob::Generation::INITIAL)
+        );
+        assert!(
+            restarted.session_exists(&old_session).await,
+            "the held rotation keeps the member's session"
+        );
+
+        // The host's re-issue finishes the rotation, once.
+        let next_session = tokio::time::timeout(STEP, resumed.rotate_member(spec()))
+            .await
+            .expect("the re-issue answers")
+            .expect("the host's re-issue finishes the held rotation");
+        assert_ne!(next_session, old_session);
+        assert_eq!(
+            resumed
+                .get_member(&identity)
+                .await
+                .expect("roster read")
+                .map(|entry| entry.generation),
+            Some(meerkat_mob::Generation::new(1))
+        );
+        assert_eq!(
+            resumed.resolve_bridge_session_id(&identity).await,
+            Some(next_session)
+        );
+        assert!(
+            !resumed
+                .rotation_held_for_host(&identity)
+                .expect("read the published machine state"),
+            "the host's own rotation ends the hold"
+        );
+        assert!(
+            !restarted.session_exists(&old_session).await,
+            "the finished rotation archives the retired incarnation's session"
+        );
+        // The host's mob stays inserted in the state until here.
+        drop(state);
     }
 
     #[tokio::test]

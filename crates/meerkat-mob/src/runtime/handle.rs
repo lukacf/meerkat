@@ -9697,21 +9697,35 @@ impl MobHandle {
     /// and calls this again with the same spec after the restart: the
     /// restarted mob holds that rotation for the call (recorded stuck at
     /// admission, with a cause that names the wait, see
-    /// [`Self::retirement_settlement`]), which finishes it once. Without the
-    /// host-pending mark the restarted mob finishes the rotation itself, so a
-    /// host that does not mark the member must not re-issue an unanswered
-    /// call after a restart: a call made after the rotation finished rotates
-    /// the member again. While the rotation stands, a call with the same spec
-    /// re-drives it (a stuck one included) and answers its session; a
-    /// recorded rotation whose next incarnation cannot be planned again (its
-    /// profile left the definition) stays stuck until a call whose spec
-    /// plans the same next session. A call that names another next session
-    /// is refused retryable ([`MobError::LifecycleOperationPending`]) before
-    /// anything starts; a same-session rotation of the member (a respawn) is
-    /// finished by the mob itself, after which the call can be made again. A
-    /// call for a member whose retirement started without a rotation is
-    /// refused the same way unless the member is host-pending, and a retry
-    /// alone does not succeed: that retirement must finish, or be re-driven
+    /// [`Self::retirement_settlement`] and [`Self::rotation_held_for_host`]),
+    /// which finishes it once; a retire by any other caller leaves it held.
+    /// Without the host-pending mark the restarted mob finishes the rotation
+    /// itself, and a call made after the rotation finished rotates the
+    /// member again. So a host that does not mark the member reads it once
+    /// after a restart before it calls again (the replay is done before the
+    /// handle is returned): a higher generation means the rotation finished;
+    /// a Retiring member ([`Self::list_members_including_retiring`]) means it
+    /// stands, and the mob finishes it; the generation the call saw, not
+    /// Retiring, means it never started, and the call is made again. While
+    /// the rotation stands, a call with the same spec re-drives it (a stuck
+    /// one included) and answers its session. A recorded rotation whose next
+    /// incarnation cannot be planned again (its profile left the definition)
+    /// stays stuck until a call plans the same next session: for a rotation
+    /// onto a fresh session, this call with a spec the definition plans; for
+    /// a same-session rotation (a respawn), [`Self::respawn_member`] naming a
+    /// profile the definition has, since this call plans a fresh session and
+    /// is refused while that rotation stands. The mob's destroy ends either.
+    /// A call that names another next session is refused retryable
+    /// ([`MobError::LifecycleOperationPending`]) before anything starts; a
+    /// same-session rotation of the member (a respawn) is finished by the mob
+    /// itself, after which the call can be made again. A host-pending
+    /// member's same-session rotation does not end the mark: its successor is
+    /// seated Dormant, and its wakes are refused until the host's seat step
+    /// for it (a [`Self::seat_dormant_members`] of the identity on its kept
+    /// session answers `AlreadySeated` and ends the mark). A call for a
+    /// member whose retirement started without a rotation is refused the
+    /// same way unless the member is host-pending, and a retry alone does not
+    /// succeed: that retirement must finish, or be re-driven
     /// ([`Self::redrive_retirement`]), first. Needs the members' comms
     /// transport, as [`Self::seat_dormant_members`] does.
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
@@ -10102,6 +10116,23 @@ impl MobHandle {
         };
         policy.require(scope)?;
         Ok(read(&state))
+    }
+
+    /// Whether `identity`'s rotation is held for its host: the member is
+    /// host-pending ([`super::MobBuilder::with_host_pending_members`]) and the
+    /// rotation that stands for it is a FreshSession one (a `rotate_member`),
+    /// which only the host's own call finishes. A caller other than the host
+    /// leaves it held: its retire answers
+    /// [`MobError::MemberRetirementStuck`] with the hold's cause, and it does
+    /// not re-drive the retirement. Read as [`Self::identity_entry`] is: no
+    /// actor command, no wake, the [`crate::ControlScope::List`] scope.
+    pub fn rotation_held_for_host(&self, identity: &AgentIdentity) -> Result<bool, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            let identity = mob_dsl::AgentIdentity::from_domain(identity);
+            state.member_host_preparation_pending.contains(&identity)
+                && state.member_rotation_targets.get(&identity)
+                    == Some(&mob_dsl::RotationTarget::FreshSession)
+        })
     }
 
     /// Whether `identity` is an identity entry, and where its member stands:
@@ -14306,8 +14337,9 @@ impl MobHandle {
     /// initial message): one machine step that never leaves the identity
     /// unseated, which a restarted mob finishes itself after a crash. Its
     /// successor keeps its session and so the restrictions the session
-    /// records. Such a member is refused typed when a same-session successor
-    /// cannot serve it (see [`Self::respawn_member`]).
+    /// records. MobMachine decides the route: it refuses a fresh-life
+    /// respawn of an entry's member. Such a member is refused typed when a
+    /// same-session successor cannot serve it (see [`Self::respawn_member`]).
     ///
     /// A worker member's respawn is a helper convenience over primitive mob
     /// behavior, not a machine-owned primitive: its successor gets a new
@@ -14355,8 +14387,9 @@ impl MobHandle {
     /// anything is retired and keeps the member.
     ///
     /// The member of an identity entry is refused
-    /// ([`MobError::UnsupportedForMode`]) before anything starts: its respawn
-    /// keeps its session ([`Self::respawn_member`], [`Self::respawn`]).
+    /// ([`MobError::UnsupportedForMode`]) before anything starts: MobMachine
+    /// refuses a fresh-life respawn of an entry's member, whose respawn keeps
+    /// its session ([`Self::respawn_member`], [`Self::respawn`]).
     pub async fn respawn_with_successor_spec(
         &self,
         successor_spec: SpawnMemberSpec,
@@ -14415,7 +14448,19 @@ impl MobHandle {
     /// continuity or (for a role migration) last role cannot be read. A
     /// member whose retirement is in flight is refused retryable
     /// ([`MobError::LifecycleOperationPending`]); a call that finds this
-    /// rotation itself stuck re-drives it.
+    /// rotation itself stuck re-drives it. A stuck one whose successor cannot
+    /// be planned again (its profile left the definition) is ended by a call
+    /// naming a profile the definition has ([`super::MemberRespawn`]'s
+    /// profile), or by the mob's destroy: [`Self::rotate_member`] cannot end
+    /// it.
+    ///
+    /// A host-pending member ([`super::MobBuilder::with_host_pending_members`])
+    /// keeps its mark through its respawn, whoever finishes it: the successor
+    /// is seated Dormant, and its wakes are refused
+    /// ([`MobError::MemberWakeRefused`], `HostPreparationPending`) until the
+    /// host's seat step for it (a [`Self::seat_dormant_members`] of the
+    /// identity on its kept session) ends the mark. A respawn that asks for
+    /// the wake reports that refusal on its receipt.
     pub async fn respawn_member(
         &self,
         identity: AgentIdentity,

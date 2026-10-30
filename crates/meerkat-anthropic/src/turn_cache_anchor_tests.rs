@@ -32,8 +32,8 @@ use std::sync::Arc;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 use meerkat_core::{
-    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, SystemMessage,
-    ToolDef, ToolResult, TranscriptMessageIdentity, UserMessage,
+    AssistantBlock, BlockAssistantMessage, CacheBreakpointBoundary, Message, ProviderMeta,
+    StopReason, SystemMessage, ToolDef, ToolResult, TranscriptMessageIdentity, UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmRequest};
 use serde_json::{Value, json};
@@ -811,4 +811,53 @@ fn anthropic_cache_model_reads_whole_prior_conversation_after_activation() {
     let mut cache = ProviderCache::default();
     cache.serve(&prior);
     assert_eq!(cache.serve(&next), system_prefix, "system_prefix: {next}");
+}
+
+/// Under `system_and_conversation` the client lowers the entry after the
+/// User row it governs, so turn k+1's transcript `[S, U1, A1, U2, A2, entry,
+/// U3]` lowers to `[U1, A1, U2, A2, U3, entry]` and the window marks A2, U3
+/// and the entry. A breakpoint claim binds the transcript prefix through a
+/// marked message to the messages rendered through that marker, so it holds
+/// only where they are exactly that prefix. The marker on U3 ends the
+/// rendered `[U1, A1, U2, A2, U3]`, which is no transcript prefix, so it
+/// carries no claim: the claims are the system prefix, turn k's answer and
+/// the whole request.
+#[test]
+fn anthropic_cache_claims_follow_the_rendered_order_of_a_moved_system_row() {
+    let policy = AnthropicCacheControlPolicy::SystemAndConversation;
+    let (_, next_turn) = activation_requests();
+    let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    let mut request = LlmRequest::new(ACTIVATION_MODEL, next_turn)
+        .with_tools(tools())
+        .with_anthropic_tag_merge(|tag| tag.cache_control = Some(policy));
+    request.messages = client.project_replay_messages(&request.messages).unwrap();
+    let body = client.build_request_body(&request).unwrap();
+    assert_eq!(breakpoint_messages(&body), vec![3, 4, 5], "{body}");
+
+    assert_eq!(
+        AnthropicClient::anthropic_authored_breakpoint_boundaries(&request, policy, &body).unwrap(),
+        vec![
+            (
+                CacheBreakpointBoundary::SystemProfilePrefix { message_count: 1 },
+                0,
+            ),
+            (
+                CacheBreakpointBoundary::TranscriptAfter { message_count: 5 },
+                4,
+            ),
+            (
+                CacheBreakpointBoundary::TranscriptAfter { message_count: 7 },
+                6,
+            ),
+        ],
+        "the system prefix, turn k's answer and the whole request, each with its lowered count"
+    );
+    assert_eq!(
+        client
+            .authored_cache_breakpoints(&request, &request.messages)
+            .unwrap()
+            .len(),
+        3,
+        "the client claims exactly those boundaries"
+    );
 }

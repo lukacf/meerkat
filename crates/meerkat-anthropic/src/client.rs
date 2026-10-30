@@ -1287,6 +1287,61 @@ impl AnthropicClient {
         }
     }
 
+    /// The cache breakpoints `body`, lowered from `request`, authors under
+    /// `policy`: each canonical boundary with the number of lowered
+    /// `messages` its rendered prefix covers.
+    pub(crate) fn anthropic_authored_breakpoint_boundaries(
+        request: &LlmRequest,
+        policy: AnthropicCacheControlPolicy,
+        body: &Value,
+    ) -> Result<Vec<(meerkat_core::CacheBreakpointBoundary, usize)>, LlmError> {
+        let leading_system_count = request
+            .messages
+            .iter()
+            .take_while(|message| matches!(message, Message::System(_)))
+            .count();
+        let mut boundaries = Vec::new();
+        if leading_system_count > 0 && body.get("system").is_some_and(Self::contains_cache_control)
+        {
+            boundaries.push((
+                meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix {
+                    message_count: leading_system_count as u64,
+                },
+                0,
+            ));
+        }
+
+        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation) {
+            let source_indices: Vec<usize> = request
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    (!(index < leading_system_count && matches!(message, Message::System(_))))
+                        .then_some(index)
+                })
+                .collect();
+            if let Some(lowered_messages) = body.get("messages").and_then(Value::as_array) {
+                for (position, (source_index, lowered)) in
+                    source_indices.into_iter().zip(lowered_messages).enumerate()
+                {
+                    if lowered
+                        .get("content")
+                        .is_some_and(Self::contains_cache_control)
+                    {
+                        boundaries.push((
+                            meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
+                                message_count: (source_index + 1) as u64,
+                            },
+                            position + 1,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(boundaries)
+    }
+
     fn ensure_claude_ai_oauth_system_marker(body: &mut Value) {
         match body.get_mut("system") {
             Some(Value::String(system)) => {
@@ -2359,61 +2414,9 @@ impl LlmClient for AnthropicClient {
             AnthropicCacheTtl::FiveMinutes => meerkat_core::ProviderCacheTtl::FiveMinutes,
             AnthropicCacheTtl::OneHour => meerkat_core::ProviderCacheTtl::OneHour,
         };
-        let mut boundaries = Vec::new();
-        let leading_system_count = request
-            .messages
-            .iter()
-            .take_while(|message| matches!(message, Message::System(_)))
-            .count();
-        if leading_system_count > 0 && body.get("system").is_some_and(Self::contains_cache_control)
-        {
-            boundaries.push(meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix {
-                message_count: leading_system_count as u64,
-            });
-        }
-
-        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation) {
-            let source_indices: Vec<usize> = request
-                .messages
-                .iter()
-                .enumerate()
-                .filter_map(|(index, message)| {
-                    (!(index < leading_system_count && matches!(message, Message::System(_))))
-                        .then_some(index)
-                })
-                .collect();
-            if let Some(lowered_messages) = body.get("messages").and_then(Value::as_array) {
-                for (source_index, lowered) in source_indices.into_iter().zip(lowered_messages) {
-                    if lowered
-                        .get("content")
-                        .is_some_and(Self::contains_cache_control)
-                    {
-                        boundaries.push(meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
-                            message_count: (source_index + 1) as u64,
-                        });
-                    }
-                }
-            }
-        }
-
-        boundaries
+        Self::anthropic_authored_breakpoint_boundaries(request, policy, &body)?
             .into_iter()
-            .map(|boundary| {
-                let lowered_message_count = match boundary {
-                    meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix { .. } => 0,
-                    meerkat_core::CacheBreakpointBoundary::TranscriptAfter { message_count } => {
-                        request
-                            .messages
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, message)| {
-                                !(*index < leading_system_count
-                                    && matches!(message, Message::System(_)))
-                            })
-                            .take_while(|(index, _)| (*index as u64) < message_count)
-                            .count()
-                    }
-                };
+            .map(|(boundary, lowered_message_count)| {
                 let lowered_messages = body
                     .get("messages")
                     .and_then(Value::as_array)

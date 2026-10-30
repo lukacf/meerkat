@@ -1,10 +1,11 @@
-import { fireEvent, render, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { identityStateLabel, type IdentityInspectViewState, type IdentityStatusRow } from "@console-core";
 import type { ConsoleAgent } from "../types";
 import { AgentDetailsPanel, agentStatusChip, reachabilityWords } from "./AgentDetailsPanel";
 import { HealthPanel } from "./HealthPanel";
+import { SchedulesSection } from "./SchedulesSection";
 import { AgentDirectoryProvider, createAgentDirectory } from "../../../packages/console-components/src/panel-kit";
 
 // DOM assertions compare booleans and strings, never elements.
@@ -144,6 +145,47 @@ describe("AgentDetailsPanel", () => {
     );
     expect(view.getByRole("status").textContent).toBe("Loading agent details");
     expect(within(view.getByTestId("inspect-panel:identity:coordinator")).getByRole("heading", { level: 2 }).textContent).toBe("Coordinator");
+  });
+});
+
+describe("Agent details headings", () => {
+  // Every heading in document order, by its text and level.
+  function outline(root: HTMLElement): Array<[string, number]> {
+    return Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']")).map((heading) => [
+      heading.textContent ?? "",
+      Number(heading.getAttribute("aria-level") ?? heading.tagName.slice(1)),
+    ]);
+  }
+
+  it("titles the panel h2 and each section below it h3, skipping no level", async () => {
+    const schedule = {
+      schedule_id: "sch_1",
+      identity: "identity:coordinator",
+      name: "Standup",
+      content: "Post the standup summary",
+      trigger: { type: "interval", start_at_utc: "2030-01-01T09:00:00Z", every_seconds: 7200 },
+      phase: "active",
+      revision: 1,
+      next_due_at_utc: "2030-01-01T11:00:00Z",
+    };
+    const run = vi.fn(async (command: string) => (
+      command === "listSchedules" ? { identity: "identity:coordinator", schedules: [schedule] } : {}
+    ));
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <AgentDetailsPanel identity="identity:coordinator" inspect={inspect()} agent={agent} stateLabel="active" actions={{}}>
+          <SchedulesSection identity="identity:coordinator" editing={{ canChange: true, note: null }} run={run} timezone="UTC" />
+        </AgentDetailsPanel>
+      </AgentDirectoryProvider>,
+    );
+    await waitFor(() => expect(view.queryByTestId("schedule:sch_1") !== null).toBe(true));
+    // The schedule form adds no heading of its own.
+    fireEvent.click(view.getByTestId("schedules-new:identity:coordinator"));
+    const headings = outline(view.getByTestId("inspect-panel:identity:coordinator"));
+    expect(headings).toEqual([["Coordinator", 2], ["Overview", 3], ["Latest output", 3], ["Schedules", 3]]);
+    for (let index = 1; index < headings.length; index += 1) {
+      expect(headings[index][1] <= headings[index - 1][1] + 1).toBe(true);
+    }
   });
 });
 

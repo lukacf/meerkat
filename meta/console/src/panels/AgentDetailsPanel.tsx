@@ -144,7 +144,7 @@ export function AgentDetailsPanel({
                 </Notice>
               </div>
             ) : null}
-            <PanelSection label="Overview" headerAs="div" padded>
+            <PanelSection label="Overview" padded>
               <KeyValueList
                 items={[
                   {
@@ -176,7 +176,7 @@ export function AgentDetailsPanel({
               />
             </PanelSection>
             {inspect.output_preview ? (
-              <PanelSection label="Latest output" headerAs="div" padded>
+              <PanelSection label="Latest output" padded>
                 <blockquote className="agent-details__preview">{inspect.output_preview}</blockquote>
               </PanelSection>
             ) : null}

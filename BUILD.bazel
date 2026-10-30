@@ -805,6 +805,7 @@ test_suite(
         "//crates/meerkat-mob:member_revival_rebinding_test",
         "//crates/meerkat-mob:member_run_resumed_after_kill_test",
         "//crates/meerkat-mob:member_session_bindings_test",
+        "//crates/meerkat-mob:member_turn_host_runtime_test",
         "//crates/meerkat-mob:member_turn_options_public_api_test",
         "//crates/meerkat-mob:member_upcall_lane_test",
         "//crates/meerkat-mob:mob_host_binding_authority_test",

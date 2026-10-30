@@ -266,6 +266,29 @@ them.
   the same way on the dispatch and entered paths, and answers `Unavailable`
   only past the bounds; its prepared path does not wait.
 
+- `meerkat-core`: `OwnerChangeChurn::wait_after_stale_read`, the bounded
+  wait for a host's pure observation of a work's own authorization
+  publication (one that reads owners and runs no effect) that is still
+  stale after its one rebuild (`PublicationError::Changed`,
+  `LineageResolutionRefusal::Changed`). Such a read can end stale after a
+  change it never saw in progress: one that waited for an owner's own lock
+  while another actor's change held it (a grant issuance holds the grant
+  owner's mutex across its acknowledged append) ends stale only once that
+  change published, often after it completed, and
+  `wait_for_settled_change` then answers `None`. The new wait waits for any
+  change in progress, an unpublished reservation of the writer included,
+  and with none in progress as it starts it pauses 1 ms first. `Settled`
+  means make the same observation once more, afresh; `NotSettled` means
+  stop and answer the read as stale, never as unavailable. Every settled
+  wait is one of the churn's three free rebuilds, within its one deadline
+  (2 s, clamped to the budget passed, such as
+  `ToolDispatchContext::remaining_tool_time`), armed at its first wait. Take
+  a fresh churn for each decision point, hold nothing across the wait, and
+  never wait around an effect. Dropping the wait cancels it with nothing to
+  release. The waiting forms of the governed dispatch steps take the same
+  wait. Shell synchronization only: no machine input, owner fact, wire type
+  or error variant changes.
+
 ### Fixed
 
 - `meerkat-core`: a pending or approved human consent (R3) is now kept
@@ -488,6 +511,20 @@ them.
   the reload proceeds (see Breaking). The committed input stays durably
   admitted and pending in the cold successor, and a resubmission with the
   same idempotency key is deduplicated against it.
+
+- `meerkat-core`: an owner-change wait (`OwnerChangeChurn`) no longer
+  settles at or past its deadline. Its loop read the change in progress
+  before it checked the deadline, so a change that completed during the
+  last sleep before the deadline settled the wait at the deadline, a
+  waiting governed step or a stale-read wait with nothing in progress and
+  less time left than its 1 ms pause settled after the pause, and a later
+  wait of a churn whose deadline had passed settled at once when the change
+  cleared between its first read and the next: each granted a free rebuild
+  past `OWNER_CHANGE_WAIT_BOUND` or the caller's budget. The loop now checks
+  the deadline before every read, so a read at or after it answers
+  `NotSettled`. Every Core wait that rebuilds after `ReprepareRequired`
+  (`wait_for_settled_change`), the waiting governed steps and the new
+  `wait_after_stale_read` share the loop.
 
 ### Known limitations
 

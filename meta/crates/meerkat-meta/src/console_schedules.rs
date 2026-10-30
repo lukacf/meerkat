@@ -48,10 +48,11 @@ pub const CONSOLE_SCHEDULE_RUNNABLE: &str = "meta.console.scheduled_send";
 /// The schema of a console schedule's send ([`ConsoleScheduledSend`]).
 pub(crate) const CONSOLE_SCHEDULED_SEND_SCHEMA: &str = "meta.console.scheduled_send.v1";
 
-/// How long after its runtime is built a fire waits for the Console's send
-/// path when no console router was built yet: a gateway builds its router
-/// right after it starts its schedule host, so only a fire due at boot waits.
-/// Past this window a fire with no send path fails at once.
+/// How long after the gateway's schedule host starts (when the console
+/// schedules' runnable is composed) a fire waits for the Console's send path
+/// when no console router was built yet: a gateway builds its router after
+/// it starts its schedule host, so a fire due at boot waits for it. Past
+/// this window a fire with no send path fails at once.
 const CONSOLE_DOOR_WAIT: Duration = Duration::from_secs(30);
 
 /// The Console caller a console schedule fires as: the caller who last
@@ -347,14 +348,7 @@ pub(crate) trait ConsoleScheduleDoor: Send + Sync {
     async fn send(&self, send: &ConsoleScheduledSend, delivery_key: &str) -> Result<(), String>;
 }
 
-/// The Console's send path for console schedule fires, and until when a
-/// fire waits for one.
-struct DoorState {
-    door: watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>,
-    /// The end of the boot window in which a fire waits for a console router
-    /// build ([`CONSOLE_DOOR_WAIT`] after the slot opened).
-    wait_until: std::time::Instant,
-}
+type DoorSender = watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>;
 
 /// The Console's send path for console schedule fires: installed by each
 /// console router build (the router built last is the one fires take),
@@ -362,36 +356,28 @@ struct DoorState {
 /// shutdown, and held weakly by the console schedules' runnable, so a fire
 /// never keeps a stopped runtime's Console alive.
 #[derive(Clone)]
-pub struct ConsoleScheduleDoorSlot(Arc<DoorState>);
+pub struct ConsoleScheduleDoorSlot(Arc<DoorSender>);
 
 impl Default for ConsoleScheduleDoorSlot {
     fn default() -> Self {
-        Self::with_boot_wait(CONSOLE_DOOR_WAIT)
+        Self(Arc::new(watch::channel(None).0))
     }
 }
 
 impl ConsoleScheduleDoorSlot {
-    /// A slot whose fires wait `wait` from now for a console router build.
-    fn with_boot_wait(wait: Duration) -> Self {
-        Self(Arc::new(DoorState {
-            door: watch::channel(None).0,
-            wait_until: std::time::Instant::now() + wait,
-        }))
-    }
-
     /// Install the Console's send path; it replaces the one before.
     pub(crate) fn install(&self, door: Arc<dyn ConsoleScheduleDoor>) {
-        self.0.door.send_replace(Some(door));
+        self.0.send_replace(Some(door));
     }
 
     /// Remove the Console's send path, and what it holds: the console
     /// projection it sends through was replaced, or the runtime shuts down.
     /// Fires fail until a console router build installs a send path again.
     pub(crate) fn clear(&self) {
-        self.0.door.send_replace(None);
+        self.0.send_replace(None);
     }
 
-    fn downgrade(&self) -> Weak<DoorState> {
+    fn downgrade(&self) -> Weak<DoorSender> {
         Arc::downgrade(&self.0)
     }
 }
@@ -399,22 +385,27 @@ impl ConsoleScheduleDoorSlot {
 /// The host runnable of every console schedule: a fire sends the
 /// schedule's message as its sender through the Console's send path.
 struct ConsoleScheduleRunnable {
-    doors: Weak<DoorState>,
+    doors: Weak<DoorSender>,
+    /// The end of the window in which a fire waits for a console router
+    /// build: [`CONSOLE_DOOR_WAIT`] after the runnable was composed, as the
+    /// gateway's schedule host started.
+    wait_until: std::time::Instant,
 }
 
 impl ConsoleScheduleRunnable {
-    /// The Console's send path, waiting for one within the slot's boot
-    /// window when no console router was built yet.
+    /// The Console's send path, waiting for one within the window that
+    /// opened when the schedule host started, when no console router was
+    /// built yet.
     async fn door(&self) -> Result<Arc<dyn ConsoleScheduleDoor>, String> {
         const STOPPED: &str = "the console runtime has stopped";
         const NO_DOOR: &str =
             "this gateway has no Console send path now, so a console schedule cannot be sent";
-        let Some(state) = self.doors.upgrade() else {
+        let Some(doors) = self.doors.upgrade() else {
             return Err(STOPPED.to_string());
         };
-        let deadline = tokio::time::Instant::from_std(state.wait_until);
-        let mut installed = state.door.subscribe();
-        drop(state);
+        let deadline = tokio::time::Instant::from_std(self.wait_until);
+        let mut installed = doors.subscribe();
+        drop(doors);
         let waited = tokio::time::timeout_at(deadline, installed.wait_for(Option::is_some)).await;
         match waited {
             Ok(Ok(door)) => door.clone().ok_or_else(|| NO_DOOR.to_string()),
@@ -479,14 +470,27 @@ impl ScheduleRunnableHost for WithConsoleScheduleRunnable {
 }
 
 /// `runnable_host` with the console schedules' runnable composed in front,
-/// sending through the Console send path `doors` holds.
+/// sending through the Console send path `doors` holds. Composed as the
+/// gateway's schedule host starts: a fire claimed before the console router
+/// is built waits for it until [`CONSOLE_DOOR_WAIT`] after now.
 pub(crate) fn with_console_schedule_runnable(
     runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
     doors: &ConsoleScheduleDoorSlot,
 ) -> Arc<dyn ScheduleRunnableHost> {
+    console_schedule_runnable_waiting(runnable_host, doors, CONSOLE_DOOR_WAIT)
+}
+
+/// [`with_console_schedule_runnable`] whose fires wait for a console router
+/// build until `wait` after now.
+fn console_schedule_runnable_waiting(
+    runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
+    doors: &ConsoleScheduleDoorSlot,
+    wait: Duration,
+) -> Arc<dyn ScheduleRunnableHost> {
     Arc::new(WithConsoleScheduleRunnable {
         console: ConsoleScheduleRunnable {
             doors: doors.downgrade(),
+            wait_until: std::time::Instant::now() + wait,
         },
         inner: runnable_host,
     })
@@ -980,13 +984,47 @@ mod tests {
         assert!(detail.contains("stopped"), "{detail}");
     }
 
-    /// Past the slot's boot window a fire with no Console send path fails at
-    /// once, and a cleared send path (its projection replaced, or its
-    /// runtime shutting down) is released and sends nothing.
+    /// A fire claimed before the console router is built (an occurrence due
+    /// at boot, on a gateway that builds its router after starting its
+    /// schedule host) waits for the router, and sends once the router
+    /// installs its send path within the window that opened when the host
+    /// started.
+    #[tokio::test]
+    async fn a_fire_claimed_before_the_console_router_waits_for_it() {
+        let doors = ConsoleScheduleDoorSlot::default();
+        let host = with_console_schedule_runnable(None, &doors);
+        let pending = tokio::spawn({
+            let host = Arc::clone(&host);
+            async move {
+                host.run_occurrence(invocation(
+                    CONSOLE_SCHEDULE_RUNNABLE,
+                    Some(serde_json::to_value(send()).unwrap()),
+                ))
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !pending.is_finished(),
+            "the fire waits for the Console's send path"
+        );
+        let door = Arc::new(RecordingDoor(std::sync::Mutex::new(Vec::new())));
+        doors.install(door.clone());
+        pending.await.unwrap().unwrap();
+        assert_eq!(
+            *door.0.lock().unwrap(),
+            vec![(send(), "schedule:s:occurrence:o".to_string())]
+        );
+    }
+
+    /// Past the window that opened when the schedule host started, a fire
+    /// with no Console send path fails at once, and a cleared send path (its
+    /// projection replaced, or its runtime shutting down) is released and
+    /// sends nothing.
     #[tokio::test]
     async fn a_fire_without_a_console_send_path_fails_at_once() {
-        let doors = ConsoleScheduleDoorSlot::with_boot_wait(Duration::ZERO);
-        let host = with_console_schedule_runnable(None, &doors);
+        let doors = ConsoleScheduleDoorSlot::default();
+        let host = console_schedule_runnable_waiting(None, &doors, Duration::ZERO);
         let fire = || {
             host.run_occurrence(invocation(
                 CONSOLE_SCHEDULE_RUNNABLE,

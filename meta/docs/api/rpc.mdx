@@ -2707,8 +2707,8 @@ Known limits:
 - **One Console sends them.** Fires go through the Console router built
   last, under its decisions and visibility policy. A schedule host on a
   gateway that serves no Console and drains the same store fails their
-  fires: a fire waits for a Console only in the gateway's first 30 seconds,
-  and otherwise fails at once. Replacing the Console's log store, and
+  fires: a fire waits for a Console only in the first 30 seconds after the
+  gateway's schedule host starts, and otherwise fails at once. Replacing the Console's log store, and
   shutdown, end the fires until a Console router is built again.
 - **Dedupe across a restart.** A gateway whose console send dedupe store is
   in memory forgets a fire's key when it restarts, so an occurrence

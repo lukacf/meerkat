@@ -13570,6 +13570,43 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
     }
 }
 
+/// A member's pre-dequeue handle: the runtime's realization of committed
+/// model-routing handoffs, after the member's session service has checked
+/// that the member's session task did not end with the host's runtime. A
+/// realization reconfigures the live actor, so for a member whose host's
+/// runtime stopped it would fail, and the runtime loop's cleanup would then
+/// end the queued inputs as stopped; the check degrades the registration
+/// first, so the loop leaves them to the session's next registration.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+struct HostRuntimeCheckedPreDequeueHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+    inner: Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>,
+}
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorPreDequeueHandle for HostRuntimeCheckedPreDequeueHandle {
+    async fn realize_committed_handoffs_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<meerkat_core::lifecycle::CorePreDequeueOutcome, CoreExecutorError> {
+        if self
+            .session_service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+        {
+            return Err(CoreExecutorError::control_failed_runtime(format!(
+                "member session '{}' lost its session task to the runtime it ran on; its \
+                 queued work is left to the session's next registration",
+                self.session_id
+            )));
+        }
+        self.inner
+            .realize_committed_handoffs_under_turn_finalization_boundary()
+            .await
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn runtime_llm_reconfigure_request_from_primitive(
     primitive: &RunPrimitive,
@@ -13671,10 +13708,14 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(meerkat_runtime::persistent_runtime_pre_dequeue_handle(
-            Arc::clone(&self.runtime_adapter),
-            self.bridge_session_id.clone(),
-        ))
+        Some(Arc::new(HostRuntimeCheckedPreDequeueHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.bridge_session_id.clone(),
+            inner: meerkat_runtime::persistent_runtime_pre_dequeue_handle(
+                Arc::clone(&self.runtime_adapter),
+                self.bridge_session_id.clone(),
+            ),
+        }))
     }
 
     /// Typed system notices (such as an interrupted-run notice after an
@@ -13699,6 +13740,24 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
             ));
+        }
+        // A member whose session task ended with the host's runtime cannot
+        // run this turn, and the steps ahead of the service apply (the
+        // per-turn LLM reconfigure) would fail on the lost actor and record
+        // the run as failed. The session service degrades the member's
+        // registration first, so the runtime loop leaves the run to the
+        // session's next registration, as the service apply does for a turn
+        // the stop cut short.
+        if self
+            .session_service
+            .runtime_turn_lost_its_host_runtime(&self.bridge_session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "member session '{}' lost its session task to the runtime it ran on; run \
+                 {run_id} is left to the session's next registration",
+                self.bridge_session_id
+            )));
         }
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();

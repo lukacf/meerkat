@@ -2418,6 +2418,16 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&RunId>,
+    ) -> bool {
+        self.service
+            .runtime_turn_lost_its_host_runtime(session_id, run_id)
+            .await
+    }
+
     async fn suspend_run_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -10042,6 +10052,27 @@ impl SessionRuntime {
         pre_admission: Option<RpcRuntimePreAdmission>,
         llm_reconfigure_boundary: LlmReconfigureBoundaryOwnership,
     ) -> Result<CoreApplyOutput, RpcError> {
+        // A session whose task ended with the host's runtime cannot run this
+        // turn, and the steps ahead of the service apply (the per-turn LLM
+        // hot swap, the live staleness read) would fail on the lost actor and
+        // record the run as failed. The session service degrades the
+        // session's registration first, so the runtime loop leaves the run to
+        // the session's next registration, as the service apply does for a
+        // turn the stop cut short.
+        if self
+            .service
+            .runtime_turn_lost_its_host_runtime(session_id, Some(&run_id))
+            .await
+        {
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session {session_id} lost its session task to the runtime it ran on; run \
+                     {run_id} is left to the session's next registration"
+                ),
+                data: None,
+            });
+        }
         // The configured native owner must hand this executor both the admitted
         // work context and the exact-input capacity/seed claim. A missing or
         // unresolved claim must never fall through to ordinary live/cold setup.

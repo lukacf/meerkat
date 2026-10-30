@@ -17971,6 +17971,16 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&meerkat_core::lifecycle::RunId>,
+    ) -> bool {
+        self.inner
+            .runtime_turn_lost_its_host_runtime(session_id, run_id)
+            .await
+    }
+
     async fn suspend_run_with_machine_authority(
         &self,
         session_id: &SessionId,

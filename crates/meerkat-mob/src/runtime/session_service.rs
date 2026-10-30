@@ -1681,6 +1681,29 @@ pub trait MobSessionService:
         <Self as SessionService>::has_live_session(self, session_id).await
     }
 
+    /// Whether `session_id`'s session task ended with the runtime it ran on:
+    /// the host's runtime, stopped in the middle of a turn or while the
+    /// session was idle. A service that keeps durable runtime state then
+    /// degrades the session's registration to require a cold reload from
+    /// durable state and answers `true`, so the runtime loop serving the
+    /// session writes nothing more for it, and the caller fails the work it
+    /// was about to do without recording it as failed. A member's runtime
+    /// executor asks it before the steps it runs ahead of the turn that need
+    /// the live actor (a per-turn LLM reconfigure, the realization of a
+    /// committed model-routing handoff).
+    ///
+    /// The default answers `false`. The stock persistent service overrides
+    /// it; a host's own `MobSessionService` wrapper should forward it to the
+    /// service it wraps, or a member of a stopped host runtime can have such
+    /// a step fail and record the input it was serving as a failed run.
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        _session_id: &SessionId,
+        _run_id: Option<&meerkat_core::lifecycle::RunId>,
+    ) -> bool {
+        false
+    }
+
     /// Standalone turn execution with an owner-issued admission notification,
     /// separate from the returned terminal result. Send only after generated
     /// admission and command handoff, never merely after spawning a task.
@@ -3961,6 +3984,17 @@ where
             )
             .await,
         )
+    }
+
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&meerkat_core::lifecycle::RunId>,
+    ) -> bool {
+        meerkat_session::PersistentSessionService::<B>::runtime_turn_lost_its_host_runtime(
+            self, session_id, run_id,
+        )
+        .await
     }
 
     async fn subscribe_session_activity(

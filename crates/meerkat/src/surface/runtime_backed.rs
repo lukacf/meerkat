@@ -2384,6 +2384,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        // A session whose task ended with the host's runtime cannot run this
+        // turn: the session service degrades its registration, so the runtime
+        // loop leaves the run to the session's next registration instead of
+        // recording a step that fails on the lost actor as a failed run.
+        if self
+            .service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "session {} lost its session task to the runtime it ran on; run {run_id} is \
+                 left to the session's next registration",
+                self.session_id
+            )));
+        }
         validate_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive).await?;
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(

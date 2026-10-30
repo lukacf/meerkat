@@ -308,7 +308,7 @@ impl MobActor {
         // A dormant seat never takes an identity entry its host creates: one
         // hosted on its first use (placed or externally bound) or one
         // awaiting its held creation (MobMachine's dormant seat refuses both
-        // too, entry_neither_hosted_nor_held).
+        // too, unseated_entry_owed_its_seat).
         if mode == SeatPlanMode::Seat
             && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
         {

@@ -83,6 +83,19 @@ impl ScriptedClient {
             .expect("a model request mentions the token")
     }
 
+    /// How many recorded model requests mention every token of `tokens`.
+    fn requests_mentioning_all(&self, tokens: &[&str]) -> usize {
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .iter()
+            .filter(|request| {
+                let messages = format!("{:?}", request.messages);
+                tokens.iter().all(|token| messages.contains(token))
+            })
+            .count()
+    }
+
     /// How many recorded model requests mention `token` anywhere.
     fn requests_mentioning(&self, token: &str) -> usize {
         self.requests
@@ -3383,8 +3396,9 @@ async fn kickoff_notices_to_a_dormant_peer_wake_it_once() {
 /// history. The unlisted retirement archives the member's session and
 /// MobMachine records it; the apply that lists the identity again seats it
 /// Dormant on that archived session at its next generation, waking nothing;
-/// the member's first wake revives the session, and its transcript holds
-/// the turn it ran before it was unlisted.
+/// the member's first wake revives the session, and its next turn runs with
+/// the turn it ran before it was unlisted: the model request carries both,
+/// and both are on the one session.
 ///
 /// RED: drop the revival admission from the dormant seat's preparation
 /// (`prepare_dormant_seat` answers every archived session `SessionArchived`):
@@ -3473,9 +3487,22 @@ async fn an_unlisted_identity_listed_again_wakes_on_its_archived_session_with_it
         .await
         .expect("the first wake revives the archived session");
     assert_eq!(fixture.session(&identity).await, session);
+    let after = token("declared-revival-after");
+    fixture
+        .host_turn(&identity, &after, HandlingMode::Queue)
+        .await;
+    assert_eq!(
+        fixture
+            .client
+            .requests_mentioning_all(&[before.as_str(), after.as_str()]),
+        1,
+        "the revived member's turn runs with its history"
+    );
+    assert_eq!(fixture.session(&identity).await, session);
+    let transcript = fixture.transcript(&session).await;
     assert!(
-        fixture.transcript(&session).await.contains(&before),
-        "the identity keeps its history"
+        transcript.contains(&before) && transcript.contains(&after),
+        "both turns are on the one session"
     );
     fixture.finish().await;
 }

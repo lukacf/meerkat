@@ -692,16 +692,16 @@ fi
 # not and its incarnation local or hosted elsewhere), the replay of its
 # start row (stale or not), Stop, Resume and Complete, and the mob's reset
 # from each phase it leaves (its preflight with a member seated, its commit
-# on an empty roster); and an explicit resume over a member, Dormant or
-# Live, whose host preparation is owed or not. --part roles (shard
-# audits-n): a seated entry declared under another role or mode, a
-# first-boot preparation and every WakeMember cause; and a role-held
-# member's declared migration, its same-session and fresh-session rotations
-# under another role or its own, and a first-boot Resume request.
-# --part hosted (shard audits-o): held creation, the held spawn and entries
-# hosted on their first use, with Stop, Resume and Complete, and the
-# declared apply's open fact; and one bound host and the placed spawn
-# ladder, its remote commit, its retirement and the placed end. They check
+# on an empty roster). --part roles (shard audits-n): a seated entry
+# declared under another role or mode, a first-boot preparation and every
+# WakeMember cause; and a role-held member's declared migration, its
+# same-session and fresh-session rotations under another role or its own,
+# and a first-boot Resume request. --part hosted (shard audits-o): held
+# creation, the held spawn and entries hosted on their first use, with
+# Stop, Resume and Complete, and the declared apply's open fact; one bound
+# host and the placed spawn ladder, its remote commit, its retirement and
+# the placed end; and an explicit resume over a member, Dormant or Live,
+# whose host preparation is owed or not. They check
 # every generated invariant (the declared apply's among them), exactly one
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
@@ -921,11 +921,11 @@ run_machine_verify() {
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, alone, locally with 4 TLC workers
 # (2026-10-30): apply (one whole-space run, 15 witnesses, 15 mutants)
-# 170 s; legacy (two runs, 15 witnesses, 19 mutants) 244 s; roles (two
-# runs, 13 witnesses, 9 mutants) 186 s; hosted (two runs, 10 witnesses, 9
-# mutants) 116 s. As one part (five runs, 28 witnesses, 17 mutants) the
+# 170 s; legacy (one run, 13 witnesses, 16 mutants) 219 s; roles (two
+# runs, 13 witnesses, 9 mutants) 186 s; hosted (three runs, 12 witnesses,
+# 12 mutants) 142 s. As one part (five runs, 28 witnesses, 17 mutants) the
 # declared apply took 300-305 s; with its seven runs, 53 witnesses and 52
-# mutants it would take about 716 s, past 10 minutes on a hosted runner.
+# mutants it would take about 717 s, past 10 minutes on a hosted runner.
 # None of audits-g, audits-i and audits-k through audits-o has been
 # measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,

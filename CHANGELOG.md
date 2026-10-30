@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-10-30
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-authorization`: the
@@ -37473,7 +37475,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/lukacf/meerkat/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/lukacf/meerkat/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/lukacf/meerkat/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/lukacf/meerkat/compare/v0.9.4...v0.9.5

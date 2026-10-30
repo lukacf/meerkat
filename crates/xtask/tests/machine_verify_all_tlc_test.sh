@@ -777,9 +777,10 @@ run_machine_verify() {
 # eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
 # before the job timeout cut it off, about 430 s in all, and about 525 s on
 # the pull request's runner, 1.22x slower on the rest of its shard;
-# audits-h = input controller hold with --mutants, alone: its safety run,
-# nine witness runs and nine single-worker mutant runs are measured at
-# validation.
+# audits-h = input controller hold with --mutants, alone: its safety run
+# (1617 distinct states at 14 steps), nine witness runs and nine
+# single-worker mutant runs took 100 s on a 4-worker local run, not yet
+# measured on a hosted runner.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

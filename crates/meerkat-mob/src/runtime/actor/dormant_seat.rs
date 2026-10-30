@@ -1733,6 +1733,15 @@ impl MobActor {
                 },
             });
         }
+        // A same-session successor keeps the member's wiring and external
+        // edges (MobMachine's terminal keeps them), while replay ends the
+        // retired incarnation's edges with its `MemberRetired` row. The batch
+        // records the kept edges again after the successor's row, read from
+        // the state the terminal committed, so a replay (this release's or
+        // an older one's) restores exactly the topology the terminal kept.
+        if rotation.keeps_session() {
+            batch.extend(self.kept_topology_rows(prepared.authority.state(), entry)?);
+        }
         batch.extend(wired_rows);
         #[cfg(test)]
         super::seat_wiring::record_seat_step_append_for_test(&self.definition.id, &batch);
@@ -1777,6 +1786,66 @@ impl MobActor {
             Box::pin(self.realize_staged_declared_edges(declared_edges)).await;
         }
         Ok(())
+    }
+
+    /// The rows that record the wiring edges and external peer edges of
+    /// `entry`'s identity again, as MobMachine `state` holds them: one
+    /// `MembersWiredBatch` row for its member edges and one
+    /// `ExternalPeerWired` row per external edge. A same-session successor's
+    /// terminal batch appends them, since the terminal keeps these edges and
+    /// the replay of its `MemberRetired` row ends them. An external edge
+    /// keeps the descriptor its own row recorded (the retiring incarnation's
+    /// roster entry holds it) when that descriptor is the edge's endpoint;
+    /// otherwise the row carries the endpoint MobMachine holds.
+    fn kept_topology_rows(
+        &self,
+        state: &mob_dsl::MobMachineState,
+        entry: &RosterEntry,
+    ) -> Result<Vec<NewMobEvent>, MobError> {
+        let identity = &entry.agent_identity;
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let edges = state
+            .wiring_edges
+            .iter()
+            .filter(|edge| edge.a == dsl_identity || edge.b == dsl_identity)
+            .map(|edge| crate::event::MemberWireEdge {
+                a: AgentIdentity::from(edge.a.0.as_str()),
+                b: AgentIdentity::from(edge.b.0.as_str()),
+            })
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        if !edges.is_empty() {
+            rows.push(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MembersWiredBatch { edges },
+            });
+        }
+        for edge in state
+            .external_peer_edges
+            .iter()
+            .filter(|edge| edge.local == dsl_identity)
+        {
+            let spec = match entry.external_peer_descriptor(edge.endpoint.name.0.as_str()) {
+                Some(recorded)
+                    if mob_dsl::ExternalPeerEndpoint::from(recorded) == edge.endpoint =>
+                {
+                    recorded.clone()
+                }
+                _ => super::super::builder::trusted_peer_descriptor_from_dsl_external_endpoint(
+                    &edge.endpoint,
+                )?,
+            };
+            rows.push(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::ExternalPeerWired {
+                    local: identity.clone(),
+                    spec,
+                },
+            });
+        }
+        Ok(rows)
     }
 }
 

@@ -986,6 +986,12 @@ test("WorkGraphPanel attention actions split CAS tokens the same way and gate re
     };
 
     const coordRow = bindingRow("b-coord");
+    // Attention renders inside the card of the goal it is bound to.
+    assert.equal(
+      coordRow.closest("[data-testid='workgraph-panel-item:goal-1']") !== null,
+      true,
+      "the binding sits in its goal's card",
+    );
     clickByLabel(coordRow, "Confirm");
     clickByLabel(coordRow, "Request close");
     clickByLabel(coordRow, "Pause");

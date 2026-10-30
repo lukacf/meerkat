@@ -1,6 +1,22 @@
 import React from "react";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import { CopyGlyph } from "../../../packages/console-components/src/copy-glyph";
+import {
+  AgentAvatar,
+  Button,
+  Chip,
+  EmptyState,
+  KeyValueList,
+  RelativeTime,
+  TechnicalDetails,
+  humanizeEnum,
+  joinMeta,
+  plural,
+  priorityTone,
+  statusTone,
+  useAgentDirectory,
+} from "../../../packages/console-components/src/panel-kit";
+import type { AgentAvatarSize } from "../../../packages/console-components/src/panel-kit";
 
 import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireItem } from "../types";
 import {
@@ -9,9 +25,10 @@ import {
   layoutWorkGraph,
   workGraphEdgeMidpoint,
   workGraphEdgePath,
-  workGraphItemOwnerLabel,
+  workGraphItemOwner,
+  workGraphStatusWord,
 } from "../lib/workgraph-layout";
-import type { WorkGraphLayoutEdge, WorkGraphLayoutNode } from "../lib/workgraph-layout";
+import type { WorkGraphLayoutEdge, WorkGraphLayoutNode, WorkGraphOwnerView } from "../lib/workgraph-layout";
 import { useZoomPan, viewportTransform } from "./topology/zoom-pan";
 import type { Viewport } from "./topology/zoom-pan";
 
@@ -19,8 +36,9 @@ import type { Viewport } from "./topology/zoom-pan";
 /// the tree panel's status language, parent edges are solid arrows into the
 /// parent, blocks edges dashed amber. Pan by dragging, zoom with the wheel
 /// (non-passive listener inside useZoomPan so the dock scroll container
-/// never eats it), Fit resets to the fitted view. Mutations stay in the
-/// tree/attention sections - the graph only selects.
+/// never eats it), Fit resets to the fitted view. Nodes take keyboard focus
+/// and Enter or Space selects one. Mutations stay in the tree/attention
+/// sections - the graph only selects.
 ///
 /// Scale model: the viewBox is the measured frame size, so one SVG user
 /// unit is one CSS pixel and the CSS font sizes on the labels are real
@@ -46,7 +64,7 @@ const LABEL_RIGHT_PAD = 10;
 /// Must match `.workgraph-graph__node-title` / `__node-meta` in
 /// console-host.css; used to measure labels on a canvas.
 const TITLE_FONT = { size: 12, weight: 500, family: "--sans" } as const;
-const META_FONT = { size: 10, weight: 400, family: "--mono" } as const;
+const META_FONT = { size: 10.5, weight: 400, family: "--sans" } as const;
 /// Initial fit never shrinks the graph below this, so 12px titles render
 /// at 10px or more. Smaller graphs open at 1:1 and are never enlarged.
 const FIT_MIN_SCALE = 0.85;
@@ -177,13 +195,17 @@ function useLabelMeasurers(
   }, [families, fontsEpoch]);
 }
 
-function nodeMetaText(node: WorkGraphLayoutNode): string {
-  const parts: string[] = [];
-  if (node.priority && node.priority !== "medium") parts.push(node.priority);
-  if (node.blocked) parts.push("blocked");
-  if (node.ownerLabel) parts.push(node.ownerLabel);
-  if (node.alsoUnder.length > 0) parts.push(`also under ${node.alsoUnder.join(", ")}`);
-  return parts.join(" · ");
+/// The second line of a node, in words: priority when it matters, a blocked
+/// marker (status is never colour alone), the owner's name and any extra
+/// parents.
+function nodeMetaText(node: WorkGraphLayoutNode, ownerName = node.ownerLabel): string {
+  const priority = priorityTone(node.priority) ? humanizeEnum(node.priority) : "";
+  return joinMeta(
+    priority,
+    node.blocked ? "Blocked" : "",
+    ownerName,
+    node.alsoUnder.length > 0 ? `Also under ${node.alsoUnder.join(", ")}` : "",
+  );
 }
 
 function nodeMetaLine(node: WorkGraphLayoutNode): string {
@@ -212,46 +234,92 @@ function edgeLabelPlacement(edge: WorkGraphLayoutEdge): {
   return { x: mid.x, y: mid.y, anchor: "middle" };
 }
 
-function nodeHoverText(node: WorkGraphLayoutNode, item: WorkGraphWireItem | undefined): string {
-  const lines = [node.title, `status: ${node.status}`];
-  if (node.ownerLabel) lines.push(`owner: ${node.ownerLabel}`);
-  if (node.alsoUnder.length > 0) lines.push(`also under: ${node.alsoUnder.join(", ")}`);
+function nodeHoverText(node: WorkGraphLayoutNode, item: WorkGraphWireItem | undefined, ownerName: string): string {
+  const lines = [node.title, `Status: ${workGraphStatusWord(node.status)}`];
+  if (ownerName) lines.push(`Owner: ${ownerName}`);
+  if (node.alsoUnder.length > 0) lines.push(`Also under: ${node.alsoUnder.join(", ")}`);
   if (item?.description) lines.push(item.description);
   return lines.join("\n");
+}
+
+function moreItemsNotDrawn(count: number): string {
+  return `+${count} more ${count === 1 ? "item" : "items"} not drawn`;
+}
+
+/// A person by name with the raw key in the tooltip: the kit's AgentName
+/// markup, for names the work graph resolves itself (a stored display name
+/// is preferred over a bare key the directory does not know).
+export function WorkGraphPerson({
+  person,
+  avatar,
+  className,
+}: {
+  person: WorkGraphOwnerView;
+  avatar?: AgentAvatarSize;
+  className?: string;
+}): React.JSX.Element {
+  return (
+    <span className={className ? `cc-agent ${className}` : "cc-agent"} title={person.key || undefined}>
+      {avatar ? <AgentAvatar name={person.name} size={avatar} /> : null}
+      <span className="cc-agent__name">{person.name}</span>
+    </span>
+  );
 }
 
 function ItemCopyIcon({ name }: { name: string }) {
   return <CopyGlyph state={name === "i-check" ? "copied" : "idle"} />;
 }
 
-function WorkItemDetails({ itemId, item, hasAttention }: {
+function WorkItemDetails({ itemId, item, node, hasAttention }: {
   itemId: string;
   item: WorkGraphWireItem | undefined;
+  node: WorkGraphLayoutNode | undefined;
   hasAttention: boolean;
 }) {
-  const owner = item ? workGraphItemOwnerLabel(item) : "";
-  const status = item?.status?.replaceAll("_", " ");
+  const directory = useAgentDirectory();
+  const owner = item ? workGraphItemOwner(item, directory) : null;
+  const status = item?.status;
+  const priority = priorityTone(item?.priority);
   return <>
     <div className="workgraph-graph__detail-heading">
       <h4 className="workgraph-graph__detail-title">{item?.title || (item ? "Untitled work item" : "Work item unavailable in this snapshot")}</h4>
-      {status ? <span className="workgraph-graph__detail-status" data-status={item?.status}>
-        <span className={`workgraph__dot is-${item?.status}`} aria-hidden="true" />
-        {status[0].toUpperCase() + status.slice(1)}
-      </span> : null}
+      {status ? (
+        <span className="workgraph-graph__detail-status" data-status={status}>
+          <Chip tone={statusTone(status)} dot>{workGraphStatusWord(status)}</Chip>
+        </span>
+      ) : null}
     </div>
     {item?.description ? <p className="workgraph-graph__detail-description">{item.description}</p> : null}
-    {owner ? <p className="workgraph-graph__detail-owner">Owner <span>{owner}</span></p> : null}
-    <details className="workgraph-graph__metadata">
-      <summary>Item details</summary>
-      <dl>
-        <dt>ID</dt>
-        <dd className="workgraph-graph__detail-id"><code>{itemId}</code>
-          <CopyButton text={itemId} label="Copy work item ID" copiedLabel="Work item ID copied" Icon={ItemCopyIcon} />
-        </dd>
-        {item?.labels?.length ? <><dt>Labels</dt><dd>{item.labels.join(", ")}</dd></> : null}
-        {hasAttention ? <><dt>Attention</dt><dd>Bound to this item</dd></> : null}
-      </dl>
-    </details>
+    <KeyValueList
+      className="workgraph-graph__detail-facts"
+      items={[
+        owner ? { key: "owner", label: "Owner", value: <WorkGraphPerson person={owner} avatar={18} /> } : null,
+        priority ? { key: "priority", label: "Priority", value: <Chip tone={priority} outline={priority === "crit"}>{humanizeEnum(item?.priority)}</Chip> } : null,
+        node?.alsoUnder.length ? { key: "also-under", label: "Also under", value: node.alsoUnder.join(", ") } : null,
+        item?.updated_at ? { key: "updated", label: "Updated", value: <RelativeTime value={item.updated_at} /> } : null,
+      ]}
+    />
+    <TechnicalDetails
+      className="workgraph-graph__metadata"
+      summary="Item details"
+      items={[
+        {
+          label: "ID",
+          value: (
+            <span className="cc-tech-id workgraph-graph__detail-id">
+              <code>{itemId}</code>
+              <CopyButton text={itemId} label="Copy work item ID" copiedLabel="Work item ID copied" Icon={ItemCopyIcon} />
+            </span>
+          ),
+        },
+        item?.labels?.length ? {
+          label: "Labels",
+          value: <span className="cc-chips">{item.labels.map((label) => <Chip key={label} mono>{label}</Chip>)}</span>,
+        } : null,
+        typeof item?.revision === "number" ? { label: "Revision", value: item.revision } : null,
+        hasAttention ? { label: "Attention", value: "Bound to this item", plain: true } : null,
+      ]}
+    />
   </>;
 }
 
@@ -299,32 +367,33 @@ export function WorkGraphGraphView({
     }
     return bound;
   }, [attention]);
+  const directory = useAgentDirectory();
 
   if (layout.nodes.length === 0) {
-    return <div className="workgraph__empty">No work items to draw.</div>;
+    return <EmptyState inline title="No work items yet" />;
   }
+
+  const ownerNameOf = (node: WorkGraphLayoutNode): string => {
+    const item = itemById.get(node.itemId);
+    return (item ? workGraphItemOwner(item, directory)?.name : "") || node.ownerLabel;
+  };
+  const selectedNode = selectedId ? layout.nodes.find((node) => node.itemId === selectedId) : undefined;
 
   return (
     <div className="workgraph-graph" data-testid="workgraph-graph-frame">
       <div className="workgraph-graph__toolbar">
-        <button
-          type="button"
-          className="workgraph__action"
-          data-testid="workgraph-graph-fit"
-          onClick={zoom.reset}
-        >
+        <Button size="sm" title="Fit the graph to the frame" data-testid="workgraph-graph-fit" onClick={zoom.reset}>
           Fit
-        </button>
+        </Button>
         <span className="workgraph-graph__stats">
-          {layout.nodes.length} items · {layout.edges.length} edges
+          {joinMeta(plural(layout.nodes.length, "item"), plural(layout.edges.length, "link"))}
         </span>
         {layout.overflowCount > 0 ? (
           <span className="workgraph-graph__overflow" data-testid="workgraph-graph-overflow">
-            +{layout.overflowCount} more items not drawn
+            {moreItemsNotDrawn(layout.overflowCount)}
           </span>
         ) : null}
-        <span className="workgraph__spacer" />
-        <span className="workgraph-graph__hint">drag to pan · wheel to zoom</span>
+        <span className="workgraph-graph__hint">Drag to pan, scroll to zoom</span>
       </div>
       <svg
         data-testid="workgraph-graph"
@@ -332,7 +401,8 @@ export function WorkGraphGraphView({
         viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
         preserveAspectRatio="xMidYMid meet"
         data-scale={zoom.viewport.scale.toFixed(3)}
-        role="img"
+        // A group, not an image: its nodes are buttons people can reach.
+        role="group"
         aria-label="Work item dependency graph"
         ref={setSvgRef}
         onPointerDown={zoom.onPointerDown}
@@ -385,7 +455,8 @@ export function WorkGraphGraphView({
           })}
           {layout.nodes.map((node) => {
             const labelWidth = node.w - LABEL_X - LABEL_RIGHT_PAD;
-            const metaText = nodeMetaText(node);
+            const ownerName = ownerNameOf(node);
+            const metaText = nodeMetaText(node, ownerName);
             const meta = metaText
               ? fitLabel(metaText, labelWidth, measure?.meta ?? null, META_MAX_CHARS)
               : "";
@@ -397,8 +468,13 @@ export function WorkGraphGraphView({
                 data-testid="workgraph-graph-node"
                 data-item-id={node.itemId}
                 data-status={node.status}
+                data-tone={statusTone(node.status)}
                 className={`workgraph-graph__node is-${node.status}${selected ? " is-selected" : ""}`}
                 transform={`translate(${node.x} ${node.y})`}
+                role="button"
+                tabIndex={0}
+                aria-label={`${node.title}, ${workGraphStatusWord(node.status)}`}
+                aria-current={selected ? "true" : undefined}
                 // Select on pointerdown, not click: the svg's pan handler
                 // takes pointer capture, which retargets the eventual click
                 // to the svg and would swallow node selection entirely.
@@ -407,11 +483,26 @@ export function WorkGraphGraphView({
                   event.stopPropagation();
                   onSelect?.(node.itemId);
                 }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  onSelect?.(node.itemId);
+                }}
               >
                 <title>
-                  {nodeHoverText(node, itemById.get(node.itemId))}
+                  {nodeHoverText(node, itemById.get(node.itemId), ownerName)}
                 </title>
-                <rect className="workgraph-graph__node-box" width={node.w} height={node.h} rx={8} />
+                {selected ? (
+                  <rect
+                    className="workgraph-graph__node-ring"
+                    x={-4}
+                    y={-4}
+                    width={node.w + 8}
+                    height={node.h + 8}
+                    rx={9}
+                  />
+                ) : null}
+                <rect className="workgraph-graph__node-box" width={node.w} height={node.h} rx={6} />
                 <circle className="workgraph-graph__node-dot" cx={14} cy={meta ? 15 : node.h / 2} r={3.5} />
                 {boundItemIds.has(node.itemId) ? (
                   <circle
@@ -459,8 +550,16 @@ export function WorkGraphGraphView({
       </svg>
       <div className="workgraph-graph__detail" data-testid="workgraph-graph-detail">
         {selectedId
-          ? <WorkItemDetails key={selectedId} itemId={selectedId} item={itemById.get(selectedId)} hasAttention={boundItemIds.has(selectedId)} />
-          : "Click a node to inspect it."}
+          ? (
+            <WorkItemDetails
+              key={selectedId}
+              itemId={selectedId}
+              item={itemById.get(selectedId)}
+              node={selectedNode}
+              hasAttention={boundItemIds.has(selectedId)}
+            />
+          )
+          : <p className="workgraph-graph__detail-hint">Select an item to see its details.</p>}
       </div>
     </div>
   );

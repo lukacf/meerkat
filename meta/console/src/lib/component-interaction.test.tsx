@@ -352,6 +352,124 @@ test("MemoryLiveStrip pause-on-scroll freezes, jump-to-live resumes, top auto-un
   }
 });
 
+test("MemoryPanel reads in names and words; IDs live in tooltips and technical details", async () => {
+  // The kit's directory provider, imported here so this test leaves the
+  // shared import block alone.
+  const { AgentDirectoryProvider, createAgentDirectory } = await import("@console-components");
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const warnings: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  const hour = 60 * 60 * 1000;
+  const now = Date.now();
+  const record: MemoryPanelRecord = {
+    id: "mem_01JBX6Q5B1D7F3H9K2M8P4R6T0",
+    title: "Release train cutoff is Thursday",
+    kind: "fact",
+    trust: "agent_verified",
+    status: { status: "active" },
+    scope: { scope: "identity", realm: "default", identity: "coordinator" },
+    updated_at_ms: now - hour,
+    provenance: {
+      author: { author: "agent", identity: "coordinator" },
+      evidence: [{ session_id: "sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D", generation: 4, range: [12, 18] }],
+    },
+  };
+  const directory = createAgentDirectory([{ id: "identity:coordinator", label: "Coordinator" }]);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  const panel = (detail: React.ComponentProps<typeof MemoryPanel>["detail"]) => (
+    <AgentDirectoryProvider directory={directory}>
+      <MemoryPanel
+        records={[record]}
+        realms={["default"]}
+        quarantineRecords={[]}
+        pendingPromotions={[]}
+        dreams={[]}
+        detail={detail}
+        onRefresh={() => undefined}
+        onSelectRecord={() => undefined}
+        onClearDetail={() => undefined}
+        onLoadEvidence={async () => null}
+      />
+    </AgentDirectoryProvider>
+  );
+  const render = async (element: React.ReactElement) => {
+    await React.act(async () => {
+      root.render(element);
+    });
+  };
+  const click = async (selector: string) => {
+    const target = host.querySelector(selector) as HTMLElement | null;
+    assert.equal(target === null, false, `missing ${selector}`);
+    await React.act(async () => {
+      target?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+  };
+  const text = (selector: string) => host.querySelector(selector)?.textContent || "";
+
+  try {
+    await render(panel(null));
+    // Holdings: the agent scope reads as the agent's name, its key in the tooltip.
+    const scope = "[data-testid='memory-holdings-scope:identity:default:coordinator']";
+    assert.equal(text(scope).includes("Coordinator"), true, text(scope));
+    assert.equal(text(scope).includes("Agent memory"), true, text(scope));
+    assert.equal(host.querySelector(`${scope} [title='coordinator']`) === null, false);
+    // Refresh is a header button, not a tab.
+    assert.equal(host.querySelector("[role='tablist'] [data-testid='memory-refresh']") === null, true);
+    assert.equal(host.querySelector("[data-testid='memory-tab:records']")?.getAttribute("role"), "tab");
+
+    // Records: grouped under the agent's name; the row headline is the title.
+    await click("[data-testid='memory-tab:records']");
+    const group = "[data-testid='memory-group:identity:default:coordinator']";
+    assert.equal(text(group).includes("Coordinator"), true, text(group));
+    assert.equal(text(group).includes(record.id), false, "no record ID on the list row");
+
+    // Biography: the evidence reads as a conversation; the session ID stays in
+    // the button as a technical ID (its full value visually hidden), and the
+    // record ID moves into the collapsed technical details.
+    await render(panel({
+      realm: "default",
+      record: { ...record, body: "Release train cutoff is Thursday 17:00 UTC.", content_hash: "sha256:9f2c" },
+      chain: [],
+      injections: [{ record_id: record.id, identity: "coordinator", surface: "build", at_ms: now - hour }],
+    }));
+    const evidence = text("[data-testid='memory-evidence:0']");
+    assert.equal(evidence.includes("Conversation with Coordinator, messages 12-18"), true, evidence);
+    assert.equal(evidence.includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), true, evidence);
+    assert.equal(evidence.includes("generation 4"), true, evidence);
+    assert.equal(text("[data-testid='memory-detail-born']").includes("Coordinator (agent)"), true);
+    assert.equal(text("[data-testid='memory-detail-life']").includes("Given to Coordinator at startup"), true);
+    const technical = host.querySelector("[data-testid='memory-detail'] details.cc-tech");
+    assert.equal(technical === null, false);
+    assert.equal(technical?.hasAttribute("open"), false, "technical details start collapsed");
+    assert.equal((technical?.textContent || "").includes(record.id), true);
+    assert.equal((technical?.textContent || "").includes("sha256:9f2c"), true);
+    const headline = text("[data-testid='memory-detail'] header");
+    assert.equal(headline.includes(record.id), false, "the ID is not part of the headline");
+    assert.deepEqual(warnings, []);
+  } finally {
+    console.error = originalError;
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
 test("MemoryPanel walks the lattice over its first records page, never over the placeholder before it", async () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const previousWindow = globalThis.window;

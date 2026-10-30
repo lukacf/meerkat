@@ -2716,9 +2716,9 @@ function VerdictTileCard({
     >
       {evidence.length > 0 ? (
         <>
-          {evidence.map((violation) => (
+          {evidence.map((violation, index) => (
             <RecordLink
-              key={violation.id}
+              key={`${violation.realm}:${violation.id}:${index}`}
               className="memory-tile__evidence"
               id={violation.id}
               realm={violation.realm}

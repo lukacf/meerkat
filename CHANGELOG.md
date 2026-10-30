@@ -89,6 +89,42 @@ them.
   `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`, so no existing
   variant's discriminant moves. Exhaustive matches must add the new variants.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine records the target of every rotation and owns the same-session
+  rotation, the replay of a rotation and the scoped release (see Added).
+  `MobMachineState` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` `State` gain the public field `member_rotation_targets`, so
+  code that builds either struct literally must set it. The `MobMachineInput`
+  variant `BeginMemberRotation` (meerkat-machine-schema and meerkat-mob) and
+  the kernel `generated::mob::inputs` struct `BeginMemberRotation` gain the
+  public field `target` (the new enum `RotationTarget`: `FreshSession` keeps
+  the previous behaviour), and the variant and struct `ClassifyMemberRelease`
+  gain `scope_agent_runtime_id`, `scope_fence_token` and `scope_session_id`
+  (`None` keeps the previous unscoped verdict), so code that builds them
+  literally must set them, and a serialized kernel input without them no
+  longer deserializes. `MobMachineSignal` and its variant enum and the kernel
+  `Signal` and `SignalKind` gain `RecoverMemberRotationIntent {
+  agent_identity, agent_runtime_id, target, session_id, peer_endpoint }`;
+  `MemberSessionDisposal` (meerkat-machine-schema and meerkat-mob) gains
+  `KeptForSuccessor` and `MemberReleaseVerdict` gains `Stale`; each appended
+  last. The machine enum `RotationTarget` is new (the reads and the journal
+  answer with `meerkat_mob::RotationTarget`, its public projection). The
+  kernel `generated::mob::TransitionId` gains, appended last,
+  `BeginMemberRotationSameSessionRunning`,
+  `CommitMemberRotationSameSessionRunning`,
+  `CommitMemberRotationSameSessionStopped`,
+  `CommitMemberRotationSameSessionKickoffRunning`,
+  `CommitMemberRotationSameSessionKickoffStopped`,
+  `RecoverMemberRotationIntentFreshSessionRunning`,
+  `RecoverMemberRotationIntentSameSessionRunning`,
+  `RecoverMemberRotationIntentDestroyingRunning`,
+  `ClassifyMemberReleaseStaleRunning`, `ClassifyMemberReleaseStaleStopped`,
+  `ClassifyMemberReleaseStaleCompleted` and
+  `ClassifyMemberReleaseStaleDestroyed`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
+  `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
+  `rotation` (the rotation the retirement carries out, which serde skips), so
+  code that builds the variant literally must set it (`None`).
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records the members exempt from the mob definition's wiring rules
   (see Added). `MobMachineState` (meerkat-machine-schema and meerkat-mob) and
   the kernel `generated::mob` `State` gain the public field
@@ -204,6 +240,43 @@ them.
   Behaviour is unchanged until a host declares an entry. The option and the
   reads are Rust-only; the wire contracts do not carry them.
 
+- `meerkat-mob`: a member can be respawned on its own session, a rotation
+  finishes after a crash on its own, and a release can name the incarnation
+  it means. `MobHandle::respawn_member(identity, MemberRespawn)` retires the
+  member's current incarnation and seats its next one Dormant at the next
+  generation on the same session, each in one MobMachine step, so the
+  identity is never unseated: the next incarnation keeps the member's
+  conversation, comms identity and wiring edges. The member's running turn is
+  cancelled. When its session commits each round, its queued inputs that may
+  cross a stop (durable prompts not bound to an objective) stay queued for the
+  next incarnation, which the handover wakes to run each of them once, and
+  their waiters are answered `RequeuedAcrossStop`; every other input ends
+  stopped, typed. The new `MemberRespawn` names an initial message, a profile
+  (a declared role migration, which the next incarnation's spawn row records,
+  so its first build restamps the session after a restart too), a runtime mode
+  and whether to wake the next incarnation; the answer is the successor's
+  `MemberRespawnReceipt`. A member a same-session successor cannot serve (a
+  placed member, one bound to no session of its own, one that is not
+  runtime-backed or whose service keeps no durable sessions, one whose
+  session is lost or archived, a fork-derived member, one holding a forked
+  participant attachment) is refused `MobError::UnsupportedForMode` before
+  anything starts. Every rotation is durable from its start: the retirement's
+  start row records it (`RotationTarget::FreshSession` for `rotate_member`,
+  `SameSession` for a respawn), and a mob restarted at any point of it records
+  it again from that row and finishes it itself, with no host record. While a
+  rotation of the member stands, `redrive_retirement` re-drives the rotation
+  and any other retirement of the member is refused retryable.
+  `MobHandle::release_member_at_scope(scope)` releases a
+  member's materialization only when the `MemberDeliveryScope` names its
+  current incarnation on its current session (`ReleaseOutcome::Released`);
+  any other scope answers `ReleaseOutcome::Stale` and releases nothing. The
+  entry reads (`IdentityEntryView::rotation_in_flight`) and the journal's
+  retirement starts (`MemberLifecycleEvent::RetirementStarted::rotation`)
+  name the target of a rotation (`RotationTarget`). The rotation record is
+  internal to the stored event codec: an older Meerkat release replays the
+  start row as a plain retirement's. Rust-only; the wire contracts do not
+  carry it.
+
 - `meerkat-mob`: a spawn can exempt its member from the mob definition's
   wiring rules. `SpawnMemberSpec::definition_wiring` (builder
   `SpawnMemberSpec::with_definition_wiring`) takes the new
@@ -272,6 +345,26 @@ them.
   `rkat auth test` and `rkat auth status`. Default selection never picks
   these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
+
+### Changed
+
+- `meerkat-mob`: `MobHandle::respawn` of an identity entry's member respawns
+  it on its own session, as `MobHandle::respawn_member` does (see Added),
+  instead of retiring it and spawning a successor on a new session: the
+  identity stays seated and an entry throughout, and the successor keeps the
+  restrictions its session recorded. A worker's respawn is unchanged.
+
+- `meerkat-mob`: `MobHandle::rotate_member` no longer needs a host record to
+  survive a crash: the rotation is durable from its start and a restarted mob
+  finishes it itself. Re-issued while the rotation stands, the call re-drives
+  that rotation and answers its session; re-issued after it finished, it
+  rotates the member again. A host that keeps its own rotation record still
+  passes the identity host-pending (`MobBuilder::with_host_pending_members`)
+  and calls `rotate_member` again after the restart: the restarted mob leaves
+  that rotation to the call, which finishes it once, as it did for a start row
+  that predates the record. The call is refused retryable
+  (`MobError::LifecycleOperationPending`) for a member whose retirement
+  started without a rotation, unless the member is host-pending.
 
 ## [0.9.7] - 2026-10-28
 

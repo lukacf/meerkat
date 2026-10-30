@@ -172,9 +172,11 @@ name.
   agent calls: the agent mob tools of `meerkat-mob-mcp` (`mob_retire_member`,
   `mob_wire`, `mob_unwire` and the others) use it. The host acts on its own
   entries.
-- A respawn of an entry's member seats the entry's member again, and a
-  rotation (`rotate_member`) keeps the identity's standing. Every retirement
-  ends the entry: in this release an entry is always seated.
+- A respawn of an entry's member rotates it onto its own session (see
+  [Respawn, rotation and scoped release](#respawn-rotation-and-scoped-release)):
+  the identity stays seated and an entry throughout, and a rotation
+  (`rotate_member`) keeps the identity's standing too. Every retirement ends
+  the entry: in this release an entry is always seated.
 - Only a local member is an entry: a placed spawn refuses entry custody.
 
 `MobHandle::adopt_legacy_identity_entry(identity)` adopts, once, a member a
@@ -198,10 +200,10 @@ The reads need no actor command and never wake a member:
 
 | Read | Answers |
 |------|---------|
-| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode), whether it is Broken, whether its host preparation is pending and whether a rotation of it is in flight; or `NotAnEntry` with the worker that holds the identity, if any. |
+| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode), whether it is Broken, whether its host preparation is pending and the target of a rotation of it in flight (`RotationTarget`), if any; or `NotAnEntry` with the worker that holds the identity, if any. |
 | `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. |
 | `identity_census()` | The entries declared, seated, retiring, Broken, with host preparation pending and with a rotation in flight. |
-| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records), legacy adoptions, retirement starts, retirements, member resets and mob resets. |
+| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records), legacy adoptions, retirement starts (with the target of the rotation a start belongs to), retirements, member resets and mob resets. |
 | `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
 
 All but the journal read answer from the machine state the actor last
@@ -226,11 +228,72 @@ When the stored and requested roles differ, an absent declaration fails with
 current comms name, typed member binding, role/profile labels, callback
 context, and explicitly configured tooling. The declaration is not persisted,
 so a `SpawnMemberCustomizer` must re-supply it at `SpawnSource::Resume` after
-process restart.
+process restart. A same-session respawn that names another profile is the one
+exception: its next incarnation's spawn row records the declaration (see
+[Respawn, rotation and scoped release](#respawn-rotation-and-scoped-release)).
 
 This seam exists on trusted in-process `SpawnMemberSpec` and private
 `MaterializeLaunchMode::Resume` only. Agent tools, standing profiles, CLI,
 public RPC/REST/MCP/SDK spawn contracts, and Web do not expose it.
+
+### Respawn, rotation and scoped release
+
+Since 0.9.8 a member can be respawned on its own session, a rotation finishes
+after a crash on its own, and a release can name the incarnation it means.
+
+`MobHandle::respawn_member(identity, MemberRespawn)` rotates a member onto its
+own session. One MobMachine step starts the current incarnation's retirement
+and records the rotation while the member stays seated on its session. The
+retirement cancels the member's running turn, releases its runtime
+registration and keeps the session. A second step retires the incarnation and
+seats the next one Dormant at the next generation on the same session, so the
+identity is never unseated, and the next incarnation keeps the member's
+conversation, comms identity and wiring edges. When the member's session
+commits each round, its queued inputs that may cross a stop (durable prompts
+not bound to an objective) stay queued: their waiters are answered
+`RequeuedAcrossStop`, and the next incarnation, woken by the work the handover
+leaves it, runs each of them once. Every other input ends stopped, typed.
+`MemberRespawn` can name an initial message (run once as the next
+incarnation's first turn), a profile (a declared role migration: the next
+incarnation's spawn row records the role its session was last built under, so
+its first build restamps the session, after a restart too), a runtime mode,
+and `with_wake(true)` to wake the next incarnation before answering. The answer
+is the successor's `MemberRespawnReceipt`. A member a same-session successor
+cannot serve is refused `MobError::UnsupportedForMode` before anything starts:
+a placed member, one bound to no session of its own, one that is not
+runtime-backed or whose service keeps no durable sessions, one whose session
+is lost or archived, a fork-derived member and one holding a forked
+participant attachment. A member whose retirement is in flight is refused
+retryable (`LifecycleOperationPending`), unless that retirement is this
+rotation, which the call re-drives. `MobHandle::respawn` respawns an identity
+entry's member this way; a worker's respawn keeps its fresh-session successor.
+
+A rotation is durable from its start. Its retirement's start row records it:
+its target (`RotationTarget::FreshSession` for `rotate_member`, `SameSession`
+for a respawn), its next session and endpoint, and what its next incarnation
+is seated with. A mob restarted at any point of the rotation records it again
+from that row and finishes it itself; no host record is needed. A host that
+keeps its own record of a rotation passes the identity host-pending
+(`MobBuilder::with_host_pending_members`) and calls `rotate_member` again
+after the restart: the restarted mob leaves that rotation to the call, which
+finishes it once. Re-issued while its rotation stands, `rotate_member`
+re-drives that rotation; re-issued after it finished, it rotates the member
+again. While a rotation of the member stands, `redrive_retirement` re-drives
+the rotation and any other retirement of the member is refused retryable. A
+rotation never takes over a retirement of the member that started without it,
+whose start row records no rotation: `rotate_member` is refused retryable
+while that retirement stands, unless the member is host-pending. The record is
+internal to the stored event codec: an older Meerkat release replays the start
+row as a plain retirement's.
+
+`MobHandle::release_member_at_scope(scope)` releases a member's
+materialization only when its `MemberDeliveryScope` (from
+`capture_member_delivery_scope`: the mob's incarnation and the member's
+runtime id, fence and session) names the member's current incarnation on its
+current session, and answers `ReleaseOutcome::Released`. Any other scope answers
+`ReleaseOutcome::Stale` and releases nothing, so a release meant for an
+incarnation a respawn replaced never reaches its successor. MobMachine decides
+the verdict. `release_member` stays unscoped.
 
 ## Runtime Bindings
 

@@ -320,6 +320,12 @@ none and its profile resolves to the provider that binding was recorded for. A
 successor re-profiled to another provider, or to one that cannot be told,
 selects its own binding as a fresh spawn does.
 
+Since 0.9.8 the respawn of an identity entry's member, and every
+`MobHandle::respawn_member`, keeps the member's own session: the successor is
+built from that session as a restart builds it, under the restrictions the
+session recorded (see
+[Respawn, rotation and scoped release](/reference/mob-architecture#respawn-rotation-and-scoped-release)).
+
 For a member with a local session, the successor's profile and provider are
 resolved before anything is retired. The respawn is refused before
 retirement, and the member is kept, when the predecessor's restrictions cannot

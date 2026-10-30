@@ -738,7 +738,12 @@ For automatic cold restoration after a process restart, install a
 only when `ctx.spawn_source == SpawnSource::Resume`, after checking the exact
 member identity and requested target profile. The declaration is intentionally
 not persisted, so each later migration or restore must re-supply current host
-intent.
+intent. A same-session respawn that names another profile
+(`MobHandle::respawn_member` with `MemberRespawn::with_profile`) declares its
+migration itself: the next incarnation's spawn row records the role its
+session was last built under, so its first build restamps the session, after a
+restart too, with no customizer (see
+[Respawn, rotation and scoped release](/reference/mob-architecture#respawn-rotation-and-scoped-release)).
 
 The runtime enforces all of these facts:
 

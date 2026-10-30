@@ -21,9 +21,14 @@
 //!
 //! The activation rows at the end hold the same cache argument for an
 //! operator instruction appended after history, with a plain System row as
-//! the stand-in entry: under each cache policy, turn k's request stays a
-//! byte prefix of turn k+1's request apart from breakpoint markers, and the
-//! cache model serves turn k+1 all of turn k's request.
+//! the stand-in entry, from turn k through turn k+2, whose request has moved
+//! the recent breakpoints of `system_and_conversation` past the entry. Under
+//! each cache policy every request is a byte prefix of the next apart from
+//! breakpoint markers. The cache model serves each request all of the one
+//! before under `automatic` and `system_and_conversation`, and the system
+//! prefix under `system_prefix`. Turn k+1 renders the entry after its own
+//! prompt, and its breakpoint claims cover only rendered prefixes that are
+//! transcript prefixes.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::HashSet;
@@ -612,6 +617,9 @@ const TURN_K_ANCHOR: usize = 1;
 /// Lowered `messages` index of turn k's answer in turn k+1's request.
 const NEXT_TURN_ANCHOR: usize = 3;
 
+/// Lowered `messages` index of turn k+1's answer in turn k+2's request.
+const AFTER_NEXT_ANCHOR: usize = 8;
+
 /// Turn k's request and turn k+1's request around an activation. Turns k-1
 /// and k end without tools. Between turns k and k+1 the host appended a
 /// System row, which the transcript records before the User row it governs
@@ -640,6 +648,23 @@ fn activation_requests() -> (Vec<Message>, Vec<Message>) {
         Message::User(UserMessage::text("what is left for tomorrow?")),
     ]);
     (turn_k, next_turn)
+}
+
+/// Turn k+2's request. Turn k+1 answers after one tool round, so the recent
+/// breakpoints of `system_and_conversation` move past the entry: turn k+2
+/// lowers `[U1, A1, U2, A2, U3, entry, call, result, A3, U4]` and marks the
+/// last three.
+fn turn_after_next(next_turn: &[Message]) -> Vec<Message> {
+    let run = RunId::new();
+    let mut transcript = next_turn.to_vec();
+    transcript.extend(tool_call(&run, "call-agenda", "calendar_lookup"));
+    transcript.push(stamped(
+        &run,
+        vec![text("Left for tomorrow: standup at 9.")],
+        StopReason::EndTurn,
+    ));
+    transcript.push(Message::User(UserMessage::text("thanks")));
+    transcript
 }
 
 fn lower_activation(messages: &[Message], policy: AnthropicCacheControlPolicy) -> Value {
@@ -682,36 +707,45 @@ fn content_text(content: &Value) -> String {
     }
 }
 
-/// Build turn k's request, append the entry, build turn k+1's request:
-/// tools and `system` are byte-equal, turn k's `messages` are a byte prefix
-/// of turn k+1's with the breakpoint markers removed, the entry closes turn
-/// k+1's request after the User row it governs, and turn k's anchor lies
-/// inside the shared prefix.
+/// Build turn k's request, append the entry, build turn k+1's and turn
+/// k+2's requests. At each step tools and `system` are byte-equal and the
+/// earlier `messages` are a byte prefix of the later ones with the
+/// breakpoint markers removed. The entry closes turn k+1's request after the
+/// User row it governs and keeps its place in turn k+2's, unmarked. Each
+/// request carries exactly the policy's breakpoints, and turn k's anchor
+/// lies inside the prefix turn k+1 repeats.
 fn assert_activation_keeps_cached_prefix(policy: AnthropicCacheControlPolicy) {
     let (turn_k, next_turn) = activation_requests();
+    let after_next = turn_after_next(&next_turn);
     let prior = lower_activation(&turn_k, policy);
     let next = lower_activation(&next_turn, policy);
+    let after = lower_activation(&after_next, policy);
 
-    assert_eq!(
-        head_bytes(&next),
-        head_bytes(&prior),
-        "{policy:?}: tools and system are byte-equal across the activation"
-    );
+    for (earlier, later, added, step) in [
+        (&prior, &next, 3, "turn k to k+1"),
+        (&next, &after, 4, "turn k+1 to k+2"),
+    ] {
+        assert_eq!(
+            head_bytes(later),
+            head_bytes(earlier),
+            "{policy:?} {step}: tools and system are byte-equal"
+        );
+        let earlier_messages = message_bytes(earlier);
+        let later_messages = message_bytes(later);
+        assert_eq!(
+            later_messages.len(),
+            earlier_messages.len() + added,
+            "{policy:?} {step}"
+        );
+        assert_eq!(
+            later_messages[..earlier_messages.len()],
+            earlier_messages[..],
+            "{policy:?} {step}: the earlier messages are a byte prefix of the later, markers aside"
+        );
+    }
 
-    let prior_messages = message_bytes(&prior);
-    let next_messages = message_bytes(&next);
-    assert_eq!(
-        next_messages.len(),
-        prior_messages.len() + 3,
-        "{policy:?}: turn k's answer, turn k+1's prompt and the entry follow"
-    );
-    assert_eq!(
-        next_messages[..prior_messages.len()],
-        prior_messages[..],
-        "{policy:?}: turn k's messages are a byte prefix of turn k+1's, markers aside"
-    );
-
-    let entry_index = prior_messages.len() + 2;
+    let prior_len = prior["messages"].as_array().unwrap().len();
+    let entry_index = prior_len + 2;
     let governed = &next["messages"][entry_index - 1];
     let entry = &next["messages"][entry_index];
     assert_eq!(governed["role"], "user", "{policy:?}: {governed}");
@@ -721,28 +755,44 @@ fn assert_activation_keeps_cached_prefix(policy: AnthropicCacheControlPolicy) {
         ACTIVATION_ENTRY,
         "{policy:?}"
     );
+    // Turn k+2 has moved every breakpoint past the entry, which keeps the
+    // unmarked form of its policy: one text block under
+    // `system_and_conversation`, the bare string under the others.
+    let unmarked_entry = if policy == AnthropicCacheControlPolicy::SystemAndConversation {
+        json!([{"type": "text", "text": ACTIVATION_ENTRY}])
+    } else {
+        json!(ACTIVATION_ENTRY)
+    };
+    assert_eq!(
+        after["messages"][entry_index]["content"], unmarked_entry,
+        "{policy:?}: {after}"
+    );
 
-    // Turn k's anchor lies inside the prefix turn k+1 repeats, and turn
-    // k+1's anchor (turn k's answer) lies before the entry.
-    assert!(TURN_K_ANCHOR < prior_messages.len(), "{policy:?}");
+    assert!(TURN_K_ANCHOR < prior_len, "{policy:?}");
     assert!(NEXT_TURN_ANCHOR < entry_index, "{policy:?}");
-    let prior_breakpoints = breakpoint_messages(&prior);
-    let next_breakpoints = breakpoint_messages(&next);
-    match policy {
-        AnthropicCacheControlPolicy::Automatic => {
-            assert_eq!(prior_breakpoints, vec![TURN_K_ANCHOR], "{prior}");
-            assert_eq!(next_breakpoints, vec![NEXT_TURN_ANCHOR], "{next}");
-        }
-        AnthropicCacheControlPolicy::SystemPrefix => {
-            assert!(prior_breakpoints.is_empty(), "{prior}");
-            assert!(next_breakpoints.is_empty(), "{next}");
-        }
+    let expected = match policy {
+        AnthropicCacheControlPolicy::Automatic => [
+            vec![TURN_K_ANCHOR],
+            vec![NEXT_TURN_ANCHOR],
+            vec![AFTER_NEXT_ANCHOR],
+        ],
+        AnthropicCacheControlPolicy::SystemPrefix => [vec![], vec![], vec![]],
+        // The three most recent messages, each set holding its request's
+        // anchor; the fix that lowers content as blocks leaves them in place.
         AnthropicCacheControlPolicy::SystemAndConversation => {
-            assert!(prior_breakpoints.contains(&TURN_K_ANCHOR), "{prior}");
-            assert!(next_breakpoints.contains(&NEXT_TURN_ANCHOR), "{next}");
+            [vec![0, 1, 2], vec![3, 4, 5], vec![7, 8, 9]]
         }
         other => panic!("no activation row for {other:?}"),
-    }
+    };
+    assert_eq!(
+        [
+            breakpoint_messages(&prior),
+            breakpoint_messages(&next),
+            breakpoint_messages(&after),
+        ],
+        expected,
+        "{policy:?}: the breakpoints of turns k, k+1 and k+2"
+    );
 }
 
 #[test]
@@ -774,12 +824,14 @@ fn blocks_through_message(body: &Value, through: usize) -> usize {
 #[test]
 fn anthropic_cache_model_reads_whole_prior_conversation_after_activation() {
     let (turn_k, next_turn) = activation_requests();
+    let after_next = turn_after_next(&next_turn);
     for policy in [
         AnthropicCacheControlPolicy::Automatic,
         AnthropicCacheControlPolicy::SystemAndConversation,
     ] {
         let prior = lower_activation(&turn_k, policy);
         let next = lower_activation(&next_turn, policy);
+        let after = lower_activation(&after_next, policy);
         let anchor_prefix = blocks_through_message(&prior, TURN_K_ANCHOR);
         let prior_request = cache_view(&prior).prefixes.len();
 
@@ -795,12 +847,18 @@ fn anthropic_cache_model_reads_whole_prior_conversation_after_activation() {
             read, prior_request,
             "{policy:?}: turn k+1 reads all of turn k's request from cache"
         );
+        assert_eq!(
+            cache.serve(&after),
+            cache_view(&next).prefixes.len(),
+            "{policy:?}: turn k+2 reads all of turn k+1's request, the entry included"
+        );
     }
 
     // `system_prefix` caches the system prefix alone, which the activation
     // leaves as it was.
     let prior = lower_activation(&turn_k, AnthropicCacheControlPolicy::SystemPrefix);
     let next = lower_activation(&next_turn, AnthropicCacheControlPolicy::SystemPrefix);
+    let after = lower_activation(&after_next, AnthropicCacheControlPolicy::SystemPrefix);
     let system_prefix = cache_view(&json!({
         "tools": next["tools"],
         "system": next["system"],
@@ -811,6 +869,7 @@ fn anthropic_cache_model_reads_whole_prior_conversation_after_activation() {
     let mut cache = ProviderCache::default();
     cache.serve(&prior);
     assert_eq!(cache.serve(&next), system_prefix, "system_prefix: {next}");
+    assert_eq!(cache.serve(&after), system_prefix, "system_prefix: {after}");
 }
 
 /// Under `system_and_conversation` the client lowers the entry after the

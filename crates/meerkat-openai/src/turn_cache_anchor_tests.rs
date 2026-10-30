@@ -22,8 +22,10 @@
 //!
 //! The activation rows at the end hold the same cache argument for an
 //! operator instruction appended after history, with a plain System row as
-//! the stand-in entry: turn k's input items stay byte-equal in turn k+1's
-//! request, and the cache model serves turn k+1 all of turn k's input.
+//! the stand-in entry: turn k's input items keep their bytes in turn k+1's
+//! request (in implicit mode apart from the one turn-anchor marker, which
+//! moves forward each run), and the cache model serves turn k+1 all of turn
+//! k's input.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::HashSet;

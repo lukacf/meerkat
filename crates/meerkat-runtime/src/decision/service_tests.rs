@@ -213,20 +213,21 @@ fn hold_of(
     rendering: &DecisionRendering,
     deadline_at_ms: u64,
 ) -> DecisionHoldRequest {
-    DecisionHoldRequest {
-        kind: DecisionKind::new("release").expect("kind"),
-        subject_key: DecisionSubjectKey::new(subject).expect("subject key"),
-        operation_id: operation_id(),
-        request_digest: request_digest(),
+    let request = DecisionHoldRequest::new(
+        DecisionKind::new("release").expect("kind"),
+        DecisionSubjectKey::new(subject).expect("subject key"),
+        operation_id(),
+        request_digest(),
+        DecisionRequestBody::from_value(&serde_json::json!({"build": 7})).expect("request body"),
         requester,
-        approver_id: approver_id(),
-        reviewer,
+        approver_id(),
         deadline_at_ms,
-        request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
-            .expect("request body"),
-        rendering: rendering.clone(),
-        renderer: DecisionRenderer::new("render.v1").expect("renderer"),
-        expected_subject_digest: None,
+        rendering.clone(),
+        DecisionRenderer::new("render.v1").expect("renderer"),
+    );
+    match reviewer {
+        Some(reviewer) => request.with_reviewer(reviewer),
+        None => request,
     }
 }
 
@@ -972,7 +973,7 @@ fn the_permit_carries_decided_consent_and_the_held_binding() {
             assert_eq!(Some(*decided_at_ms), row.state.decided_at_ms);
             assert_eq!(evidence, &outcome.evidence);
         }
-        ConsentProvenance::Imported { .. } => panic!("a permit carries decided consent"),
+        other => panic!("a permit carries decided consent, not {other:?}"),
     }
 
     let again = service
@@ -1101,8 +1102,8 @@ fn a_hold_replays_its_binding_and_refuses_another() {
         ),
         DecisionRefusal::HoldConflict
     );
-    let mut foreign = hold_request(&rendering);
-    foreign.expected_subject_digest = Some(Sha256Digest::of(b"another rendering"));
+    let foreign = hold_request(&rendering)
+        .with_expected_subject_digest(Sha256Digest::of(b"another rendering"));
     assert_eq!(
         service
             .hold(foreign, true)

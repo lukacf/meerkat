@@ -164,25 +164,20 @@ mod tests {
 
     /// The hold of `subject` until `deadline_at_ms`.
     fn hold_of(subject: &str, deadline_at_ms: u64) -> DecisionHoldRequest {
-        DecisionHoldRequest {
-            kind: DecisionKind::new("release").expect("kind"),
-            subject_key: DecisionSubjectKey::new(subject).expect("subject key"),
-            operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
-            request_digest: Sha256Digest::of(br#"{"build":7}"#),
-            requester: DecisionPrincipalKey::of(&principal(
-                PrincipalKind::PersonalAgent,
-                "builder",
-            ))
-            .expect("principal key"),
-            approver_id: approver_id(),
-            reviewer: None,
-            deadline_at_ms,
-            request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+        DecisionHoldRequest::new(
+            DecisionKind::new("release").expect("kind"),
+            DecisionSubjectKey::new(subject).expect("subject key"),
+            DecisionOperationId::new("operation-7").expect("operation id"),
+            Sha256Digest::of(br#"{"build":7}"#),
+            DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
                 .expect("request body"),
-            rendering: rendering(),
-            renderer: DecisionRenderer::new("render.v1").expect("renderer"),
-            expected_subject_digest: None,
-        }
+            DecisionPrincipalKey::of(&principal(PrincipalKind::PersonalAgent, "builder"))
+                .expect("principal key"),
+            approver_id(),
+            deadline_at_ms,
+            rendering(),
+            DecisionRenderer::new("render.v1").expect("renderer"),
+        )
     }
 
     fn hold_request() -> DecisionHoldRequest {

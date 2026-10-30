@@ -41,20 +41,21 @@ fn hold_request(
     rendering: DecisionRendering,
     expected_subject_digest: Option<Sha256Digest>,
 ) -> DecisionHoldRequest {
-    DecisionHoldRequest {
-        kind: DecisionKind::new("release").expect("kind"),
-        subject_key: DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
-        operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
-        request_digest: Sha256Digest::of(b"{\"build\":7}"),
-        requester: key(PrincipalKind::PersonalAgent, "builder"),
-        approver_id: approver_id(),
-        reviewer: None,
-        deadline_at_ms: 60_000,
-        request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
-            .expect("request body"),
+    let request = DecisionHoldRequest::new(
+        DecisionKind::new("release").expect("kind"),
+        DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
+        DecisionOperationId::new("operation-7").expect("operation id"),
+        Sha256Digest::of(b"{\"build\":7}"),
+        DecisionRequestBody::from_value(&serde_json::json!({"build": 7})).expect("request body"),
+        key(PrincipalKind::PersonalAgent, "builder"),
+        approver_id(),
+        60_000,
         rendering,
-        renderer: DecisionRenderer::new("render.v1").expect("renderer"),
-        expected_subject_digest,
+        DecisionRenderer::new("render.v1").expect("renderer"),
+    );
+    match expected_subject_digest {
+        Some(digest) => request.with_expected_subject_digest(digest),
+        None => request,
     }
 }
 
@@ -491,16 +492,7 @@ fn stored(
         executed_request_digest: None,
         notice,
     };
-    StoredDecision {
-        decision_id,
-        descriptor,
-        state,
-        presentations: Vec::new(),
-        outcome: None,
-        execution_refusal: None,
-        notice_receipt: None,
-        revision: 1,
-    }
+    StoredDecision::held(descriptor, state)
 }
 
 #[test]

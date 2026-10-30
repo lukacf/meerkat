@@ -25,8 +25,8 @@ use meerkat_core::approval::decision::{
     DECISION_PRESENTATIONS_MAX, DecisionContractError, DecisionDescriptor, DecisionHoldRequest,
     DecisionId, DecisionListFilter, DecisionMachineState, DecisionNotice, DecisionOperationId,
     DecisionOutcome, DecisionPage, DecisionPhase, DecisionPrincipalKey, DecisionReference,
-    DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore, DecisionTier,
-    PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision, UnreadableDecision,
+    DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore, PresentationAudience,
+    PresentationRecord, Sha256Digest, StoredDecision, UnreadableDecision,
 };
 use meerkat_core::approval::{ApprovalConsentDeliveryState, ApprovalStoreError};
 use serde::{Deserialize, Serialize};
@@ -192,8 +192,9 @@ pub enum DecisionError {
     Machine(String),
 }
 
-/// Who withdraws a decision.
+/// Who withdraws a decision. More withdrawers may be added.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecisionWithdrawer {
     /// The decision's requester.
     Requester(DecisionPrincipalKey),
@@ -203,8 +204,10 @@ pub enum DecisionWithdrawer {
 
 /// One page of decisions, each projected at the clock reading of the read
 /// (a decision past its deadline reads as expired; the projection is not
-/// recorded), and the rows of the page this binary cannot read.
+/// recorded), and the rows of the page this binary cannot read. It may gain
+/// fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecisionListing {
     pub decisions: Vec<StoredDecision>,
     pub unreadable: Vec<UnreadableDecision>,
@@ -778,16 +781,7 @@ impl DurableDecisionService {
                             refusal,
                         });
                     }
-                    let row = StoredDecision {
-                        decision_id: decision_id.clone(),
-                        descriptor,
-                        state: stored_state(authority.state())?,
-                        presentations: Vec::new(),
-                        outcome: None,
-                        execution_refusal: None,
-                        notice_receipt: None,
-                        revision: 1,
-                    };
+                    let row = StoredDecision::held(descriptor, stored_state(authority.state())?);
                     match store.insert_if_absent(&row) {
                         Ok(()) => return Ok(row),
                         // Another owner held it first: answer this hold as a
@@ -882,10 +876,7 @@ impl DurableDecisionService {
             });
             let next = successor(loaded, state, |row| {
                 if decided {
-                    row.outcome = Some(DecisionOutcome {
-                        tier: DecisionTier::Human,
-                        evidence: evidence.clone(),
-                    });
+                    row.outcome = Some(DecisionOutcome::of(evidence.clone()));
                     if let Some(presentation) = carried {
                         keep_presentation(row, presentation.clone());
                     }
@@ -932,10 +923,7 @@ impl DurableDecisionService {
             });
             let next = successor(loaded, state, |row| {
                 if decided {
-                    row.outcome = Some(DecisionOutcome {
-                        tier: DecisionTier::Review,
-                        evidence: evidence.clone(),
-                    });
+                    row.outcome = Some(DecisionOutcome::of(evidence.clone()));
                 }
             });
             Ok(Step::of(&effects, next))
@@ -1054,10 +1042,9 @@ impl DurableDecisionService {
                     let stored_under = row.decision_id.as_str().to_owned();
                     match check_row(&stored_under, *row) {
                         Ok(loaded) => listing.decisions.push(loaded.row),
-                        Err(error) => listing.unreadable.push(UnreadableDecision {
-                            decision_id: stored_under,
-                            reason: error.to_string(),
-                        }),
+                        Err(error) => listing
+                            .unreadable
+                            .push(UnreadableDecision::new(stored_under, error.to_string())),
                     }
                 }
             }
@@ -1097,10 +1084,9 @@ impl DurableDecisionService {
             });
             match projected {
                 Ok(row) => listing.decisions.push(row),
-                Err(error) => listing.unreadable.push(UnreadableDecision {
-                    decision_id: stored_under,
-                    reason: error.to_string(),
-                }),
+                Err(error) => listing
+                    .unreadable
+                    .push(UnreadableDecision::new(stored_under, error.to_string())),
             }
         }
         Ok(listing)

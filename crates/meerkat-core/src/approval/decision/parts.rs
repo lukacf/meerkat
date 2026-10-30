@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApproverId, DecisionPrincipalKey, DecisionReference, DecisionRendering, Sha256Digest};
 
-/// One canonical part of a rendering.
+/// One canonical part of a rendering, as [`canonical_parts`] computes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CanonicalPart {
     /// The part's position, from 0.
     pub index: u32,
@@ -81,6 +82,9 @@ pub fn canonical_parts(rendering: &str, max_part_bytes: Option<NonZeroU32>) -> V
 }
 
 /// Who a presentation was shown to.
+///
+/// Matched exhaustively: the audiences are the two parties the decision
+/// machine records a presentation to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PresentationAudience {
@@ -90,9 +94,11 @@ pub enum PresentationAudience {
     Reviewer { reviewer: DecisionPrincipalKey },
 }
 
-/// One durable record of a presentation of a decision's rendering.
+/// One durable record of a presentation of a decision's rendering. Built by
+/// [`Self::complete`]; it may gain fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PresentationRecord {
     pub audience: PresentationAudience,
     /// The digest of the rendering that was presented.

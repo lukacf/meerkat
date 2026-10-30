@@ -20,9 +20,11 @@ use crate::{PrincipalKind, PrincipalRef, SessionId};
 /// Largest decision reason or review feedback, in bytes.
 pub const DECISION_REASON_MAX_BYTES: usize = 4 * 1024;
 
-/// Who decides a decision.
+/// Who decides a decision. More tiers may be added with new kinds of
+/// evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DecisionTier {
     /// An authenticated human acting for the decision's approver id (R3).
     Human,
@@ -31,6 +33,8 @@ pub enum DecisionTier {
 }
 
 /// A reviewer's verdict on a decision in its review stage.
+///
+/// Matched exhaustively: each verdict is one of the decision machine's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionReviewVerdict {
@@ -298,9 +302,10 @@ impl AttributedReview {
 /// attributed review established, as the owner service stores it. The
 /// decision's machine state carries the digest of this record
 /// ([`Self::digest`]); a row whose stored evidence does not hash to it is
-/// torn and is never read as decided.
+/// torn and is never read as decided. More kinds may be added.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DecisionEvidence {
     /// An authenticated human's decision.
     Human {

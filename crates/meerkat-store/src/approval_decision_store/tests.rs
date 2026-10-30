@@ -37,21 +37,19 @@ fn stored(
     )
     .expect("principal key");
     let descriptor = DecisionDescriptor::seal(
-        DecisionHoldRequest {
-            kind: DecisionKind::new("release").expect("kind"),
-            subject_key: DecisionSubjectKey::new(subject).expect("subject key"),
-            operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
-            request_digest: Sha256Digest::of(br#"{"build":7}"#),
-            requester,
-            approver_id: ApproverId::new("team:owners").expect("approver id"),
-            reviewer: None,
-            deadline_at_ms: deadline,
-            request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+        DecisionHoldRequest::new(
+            DecisionKind::new("release").expect("kind"),
+            DecisionSubjectKey::new(subject).expect("subject key"),
+            DecisionOperationId::new("operation-7").expect("operation id"),
+            Sha256Digest::of(br#"{"build":7}"#),
+            DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
                 .expect("request body"),
-            rendering: DecisionRendering::new("Release build 7.").expect("rendering"),
-            renderer: DecisionRenderer::new("render.v1").expect("renderer"),
-            expected_subject_digest: None,
-        },
+            requester,
+            ApproverId::new("team:owners").expect("approver id"),
+            deadline,
+            DecisionRendering::new("Release build 7.").expect("rendering"),
+            DecisionRenderer::new("render.v1").expect("renderer"),
+        ),
         10,
     )
     .expect("seal");
@@ -76,16 +74,7 @@ fn stored(
         executed_request_digest: None,
         notice,
     };
-    StoredDecision {
-        decision_id,
-        descriptor,
-        state,
-        presentations: Vec::new(),
-        outcome: None,
-        execution_refusal: None,
-        notice_receipt: None,
-        revision: 1,
-    }
+    StoredDecision::held(descriptor, state)
 }
 
 fn open_row(subject: &str) -> StoredDecision {
@@ -297,27 +286,20 @@ fn owed_due_and_count_queries_use_their_indexes() {
     for (label, filter, index) in [
         (
             "count by phase",
-            DecisionListFilter {
-                phase: Some(DecisionPhase::Open),
-                ..DecisionListFilter::default()
-            },
+            DecisionListFilter::default().with_phase(DecisionPhase::Open),
             "approval_decisions_phase_deadline_idx",
         ),
         (
             "count by approver",
-            DecisionListFilter {
-                approver_id: Some(ApproverId::new("team:owners").expect("approver id")),
-                ..DecisionListFilter::default()
-            },
+            DecisionListFilter::default()
+                .with_approver_id(ApproverId::new("team:owners").expect("approver id")),
             "approval_decisions_approver_phase_idx",
         ),
         (
             "count by kind",
-            DecisionListFilter {
-                kind: Some(DecisionKind::new("release").expect("kind")),
-                phase: Some(DecisionPhase::Open),
-                ..DecisionListFilter::default()
-            },
+            DecisionListFilter::default()
+                .with_kind(DecisionKind::new("release").expect("kind"))
+                .with_phase(DecisionPhase::Open),
             "approval_decisions_kind_phase_idx",
         ),
     ] {
@@ -326,10 +308,7 @@ fn owed_due_and_count_queries_use_their_indexes() {
     }
     let requester = open_row("subject-1").descriptor.requester;
     let (sql, values) = list_query(
-        &DecisionListFilter {
-            requester: Some(requester),
-            ..DecisionListFilter::default()
-        },
+        &DecisionListFilter::default().with_requester(requester),
         None,
         10,
     );
@@ -402,10 +381,7 @@ fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
     assert_eq!(all, sorted, "pages follow decision id order");
     assert_eq!(
         store
-            .count(&DecisionListFilter {
-                phase: Some(DecisionPhase::Approved),
-                ..DecisionListFilter::default()
-            })
+            .count(&DecisionListFilter::default().with_phase(DecisionPhase::Approved))
             .expect("count"),
         2
     );

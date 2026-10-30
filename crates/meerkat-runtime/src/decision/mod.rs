@@ -47,8 +47,9 @@ pub use service::{
 ///
 /// Fixed when the owner is opened: an owner composed for a candidate launch
 /// is narrowed to [`Self::CandidateLaunch`] before it is shared, and nothing
-/// widens it again.
+/// widens it again. More modes may be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecisionWriteMode {
     /// An admitted launch: the owner reads and writes decisions.
     Admitted,

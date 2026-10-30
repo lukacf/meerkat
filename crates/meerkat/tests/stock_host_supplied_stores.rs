@@ -622,21 +622,18 @@ fn hold_request() -> DecisionHoldRequest {
         TrustDomainId::new("example.org").expect("trust domain"),
     )
     .expect("principal");
-    DecisionHoldRequest {
-        kind: DecisionKind::new("release").expect("kind"),
-        subject_key: DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
-        operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
-        request_digest: Sha256Digest::of(br#"{"build":7}"#),
-        requester: DecisionPrincipalKey::of(&requester).expect("principal key"),
-        approver_id: ApproverId::new("team:owners").expect("approver id"),
-        reviewer: None,
-        deadline_at_ms: u64::MAX / 2,
-        request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
-            .expect("request body"),
-        rendering: DecisionRendering::new("Release build 7.").expect("rendering"),
-        renderer: DecisionRenderer::new("render.v1").expect("renderer"),
-        expected_subject_digest: None,
-    }
+    DecisionHoldRequest::new(
+        DecisionKind::new("release").expect("kind"),
+        DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
+        DecisionOperationId::new("operation-7").expect("operation id"),
+        Sha256Digest::of(br#"{"build":7}"#),
+        DecisionRequestBody::from_value(&serde_json::json!({"build": 7})).expect("request body"),
+        DecisionPrincipalKey::of(&requester).expect("principal key"),
+        ApproverId::new("team:owners").expect("approver id"),
+        u64::MAX / 2,
+        DecisionRendering::new("Release build 7.").expect("rendering"),
+        DecisionRenderer::new("render.v1").expect("renderer"),
+    )
 }
 
 /// Whether a file named `name` exists anywhere under `dir`.

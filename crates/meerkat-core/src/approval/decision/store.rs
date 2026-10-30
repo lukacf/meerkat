@@ -22,6 +22,8 @@ pub const DECISION_PAGE_MAX: usize = 500;
 
 /// A row as a store read it: decoded, or kept unreadable for its decision
 /// only. An unreadable row is listed as such and never executed.
+///
+/// Matched exhaustively: every reader handles both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionRow {
     Readable(Box<StoredDecision>),
@@ -39,24 +41,41 @@ impl DecisionRow {
     }
 }
 
-/// A stored row this binary cannot read: undecodable, or torn.
+/// A stored row this binary cannot read: undecodable, or torn. It may gain
+/// fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnreadableDecision {
     /// The id the row is stored under.
     pub decision_id: String,
     pub reason: String,
 }
 
-/// One page of rows, in decision id order.
+impl UnreadableDecision {
+    /// The row stored under `decision_id`, unreadable for `reason`.
+    #[must_use]
+    pub fn new(decision_id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            decision_id: decision_id.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// One page of rows, in decision id order. It may gain fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecisionPage {
     pub rows: Vec<DecisionRow>,
     /// The id to read the next page after, when there may be more rows.
     pub next_after: Option<String>,
 }
 
-/// Which rows a listing reads. Every set field must match.
+/// Which rows a listing reads. Every set field must match. Built from
+/// [`Self::default`] (every row) with the `with_` methods; it may gain
+/// fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecisionListFilter {
     pub kind: Option<DecisionKind>,
     pub phase: Option<DecisionPhase>,
@@ -65,6 +84,34 @@ pub struct DecisionListFilter {
 }
 
 impl DecisionListFilter {
+    /// Only decisions of `kind`.
+    #[must_use]
+    pub fn with_kind(mut self, kind: DecisionKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Only decisions in `phase`.
+    #[must_use]
+    pub fn with_phase(mut self, phase: DecisionPhase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    /// Only decisions held for `approver_id`.
+    #[must_use]
+    pub fn with_approver_id(mut self, approver_id: ApproverId) -> Self {
+        self.approver_id = Some(approver_id);
+        self
+    }
+
+    /// Only decisions `requester` asked for.
+    #[must_use]
+    pub fn with_requester(mut self, requester: DecisionPrincipalKey) -> Self {
+        self.requester = Some(requester);
+        self
+    }
+
     /// Whether `row` matches every field this filter sets.
     #[must_use]
     pub fn matches(&self, row: &StoredDecision) -> bool {

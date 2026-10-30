@@ -183,14 +183,13 @@ fn integer(value: u64, what: &str) -> Result<i64, ApprovalStoreError> {
 fn decode(decision_id: String, bytes: &[u8]) -> DecisionRow {
     match serde_json::from_slice::<StoredDecision>(bytes) {
         Ok(row) if row.decision_id.as_str() == decision_id => DecisionRow::Readable(Box::new(row)),
-        Ok(row) => DecisionRow::Unreadable(UnreadableDecision {
+        Ok(row) => DecisionRow::Unreadable(UnreadableDecision::new(
             decision_id,
-            reason: format!("the row names the decision {}", row.decision_id),
-        }),
-        Err(error) => DecisionRow::Unreadable(UnreadableDecision {
-            decision_id,
-            reason: error.to_string(),
-        }),
+            format!("the row names the decision {}", row.decision_id),
+        )),
+        Err(error) => {
+            DecisionRow::Unreadable(UnreadableDecision::new(decision_id, error.to_string()))
+        }
     }
 }
 
@@ -283,10 +282,9 @@ fn read_page(
             .as_bytes()
         {
             Ok(bytes) => decode(decision_id, bytes),
-            Err(error) => DecisionRow::Unreadable(UnreadableDecision {
-                decision_id,
-                reason: error.to_string(),
-            }),
+            Err(error) => {
+                DecisionRow::Unreadable(UnreadableDecision::new(decision_id, error.to_string()))
+            }
         };
         page.rows.push(entry);
     }

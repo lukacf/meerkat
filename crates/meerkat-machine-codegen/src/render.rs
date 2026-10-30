@@ -604,6 +604,32 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RespawnIdentityEntryRefusedRunning",
             "RespawnIdentityEntryRefusedStopped",
             "RespawnIdentityEntryRefusedCompleted",
+            // The declared apply (0.9.9): one arm per verdict of a declared
+            // identity, the seal of a complete roster, the replay of an
+            // unlisted retirement and the release of an archived session
+            // record.
+            "DeclareIdentityEntryKept",
+            "DeclareIdentityEntrySeatOwed",
+            "DeclareIdentityEntryHostedOnFirstUse",
+            "DeclareIdentityEntryAwaitHeldCreation",
+            "DeclareIdentityEntryRuntimeModeRestamp",
+            "DeclareIdentityEntryRoleMigrate",
+            "DeclareIdentityEntryRoleRotate",
+            "DeclareIdentityEntryRoleMigrationHeld",
+            "DeclareIdentityEntryLifecycleInFlight",
+            "DeclareIdentityEntryRefusedNameHeldByWorker",
+            "DeclareIdentityEntryRefusedHostAdopted",
+            "DeclareIdentityEntryRefusedNonAuthoritative",
+            "DeclareIdentityEntryMobNotRunningStopped",
+            "DeclareIdentityEntryMobNotRunningCompleted",
+            "DeclareIdentityEntryMobNotRunningDestroyed",
+            "SealDeclaredRosterSealed",
+            "SealDeclaredRosterNonAuthoritative",
+            "SealDeclaredRosterMobNotRunningStopped",
+            "SealDeclaredRosterMobNotRunningCompleted",
+            "SealDeclaredRosterMobNotRunningDestroyed",
+            "RecoverIdentityEntryRetiringMarkedRunning",
+            "ForgetArchivedSession",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

@@ -88,9 +88,11 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 
 /// Transition-name prefixes of the identity-entry arms: the admission probe,
 /// the spawn ladder that carries entry custody and the commits that consume
-/// it, the worker reconcile and ensure, the replay of an entry's row, the
-/// legacy adoption and the agent lane's member admission. They are written
-/// one arm per lifecycle phase as the residency arms are.
+/// it, the worker reconcile and ensure, the replay of an entry's row and of
+/// an unlisted retirement, the legacy adoption, the agent lane's member
+/// admission, and the declared apply (its verdicts, its seal and the release
+/// of an archived session record). They are written one arm per lifecycle
+/// phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -102,6 +104,9 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "RecoverIdentityEntry",
     "AdoptLegacyIdentityEntry",
     "ResolveAgentLaneMemberAdmission",
+    "DeclareIdentityEntry",
+    "SealDeclaredRoster",
+    "ForgetArchivedSession",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -113,6 +118,13 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "AdoptLegacyIdentityEntryAdopted",
     "AdoptLegacyIdentityEntryMobNotRunning",
     "ResolveAgentLaneMemberAdmissionIdentityMember",
+    "DeclareIdentityEntrySeatOwed",
+    "DeclareIdentityEntryRoleMigrationHeld",
+    "DeclareIdentityEntryMobNotRunning",
+    "SealDeclaredRosterSealed",
+    "SealDeclaredRosterMobNotRunning",
+    "RecoverIdentityEntryRetiringMarked",
+    "ForgetArchivedSession",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member
@@ -121,14 +133,15 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
 const MEERKAT_RESIDENCY_ARM_PREFIXES: &[&str] =
     &["ResolveEmptyResumeRetirement", "ClaimCompositionResidency"];
 
-/// Helper-name prefixes of the residency helpers: they take member facts
-/// only, never the lifecycle phase.
+/// Helper-name prefixes of the residency helpers, and the declared apply's
+/// verdict helper: they take member facts only, never the lifecycle phase.
 const RESIDENCY_HELPER_PREFIXES: &[&str] = &[
     "member_wake",
     "member_boot",
     "peer_notice",
     "member_release",
     "member_registration",
+    "identity_entry_verdict",
 ];
 
 fn dsl_source(file: &str) -> String {

@@ -482,23 +482,24 @@ fn anthropic_mid_system_predecessor_allows(message: &Message) -> bool {
     }
 }
 
-fn flush_anthropic_mid_system_messages<'a>(
+fn flush_anthropic_mid_system_messages(
     model: &str,
-    projected: &mut Vec<&'a Message>,
-    pending: &mut Vec<(usize, &'a Message)>,
+    messages: &[Message],
+    order: &mut Vec<usize>,
+    pending: &mut Vec<usize>,
 ) -> Result<(), LlmError> {
-    if pending.is_empty() {
+    let Some(&index) = pending.first() else {
         return Ok(());
-    }
-    if projected
+    };
+    if order
         .last()
-        .is_some_and(|message| anthropic_mid_system_predecessor_allows(message))
+        .and_then(|&last| messages.get(last))
+        .is_some_and(anthropic_mid_system_predecessor_allows)
     {
-        projected.extend(pending.drain(..).map(|(_, message)| message));
+        order.append(pending);
         return Ok(());
     }
 
-    let index = pending[0].0;
     Err(LlmError::InvalidInputShape {
         message: format!(
             "Anthropic model {model} cannot place System message at transcript index {index}; \
@@ -508,28 +509,29 @@ fn flush_anthropic_mid_system_messages<'a>(
     })
 }
 
-/// Lower Meerkat's canonical turn order onto Anthropic's placement contract.
+/// The transcript indices of `messages` in the order the client lowers them:
+/// Meerkat's canonical turn order on Anthropic's placement contract.
 ///
 /// Meerkat records turn-scoped System rows before the User row they govern.
 /// Modern Anthropic models accept the equivalent wire section after that User
 /// row and before the Assistant response. Leading System rows remain in the
 /// top-level `system` field.
-fn project_anthropic_system_message_order<'a>(
+fn anthropic_system_message_render_order(
     model: &str,
-    messages: &'a [Message],
-) -> Result<Vec<&'a Message>, LlmError> {
+    messages: &[Message],
+) -> Result<Vec<usize>, LlmError> {
     let supports_mid_conversation_system_messages =
         crate::request_support::supports_mid_conversation_system_messages(model);
-    let mut projected = Vec::with_capacity(messages.len());
+    let mut order = Vec::with_capacity(messages.len());
     let mut pending = Vec::new();
     let mut leading_system_prefix = true;
 
     for (index, message) in messages.iter().enumerate() {
         if matches!(message, Message::System(_)) {
             if leading_system_prefix {
-                projected.push(message);
+                order.push(index);
             } else if supports_mid_conversation_system_messages {
-                pending.push((index, message));
+                pending.push(index);
             } else {
                 return Err(LlmError::InvalidInputShape {
                     message: format!(
@@ -543,13 +545,25 @@ fn project_anthropic_system_message_order<'a>(
 
         leading_system_prefix = false;
         if matches!(message, Message::BlockAssistant(_)) {
-            flush_anthropic_mid_system_messages(model, &mut projected, &mut pending)?;
+            flush_anthropic_mid_system_messages(model, messages, &mut order, &mut pending)?;
         }
-        projected.push(message);
+        order.push(index);
     }
 
-    flush_anthropic_mid_system_messages(model, &mut projected, &mut pending)?;
-    Ok(projected)
+    flush_anthropic_mid_system_messages(model, messages, &mut order, &mut pending)?;
+    Ok(order)
+}
+
+/// Lower Meerkat's canonical turn order onto Anthropic's placement contract:
+/// `messages` in `anthropic_system_message_render_order`.
+fn project_anthropic_system_message_order<'a>(
+    model: &str,
+    messages: &'a [Message],
+) -> Result<Vec<&'a Message>, LlmError> {
+    Ok(anthropic_system_message_render_order(model, messages)?
+        .into_iter()
+        .filter_map(|index| messages.get(index))
+        .collect())
 }
 
 impl AnthropicClient {
@@ -1290,6 +1304,12 @@ impl AnthropicClient {
     /// The cache breakpoints `body`, lowered from `request`, authors under
     /// `policy`: each canonical boundary with the number of lowered
     /// `messages` its rendered prefix covers.
+    ///
+    /// The lowered `messages` follow the render order, which moves a
+    /// mid-conversation System row after the User row it governs. A
+    /// breakpoint is claimed only where the messages rendered through it are
+    /// exactly a canonical transcript prefix, none left out and none moved in
+    /// from after it; a breakpoint on any other message carries no claim.
     pub(crate) fn anthropic_authored_breakpoint_boundaries(
         request: &LlmRequest,
         policy: AnthropicCacheControlPolicy,
@@ -1311,31 +1331,33 @@ impl AnthropicClient {
             ));
         }
 
-        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation) {
-            let source_indices: Vec<usize> = request
-                .messages
+        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation)
+            && let Some(lowered_messages) = body.get("messages").and_then(Value::as_array)
+        {
+            let render_order =
+                anthropic_system_message_render_order(&request.model, &request.messages)?;
+            // The `position + 1` messages rendered through `position` are a
+            // transcript prefix exactly when they fill every index from the
+            // first non-leading one up to the highest rendered so far.
+            let mut highest = leading_system_count;
+            for (position, (&source_index, lowered)) in render_order
                 .iter()
+                .skip(leading_system_count)
+                .zip(lowered_messages)
                 .enumerate()
-                .filter_map(|(index, message)| {
-                    (!(index < leading_system_count && matches!(message, Message::System(_))))
-                        .then_some(index)
-                })
-                .collect();
-            if let Some(lowered_messages) = body.get("messages").and_then(Value::as_array) {
-                for (position, (source_index, lowered)) in
-                    source_indices.into_iter().zip(lowered_messages).enumerate()
-                {
-                    if lowered
+            {
+                highest = highest.max(source_index);
+                if highest == leading_system_count + position
+                    && lowered
                         .get("content")
                         .is_some_and(Self::contains_cache_control)
-                    {
-                        boundaries.push((
-                            meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
-                                message_count: (source_index + 1) as u64,
-                            },
-                            position + 1,
-                        ));
-                    }
+                {
+                    boundaries.push((
+                        meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
+                            message_count: (highest + 1) as u64,
+                        },
+                        position + 1,
+                    ));
                 }
             }
         }

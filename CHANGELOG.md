@@ -921,6 +921,18 @@ them.
   missed from that message on. The other cache policies lower messages as
   before.
 
+- `meerkat-anthropic`: under the `system_and_conversation` prompt-cache
+  policy, the cache-breakpoint evidence of a request no longer binds a
+  transcript prefix to messages that are not that prefix. The client lowers a
+  mid-conversation System message after the user message it governs, and the
+  evidence paired the lowered messages with transcript positions in
+  transcript order, so the breakpoint on that user message was claimed for
+  the transcript prefix through the System message, and the session kept
+  that claim. A breakpoint is now claimed only where the messages rendered
+  through it are exactly a transcript prefix, as
+  `LlmClient::authored_cache_breakpoints` requires; the request itself is
+  unchanged.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary

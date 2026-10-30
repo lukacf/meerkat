@@ -289,15 +289,20 @@ Meerkat also keeps two small Tokio runtimes of its own for the whole process,
 in a host binary and in a Rust embedding alike: the machine cleanup runtime
 (threads named `meerkat-machine-cleanup`) and the runtime-loop serving
 runtime (`meerkat-runtime-serving`). They run session and mob work as well,
-so they follow the same variable: `RKAT_WORKER_STACK_BYTES` sets their thread
-stack exactly. When it is unset they take the 8 MiB budget, or
-`RUST_MIN_STACK` when that asks for more. Their threads have an explicit
-size, so Rust itself would never apply `RUST_MIN_STACK` to them; this way an
-embedding whose debug build needs deeper stacks raises these threads with the
-same `RUST_MIN_STACK` it gives its own. An invalid `RKAT_WORKER_STACK_BYTES`
-fails every operation that needs one of these runtimes until it is corrected,
-with the refusal a host binary gives at startup. `RKAT_RPC_WORKER_STACK_BYTES`
-does not reach them.
+including work an embedding host composes: the turns of runtime-backed mob
+members, with the host's tools and whatever those spawn, run on the cleanup
+runtime. So these threads must not have less stack than the host's own
+workers: when `RKAT_WORKER_STACK_BYTES` is unset they take 16 MiB, twice the
+budget, or `RUST_MIN_STACK` when that asks for more. They follow the same
+variable as the host: `RKAT_WORKER_STACK_BYTES` sets their thread stack
+exactly, below 16 MiB included, so the diagnosis sweep reaches them too.
+Their threads have an explicit size, so Rust itself would never apply
+`RUST_MIN_STACK` to them; this way an embedding whose workers or debug build
+need more than 16 MiB raises these threads with the same `RUST_MIN_STACK` it
+gives its own. An invalid `RKAT_WORKER_STACK_BYTES` fails every operation
+that needs one of these runtimes until it is corrected, with the refusal a
+host binary gives at startup. `RKAT_RPC_WORKER_STACK_BYTES` does not reach
+them.
 
 ## Worker Threads
 

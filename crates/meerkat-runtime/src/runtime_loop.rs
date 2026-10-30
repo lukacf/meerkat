@@ -5891,8 +5891,8 @@ impl RuntimeLoopTaskSpawner {
                 });
             }
 
-            // Its threads follow the host stack budget and its knobs (see
-            // `crate::host_stack`).
+            // Its threads get the process-runtime stack: 16 MiB, or what the
+            // host stack knobs set (see `crate::host_stack`).
             let stack_bytes =
                 crate::host_stack::process_runtime_stack_bytes().map_err(|error| {
                     crate::traits::RuntimeDriverError::Internal(format!(

@@ -353,10 +353,13 @@ mod tests {
         // An owned executable models only the preparer's canonical-parent
         // precondition. It refuses the old lexical handoff before emitting any
         // usable connection, without requiring Python or a product archive.
+        // Argv: -I -B prepare.py --destination D --realm-state-root S --realm R.
         fs::write(fixture.root.join("runtime/python/bin/python3.11"), br##"#!/bin/sh
 set -eu
-[ "$#" -eq 5 ]
+[ "$#" -eq 9 ]
 [ "$4" = "--destination" ]
+[ "$6" = "--realm-state-root" ]
+[ "$8" = "--realm" ]
 parent=${5%/*}
 canonical=$(CDPATH= cd "$parent" && pwd -P)
 [ "$parent" = "$canonical" ]

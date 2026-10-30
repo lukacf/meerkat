@@ -890,7 +890,7 @@ struct DirectResume {
 impl DirectResume {
     fn new(own_lineage: bool) -> Self {
         let (configuration, mut input, _domain, publication) = configuration_with_publication();
-        let grants = Arc::clone(&configuration.grants);
+        let grants = configuration.grants;
         let mut claims = input
             .header()
             .authority_association
@@ -964,11 +964,11 @@ impl DirectResume {
         };
         let check = crate::meerkat_machine::ScopedRetainedResume::new(
             grants,
-            claims.ingress_namespace.ingress.clone(),
+            claims.ingress_namespace.ingress,
             custody,
             Arc::new(Policy {
-                requester: claims.requester.clone(),
-                executor: claims.logical_executor.clone(),
+                requester: claims.requester,
+                executor,
             }),
             Arc::new(Controllers),
         );

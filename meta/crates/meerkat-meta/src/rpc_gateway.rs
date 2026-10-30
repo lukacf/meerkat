@@ -12534,8 +12534,10 @@ impl crate::identity_first::gateway_bridges::CallbackBridge for StdioCallbackBri
 /// response wire: a bare name string (legacy shape) or
 /// `{name, description?, input_schema?}` so the agent — and the live
 /// projection's `live_visible_tool_defs` — see the real argument schema
-/// instead of the permissive `{"type": "object"}` placeholder.
-struct CallbackToolSpec {
+/// instead of the permissive `{"type": "object"}` placeholder. An identity
+/// creation template declares the callback tools it binds in this same shape
+/// (`crate::identity_creation`).
+pub(crate) struct CallbackToolSpec {
     name: String,
     description: Option<String>,
     input_schema: Option<Value>,
@@ -13093,7 +13095,7 @@ impl DetachedCallbackJobRuntime {
 }
 
 impl CallbackToolSpec {
-    fn parse(value: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
         if let Some(name) = value.as_str() {
             return Ok(Self {
                 name: name.to_string(),
@@ -13157,6 +13159,21 @@ impl CallbackToolSpec {
             execution,
             artifact,
         })
+    }
+
+    /// The tool's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The tool's description, as the host gave it.
+    pub(crate) fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// The tool's input schema, as the host gave it.
+    pub(crate) fn input_schema(&self) -> Option<&Value> {
+        self.input_schema.as_ref()
     }
 }
 

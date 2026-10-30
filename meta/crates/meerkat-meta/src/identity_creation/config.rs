@@ -14,7 +14,9 @@
 //!              "batch": 32, "open_decisions_per_creator": 3},
 //!   "templates": {"research": {
 //!     "profiles": ["assistant"], "models": "profile", "accounts": [],
-//!     "callbacks": ["notes_read"], "tools": {"floor": [], "ceiling": ["notes_read", "search"]},
+//!     "callbacks": [{"name": "notes_read", "description": "Read notes",
+//!                    "input_schema": {"type": "object"}}],
+//!     "tools": {"floor": [], "ceiling": ["notes_read", "search"]},
 //!     "excess": "strict", "authority_fields": {"team": {"values": ["a", "b"]}},
 //!     "preamble": "You were created by {creator}.", "preparation": "none",
 //!     "kickoff": "allowed", "namespace": "team",
@@ -164,12 +166,13 @@ pub struct TemplateConfig {
     /// The account binding references the template's members act under.
     #[serde(default)]
     pub accounts: Vec<String>,
-    /// The callback tools the template binds: names in the host's
-    /// registered callback tool catalog. Their registered definitions
-    /// (name, description and input schema) are sealed in the template
-    /// binding.
+    /// The callback tools the template binds, each in the shape a host's
+    /// `callback/build_agent` answer gives a callback tool: a bare name, or
+    /// `{"name", "description"?, "input_schema"?}`. The definitions are
+    /// sealed in the template binding, and every build of an identity
+    /// created from the template must be given exactly these.
     #[serde(default)]
-    pub callbacks: Vec<String>,
+    pub callbacks: Vec<Value>,
     /// The tool floor and ceiling.
     #[serde(default)]
     pub tools: ToolBoundsConfig,

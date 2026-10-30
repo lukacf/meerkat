@@ -18,7 +18,7 @@ use super::config::{
 use super::digest::{Sha256Digest, canonical_digest};
 use super::refusal::{PolicyRefusal, PolicyRefusalKind};
 use super::render::RENDERING_MAX_BYTES;
-use super::template::Preamble;
+use super::template::{Preamble, callback_definition_digest};
 
 /// The most identities one create request may name: the most a Core seat
 /// step commits in one store transaction. A larger request is refused
@@ -227,7 +227,7 @@ pub struct Template {
     profiles: ProfileChoice,
     models: ModelChoice,
     accounts: BTreeSet<String>,
-    callbacks: BTreeSet<String>,
+    callbacks: BTreeMap<String, Sha256Digest>,
     floor: BTreeSet<String>,
     ceiling: BTreeSet<String>,
     excess: ExcessMode,
@@ -277,11 +277,10 @@ impl Template {
         &self.accounts
     }
 
-    /// The callback tools the template binds, by name in the host's
-    /// registered callback tool catalog. Validation checks the names only;
-    /// a create and every build resolve them in the catalog
-    /// (`resolve_binding`).
-    pub fn callbacks(&self) -> &BTreeSet<String> {
+    /// The callback tools the template declares, by name: the digest of
+    /// each one's definition (`callback_definition_digest`), which the
+    /// binding seals.
+    pub fn callbacks(&self) -> &BTreeMap<String, Sha256Digest> {
         &self.callbacks
     }
 
@@ -1085,13 +1084,7 @@ fn validate_template(
     let accounts = unique_set(&config.accounts, &format!("{path}.accounts"), |account| {
         is_reference(account, REFERENCE_MAX_BYTES)
     })?;
-    // Names only: whether the host registered them, and what their
-    // definitions are, is read at a create and at every build.
-    let callbacks = unique_set(
-        &config.callbacks,
-        &format!("{path}.callbacks"),
-        is_tool_name,
-    )?;
+    let callbacks = template_callbacks(&config.callbacks, &format!("{path}.callbacks"))?;
     let floor = unique_set(
         &config.tools.floor,
         &format!("{path}.tools.floor"),
@@ -1221,6 +1214,62 @@ fn validate_template(
         max_bytes,
         may_grant_creation: config.may_grant_creation,
     })
+}
+
+/// The callback tools a template declares, in the shape a host's
+/// `callback/build_agent` answer gives them, parsed by the gateway's own
+/// reader of that shape. Only the members the binding seals (name,
+/// description, input schema) are declared here: how a host runs a handler
+/// (`execution`, `artifact`) is a build's, not the template's.
+fn template_callbacks(
+    declared: &[Value],
+    path: &str,
+) -> Result<BTreeMap<String, Sha256Digest>, PolicyRefusal> {
+    let mut callbacks = BTreeMap::new();
+    for (index, value) in declared.iter().enumerate() {
+        let item = format!("{path}[{index}]");
+        if let Some(object) = value.as_object()
+            && let Some(key) = object
+                .keys()
+                .find(|key| !matches!(key.as_str(), "name" | "description" | "input_schema"))
+        {
+            let kind = if matches!(key.as_str(), "execution" | "artifact") {
+                PolicyRefusalKind::Unsupported {
+                    feature: format!("a callback tool's {key} in a template"),
+                }
+            } else {
+                PolicyRefusalKind::Malformed {
+                    detail: format!("unknown field `{key}`"),
+                }
+            };
+            return Err(refusal(format!("{item}.{key}"), kind));
+        }
+        let spec = crate::rpc_gateway::CallbackToolSpec::parse(value)
+            .map_err(|detail| refusal(item.clone(), PolicyRefusalKind::Malformed { detail }))?;
+        if !is_tool_name(spec.name()) {
+            return Err(invalid(format!("{item}.name"), spec.name()));
+        }
+        if let Some(description) = spec.description()
+            && description.len() > DESCRIPTION_MAX_BYTES
+        {
+            return Err(too_long(
+                format!("{item}.description"),
+                description.len(),
+                DESCRIPTION_MAX_BYTES,
+            ));
+        }
+        let digest =
+            callback_definition_digest(spec.name(), spec.description(), spec.input_schema());
+        if callbacks.insert(spec.name().to_owned(), digest).is_some() {
+            return Err(refusal(
+                item,
+                PolicyRefusalKind::Duplicate {
+                    value: spec.name().to_owned(),
+                },
+            ));
+        }
+    }
+    Ok(callbacks)
 }
 
 fn text_limits(config: &MaxBytesConfig, path: &str) -> Result<TextLimits, PolicyRefusal> {

@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use meerkat_core::{ToolCatalogEntry, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -84,22 +83,52 @@ fn is_empty_member(value: &Value) -> bool {
 /// The mob profiles a template may bind, by name.
 pub type MobProfiles = BTreeMap<String, ProfileFacts>;
 
-/// The digest of a registered callback tool's definition: its name,
-/// description and input schema. A template binding seals it for every
-/// callback the template names, so a host that changes a registered
-/// definition changes the binding of every identity that binds it.
-pub fn callback_definition_digest(tool: &ToolDef) -> Sha256Digest {
+/// The digest of a callback tool's definition: its name, description and
+/// input schema, as a template declares them and as a host's build gives
+/// them (absent members digest as absent). A template binding seals one per
+/// callback the template declares, so a changed declaration changes the
+/// binding of every identity created from the template.
+pub fn callback_definition_digest(
+    name: &str,
+    description: Option<&str>,
+    input_schema: Option<&Value>,
+) -> Sha256Digest {
     canonical_digest(&json!({
         "format": FORMAT_CALLBACK,
-        "name": tool.name.as_str(),
-        "description": tool.description,
-        "input_schema": tool.input_schema,
+        "name": name,
+        "description": description,
+        "input_schema": input_schema,
     }))
+}
+
+/// The build-time check of a created identity's callback tools: the
+/// definitions a host's build gives (each tool's name, description and
+/// input schema, as its `callback/build_agent` answer carries them) must be
+/// exactly the ones the binding sealed. A changed, missing, extra or
+/// repeated tool reads `template_binding_changed`: the identity is Broken
+/// until a host rebind. The executor's build path calls it; this module
+/// only defines it.
+pub fn check_build_callbacks<'a>(
+    binding: &TemplateBinding,
+    supplied: impl IntoIterator<Item = (&'a str, Option<&'a str>, Option<&'a Value>)>,
+) -> Result<(), IdentityRefusalKind> {
+    let mut built = BTreeMap::new();
+    for (name, description, input_schema) in supplied {
+        let digest = callback_definition_digest(name, description, input_schema);
+        if built.insert(name.to_owned(), digest).is_some() {
+            return Err(IdentityRefusalKind::TemplateBindingChanged);
+        }
+    }
+    if built == binding.callbacks {
+        Ok(())
+    } else {
+        Err(IdentityRefusalKind::TemplateBindingChanged)
+    }
 }
 
 /// The exact template binding an identity seals for its life: the template
 /// and its install version, the bound profile and its digest, the model,
-/// the accounts, the registered definitions of its callback tools, the tool
+/// the accounts, the declared definitions of its callback tools, the tool
 /// floor and ceiling, and the preparation rule. Its digest is what every
 /// build compares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,8 +147,8 @@ pub struct TemplateBinding {
     pub model: String,
     /// The account binding references.
     pub accounts: BTreeSet<String>,
-    /// The callback tools the template names, by name: the digest of each
-    /// one's registered definition (`callback_definition_digest`).
+    /// The callback tools the template declares, by name: the digest of
+    /// each one's definition (`callback_definition_digest`).
     pub callbacks: BTreeMap<String, Sha256Digest>,
     /// The tool floor.
     pub floor: BTreeSet<String>,
@@ -149,20 +178,15 @@ impl TemplateBinding {
     }
 }
 
-/// Resolve a request's profile and model against `template`, the mob's
-/// profiles and the host's registered callback tool catalog, into the
-/// binding the identity seals. A request that names no profile takes the
-/// template's first listed one; one that names no model takes the
-/// template's first listed model, or the profile's own. Every callback the
-/// template names must be in `registered`; one that is not refuses the
-/// template, `template_not_allowed`. The catalog holds one entry per tool
-/// name, and its order and its other entries change nothing.
+/// Resolve a request's profile and model against `template` and the mob's
+/// profiles, into the binding the identity seals. A request that names no
+/// profile takes the template's first listed one; one that names no model
+/// takes the template's first listed model, or the profile's own.
 pub fn resolve_binding(
     template: &Template,
     profile: Option<&str>,
     model: Option<&str>,
     profiles: &MobProfiles,
-    registered: &[ToolCatalogEntry],
 ) -> Result<TemplateBinding, IdentityRefusalKind> {
     let profile = match (profile, template.profiles()) {
         (Some(name), ProfileChoice::Any) => name,
@@ -205,7 +229,6 @@ pub fn resolve_binding(
             }
         },
     };
-    let callbacks = bound_callbacks(template, registered)?;
     Ok(TemplateBinding {
         template: template.id().to_owned(),
         version: template.version().map(str::to_owned),
@@ -213,32 +236,11 @@ pub fn resolve_binding(
         profile_digest: facts.digest.clone(),
         model: model.to_owned(),
         accounts: template.accounts().clone(),
-        callbacks,
+        callbacks: template.callbacks().clone(),
         floor: template.floor().clone(),
         ceiling: template.ceiling().clone(),
         preparation: template.preparation(),
     })
-}
-
-/// The callbacks `template` names, resolved in the registered catalog: each
-/// with the digest of its registered definition.
-fn bound_callbacks(
-    template: &Template,
-    registered: &[ToolCatalogEntry],
-) -> Result<BTreeMap<String, Sha256Digest>, IdentityRefusalKind> {
-    template
-        .callbacks()
-        .iter()
-        .map(|name| {
-            registered
-                .iter()
-                .find(|entry| entry.tool.name.as_str() == name)
-                .map(|entry| (name.clone(), callback_definition_digest(&entry.tool)))
-                .ok_or_else(|| IdentityRefusalKind::TemplateNotAllowed {
-                    template: template.id().to_owned(),
-                })
-        })
-        .collect()
 }
 
 /// What the creator side contributes to a created identity's tools, at a

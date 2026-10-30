@@ -80,6 +80,7 @@ pub use request::{
 };
 pub use template::{
     CREATOR_INSTRUCTIONS_HEADING, CreatorBound, MobProfiles, Preamble, PreambleInputs,
-    ProfileFacts, TemplateBinding, callback_definition_digest, compose_member_instructions,
-    effective_tools, native_tool_policy, resolve_binding, sealed_upper_bound,
+    ProfileFacts, TemplateBinding, callback_definition_digest, check_build_callbacks,
+    compose_member_instructions, effective_tools, native_tool_policy, resolve_binding,
+    sealed_upper_bound,
 };

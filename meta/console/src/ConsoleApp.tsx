@@ -5657,7 +5657,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
           }}
-          teamName={experience?.console_config?.title || experience?.agent_sidebar?.title || undefined}
+          // No console or sidebar title here: those name the console, not the
+          // team. The experience carries no team display name, so the Roles
+          // root reads "Team".
         />
       );
     if (target.kind === "health")

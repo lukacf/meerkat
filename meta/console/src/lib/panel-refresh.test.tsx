@@ -251,6 +251,26 @@ describe("empty shared-console panels", () => {
   );
 });
 
+describe("Topology roles root", () => {
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => window.localStorage.clear());
+
+  it("names the team, never the console's title", async () => {
+    seedDock(true);
+    window.localStorage.setItem("meta-console-topology-view", "roles");
+    const harness = transport();
+    harness.loadExperience = async () => ({
+      ...experience(),
+      console_config: { title: "Acme Operations Console" },
+      agent_sidebar: { ...experience().agent_sidebar, title: "Agents" },
+    }) as never;
+    const view = render(<ConsoleApp baseUrl="" transport={harness} />);
+    await waitFor(() => expect(view.container.querySelector(".topo-roletree__label") !== null).toBe(true));
+    expect(view.container.querySelector(".topo-roletree__label")?.textContent).toBe("Team");
+    view.unmount();
+  });
+});
+
 describe("manual memory detail refresh", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(() => window.localStorage.clear());

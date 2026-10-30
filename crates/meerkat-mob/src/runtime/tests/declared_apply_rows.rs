@@ -2096,10 +2096,7 @@ async fn a_dropped_apply_never_refuses_the_next_one() {
     entered_rx.await.expect("the actor parks");
     let opening = mob
         .handle
-        .enqueue_actor_command_for_test(|reply_tx| MobCommand::OpenDeclaredApply {
-            close_authority: mob.handle.command_authority.clone(),
-            reply_tx,
-        })
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
         .await
         .expect("enqueue an opening behind the parked actor");
     drop(opening);
@@ -2160,6 +2157,167 @@ async fn a_dropped_apply_never_refuses_the_next_one() {
             DeclaredEntryOutcome::Seated { .. }
         ),
         "{opened:?}"
+    );
+}
+
+/// Seat `name`, wake it and retire it, so its session is archived and its
+/// next declaration reads the role that session was built under.
+async fn archived_identity(mob: &ApplyMob, name: &str) {
+    mob.apply(DeclaredRoster::partial([declared(name)])).await;
+    mob.wake(name).await;
+    tokio::time::timeout(STEP, mob.handle.retire(id(name)))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert!(
+        mob.archived_record(name).is_some(),
+        "the retirement archived the session"
+    );
+}
+
+/// An apply of `name` that has reached its role read, which the mock holds.
+async fn apply_held_at_its_role_read(
+    mob: &ApplyMob,
+    handle: MobHandle,
+    name: &str,
+) -> tokio::task::JoinHandle<Result<DeclaredRosterOutcome, MobError>> {
+    let reads = mob.service.persisted_session_metadata_load_call_count();
+    mob.service.hold_persisted_session_metadata_reads();
+    let roster = DeclaredRoster::partial([declared(name)]);
+    let applying = tokio::spawn(async move { handle.apply_declared_roster(roster).await });
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.service.persisted_session_metadata_load_call_count() == reads {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the apply never reached its role read"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    applying
+}
+
+/// The close of an apply whose caller's grant ends while it runs closes its
+/// open fact: the close is the lease's own command on the internal lane, so
+/// no grant refuses it, and the owner's next apply opens.
+///
+/// RED: send the close under the opening call's authority, with the
+/// `Retire` scope (the shape before this fix): the revoked principal's close
+/// is refused `ScopeDenied`, the open fact stays set, and the owner's next
+/// apply is refused `LifecycleOperationPending` until the process restarts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_after_a_revoked_grant_never_refuses_the_next_apply() {
+    use crate::control_policy::{CommandAuthority, MobControlPrincipal};
+    use crate::machines::mob_machine::ControlScope;
+
+    let mob = ApplyMob::new("apply-close-revoked").await;
+    archived_identity(&mob, "revived").await;
+    let principal =
+        meerkat_core::auth::PrincipalId::new("declared-applier").expect("a principal id");
+    tokio::time::timeout(
+        STEP,
+        mob.handle.grant_scopes(
+            MobControlPrincipal::Owner,
+            principal.clone(),
+            [ControlScope::Retire, ControlScope::SendCommand]
+                .into_iter()
+                .collect(),
+            None,
+        ),
+    )
+    .await
+    .expect("the grant answers")
+    .expect("the owner grants the principal");
+    let applier = mob
+        .handle
+        .clone()
+        .with_command_authority(CommandAuthority::principal(MobControlPrincipal::External(
+            principal.clone(),
+        )));
+
+    let applying = apply_held_at_its_role_read(&mob, applier, "revived").await;
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .revoke_scopes(MobControlPrincipal::Owner, principal, None),
+    )
+    .await
+    .expect("the revoke answers")
+    .expect("the owner revokes the principal's grant");
+    mob.service.release_persisted_session_metadata_reads();
+    let _ = tokio::time::timeout(STEP, applying)
+        .await
+        .expect("the principal's apply ends")
+        .expect("the apply task joins");
+
+    let opened = mob
+        .apply(DeclaredRoster::partial([declared("after-revoked-grant")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&opened, "after-revoked-grant"),
+            DeclaredEntryOutcome::Seated { .. }
+        ),
+        "{opened:?}"
+    );
+}
+
+/// The close of an apply that reaches the actor while a Shutdown step joins
+/// its work closes its open fact once that Shutdown fails and the actor goes
+/// on serving: the step retains it as the actor's own completion, never
+/// refuses it, and the next apply opens.
+///
+/// RED: answer the close as a caller request in a Shutdown step (the shape
+/// before this fix): the step refuses it `ShutdownInProgress`, the open fact
+/// stays set after the failed Shutdown, and the next apply is refused
+/// `LifecycleOperationPending` until the process restarts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_during_a_failed_shutdown_never_refuses_the_next_apply() {
+    let mob = ApplyMob::new("apply-close-shutdown").await;
+    archived_identity(&mob, "revived").await;
+    let applying = apply_held_at_its_role_read(&mob, mob.handle.clone(), "revived").await;
+
+    // A Shutdown whose drain joins a held task, and then fails.
+    let release_drain = tokio::time::timeout(STEP, mob.handle.hold_shutdown_drain_for_test())
+        .await
+        .expect("the held task is spawned")
+        .expect("spawn the held task");
+    crate::runtime::actor::fail_next_shutdown_drain_for_test(mob.handle.mob_id());
+    let mut admitted = mob
+        .handle
+        .lifecycle_observations
+        .shutdown_admitted
+        .subscribe();
+    let shutdown = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.shutdown().await }
+    });
+    tokio::time::timeout(STEP, admitted.wait_for(|admitted| *admitted))
+        .await
+        .expect("the Shutdown is admitted")
+        .expect("the observation outlives the row");
+
+    // The apply's call is dropped while the Shutdown drains: its lease sends
+    // the close then.
+    applying.abort();
+    let _ = applying.await;
+    mob.service.release_persisted_session_metadata_reads();
+    drop(release_drain);
+    tokio::time::timeout(STEP, shutdown)
+        .await
+        .expect("the Shutdown returns")
+        .expect("the Shutdown task joins")
+        .expect_err("the Shutdown fails in its drain");
+
+    let opened = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .apply_declared_roster(DeclaredRoster::partial(std::iter::empty::<DeclaredEntry>())),
+    )
+    .await
+    .expect("the next apply answers");
+    assert!(
+        opened.is_ok(),
+        "the next apply opens after the failed Shutdown: {opened:?}"
     );
 }
 

@@ -31653,16 +31653,12 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::OpenDeclaredApply {
-                    close_authority,
-                    reply_tx,
-                } => {
+                MobCommand::OpenDeclaredApply { reply_tx } => {
                     let result = self.open_declared_apply().map(|verdict| {
                         if verdict == mob_dsl::DeclaredApplyOpenVerdict::Opened {
                             super::declared_apply::DeclaredApplyOpening::Opened(
                                 super::declared_apply::DeclaredApplyLease::new(
                                     self.command_tx.clone(),
-                                    close_authority,
                                 ),
                             )
                         } else {

@@ -197,7 +197,9 @@ entry hosted on its first use
 (`placed_entry_custody_is_hosted_on_first_use`). Applies are serialized by
 the apply-open fact (`declared_apply_open`): `OpenDeclaredApply` answers
 `Opened`, or `Busy` while an apply is open, and `CloseDeclaredApply` closes
-it in every phase. A mob reset ends every identity entry, and it commits
+it in every phase. The shell closes it through the lease the opening step
+made, on the internal lane: no grant and no Shutdown step refuses the close.
+A mob reset ends every identity entry, and it commits
 only on an empty roster (`ResetToRunning`'s `roster_empty` guard): its
 preflight, `AdmitReset`, answers the reset's other guards, changing nothing,
 before the retirement batch that empties the roster. The audit's apply runs

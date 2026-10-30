@@ -399,23 +399,23 @@ pub(in crate::runtime) enum DeclaredApplyOpening {
 /// before (an opening answer that never reached its call, a call dropped in
 /// its body or while it closes), closes the fact, so the mob's next apply is
 /// never refused for a call that is gone. It stays armed until its close
-/// command is on the actor's channel, never shorter.
+/// command is on the actor's channel, never shorter. The close is the
+/// lease's own command on the internal lane, which nothing refuses: not the
+/// opening call's grants (revoked or expired mid-apply), not a Shutdown step
+/// (the actor retains it, and a Shutdown that fails leaves the actor to
+/// process it).
 pub(in crate::runtime) struct DeclaredApplyLease {
-    close: Option<(
-        crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
-        crate::control_policy::CommandAuthority,
-    )>,
+    close: Option<crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>>,
 }
 
 impl DeclaredApplyLease {
     /// The lease of the fact the actor just opened: its close is sent on
-    /// `command_tx` under `authority`, the opening call's own.
+    /// `command_tx`.
     pub(in crate::runtime) fn new(
         command_tx: crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
-        authority: crate::control_policy::CommandAuthority,
     ) -> Self {
         Self {
-            close: Some((command_tx, authority)),
+            close: Some(command_tx),
         }
     }
 
@@ -424,18 +424,15 @@ impl DeclaredApplyLease {
         self.close = None;
     }
 
-    fn close_command(
-        authority: crate::control_policy::CommandAuthority,
-    ) -> (
+    fn close_command() -> (
         super::scope_gate::RoutedMobCommand,
         crate::tokio::sync::oneshot::Receiver<Result<(), MobError>>,
     ) {
         let (reply_tx, reply_rx) = crate::tokio::sync::oneshot::channel();
         (
-            super::scope_gate::RoutedMobCommand {
-                authority,
-                cmd: MobCommand::CloseDeclaredApply { reply_tx },
-            },
+            super::scope_gate::RoutedMobCommand::internal(MobCommand::CloseDeclaredApply {
+                reply_tx,
+            }),
             reply_rx,
         )
     }
@@ -444,10 +441,10 @@ impl DeclaredApplyLease {
     /// disarmed only once the close command is on the actor's channel, so a
     /// call dropped while it waits for room still closes.
     async fn close(mut self) {
-        let Some((command_tx, authority)) = self.close.clone() else {
+        let Some(command_tx) = self.close.clone() else {
             return;
         };
-        let (command, reply_rx) = Self::close_command(authority);
+        let (command, reply_rx) = Self::close_command();
         let sent = command_tx.send(command).await;
         self.close = None;
         // An actor that is gone took its open fact with it.
@@ -465,10 +462,10 @@ impl DeclaredApplyLease {
 
 impl Drop for DeclaredApplyLease {
     fn drop(&mut self) {
-        let Some((command_tx, authority)) = self.close.take() else {
+        let Some(command_tx) = self.close.take() else {
             return;
         };
-        let (command, _reply_rx) = Self::close_command(authority);
+        let (command, _reply_rx) = Self::close_command();
         let command = match command_tx.try_send(command) {
             Ok(()) | Err(crate::tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
             Err(crate::tokio::sync::mpsc::error::TrySendError::Full(command)) => command,
@@ -616,10 +613,7 @@ impl super::MobHandle {
         // fact is closed whatever the outcome, and when this call is dropped
         // at any point (the lease the actor answers with).
         let opening = self
-            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply {
-                close_authority: self.command_authority.clone(),
-                reply_tx,
-            })
+            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
             .await??;
         let lease = match opening {
             DeclaredApplyOpening::Opened(lease) => lease,
@@ -1231,7 +1225,6 @@ impl super::MobHandle {
         super::identity_entry::machine_seats(&self.machine_state_watch_rx.borrow(), identity)
     }
 
-    /// Close the open declared apply (`CloseDeclaredApply`).
     /// A seated member's first-boot `Fresh` request: its rotation onto a
     /// fresh session under the declared spec, once it is idle.
     async fn fresh_life_of_seated(&self, entry: &DeclaredEntry) -> DeclaredEntryOutcome {

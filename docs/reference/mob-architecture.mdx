@@ -240,6 +240,9 @@ only for a mob that is not running, an identity store whose intent rows
 cannot be read now (retryable), or another apply of the mob that is running:
 applies of one mob run one at a time, and a call while another runs is
 refused `MobError::LifecycleOperationPending`, retryable, and writes nothing.
+An apply's end always lets the next one open: a call dropped at any point, a
+caller whose grant is revoked or expires while it runs, and a Shutdown that
+fails while it closes.
 It needs `ControlScope::Retire` (and `ControlScope::SendCommand` for its
 seats); the agent lane is refused `MobError::ScopeDenied`.
 

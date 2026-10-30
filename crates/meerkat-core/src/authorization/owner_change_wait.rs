@@ -132,12 +132,12 @@ impl OwnerChangeChurn {
     /// wait for that change, and for any later one, to complete. The first
     /// call sets the operation's deadline to [`OWNER_CHANGE_WAIT_BOUND`] from
     /// now, clamped to `budget_remaining`, and later calls keep it. A free
-    /// rebuild is granted only when a read finds no change in progress, and
-    /// at most [`OWNER_CHANGE_FREE_REBUILDS`] times per operation. The
-    /// sequence only moves forward, so such a read means the sequence has
-    /// moved past the change seen here and is not odd again. A publication
-    /// poisoned during the wait also ends it as settled; see
-    /// [`OwnerChangeWait::Settled`].
+    /// rebuild is granted only when a read before the deadline finds no
+    /// change in progress, and at most [`OWNER_CHANGE_FREE_REBUILDS`] times
+    /// per operation. The sequence only moves forward, so such a read means
+    /// the sequence has moved past the change seen here and is not odd
+    /// again. A publication poisoned during the wait also ends it as
+    /// settled; see [`OwnerChangeWait::Settled`].
     ///
     /// Each wait is traced at `site` for `operation` ([`OwnerChangeWait::trace`])
     /// and reported to the operation refusal observer of the host that
@@ -196,7 +196,8 @@ impl OwnerChangeChurn {
     /// The first wait of this churn arms its one deadline,
     /// [`OWNER_CHANGE_WAIT_BOUND`] from then, clamped to `budget_remaining`
     /// (in a tool body, `ToolDispatchContext::remaining_tool_time`). Later
-    /// waits keep it: none runs past it, and none starts once it passed.
+    /// waits keep it: none runs past it, none starts once it passed, and a
+    /// read at or after it never settles.
     /// Take a fresh churn for each decision point
     /// (`ToolDispatchContext::owner_change_churn` in a tool body, otherwise
     /// [`Self::new`]): a churn already spent elsewhere would cut this wait
@@ -258,9 +259,10 @@ impl OwnerChangeChurn {
 
 /// Wait until no change is in progress on `work`'s publication, or until
 /// `deadline`. A change that began after the one refused keeps the wait
-/// going under the same deadline; only a read with no change in progress
-/// settles it. With `pause_first`, the first read follows one backoff step,
-/// and nothing settles once the deadline has passed before that pause.
+/// going under the same deadline. The deadline is checked before every
+/// read: only a read before it that finds no change in progress settles,
+/// and a wait at or past it ends unsettled without reading. With
+/// `pause_first`, the first read follows one backoff step.
 async fn await_owner_change(
     work: &dyn WorkAuthorization,
     deadline: DeadlineInstant,
@@ -279,13 +281,13 @@ async fn await_owner_change(
     }
     loop {
         let now = DeadlineInstant::now();
-        if work.owner_change_in_progress().is_none() {
-            return OwnerChangeWait::Settled {
+        if now >= deadline {
+            return OwnerChangeWait::NotSettled {
                 waited: now.saturating_duration_since(start),
             };
         }
-        if now >= deadline {
-            return OwnerChangeWait::NotSettled {
+        if work.owner_change_in_progress().is_none() {
+            return OwnerChangeWait::Settled {
                 waited: now.saturating_duration_since(start),
             };
         }

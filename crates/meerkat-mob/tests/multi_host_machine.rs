@@ -3286,6 +3286,9 @@ fn release_verdict(authority: &mut MobMachineAuthority, name: &str) -> MemberRel
         authority,
         MobMachineInput::ClassifyMemberRelease {
             agent_identity: identity(name),
+            scope_agent_runtime_id: None,
+            scope_fence_token: None,
+            scope_session_id: None,
         },
     )
     .expect("the release verdict answers in every phase")

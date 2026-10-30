@@ -40,6 +40,9 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
 };
+// Rotation targets: the schema's own type, one definition for both
+// instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::RotationTarget;
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
@@ -1784,6 +1787,9 @@ pub enum MemberSessionDisposal {
     Archived,
     RuntimeReleasedOnlyHostOwned,
     RuntimeReleasedOnlyNoDurableSessions,
+    /// A same-session rotation's retirement released the runtime and kept
+    /// the session: its next incarnation is seated on it.
+    KeptForSuccessor,
 }
 
 /// Machine-owned flow-step dispatch verdict (§18.9).
@@ -10374,6 +10380,7 @@ mod tests {
                 session_id: SessionId::from("rotating-member-next"),
                 peer_endpoint: None,
                 session_archived: false,
+                target: RotationTarget::FreshSession,
             },
         )
         .expect("the rotation records its intent");
@@ -10704,6 +10711,9 @@ mod tests {
                 authority,
                 MobMachineInput::ClassifyMemberRelease {
                     agent_identity: identity.clone(),
+                    scope_agent_runtime_id: None,
+                    scope_fence_token: None,
+                    scope_session_id: None,
                 },
             )
             .expect("the release verdict answers in every phase");
@@ -10812,6 +10822,9 @@ mod tests {
             &mut authority,
             MobMachineInput::ClassifyMemberRelease {
                 agent_identity: member.identity.clone(),
+                scope_agent_runtime_id: None,
+                scope_fence_token: None,
+                scope_session_id: None,
             },
         )
         .expect("the release verdict answers")
@@ -11146,6 +11159,7 @@ mod tests {
                 session_id: next_session.clone(),
                 peer_endpoint: None,
                 session_archived: false,
+                target: RotationTarget::FreshSession,
             },
         )
         .expect("the rotation records its intent");
@@ -11209,6 +11223,7 @@ mod tests {
                 session_id: SessionId::from("kickoff-rotation-next"),
                 peer_endpoint: None,
                 session_archived: false,
+                target: RotationTarget::FreshSession,
             },
         )
         .expect("the rotation records its intent");
@@ -11269,6 +11284,331 @@ mod tests {
                 phase: KickoffPhase::Pending,
             } if member_id == &member.identity
         )));
+    }
+
+    /// The next incarnation's profile grant under a pending rotation.
+    fn authorize_rotation_profile(authority: &mut MobMachineAuthority, member: &SeatedMember) {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: member.identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: "same-session-profile-digest".to_string(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .expect("the rotation authorizes its next incarnation's profile");
+    }
+
+    /// The terminal of `member`'s rotation, seating `next` at generation 1 on
+    /// the member's session, with the retirement's `disposal`.
+    fn same_session_commit(
+        member: &SeatedMember,
+        next: &AgentRuntimeId,
+        disposal: MemberSessionDisposal,
+    ) -> MobMachineInput {
+        MobMachineInput::CommitMemberRotation {
+            agent_identity: member.identity.clone(),
+            agent_runtime_id: member.runtime_id.clone(),
+            fence_token: member.fence_token,
+            generation: Generation(0),
+            session_id: Some(member.session_id.clone()),
+            disposal,
+            next_agent_runtime_id: next.clone(),
+            next_fence_token: FenceToken(9),
+            next_generation: Generation(1),
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            external_addressable: false,
+            kickoff_owed: false,
+            kickoff_objective_id: String::new(),
+            definition_wiring_exempt: false,
+        }
+    }
+
+    /// A same-session rotation (a respawn) starts the incarnation's
+    /// retirement on its kept binding in its own step and records itself with
+    /// its target. While it stands, a releasing retirement and a plain
+    /// archive are refused, and so is a terminal over a disposed session. Its
+    /// terminal retires the incarnation and seats the next one Dormant on the
+    /// same session in one step: the identity stays seated, bound, an entry
+    /// and reachable at its endpoint, and both journal rows name the session.
+    #[test]
+    fn a_same_session_rotation_seats_the_next_incarnation_on_the_kept_session() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_entry_member(&mut authority, "same-session-entry", 36);
+        let endpoint = authority
+            .state()
+            .member_peer_endpoints
+            .get(&member.identity)
+            .cloned();
+        assert!(endpoint.is_some(), "the member has its endpoint");
+        let begun = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginMemberRotation {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation: Generation(0),
+                session_id: member.session_id.clone(),
+                peer_endpoint: None,
+                session_archived: false,
+                target: RotationTarget::SameSession,
+            },
+        )
+        .expect("the same-session rotation starts the retirement and records itself");
+        assert!(begun.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                ..
+            }
+        )));
+        {
+            let state = authority.state();
+            assert_eq!(
+                state.member_state_markers.get(&member.runtime_id),
+                Some(&MobMemberState::Retiring)
+            );
+            assert!(
+                state
+                    .runtime_retire_archive_only
+                    .contains(&member.runtime_id)
+            );
+            assert_eq!(
+                state.member_session_bindings.get(&member.identity),
+                Some(&member.session_id)
+            );
+            assert_eq!(
+                state.member_rotation_session_ids.get(&member.identity),
+                Some(&member.session_id)
+            );
+            assert_eq!(
+                state.member_rotation_targets.get(&member.identity),
+                Some(&RotationTarget::SameSession)
+            );
+        }
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                retire_input(&member, Some(member.session_id.clone())),
+            )
+            .is_err(),
+            "a releasing re-drive never releases the kept binding"
+        );
+        assert!(
+            authority.apply_signal(archived_signal(&member)).is_err(),
+            "the plain archive waits for the rotation's own terminal"
+        );
+        authorize_rotation_profile(&mut authority, &member);
+        let next = AgentRuntimeId::from("same-session-entry:1");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                same_session_commit(&member, &next, MemberSessionDisposal::Archived),
+            )
+            .is_err(),
+            "the terminal never seats the next incarnation on a disposed session"
+        );
+        let committed = MobMachineMutator::apply(
+            &mut authority,
+            same_session_commit(&member, &next, MemberSessionDisposal::KeptForSuccessor),
+        )
+        .expect("the terminal seats the next incarnation on the kept session");
+        let state = authority.state();
+        assert_eq!(state.identity_to_runtime.get(&member.identity), Some(&next));
+        assert!(!state.live_runtime_ids.contains(&member.runtime_id));
+        assert_eq!(
+            state.member_session_bindings.get(&member.identity),
+            Some(&member.session_id)
+        );
+        assert_eq!(
+            state.member_peer_endpoints.get(&member.identity).cloned(),
+            endpoint
+        );
+        assert_eq!(
+            state.member_materialization.get(&member.identity),
+            Some(&MemberMaterializationPhase::Dormant)
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&member.identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "the identity stays an entry"
+        );
+        assert!(
+            !state
+                .member_rotation_session_ids
+                .contains_key(&member.identity)
+        );
+        assert!(!state.member_rotation_targets.contains_key(&member.identity));
+        let journaled = committed
+            .effects()
+            .iter()
+            .filter_map(|effect| match effect {
+                MobMachineEffect::AppendLifecycleJournal {
+                    kind, session_id, ..
+                } => Some((*kind, session_id.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            journaled,
+            vec![
+                (
+                    MobLifecycleJournalKind::MemberRetired,
+                    Some(member.session_id.clone())
+                ),
+                (
+                    MobLifecycleJournalKind::MemberSpawned,
+                    Some(member.session_id.clone())
+                ),
+            ]
+        );
+    }
+
+    /// The replay of a rotation's start row records the rotation again, on
+    /// the Retiring incarnation the row's replay restored and only there, so
+    /// the rotation's own terminal finishes it with no host record while the
+    /// plain archive waits.
+    #[test]
+    fn a_recovered_rotation_is_finished_by_its_own_terminal() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "recovered-rotation", 37);
+        let recover = |target: RotationTarget, session_id: &SessionId| {
+            MobMachineSignal::RecoverMemberRotationIntent {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                target,
+                session_id: session_id.clone(),
+                peer_endpoint: None,
+            }
+        };
+        assert!(
+            authority
+                .apply_signal(recover(RotationTarget::SameSession, &member.session_id))
+                .is_err(),
+            "no rotation is recorded for an incarnation that is not Retiring"
+        );
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMemberRetirementStarted {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                generation: Generation(0),
+                releasing: None,
+                session_id: Some(member.session_id.clone()),
+                retiring_peer_endpoint: None,
+                preserve_machine_topology: false,
+            })
+            .expect("replay restores the retirement start");
+        assert!(
+            authority
+                .apply_signal(recover(RotationTarget::FreshSession, &member.session_id))
+                .is_err(),
+            "a FreshSession rotation names a new session"
+        );
+        authority
+            .apply_signal(recover(RotationTarget::SameSession, &member.session_id))
+            .expect("replay records the same-session rotation again");
+        assert_eq!(
+            authority
+                .state()
+                .member_rotation_targets
+                .get(&member.identity),
+            Some(&RotationTarget::SameSession)
+        );
+        assert!(
+            authority.apply_signal(archived_signal(&member)).is_err(),
+            "the plain archive waits for the recovered rotation's terminal"
+        );
+        authorize_rotation_profile(&mut authority, &member);
+        let next = AgentRuntimeId::from("recovered-rotation:1");
+        MobMachineMutator::apply(
+            &mut authority,
+            same_session_commit(&member, &next, MemberSessionDisposal::KeptForSuccessor),
+        )
+        .expect("the recovered rotation's own terminal finishes it");
+        assert_eq!(
+            authority.state().identity_to_runtime.get(&member.identity),
+            Some(&next)
+        );
+    }
+
+    /// A scoped release names the incarnation it means: a scope that is the
+    /// member's current incarnation on its current session gets the member's
+    /// release verdict, and any other (a retired incarnation's, a stale
+    /// fence, another session) answers Stale.
+    #[test]
+    fn a_scoped_release_of_another_incarnation_is_stale() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "scoped-release", 38);
+        let verdict =
+            |authority: &mut MobMachineAuthority,
+             scope: Option<(AgentRuntimeId, FenceToken, SessionId)>| {
+                let (runtime_id, fence_token, session_id) = match scope {
+                    Some((runtime_id, fence_token, session_id)) => {
+                        (Some(runtime_id), Some(fence_token), Some(session_id))
+                    }
+                    None => (None, None, None),
+                };
+                MobMachineMutator::apply(
+                    authority,
+                    MobMachineInput::ClassifyMemberRelease {
+                        agent_identity: member.identity.clone(),
+                        scope_agent_runtime_id: runtime_id,
+                        scope_fence_token: fence_token,
+                        scope_session_id: session_id,
+                    },
+                )
+                .expect("the release verdict answers every scope")
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    MobMachineEffect::MemberReleaseClassified { verdict, .. } => Some(*verdict),
+                    _ => None,
+                })
+                .expect("the verdict is emitted")
+            };
+        let unscoped = verdict(&mut authority, None);
+        assert_ne!(unscoped, MemberReleaseVerdict::Stale);
+        assert_eq!(
+            verdict(
+                &mut authority,
+                Some((
+                    member.runtime_id.clone(),
+                    member.fence_token,
+                    member.session_id.clone()
+                ))
+            ),
+            unscoped,
+            "the current incarnation's scope gets the member's own verdict"
+        );
+        for (runtime_id, fence_token, session_id) in [
+            (
+                AgentRuntimeId::from("scoped-release:7"),
+                member.fence_token,
+                member.session_id.clone(),
+            ),
+            (
+                member.runtime_id.clone(),
+                FenceToken(member.fence_token.0 + 1),
+                member.session_id.clone(),
+            ),
+            (
+                member.runtime_id.clone(),
+                member.fence_token,
+                SessionId::from("scoped-release-other-session"),
+            ),
+        ] {
+            assert_eq!(
+                verdict(&mut authority, Some((runtime_id, fence_token, session_id))),
+                MemberReleaseVerdict::Stale
+            );
+        }
     }
 
     /// A seat owes no kickoff. A spec that owes one spawns
@@ -11664,6 +12004,7 @@ mod tests {
                 session_id: next_session.clone(),
                 peer_endpoint: None,
                 session_archived: false,
+                target: RotationTarget::FreshSession,
             },
         )
         .expect("the rotation records its intent");
@@ -12029,6 +12370,7 @@ mod tests {
                 session_id: SessionId::from("profile-check-next"),
                 peer_endpoint: None,
                 session_archived: false,
+                target: RotationTarget::FreshSession,
             },
         )
         .expect("the rotation records its intent");
@@ -12281,6 +12623,7 @@ mod tests {
                     session_id: next_session,
                     peer_endpoint: None,
                     session_archived: false,
+                    target: RotationTarget::FreshSession,
                 },
             )
             .expect("the rotation records its intent");

@@ -83,6 +83,8 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_optional_u64_is_exact_successor",
     "mob_machine_members_to_spawn",
     "mob_machine_members_to_retire",
+    // A destroy's abandoned rotation sessions: the FreshSession rotations'.
+    "mob_machine_fresh_rotation_sessions",
     "mob_machine_placed_cleanup_absent_for_identity",
     "mob_machine_placed_cleanup_obligation",
     "mob_machine_placed_carrier_binding_active",

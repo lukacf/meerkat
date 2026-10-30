@@ -1368,6 +1368,9 @@ impl GeneratedMachineKernel {
             "mob_machine_members_to_retire" => {
                 self.eval_mob_machine_members_to_retire(args, transition_name)
             }
+            "mob_machine_fresh_rotation_sessions" => {
+                self.eval_mob_machine_fresh_rotation_sessions(args, transition_name)
+            }
             "mob_machine_placed_cleanup_absent_for_identity" => {
                 self.eval_mob_machine_placed_cleanup_absent_for_identity(args, transition_name)
             }
@@ -1751,6 +1754,44 @@ impl GeneratedMachineKernel {
                 .into_keys()
                 .filter(|identity| {
                     !desired.contains(identity) && !identity_entry_origins.contains_key(identity)
+                })
+                .collect(),
+        ))
+    }
+
+    /// The next sessions of the pending FreshSession rotations, which a
+    /// destroy's admission abandons: the rotation sessions of every identity
+    /// whose rotation target is not SameSession (a same-session rotation
+    /// names its member's own session).
+    fn eval_mob_machine_fresh_rotation_sessions(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [rotation_session_ids, rotation_targets]: [KernelValue; 2] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_fresh_rotation_sessions expects two args",
+                )
+            })?;
+        let rotation_session_ids = rotation_session_ids
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let rotation_targets = rotation_targets
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let target_enum = EnumTypeId::parse("RotationTarget")
+            .map_err(|error| self.eval_error(transition_name, error.to_string()))?;
+        let same_session = EnumVariantId::parse("SameSession")
+            .map_err(|error| self.eval_error(transition_name, error.to_string()))?;
+        Ok(KernelValue::Map(
+            rotation_session_ids
+                .into_iter()
+                .filter(|(identity, _)| {
+                    !rotation_targets.get(identity).is_some_and(|target| {
+                        kernel_value_enum_variant_matches(target, &target_enum, &same_session)
+                    })
                 })
                 .collect(),
         ))
@@ -4871,6 +4912,36 @@ mod tests {
             )
             .expect("members to retire over entries");
         assert_eq!(entries_retired, KernelValue::Set(BTreeSet::new()));
+
+        // A destroy abandons the next sessions of the FreshSession rotations
+        // only: agent.b's same-session rotation names its own session.
+        let rotation_target = |variant: &str| KernelValue::NamedVariant {
+            enum_name: enum_type_id("RotationTarget"),
+            variant: enum_variant_id(variant),
+        };
+        let abandoned = kernel
+            .eval_native_helper(
+                "mob_machine_fresh_rotation_sessions",
+                vec![
+                    KernelValue::Map(BTreeMap::from([
+                        (agent_a.clone(), named_string("SessionId", "session.next")),
+                        (agent_b.clone(), named_string("SessionId", "session.own")),
+                    ])),
+                    KernelValue::Map(BTreeMap::from([
+                        (agent_a.clone(), rotation_target("FreshSession")),
+                        (agent_b.clone(), rotation_target("SameSession")),
+                    ])),
+                ],
+                &transition,
+            )
+            .expect("fresh rotation sessions");
+        assert_eq!(
+            abandoned,
+            KernelValue::Map(BTreeMap::from([(
+                agent_a.clone(),
+                named_string("SessionId", "session.next")
+            )]))
+        );
 
         let obligation = kernel
             .eval_native_helper(

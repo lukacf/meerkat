@@ -73,7 +73,12 @@
 #     millisecond as the first presentation
 #     (AuditDecisionFollowsPresentation);
 #   - a presentation that overwrites the first presentation time with its
-#     own (AuditFirstPresentationIsTheEarliest).
+#     own, and one to another audience recorded as the approver's
+#     (AuditFirstPresentationIsTheEarliest);
+#   - a presentation at 0 recorded as the first presentation
+#     (first_presentation_is_a_reading, a generated invariant), and a
+#     decision accepted on a carried presentation at 0
+#     (AuditDecisionFollowsPresentation).
 # The executor's obligations are assumed, not checked: the machine records
 # that a permit is outstanding, not who holds it or whether a commit landed.
 # The audit models one executor per decision (one owner drives the permit),
@@ -127,6 +132,7 @@ covered_actions=(
   AuditPresentRefusedSubjectChanged
   AuditPresentRefusedIncomplete
   AuditPresentToApprover
+  AuditPresentRefusedUntimed
   AuditPresentRefusedWrongApproverAudience
   AuditPresentToReviewer
   AuditPresentRefusedWrongReviewerAudience
@@ -547,5 +553,30 @@ earliest_presentation(first_presented_to_approver_at_ms, Some(presented_at_ms))
 Some(presented_at_ms)
 EOF
   mutate first_presentation_overwritten AuditFirstPresentationIsTheEarliest "${edits}"
+
+  # A presentation to any audience recorded as the approver's: the audit
+  # reads the audience from the input, not from the arm that fired.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ (audience = approver_id)
+/\ TRUE
+EOF
+  mutate present_to_another_audience AuditFirstPresentationIsTheEarliest "${edits}"
+
+  # A presentation at 0, no reading, recorded as the first presentation.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ (presented_at_ms # 0)
+/\ TRUE
+EOF
+  mutate present_untimed first_presentation_is_a_reading "${edits}"
+
+  # A decision accepted on a carried presentation at 0.
+  cat > "${edits}" <<'EOF'
+DecideApproved
+/\ (carried_presentation_at_ms # Some(0))
+/\ TRUE
+EOF
+  mutate decide_carries_untimed AuditDecisionFollowsPresentation "${edits}"
 fi
 echo "durable decision audit passed at model_step_count <= ${max_steps}"

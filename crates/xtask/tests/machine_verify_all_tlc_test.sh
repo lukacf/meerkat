@@ -725,7 +725,7 @@ fi
 # presentation, and refused for the order only before it) and two state
 # invariants (an owner's commit stays settleable; the first presentation
 # time is the earliest). It requires every wrapper to fire, fifteen
-# witnesses reached and refuses twenty-one seeded defects (--mutants). 6
+# witnesses reached and refuses twenty-four seeded defects (--mutants). 6
 # steps reach every witness. It runs alone in shard audits-j.
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then
@@ -811,8 +811,8 @@ run_machine_verify() {
 # single-worker mutant runs took 100 s on a 4-worker local run, not yet
 # measured on a hosted runner;
 # audits-j = durable decision with --mutants, alone: its safety run (36073
-# distinct states at 6 steps, 68 s), fifteen witness runs and twenty-one
-# mutant runs took 169 s on a 4-worker local run (about 270-390 s hosted at
+# distinct states at 6 steps, 65 s), fifteen witness runs and twenty-four
+# mutant runs took 146 s on a 4-worker local run (about 235-340 s hosted at
 # the 1.6-2.3x runner factor), not yet measured on a hosted runner.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the

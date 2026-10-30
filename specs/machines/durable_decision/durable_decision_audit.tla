@@ -17,11 +17,13 @@
 \* any of them is a conflict, an equal one a replay. A human decision is
 \* valid or has exactly one defect (no evidence, a stale digest, another
 \* approver id, an ineligible decider, the requester as decider). A valid
-\* one carries no presentation or one shown at 1 or 2, and its ingress
-\* observed it at any time in 0..2, before, at or after each presentation;
-\* one with a defect carries a presentation shown at 1, observed at 1. A
-\* presentation was shown at 1 or 2, whatever clock reading records it, and
-\* the first presentation is the earliest. A review verdict is the
+\* one carries no presentation or one shown at 0, 1 or 2 (0 is no reading),
+\* and its ingress observed it at any time in 0..2, before, at or after each
+\* presentation; one with a defect carries a presentation shown at 1,
+\* observed at 1. A complete presentation of the held subject to the
+\* approver was shown at 0, 1 or 2, any other at 1, whatever clock reading
+\* records it; the first presentation is the earliest reading. A review
+\* verdict is the
 \* reviewer's or another party's, with or without evidence, for the held or
 \* a stale digest. Every input carries a clock reading in 0..2 and may
 \* arrive in any phase: the machine reads no clock, so readings may repeat
@@ -68,15 +70,20 @@
 \*   AuditDecisionFollowsPresentation: a human decision is decided only when
 \*     its ingress observed it at or after the approver's first presentation
 \*     (the earliest the audit saw recorded, or the one the decision
-\*     carries), and is refused for the order only when observed before it.
+\*     carries, a time of 0 being none), and is refused for the order only
+\*     when observed before it.
 \* and two state invariants:
 \*   AuditCommittedIsSettleable: once the owner committed, the decision is
 \*     Executed, or Approved with the permit still outstanding, so the commit
 \*     is always settled as executed: no expiry, refusal or lost permit
 \*     orphans it.
 \*   AuditFirstPresentationIsTheEarliest: the machine's first presentation
-\*     time is the earliest approver presentation the audit saw accepted,
-\*     recorded or carried, in whatever order the presentations arrived.
+\*     time is the earliest approver presentation the audit saw, recorded or
+\*     carried, in whatever order the presentations arrived. The audit reads
+\*     a recorded one from the input itself (a complete presentation of the
+\*     held subject, at a reading other than 0, to the approver id of an
+\*     open human-stage decision before its deadline), never from the arm
+\*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
 \* checked from TLC's coverage, and fifteen scenarios are checked as
@@ -121,8 +128,8 @@ AuditApprover == "beta"
 AuditReviewer == "beta"
 AuditEvidence == Some("alpha")
 AuditTimes == 0..2
-\* The times a presentation is shown at: a decision observed at a time in
-\* AuditTimes falls before, at or after each.
+\* The readings a presentation is shown at: a decision observed at a time in
+\* AuditTimes falls before, at or after each. A time of 0 is no reading.
 AuditShownTimes == 1..2
 
 VARIABLES
@@ -150,11 +157,16 @@ AuditHoldInputs ==
       n \in AuditTimes, d \in 1..2,
       r \in {None, Some(AuditReviewer), Some(AuditRequester)}, b \in BOOLEAN }
 
+\* A complete presentation of the held subject to the approver is shown at
+\* 0 (no reading) or at a reading; any other presentation records no time,
+\* so it is shown at 1.
 AuditPresentInputs ==
-    { [audience |-> a, digest |-> g, complete |-> c, presented_at_ms |-> p,
-       now_ms |-> n] :
-      a \in {AuditRequester, AuditApprover}, g \in {AuditHeld, AuditOther},
-      c \in BOOLEAN, p \in AuditShownTimes, n \in AuditTimes }
+    UNION { { [audience |-> a, digest |-> g, complete |-> c, presented_at_ms |-> p,
+               now_ms |-> n] :
+              p \in IF a = AuditApprover /\ g = AuditHeld /\ c THEN AuditTimes ELSE {1},
+              n \in AuditTimes } :
+            <<a, g, c>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
+                             \X BOOLEAN }
 
 AuditValidDecision ==
     [approver_id |-> AuditApprover, decider |-> AuditApprover,
@@ -169,14 +181,14 @@ AuditDecideShapes ==
       [AuditValidDecision EXCEPT !.eligible = FALSE],
       [AuditValidDecision EXCEPT !.decider = AuditRequester] }
 
-\* The valid decision carries no presentation or one shown at either time,
-\* and was observed at any time: before, at or after each presentation. A
-\* decision with a defect is refused whatever its times, so it carries a
-\* presentation it was observed at.
+\* The valid decision carries no presentation, one at 0 (no reading), or
+\* one shown at either reading, and was observed at any time: before, at or
+\* after each presentation. A decision with a defect is refused whatever
+\* its times, so it carries a presentation it was observed at.
 AuditDecideTimes(s) ==
     IF s = AuditValidDecision
     THEN { [carried |-> c, observed |-> o] :
-           c \in {None} \cup {Some(t) : t \in AuditShownTimes}, o \in AuditTimes }
+           c \in {None} \cup {Some(t) : t \in AuditTimes}, o \in AuditTimes }
     ELSE { [carried |-> Some(1), observed |-> 1] }
 
 AuditDecideInputs ==
@@ -356,10 +368,32 @@ AuditEarliest(a, b) ==
     ELSE IF b = None THEN a
     ELSE IF AuditTimeOf(b) < AuditTimeOf(a) THEN b ELSE a
 
+\* The presentation a decision carries, when its time is a reading (0 is
+\* none). Read only for a Decide input.
+AuditTimedCarried(in) ==
+    IF in.carried_presentation_at_ms # None
+       /\ AuditTimeOf(in.carried_presentation_at_ms) > 0
+    THEN in.carried_presentation_at_ms
+    ELSE None
+
 \* The approver's first presentation as a human decision sees it: the
 \* earliest the audit saw recorded, or the one the decision carries. Read
 \* only for a Decide input.
-AuditFirstShown(in) == AuditEarliest(audit_first_presented, in.carried_presentation_at_ms)
+AuditFirstShown(in) == AuditEarliest(audit_first_presented, AuditTimedCarried(in))
+
+\* A presentation the approver's first presentation time comes from, read
+\* from the input itself and never from the arm that fired: on an open
+\* human-stage decision before its deadline, a complete presentation of
+\* the held subject to the approver id, shown at a reading other than 0.
+AuditApproverPresentation(kind, in) ==
+    /\ kind = "Present"
+    /\ phase = "Open"
+    /\ stage = "Human"
+    /\ in.now_ms < deadline_at_ms
+    /\ in.audience = approver_id
+    /\ in.digest = subject_digest
+    /\ in.complete
+    /\ in.presented_at_ms > 0
 
 AuditPresentationOrderKept(kind, arm, in) ==
     /\ (kind = "Decide" /\ phase = "Open" /\ phase' \in {"Approved", "Rejected"})
@@ -369,13 +403,13 @@ AuditPresentationOrderKept(kind, arm, in) ==
            => /\ AuditFirstShown(in) # None
               /\ in.observed_at_ms < AuditTimeOf(AuditFirstShown(in))
 
-\* The earliest approver presentation accepted after the step: a recorded
-\* presentation, or the one a decided decision carried.
-AuditFirstPresentedAfter(arm, in) ==
-    IF arm = "PresentToApprover"
+\* The earliest approver presentation after the step: a recorded one, or
+\* the one a decision that the step decided carried.
+AuditFirstPresentedAfter(kind, in) ==
+    IF AuditApproverPresentation(kind, in)
     THEN AuditEarliest(audit_first_presented, Some(in.presented_at_ms))
-    ELSE IF arm \in {"DecideApproved", "DecideRejected"}
-         THEN AuditEarliest(audit_first_presented, in.carried_presentation_at_ms)
+    ELSE IF kind = "Decide" /\ phase = "Open" /\ phase' \in {"Approved", "Rejected"}
+         THEN AuditFirstShown(in)
          ELSE audit_first_presented
 
 AuditBreaks(kind, arm, in) ==
@@ -422,7 +456,7 @@ AuditMarks(arm, in) ==
 AuditStep(kind, arm, in) ==
     /\ audit_broken' = audit_broken \cup AuditBreaks(kind, arm, in)
     /\ audit_seen' = audit_seen \cup AuditMarks(arm, in)
-    /\ audit_first_presented' = AuditFirstPresentedAfter(arm, in)
+    /\ audit_first_presented' = AuditFirstPresentedAfter(kind, in)
     /\ UNCHANGED audit_committed
 
 \* --- the owner's commit -----------------------------------------------
@@ -489,6 +523,10 @@ AuditPresentRefusedIncomplete(in) ==
 AuditPresentToApprover(in) ==
     /\ PresentArm(PresentToApprover, in)
     /\ AuditStep("Present", "PresentToApprover", in)
+
+AuditPresentRefusedUntimed(in) ==
+    /\ PresentArm(PresentRefusedUntimed, in)
+    /\ AuditStep("Present", "PresentRefusedUntimed", in)
 
 AuditPresentRefusedWrongApproverAudience(in) ==
     /\ PresentArm(PresentRefusedWrongApproverAudience, in)
@@ -814,6 +852,7 @@ AuditNext ==
     \/ \E in \in AuditPresentInputs : AuditPresentRefusedSubjectChanged(in)
     \/ \E in \in AuditPresentInputs : AuditPresentRefusedIncomplete(in)
     \/ \E in \in AuditPresentInputs : AuditPresentToApprover(in)
+    \/ \E in \in AuditPresentInputs : AuditPresentRefusedUntimed(in)
     \/ \E in \in AuditPresentInputs : AuditPresentRefusedWrongApproverAudience(in)
     \/ \E in \in AuditPresentInputs : AuditPresentToReviewer(in)
     \/ \E in \in AuditPresentInputs : AuditPresentRefusedWrongReviewerAudience(in)

@@ -880,8 +880,9 @@ jobs:
   # 40721495692 and 40721504088, an eighth for the controller hold
   # audit with its mutants (100 s on a 4-worker local run, not yet measured
   # on a hosted runner), and a ninth (audits-j) for the durable decision
-  # audit with its mutants (54 s on a 4-worker local run, not yet measured
-  # on a hosted runner).
+  # audit with its mutants (146 s on a 4-worker local run, about 235-340 s
+  # hosted at the 1.6-2.3x runner factor, not yet measured on a hosted
+  # runner).
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:

@@ -645,3 +645,113 @@ fn an_approved_decision_with_no_permit_past_its_deadline_is_due() {
     assert!(!decision_is_due(&held, 100));
     assert!(!decision_is_due(&fresh, 100));
 }
+
+/// The pinned JSON of the human evidence of
+/// `the_evidence_encoding_and_its_digest_are_pinned`.
+const HUMAN_EVIDENCE_JSON: &str = concat!(
+    r#"{"kind":"human","#,
+    r#""decider":"principal:[\"human\",\"example.org\",\"alice\"]","#,
+    r#""principal":{"kind":"human","id":"alice","#,
+    r#""qualification":{"kind":"qualified","trust_domain_id":"example.org"}},"#,
+    r#""assurance":"person_authenticated","#,
+    r#""authentication_scope":"login-1","#,
+    r#""ingress":"web","#,
+    r#""event_ref":"event-1","#,
+    r#""approver_id":"team:owners","#,
+    r#""presented_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""presentation":{"#,
+    r#""audience":{"kind":"approver","approver_id":"team:owners"},"#,
+    r#""subject_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""parts_shown":[{"index":0,"count":1,"#,
+    r#""part_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"}],"#,
+    r#""channel_ref":"channel-1","#,
+    r#""message_ref":"message-1","#,
+    r#""at_ms":5},"#,
+    r#""approve":true,"#,
+    r#""reason":"looks right"}"#,
+);
+const HUMAN_EVIDENCE_DIGEST: &str =
+    "sha256:376dacd6e9e2f1b4ecc7d0b37aefbea51499a23c927c2533dc662920bf36757f";
+
+/// The pinned JSON of the review evidence of
+/// `the_evidence_encoding_and_its_digest_are_pinned`.
+const REVIEW_EVIDENCE_JSON: &str = concat!(
+    r#"{"kind":"review","#,
+    r#""reviewer":"principal:[\"shared_agent\",\"example.org\",\"reviewer\"]","#,
+    r#""principal":{"kind":"shared_agent","id":"reviewer","#,
+    r#""qualification":{"kind":"qualified","trust_domain_id":"example.org"}},"#,
+    r#""origin_session":"018f2c3a-6b7d-7e8f-9a0b-1c2d3e4f5a6b","#,
+    r#""verdict_call_ref":"call-1","#,
+    r#""verdict":"allow","#,
+    r#""presented_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""feedback":"matches the request"}"#,
+);
+const REVIEW_EVIDENCE_DIGEST: &str =
+    "sha256:6029e98bbc45c98c4cfca425736730f8b1a6008fdc44287948dd36c033e8c44b";
+
+/// The evidence a decision binds by digest has a pinned encoding: a change
+/// to how the evidence, or any type it embeds (a principal, an assurance, a
+/// session id, a presentation record, a canonical part), serializes changes
+/// these bytes and fails here, before it would tear every decided row. Such
+/// a change needs a new evidence domain and a migration of the stored rows.
+#[test]
+fn the_evidence_encoding_and_its_digest_are_pinned() {
+    let rendering = rendering("Release build 7.");
+    let human = DecisionEvidence::Human {
+        decider: key(PrincipalKind::Human, "alice"),
+        principal: principal(PrincipalKind::Human, "alice", "example.org"),
+        assurance: ApprovalAssurance::PersonAuthenticated,
+        authentication_scope: Some("login-1".to_owned()),
+        ingress: DecisionIngress::new("web").expect("ingress"),
+        event_ref: reference("event-1"),
+        approver_id: approver_id(),
+        presented_digest: rendering.subject_digest(),
+        presentation: Some(PresentationRecord::complete(
+            PresentationAudience::Approver {
+                approver_id: approver_id(),
+            },
+            &rendering,
+            None,
+            reference("channel-1"),
+            reference("message-1"),
+            5,
+        )),
+        approve: true,
+        reason: Some("looks right".to_owned()),
+    };
+    let review = DecisionEvidence::Review {
+        reviewer: key(PrincipalKind::SharedAgent, "reviewer"),
+        principal: principal(PrincipalKind::SharedAgent, "reviewer", "example.org"),
+        origin_session: SessionId::parse("018f2c3a-6b7d-7e8f-9a0b-1c2d3e4f5a6b")
+            .expect("session id"),
+        verdict_call_ref: reference("call-1"),
+        verdict: DecisionReviewVerdict::Allow,
+        presented_digest: rendering.subject_digest(),
+        feedback: Some("matches the request".to_owned()),
+    };
+    for (evidence, json, digest) in [
+        (&human, HUMAN_EVIDENCE_JSON, HUMAN_EVIDENCE_DIGEST),
+        (&review, REVIEW_EVIDENCE_JSON, REVIEW_EVIDENCE_DIGEST),
+    ] {
+        let tier = evidence.tier();
+        assert_eq!(
+            serde_json::to_string(evidence).expect("encode"),
+            json,
+            "the {tier:?} evidence's bytes"
+        );
+        assert_eq!(
+            evidence.digest().expect("digest").as_str(),
+            digest,
+            "the {tier:?} evidence's digest"
+        );
+        assert_eq!(
+            &serde_json::from_str::<DecisionEvidence>(json).expect("the pinned bytes decode"),
+            evidence,
+            "the {tier:?} evidence decodes from its pinned bytes"
+        );
+    }
+}

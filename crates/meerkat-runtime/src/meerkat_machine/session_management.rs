@@ -6844,6 +6844,27 @@ impl MeerkatMachine {
                         ),
                     });
                 }
+                // The discard waits for the runtime loop to publish that
+                // handoff, and a loop that is still attached publishes it
+                // only once the session's degraded settlement detaches it. A
+                // ready-gated caller runs that settlement, but none may come:
+                // a failed durable write that degraded the session can return
+                // without it, and an unregister refuses at its first durable
+                // write, before it detaches the loop. Hand the settlement off
+                // here, so the discard never waits for a loop nobody
+                // detaches. Its task takes M before it changes anything, so
+                // this admission stays read-only apart from the coordinator
+                // it publishes.
+                if teardown_slot
+                    .as_ref()
+                    .is_some_and(|slot| !slot.exit_handoff_is_settled())
+                    && !matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                {
+                    self.hand_off_degraded_gate_settlement(
+                        witness.session_id(),
+                        entry.mutation_gate.clone(),
+                    );
+                }
                 let coordinator_id = uuid::Uuid::new_v4();
                 let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
                 entry.reload_required_discard_coordinator =

@@ -698,6 +698,519 @@ async fn entry_read_needs_no_actor_command_and_never_wakes() {
         .expect("the queued command succeeds");
 }
 
+/// Wait, within one step, until `name` reads as an identity entry.
+async fn entry_settles(mob: &EntryMob, name: &str) -> Option<IdentityEntryOrigin> {
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        if let Some(origin) = mob.entry(name) {
+            return Some(origin);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A host respawn of an entry's member and a rotation of a seated entry
+/// keep the entry: the successor's `MemberSpawned` row records it, and the
+/// entry survives a restart.
+///
+/// RED: drop the respawn's carry of the entry to its successor
+/// (`replacement_spec.entry_custody = snapshot.entry_custody`) or the
+/// rotation row's `identity_entry`: the respawned identity reads as a
+/// worker at once, the rotated one after the restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_and_rotation_keep_an_entry_across_a_restart() {
+    let mut mob = EntryMob::new("entry-successors").await;
+    mob.handle
+        .spawn_spec(entry_spec("respawned-entry"))
+        .await
+        .expect("the host declares a spawned entry");
+    mob.seat(entry_spec("rotated-entry")).await;
+
+    tokio::time::timeout(STEP, mob.handle.respawn(id("respawned-entry"), None))
+        .await
+        .expect("the respawn answers")
+        .expect("the host respawns its entry");
+    tokio::time::timeout(STEP, mob.handle.rotate_member(worker_spec("rotated-entry")))
+        .await
+        .expect("the rotation answers")
+        .expect("the host rotates its entry");
+    for name in ["respawned-entry", "rotated-entry"] {
+        assert_eq!(
+            entry_settles(&mob, name).await,
+            Some(IdentityEntryOrigin::Declared),
+            "{name} stays an entry"
+        );
+    }
+    let rows = spawned_entries(&mob.lifecycle().await);
+    for name in ["respawned-entry", "rotated-entry"] {
+        assert_eq!(
+            rows.get(&id(name)),
+            Some(&Some(IdentityEntryOrigin::Declared)),
+            "the row of {name}'s successor records the entry"
+        );
+    }
+
+    mob.restart().await;
+    for name in ["respawned-entry", "rotated-entry"] {
+        assert_eq!(
+            mob.entry(name),
+            Some(IdentityEntryOrigin::Declared),
+            "{name} is an entry after the restart"
+        );
+    }
+}
+
+/// A placed spawn never acts for an identity entry: one with entry custody
+/// is refused typed at the shell before anything is created (MobMachine's
+/// remote ladder has no arm for it either; see the machine test
+/// `a_placed_spawn_with_entry_custody_has_no_arm`).
+///
+/// RED: drop the shell refusal in the placed lane
+/// (`enqueue_spawn_remote_inner`): the spawn reaches the remote ladder,
+/// which refuses it untyped as a machine rejection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_placed_spawn_with_entry_custody_is_refused_typed() {
+    let mob = EntryMob::new("entry-placed").await;
+    let members = mob.handle.list_members().await.len();
+    let journal = mob.journal_len().await;
+    let mut spec = entry_spec("placed-entry");
+    spec.placement = Some(dsl::HostId("entry-placed-host".to_string()));
+    let error = mob
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect_err("a placed spawn with entry custody is refused");
+    assert!(
+        matches!(&error, MobError::WiringError(reason) if reason.contains("identity entry")),
+        "{error:?}"
+    );
+    assert_eq!(mob.handle.list_members().await.len(), members);
+    assert_eq!(mob.journal_len().await, journal, "no refusal wrote a row");
+    assert_eq!(mob.entry("placed-entry"), None);
+}
+
+/// The rest of the agent lane's refusal: it does not unwire, rotate or
+/// cancel the work of an identity entry's member either, while it still
+/// unwires two workers.
+///
+/// RED: classify `Unwire`, `PlanMemberRotation` and `CancelAllWork` as
+/// addressing no member (`AgentLaneAdmission::Unaddressed`): the agent lane
+/// unwires, rotates and cancels the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_lane_unwires_rotates_and_cancels_no_entry() {
+    let mob = EntryMob::new("entry-agent-scope").await;
+    mob.handle
+        .spawn_spec(entry_spec("scope-entry"))
+        .await
+        .expect("the host declares its entry");
+    for name in ["scope-worker", "scope-peer"] {
+        mob.handle
+            .spawn_spec(worker_spec(name))
+            .await
+            .expect("a worker");
+    }
+    mob.handle
+        .wire(id("scope-worker"), id("scope-entry"))
+        .await
+        .expect("the host wires its entry to a worker");
+    mob.handle
+        .wire(id("scope-worker"), id("scope-peer"))
+        .await
+        .expect("the host wires two workers");
+    let agent = mob.agent();
+
+    let error = agent
+        .unwire(id("scope-worker"), id("scope-entry"))
+        .await
+        .expect_err("the agent lane does not unwire an entry");
+    assert!(is_identity_member(&error, "scope-entry"), "{error:?}");
+    let error = agent
+        .rotate_member(worker_spec("scope-entry"))
+        .await
+        .expect_err("the agent lane does not rotate an entry");
+    assert!(is_identity_member(&error, "scope-entry"), "{error:?}");
+    let error = agent
+        .cancel_all_work(
+            crate::ids::AgentRuntimeId::new(id("scope-entry"), crate::ids::Generation::INITIAL),
+            crate::ids::FenceToken::new(1),
+        )
+        .await
+        .expect_err("the agent lane does not cancel an entry's work");
+    assert!(is_identity_member(&error, "scope-entry"), "{error:?}");
+    assert_eq!(
+        mob.entry("scope-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+
+    agent
+        .unwire(id("scope-worker"), id("scope-peer"))
+        .await
+        .expect("the agent lane unwires two workers");
+}
+
+/// The legacy adoption observes a member again when MobMachine answers its
+/// observation stale, a bounded number of times, and answers a retryable
+/// refusal when the incarnation keeps changing. The agent lane runs no
+/// adoption at all, of a worker or of an entry.
+///
+/// RED: observe once (no loop): the first stale observation is the answer,
+/// and the member observed once is not adopted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_legacy_observation_is_observed_again() {
+    use crate::runtime::handle::legacy_observation_hold;
+
+    let mob = EntryMob::new("entry-stale-observation").await;
+    for name in ["observed-once", "observed-stale"] {
+        mob.handle
+            .spawn_spec(labelled_spec(name, name))
+            .await
+            .expect("a legacy member");
+    }
+
+    legacy_observation_hold::force_stale(&id("observed-once"), 1);
+    assert_eq!(
+        mob.handle
+            .adopt_legacy_identity_entry(&id("observed-once"))
+            .await
+            .expect("the adoption answers"),
+        LegacyIdentityEntryAdoption::Adopted,
+        "one stale observation is observed again"
+    );
+
+    legacy_observation_hold::force_stale(&id("observed-stale"), 3);
+    let error = mob
+        .handle
+        .adopt_legacy_identity_entry(&id("observed-stale"))
+        .await
+        .expect_err("an incarnation that keeps changing is refused");
+    assert!(
+        matches!(&error, MobError::LifecycleOperationPending { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        error
+            .structured_data()
+            .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool)),
+        Some(true),
+        "the refusal is retryable"
+    );
+    assert_eq!(mob.entry("observed-stale"), None);
+
+    for name in ["observed-stale", "observed-once"] {
+        let error = mob
+            .agent()
+            .adopt_legacy_identity_entry(&id(name))
+            .await
+            .expect_err("the agent lane adopts nothing");
+        assert!(
+            matches!(error, MobError::ScopeDenied(_)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// A host retire of an entry beside an agent retire of it retires the
+/// entry: the agent's retire is refused at its scope admission, before it
+/// elects the retirement slot the host's retire would join.
+///
+/// RED: admit the retire's scope without naming the member
+/// (`ScopeAdmissionSubject::Mob` in `join_or_start_retirement_step`): both
+/// retires elect one slot, so either the host answers the agent's refusal or
+/// the agent's retire answers the host's success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_retire_beside_an_agent_retire_of_an_entry_retires_it() {
+    let mob = EntryMob::new("entry-retire-slot").await;
+    mob.handle
+        .spawn_spec(entry_spec("slot-entry"))
+        .await
+        .expect("the host declares its entry");
+
+    // The actor parks, so both retires' scope admissions queue behind it;
+    // a second park keeps their retirements from running until both
+    // elected their slots.
+    let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
+    let (first_release_tx, first_release_rx) = tokio::sync::oneshot::channel();
+    let first = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+            entered_tx: first_entered_tx,
+            release_rx: first_release_rx,
+            reply_tx,
+        })
+        .await
+        .expect("park the actor");
+    first_entered_rx.await.expect("the actor parks");
+    let agent = tokio::spawn({
+        let agent = mob.agent();
+        async move { agent.retire(id("slot-entry")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let host = tokio::spawn({
+        let host = mob.handle.clone();
+        async move { host.retire(id("slot-entry")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (second_entered_tx, second_entered_rx) = tokio::sync::oneshot::channel();
+    let (second_release_tx, second_release_rx) = tokio::sync::oneshot::channel();
+    let second = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+            entered_tx: second_entered_tx,
+            release_rx: second_release_rx,
+            reply_tx,
+        })
+        .await
+        .expect("park the actor again");
+    first_release_tx.send(()).expect("release the first park");
+    first
+        .await
+        .expect("the first park answers")
+        .expect("the first park succeeds");
+    second_entered_rx
+        .await
+        .expect("the actor parks after both admissions");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    second_release_tx.send(()).expect("release the second park");
+    second
+        .await
+        .expect("the second park answers")
+        .expect("the second park succeeds");
+
+    let agent = tokio::time::timeout(STEP, agent)
+        .await
+        .expect("the agent's retire answers")
+        .expect("the agent's retire task");
+    let host = tokio::time::timeout(STEP, host)
+        .await
+        .expect("the host's retire answers")
+        .expect("the host's retire task");
+    assert!(
+        matches!(&agent, Err(error) if is_identity_member(error, "slot-entry")),
+        "{agent:?}"
+    );
+    host.expect("the host retires its own entry");
+    assert_eq!(mob.entry("slot-entry"), None);
+    assert!(
+        !mob.handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("slot-entry")),
+        "the entry's member is retired"
+    );
+}
+
+/// The worker reconcile and ensure spawn workers only: a spec that carries
+/// entry custody is refused typed before anything is created (an identity
+/// entry is declared with `spawn_spec` or `seat_dormant_members`).
+///
+/// RED: drop the refusal in `handle_reconcile` and `handle_ensure_member`:
+/// the reconcile and the ensure seat identity entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_reconcile_and_ensure_refuse_entry_custody() {
+    let mob = EntryMob::new("entry-reconcile-custody").await;
+    let members = mob.handle.list_members().await.len();
+    let journal = mob.journal_len().await;
+    let error = mob
+        .handle
+        .reconcile(
+            vec![
+                worker_spec("reconciled-worker"),
+                entry_spec("reconciled-entry"),
+            ],
+            ReconcileOptions {
+                retire_stale: false,
+            },
+        )
+        .await
+        .expect_err("a reconcile of an entry custody spec is refused");
+    assert!(
+        matches!(&error, MobError::WiringError(reason) if reason.contains("entry custody")),
+        "{error:?}"
+    );
+    let error = mob
+        .handle
+        .ensure_member(entry_spec("ensured-entry"))
+        .await
+        .expect_err("an ensure of an entry custody spec is refused");
+    assert!(
+        matches!(&error, MobError::WiringError(reason) if reason.contains("entry custody")),
+        "{error:?}"
+    );
+    assert_eq!(
+        mob.handle.list_members().await.len(),
+        members,
+        "nothing was created"
+    );
+    assert_eq!(mob.journal_len().await, journal, "no refusal wrote a row");
+    for name in ["reconciled-worker", "reconciled-entry", "ensured-entry"] {
+        assert_eq!(mob.entry(name), None, "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The legacy label's one reader (source guard)
+// ---------------------------------------------------------------------------
+
+/// The constant the legacy identity label is read through.
+const LEGACY_LABEL_CONSTANT: &str = "LEGACY_IDENTITY_LABEL";
+
+/// The calls a label lookup makes: on a map named for labels, or the
+/// roster's label query.
+const LABEL_LOOKUPS: &[&str] = &[".get(", ".contains_key(", ".remove(", ".get_key_value("];
+
+/// The label lookups in `code` (comments and literals blanked) whose key is
+/// a literal, as `line: text`: a lookup on a map whose receiver names labels,
+/// or the roster's `find_by_label`, whose key argument is all blank (a
+/// blanked literal).
+fn literal_label_lookups(code: &str) -> Vec<String> {
+    let line = |at: usize| {
+        let start = code[..at].rfind('\n').map_or(0, |index| index + 1);
+        let end = code[at..].find('\n').map_or(code.len(), |index| at + index);
+        format!(
+            "{}: {}",
+            super::fail_stop_cause::line_of(code, at),
+            code[start..end].trim()
+        )
+    };
+    let literal_key = |open: usize| {
+        let rest = &code[open..];
+        let end = rest.find([',', ')']).unwrap_or(rest.len());
+        let key = &rest[..end];
+        !key.is_empty() && key.chars().all(char::is_whitespace)
+    };
+    let mut lookups = Vec::new();
+    for call in LABEL_LOOKUPS {
+        for (at, _) in code.match_indices(call) {
+            let receiver_start = code[..at]
+                .char_indices()
+                .rev()
+                .find(|(_, character)| {
+                    !(character.is_ascii_alphanumeric() || "_.()".contains(*character))
+                })
+                .map_or(0, |(index, character)| index + character.len_utf8());
+            let receiver = code[receiver_start..at].to_ascii_lowercase();
+            if receiver.contains("label") && literal_key(at + call.len()) {
+                lookups.push(line(at));
+            }
+        }
+    }
+    for (at, name) in code.match_indices("find_by_label(") {
+        if literal_key(at + name.len()) {
+            lookups.push(line(at));
+        }
+    }
+    lookups
+}
+
+/// The uses of the legacy label constant in `code` other than its
+/// definition and the reads inside `reader` (a byte range), as `line: text`,
+/// with the counts of definitions and reads.
+fn legacy_label_constant_uses(
+    code: &str,
+    reader: Option<&std::ops::Range<usize>>,
+) -> (Vec<String>, usize, usize) {
+    let mut others = Vec::new();
+    let (mut definitions, mut reads) = (0, 0);
+    for (at, name) in code.match_indices(LEGACY_LABEL_CONSTANT) {
+        if !super::fail_stop_cause::whole_identifier(code, at, name) {
+            continue;
+        }
+        if code[..at].trim_end().ends_with("const") {
+            definitions += 1;
+        } else if reader.is_some_and(|body| body.contains(&at)) {
+            reads += 1;
+        } else {
+            let start = code[..at].rfind('\n').map_or(0, |index| index + 1);
+            let end = code[at..].find('\n').map_or(code.len(), |index| at + index);
+            others.push(format!(
+                "{}: {}",
+                super::fail_stop_cause::line_of(code, at),
+                code[start..end].trim()
+            ));
+        }
+    }
+    (others, definitions, reads)
+}
+
+/// The legacy identity label is read in one place, the legacy adoption's
+/// observation: shipped code names its constant only where it is defined
+/// and in `legacy_roster_member`, and makes no label lookup by a literal
+/// key anywhere (a lookup of the label by its literal would bypass the
+/// constant).
+///
+/// RED: plant a second reader in shipped code, a lookup of
+/// `LEGACY_IDENTITY_LABEL` outside `legacy_roster_member` or of the label
+/// by its literal key: the guard names it (see
+/// `the_legacy_label_scans_see_a_planted_second_reader`).
+#[test]
+fn the_legacy_identity_label_is_read_only_by_the_adoption_observation() {
+    let mut violations = Vec::new();
+    let (mut definitions, mut reads) = (0, 0);
+    for (path, code) in super::fail_stop_cause::shipped_sources() {
+        let reader = if path == "runtime/identity_entry.rs" {
+            super::fail_stop_cause::function_body(&code, "fn legacy_roster_member")
+        } else {
+            None
+        };
+        let (others, defined, read) = legacy_label_constant_uses(&code, reader.as_ref());
+        definitions += defined;
+        reads += read;
+        violations.extend(others.into_iter().map(|use_| format!("{path}:{use_}")));
+        violations.extend(
+            literal_label_lookups(&code)
+                .into_iter()
+                .map(|lookup| format!("{path}:{lookup}")),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "the legacy identity label has readers outside the adoption's observation:\n{}",
+        violations.join("\n")
+    );
+    assert_eq!(
+        (definitions, reads),
+        (1, 1),
+        "the label constant is defined once and read once, by legacy_roster_member"
+    );
+}
+
+#[test]
+fn the_legacy_label_scans_see_a_planted_second_reader() {
+    let code = super::fail_stop_cause::shipped_code(concat!(
+        "pub(crate) const LEGACY_IDENTITY_LABEL: &str = \"agent_identity\";\n",
+        "fn legacy_roster_member(b: &B) -> bool { b.labels().get(LEGACY_IDENTITY_LABEL).is_some() }\n",
+        "fn second(b: &B) -> bool { b.labels().contains_key(LEGACY_IDENTITY_LABEL) }\n",
+        "fn literal(b: &B) -> bool { b.labels().get(\"agent_identity\").is_some() }\n",
+        "fn roster(r: &R) -> bool { r.find_by_label(\"agent_identity\", \"x\").is_some() }\n",
+        "fn variable(b: &B, key: &str) -> bool { b.labels().get(key).is_some() }\n",
+        "fn other(m: &M) -> bool { m.get(\"agent_identity\").is_some() }\n",
+        "// b.labels().get(\"agent_identity\")\n",
+        "#[cfg(test)]\nfn seam(b: &B) -> bool { b.labels().get(\"agent_identity\").is_some() }\n",
+    ));
+    let reader = super::fail_stop_cause::function_body(&code, "fn legacy_roster_member");
+    let (others, definitions, reads) = legacy_label_constant_uses(&code, reader.as_ref());
+    assert_eq!((definitions, reads), (1, 1));
+    assert_eq!(
+        others.iter().map(|use_| &use_[..2]).collect::<Vec<_>>(),
+        vec!["3:"],
+        "the second reader of the constant: {others:?}"
+    );
+    let lookups = literal_label_lookups(&code);
+    assert_eq!(
+        lookups
+            .iter()
+            .map(|lookup| &lookup[..2])
+            .collect::<Vec<_>>(),
+        vec!["4:", "5:"],
+        "the literal lookups, not the variable key, the other map, the comment or the \
+         test item: {lookups:?}"
+    );
+}
+
 /// The journal a reader that predates identity entries reads: every row as
 /// written, with the internal `identity_entry` fields absent (its decoder
 /// ignores the keys it does not know).
@@ -744,8 +1257,8 @@ async fn predating_reader_journal(
 /// Rollback, in-process leg: members seated and spawned with entry fields are
 /// served by a reader that predates them: listed active, woken by a
 /// delivery and reset, as ordinary members. The lane-run leg against the
-/// published binaries is
-/// `members_seated_with_entry_fields_are_served_by_096` below.
+/// published Core is `members_seated_with_entry_fields_are_served_by_097`
+/// below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn members_seated_with_entry_fields_are_served_without_them() {
     let mut mob = EntryMob::new("entry-rollback-serve").await;
@@ -782,8 +1295,11 @@ async fn members_seated_with_entry_fields_are_served_without_them() {
 /// Rollback of an adoption, in-process leg: the adoption's row, read by a
 /// reader that predates identity entries, replays as the member's current
 /// binding and changes nothing: the restored members equal those of the
-/// journal that ends before the row. The lane-run leg against the published
-/// binaries is `legacy_adoption_row_replays_as_a_no_op_under_097` below.
+/// journal that ends before the row, and the member wakes after the
+/// restart over the whole journal (the row carries the member's durable
+/// endpoint, so the reader keeps its endpoint check for it). The lane-run
+/// leg against the published Core is
+/// `legacy_adoption_row_replays_as_a_no_op_under_097` below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_adoption_row_replays_as_a_no_op_without_its_entry() {
     let mut mob = EntryMob::new("entry-rollback-adoption").await;
@@ -840,27 +1356,34 @@ async fn legacy_adoption_row_replays_as_a_no_op_without_its_entry() {
     }
     assert_eq!(restored[0], restored[1], "the adoption's row moves nothing");
     assert_eq!(restored[1].3, Some(session));
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("legacy-member")))
+        .await
+        .expect("the wake answers")
+        .expect("the member wakes after the restart over the adoption's row");
 }
 
-/// Rollback, lane-run leg: needs the published Meta 0.9.6 and Core 0.9.7.
+/// Rollback, lane-run leg: needs the published Core 0.9.7 (`meerkat-mob`
+/// 0.9.7). A Meta rollback leg belongs with the Meta change that writes a
+/// Meta state directory.
 ///
 /// This build writes the fixture: a persistent mob store (SQLite) at
-/// `$MEERKAT_ROLLBACK_FIXTURE_DIR/served-by-096/mob.sqlite` holding a
+/// `$MEERKAT_ROLLBACK_FIXTURE_DIR/served-by-097/mob.sqlite` holding a
 /// member seated with entry custody (its session unborn, so its first wake
 /// creates it) and its `MemberSpawned` row's `identity_entry`. The lane then
-/// resumes that store with Meta 0.9.6 (which pins Core 0.9.7) and checks:
-/// the member is listed `active`, a peer delivery wakes it, and a reset
-/// (`rotate_member`) re-seats it.
+/// resumes that store with the published Core (`MobBuilder::for_resume`)
+/// and checks: the member is listed `active`, a delivery wakes it, and a
+/// reset (`rotate_member`) re-seats it. The harness that resumes the
+/// fixtures with the published crates is a release gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "lane:rollback - writes the fixture the published Meta 0.9.6 and Core 0.9.7 resume"]
-async fn members_seated_with_entry_fields_are_served_by_096() {
+#[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 resumes"]
+async fn members_seated_with_entry_fields_are_served_by_097() {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
             .expect("MEERKAT_ROLLBACK_FIXTURE_DIR names the fixture directory"),
     )
-    .join("served-by-096");
+    .join("served-by-097");
     std::fs::create_dir_all(&dir).expect("create the fixture directory");
-    write_rollback_fixture(&dir, "rollback-served-by-096", |handle| async move {
+    write_rollback_fixture(&dir, "rollback-served-by-097", |handle| async move {
         let outcomes = handle
             .seat_dormant_members(vec![entry_spec("seated-entry")])
             .await
@@ -881,8 +1404,11 @@ async fn members_seated_with_entry_fields_are_served_by_096() {
 /// own id, and the row of its adoption as an identity entry. The lane then
 /// resumes that store with Core 0.9.7 and checks that the adoption's row
 /// replays as the member's current binding: the member is listed `active`
-/// on the same session, and a copy of the store whose journal ends before
-/// the row resumes to the same members.
+/// on the same session, a delivery wakes it, and a copy of the store whose
+/// journal ends before the row resumes to the same members. The adoption's
+/// row carries the member's durable endpoint when MobMachine held one; a
+/// Dormant seat may hold none, and the lane's wake shows Core 0.9.7 serves
+/// the member then too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 resumes"]
 async fn legacy_adoption_row_replays_as_a_no_op_under_097() {

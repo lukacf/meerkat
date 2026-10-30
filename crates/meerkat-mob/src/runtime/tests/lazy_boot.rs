@@ -2246,15 +2246,25 @@ async fn seating_ten_thousand_identities_wired_to_a_live_orchestrator_stays_unde
     );
 }
 
-/// A crash after a rotation's retirement durably started and
-/// before its terminal batch, under a host that keeps its own record of the
-/// rotation (as Meta 0.9.6 does): it passes the identity as host-pending and
+/// A crash after a rotation's retirement durably started and before its
+/// terminal batch, under a host that keeps its own record of the rotation
+/// (as Meta 0.9.6 does): it passes the identity as host-pending and
 /// re-issues `rotate_member` after the restart. The retirement's start row
-/// records the rotation, so the restart records it again, and leaves the
-/// host-pending identity's rotation to the host: the re-issue re-drives it,
-/// once, and seats the next incarnation on the same name-based session the
-/// interrupted rotation targeted. The journal never holds the retirement
-/// without the re-seat, and the rotation never runs twice.
+/// records the rotation, so the restart records it again, and the start
+/// holds the host-pending identity's FreshSession rotation for the host: it
+/// does not re-drive it, and it records the retirement stuck at admission
+/// with a cause that names the wait, before the restart answers. The
+/// identity keeps its retiring generation, Retiring, until the host's
+/// re-issue re-drives the rotation, once, and seats the next incarnation on
+/// the same name-based session the interrupted rotation targeted. The
+/// journal never holds the retirement without the re-seat, and the rotation
+/// never runs twice.
+///
+/// RED: let the start re-drive the host-pending identity's rotation (drop
+/// the hold in the builder's recovered retirements): no retirement is held
+/// stuck for the host at the restart, the start finishes the rotation
+/// itself, and the host's re-issue rotates the member again onto the
+/// generation-2 session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rotation_interrupted_after_its_retirement_started_completes_on_redrive() {
     let definition = with_unique_mob_id(sample_definition(), "rotation-crash");
@@ -2312,8 +2322,25 @@ async fn a_rotation_interrupted_after_its_retirement_started_completes_on_redriv
     .await
     .expect("the restart answers")
     .expect("the restart succeeds");
-    // The restart leaves the host-pending identity's rotation to the host:
-    // the identity still holds the retiring generation.
+    // The start held the host-pending identity's rotation for the host
+    // before it answered: the retirement is recorded stuck at admission,
+    // naming the wait, and the identity keeps its retiring generation,
+    // Retiring, with its FreshSession rotation standing.
+    let held = resumed
+        .retirement_settlement(&identity)
+        .expect("the start records the held rotation's retirement")
+        .current();
+    assert!(
+        matches!(
+            &held,
+            crate::runtime::RetirementSettlement::Stuck { cause, .. }
+                if matches!(
+                    cause.as_ref(),
+                    MobError::LifecycleOperationPending { intent } if intent.contains("rotate_member")
+                )
+        ),
+        "the start holds the rotation for the host's re-issue: {held:?}"
+    );
     assert_eq!(
         resumed
             .get_member(&identity)
@@ -2322,25 +2349,32 @@ async fn a_rotation_interrupted_after_its_retirement_started_completes_on_redriv
             .map(|entry| entry.generation),
         Some(crate::ids::Generation::INITIAL)
     );
-    // The host's re-issue re-drives the same rotation.
-    let deadline = tokio::time::Instant::now() + LAZY_STEP;
-    loop {
-        match resumed.rotate_member(turn_driven(&identity)).await {
-            Ok(session) => {
-                assert_eq!(
-                    session, target,
-                    "the re-issue re-drives the interrupted rotation's session"
-                );
-                break;
-            }
-            Err(MobError::LifecycleOperationPending { .. })
-                if tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(error) => panic!("the re-issued rotation fails: {error}"),
-        }
+    {
+        let state = resumed.machine_state_watch_rx.borrow();
+        let dsl_identity = dsl::AgentIdentity::from_domain(&identity);
+        let runtime = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .cloned()
+            .expect("the identity stays seated");
+        assert_eq!(
+            state.member_state_markers.get(&runtime),
+            Some(&dsl::MobMemberState::Retiring)
+        );
+        assert_eq!(
+            state.member_rotation_targets.get(&dsl_identity),
+            Some(&dsl::RotationTarget::FreshSession)
+        );
     }
+    // The host's re-issue re-drives the same rotation, once.
+    let session = tokio::time::timeout(LAZY_STEP, resumed.rotate_member(turn_driven(&identity)))
+        .await
+        .expect("the re-issue answers")
+        .expect("the re-issued rotation finishes");
+    assert_eq!(
+        session, target,
+        "the re-issue re-drives the interrupted rotation's session"
+    );
     assert_eq!(
         resumed
             .get_member(&identity)

@@ -10,6 +10,7 @@ import type {
 import type { ConsoleAgent } from "../types";
 import type { MetaDockTarget } from "../lib/adapters";
 import { buildControlTarget, buildDockTarget } from "../lib/adapters";
+import { agentDisplayTitle } from "../lib/agent-title";
 import type { NavKind } from "./Sidebar";
 
 interface MetaDockProps {
@@ -259,10 +260,9 @@ function PaneView({
           data-testid={`pane-title:${panelId}`}
           title="Retarget pane"
         >
-          <span className="pane__title-text">{title}</span>
+          <span className="pane__title-text" title={subId}>{title}</span>
           <span className="pane__caret">▾</span>
         </button>
-        {subId && <span className="pane__id">{subId}</span>}
         <span className="pane__spacer" />
         <button
           className="pane__btn"
@@ -359,7 +359,7 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
             data-testid={`pane-menu-agent:${a.member_id}`}
           >
             <span className="agent__dot" />
-            <span>{a.label}</span>
+            <span>{agentDisplayTitle(a)}</span>
             <span className="pane-menu__id">{a.identity || a.member_id}</span>
           </button>
         ))}

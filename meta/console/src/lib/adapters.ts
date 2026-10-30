@@ -52,6 +52,7 @@ import {
   parseStreamingConversationRichBlocks,
 } from "@console-core";
 import type { ConsoleAgent, ConsoleFrame } from "../types";
+import { agentDisplayTitle } from "./agent-title";
 import { createConsoleId } from "./id";
 import { formatWorkGraphTimestamp } from "./workgraph-time";
 
@@ -215,7 +216,7 @@ export function buildDockTarget(agent: ConsoleAgent): AgentChatTarget {
     addressingMode: "identity",
     memberId: agent.member_id,
     identity,
-    title: agent.label,
+    title: agentDisplayTitle(agent),
     subtitle,
     iconName: "i-team",
   };
@@ -227,7 +228,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
     kind: "identity-inspect",
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
-    title: `${agent.label} Details`,
+    title: `${agentDisplayTitle(agent)} Details`,
     subtitle: agent.identity || agent.member_id,
     iconName: "i-terminal",
   };
@@ -439,7 +440,7 @@ const USER_IDENTITY: ConversationIdentity = {
 function agentIdentity(agent: ConsoleAgent | null): ConversationIdentity {
   return {
     id: agent?.member_id || "agent",
-    label: agent?.label || "Agent",
+    label: agent ? agentDisplayTitle(agent) : "Agent",
     role: "assistant",
   };
 }

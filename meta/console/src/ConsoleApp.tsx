@@ -58,6 +58,7 @@ import {
 
 import {
   agentDirectoryEntry,
+  agentDisplayTitle,
   buildConsoleIdentityAliasMap,
   canonicalConsoleIdentityFromMap,
   normalizeAgents,
@@ -941,7 +942,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const peerLabels = React.useMemo(() => {
     const labels = new Map<string, string>();
     for (const agent of agents) {
-      const label = agent.label?.trim();
+      const label = agentDisplayTitle(agent);
       if (!label) continue;
       const identity = agent.identity?.trim();
       if (identity) labels.set(identity, label);
@@ -4291,7 +4292,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(destination))
       ?? agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(identity));
     const host = experience?.console_config?.brand?.label?.trim();
-    return { agent: agent?.label || destination, host: host || undefined };
+    return { agent: agent ? agentDisplayTitle(agent) : destination, host: host || undefined };
   }
   function setPendingCheck(identity: string, id: string, view: PendingCheckView | null) {
     setPendingChecks((current) => {
@@ -5298,7 +5299,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       {stackItems.length > 0 || (deliveredNotices[identity]?.length ?? 0) > 0 ? (
         <PendingStack
           items={stackItems}
-          agentLabel={target.title || agent?.label || identity}
+          agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
           hostLabel={experience?.console_config?.brand?.label?.trim() || undefined}
           resendUncertain={resendUncertain}
           checks={pendingChecks[identity]}
@@ -5336,7 +5337,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           // The renderer ID names a stable message assembled from potentially many
           // frames. Without canonical frame provenance, no frame-relative range is claimed.
           sourceIdentity: identity, messageId: quote.messageId,
-          quote: quote.text, label: target.title || agent?.label || identity });
+          quote: quote.text, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
         const next = [...quotedContexts, context];
         validateConsoleContexts(next);
         setContextDrafts((current) => ({ ...current, [draftKey]: next }));
@@ -5354,13 +5355,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         approvalSnapshot={activeApprovals}
         onApprovalDecision={onGatingDecision}
         peerLabels={peerLabels}
-        agentLabel={target.title || agent?.label || identity}
+        agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
         identity={identity}
         key={`${sendScope}:${panel.id}:${identity}`}
         viewportKey={{ authority: sendScope, identity, conversation: identity, pane: panel.id }}
         submittedRowId={submittedRowId}
         onQuoteSelection={addQuote}
-        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={target.title || agent?.label || identity} onEdit={(id, quote) => {
+        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)} onEdit={(id, quote) => {
           if (sendScope !== sendScopeRef.current || !lifetimeRef.current.active) throw new Error("This draft is no longer active.");
           const latest = storedComposerDraft(identity, panelKey);
           const next = editConsoleContextQuote(latest.contexts, id, quote);
@@ -5425,7 +5426,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         forkSideChatDisabledReason={canForkSideChat ? forkSideChatBlocked : null}
-        sideChatOfLabel={sideChatOf ? sideChatSourceAgent?.label || sideChatOf : null}
+        sideChatOfLabel={sideChatOf ? (sideChatSourceAgent ? agentDisplayTitle(sideChatSourceAgent) : sideChatOf) : null}
         onCloseSideChat={
           canCloseSideChat
             ? () => void onCloseSideChat(panel.id, identity)
@@ -5447,7 +5448,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 if (voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error") {
                   void voice.close();
                 } else {
-                  void voice.start({ identity, label: target.title || agent?.label || identity });
+                  void voice.start({ identity, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
                 }
               }
             : undefined
@@ -5703,7 +5704,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={frontendReadOnly || experience?.console_policy?.read_only === true}
           agents={agents.map((agent) => ({
             identity: agent.identity || agent.member_id,
-            label: agent.label,
+            label: agentDisplayTitle(agent),
           }))}
           onRefresh={() => void refreshAccessData()}
           onSetEnabled={(enabled, base) =>

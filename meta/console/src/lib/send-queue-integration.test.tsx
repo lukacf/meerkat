@@ -260,6 +260,22 @@ describe("stock durable queue integration", () => {
     expect(turnSender(ownFrame)).toBe("operator");
   });
 
+  it("names an agent without a display name the way the sidebar does in the chat header and pane title", async () => {
+    const fake = transport(vi.fn());
+    const base = await fake.loadExperience() as unknown as { agent_sidebar: { live_snapshot: { agents: Array<Record<string, unknown>> } } };
+    const agents = base.agent_sidebar.live_snapshot.agents.map((agent) => ({ ...agent, label: identity }));
+    fake.loadExperience = async () => ({ ...base, agent_sidebar: { live_snapshot: { agents } } }) as never;
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    const pane = await screen.findByTestId(`chat-pane:${identity}`);
+    const head = pane.querySelector(".conv__title");
+    expect(head?.textContent).toBe("Identity queue agent");
+    expect(head?.getAttribute("title")).toBe(identity);
+    const paneTitle = document.querySelector(".pane__title-text");
+    expect(paneTitle?.textContent).toBe("Identity queue agent");
+    expect(paneTitle?.getAttribute("title")).toBe(identity);
+    expect(document.querySelector(".pane__bar")?.textContent?.includes(identity)).toBe(false);
+  });
+
   it("reconciles a lost alias send receipt only after fresh owner resolution and exact canonical query", async () => {
     const canonical = "canonical/queue-agent";
     const scope = "alias-recovery-scope";

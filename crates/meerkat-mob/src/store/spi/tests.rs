@@ -1390,3 +1390,47 @@ async fn a_group_rewrite_keeps_an_undecodable_row_byte_identical() {
         "the rewrite writes the entry back untouched"
     );
 }
+
+/// Rollback of a host store holding created identities, in-process leg: the
+/// decode a published predecessor runs (the whole identity intents group as
+/// host-adopted intents, whose records deny unknown fields) fails on a group
+/// that holds a created entry's row, so that build does not open the mob's
+/// host storage at all. This build reads the group one entry at a time and
+/// opens it. A downgrade of a host store is unsupported while a created
+/// identity remains on it; the lane-run leg needs the pair's host store
+/// adapter.
+#[tokio::test]
+async fn a_whole_group_decode_refuses_a_host_store_holding_a_created_row() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let created = created_record("created", CreatedIdentityPresence::Present);
+    let row = created.clone();
+    write_intents(&process, move |identity| {
+        identity
+            .created
+            .insert((row.mob_id.clone(), row.agent_identity.clone()), row);
+    })
+    .await;
+    let body = process
+        .stores
+        .bundle
+        .identity_image()
+        .await
+        .expect("the identity image");
+    assert!(
+        decode_group::<(MobId, AgentIdentity), crate::identity::IdentityIntentRecord>(
+            &body, G_INTENT
+        )
+        .is_err(),
+        "a whole-group decode of host-adopted intents refuses the created row"
+    );
+    let reopened = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        created_rows(reopened.stores.storage().identity.as_ref())
+            .await
+            .get(&AgentIdentity::from("created")),
+        Some(&CreatedIdentityObservation::Created(created))
+    );
+}

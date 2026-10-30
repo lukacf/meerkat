@@ -179,6 +179,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_live_boundary_join_phase`: `Map<String, LiveBoundaryJoinPhase>`
 - `run_stop_requested`: `Option<RunId>`
 - `run_start_holds`: `Set<RunStartHoldReason>`
+- `input_controller_holds`: `Set<String>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `registration_live_input_seen`: `Bool`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -908,6 +909,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeOperatorDurableTailRepair`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
 - `ResolveEmptyResumeRetirement`(queued_input_present: Bool)
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
+- `HoldInputController`(input_id: String)
+- `ReleaseInputController`(input_id: String)
 
 ## Signals
 - `Initialize`
@@ -1182,6 +1185,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunSuspendedForStop`(run_id: RunId)
 - `RuntimeRegistrationReleased`(agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
+- `InputControllerReleased`
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1297,11 +1301,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedResumedRun`
@@ -1312,7 +1316,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `MarkRunResumableInitializing`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableIdle`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableAttached`: `no_current_run`, `no_other_resumable_run`
-  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`
+  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_inputs_not_controller_held`, `resumed_run_destination_attached`
 - Command Effects: `ResumableRunMarked`, `ResumedRunAuthorized`
 - Emitted By Transitions: `ResumableRunMarked`, `ResumedRunAuthorized`
 
@@ -1506,6 +1510,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_authority_bindings_have_native_owner`
 - `staged_inputs_are_not_queued`
 - `staged_inputs_have_run_association`
+- `input_controller_holds_are_kept_unstaged_governed_inputs`
 - `live_boundary_delivery_only_for_queued_steer`
 - `live_boundary_join_maps_lockstep`
 - `live_boundary_join_bound_to_current_run`
@@ -1928,6 +1933,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_is_current`
   - `run_is_resumable`
+  - `run_inputs_not_controller_held`
+  - `resumed_run_destination_attached`
 - Emits: `ResumedRunAuthorized`
 - To: `Running`
 
@@ -12692,6 +12699,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `homogeneous_run_authority`
   - `scoped_context_attached`
+  - `input_controller_not_held`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -12706,6 +12714,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `homogeneous_run_authority`
   - `scoped_context_attached`
+  - `input_controller_not_held`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -12720,6 +12729,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `homogeneous_run_authority`
   - `scoped_context_attached`
+  - `input_controller_not_held`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -12734,6 +12744,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `homogeneous_run_authority`
   - `scoped_context_attached`
+  - `input_controller_not_held`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -12748,6 +12759,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `homogeneous_run_authority`
   - `scoped_context_attached`
+  - `input_controller_not_held`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -13222,6 +13234,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
@@ -13231,6 +13244,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
@@ -13240,6 +13254,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
@@ -13249,6 +13264,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
@@ -13258,6 +13274,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
@@ -13267,6 +13284,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
@@ -13276,6 +13294,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
@@ -13285,6 +13304,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
@@ -13294,6 +13314,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
@@ -13303,6 +13324,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
   - `live_boundary_join_not_published`
+  - `input_controller_not_held`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
@@ -28766,6 +28788,91 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `kept_recovered_input`
 - Emits: `StopInputDispositionClassified`
+- To: `Stopped`
+
+### `HoldInputControllerIdle`
+- From: `Idle`
+- On: `HoldInputController`(input_id)
+- Guards:
+  - `kept_governed_input`
+  - `input_waits_unstaged`
+  - `no_live_boundary_delivery`
+- To: `Idle`
+
+### `HoldInputControllerAttached`
+- From: `Attached`
+- On: `HoldInputController`(input_id)
+- Guards:
+  - `kept_governed_input`
+  - `input_waits_unstaged`
+  - `no_live_boundary_delivery`
+- To: `Attached`
+
+### `HoldInputControllerRunning`
+- From: `Running`
+- On: `HoldInputController`(input_id)
+- Guards:
+  - `kept_governed_input`
+  - `input_waits_unstaged`
+  - `no_live_boundary_delivery`
+- To: `Running`
+
+### `HoldInputControllerRetired`
+- From: `Retired`
+- On: `HoldInputController`(input_id)
+- Guards:
+  - `kept_governed_input`
+  - `input_waits_unstaged`
+  - `no_live_boundary_delivery`
+- To: `Retired`
+
+### `HoldInputControllerStopped`
+- From: `Stopped`
+- On: `HoldInputController`(input_id)
+- Guards:
+  - `kept_governed_input`
+  - `input_waits_unstaged`
+  - `no_live_boundary_delivery`
+- To: `Stopped`
+
+### `ReleaseInputControllerIdle`
+- From: `Idle`
+- On: `ReleaseInputController`(input_id)
+- Guards:
+  - `input_controller_held`
+- Emits: `InputControllerReleased`
+- To: `Idle`
+
+### `ReleaseInputControllerAttached`
+- From: `Attached`
+- On: `ReleaseInputController`(input_id)
+- Guards:
+  - `input_controller_held`
+- Emits: `InputControllerReleased`
+- To: `Attached`
+
+### `ReleaseInputControllerRunning`
+- From: `Running`
+- On: `ReleaseInputController`(input_id)
+- Guards:
+  - `input_controller_held`
+- Emits: `InputControllerReleased`
+- To: `Running`
+
+### `ReleaseInputControllerRetired`
+- From: `Retired`
+- On: `ReleaseInputController`(input_id)
+- Guards:
+  - `input_controller_held`
+- Emits: `InputControllerReleased`
+- To: `Retired`
+
+### `ReleaseInputControllerStopped`
+- From: `Stopped`
+- On: `ReleaseInputController`(input_id)
+- Guards:
+  - `input_controller_held`
+- Emits: `InputControllerReleased`
 - To: `Stopped`
 
 ## Coverage

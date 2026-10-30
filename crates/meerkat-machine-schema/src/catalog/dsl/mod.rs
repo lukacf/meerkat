@@ -3385,6 +3385,12 @@ runtime_internal_inputs!(
         // of a recovered registration it placed.
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
+        // A kept governed input held while its host cannot say yet whether it
+        // supplies its controller client again, and released once it does:
+        // registration recovery and the runtime loop's re-ask apply them. No
+        // caller can ask for either.
+        HoldInputController,
+        ReleaseInputController,
     ]
 );
 

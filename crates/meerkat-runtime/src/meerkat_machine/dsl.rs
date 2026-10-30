@@ -3704,8 +3704,9 @@ pub enum InputAbandonReason {
     /// A graceful stop kept the input queued for the next start, and the next
     /// start found it older than that stop's max age.
     RequeueExpired,
-    /// The input's run was left open by a restart and was not resumed: the
-    /// host's resumed-run admission refused it.
+    /// The input's resume was refused: its run was left open by a restart and
+    /// the host's resumed-run admission refused it, or the input was kept
+    /// governed work whose controller client the host did not supply again.
     ResumeRefused,
 }
 

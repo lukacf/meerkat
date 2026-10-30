@@ -95,6 +95,47 @@ them.
   placeholder text must match the new form; the prompt still contains
   `CONTEXT COMPACTION`.
 
+- `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
+  the runtime machine (`MeerkatMachine`) holds kept governed work that waits
+  for its host to supply its controller client again (see Fixed).
+  `MeerkatMachineState` and the kernel `State` gain `input_controller_holds`.
+  `MeerkatMachineInput` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineInputVariant`, `MeerkatMachineRuntimeInternalInput` and the
+  kernel `generated::meerkat` `Input` and `InputKind` gain
+  `HoldInputController { input_id }` and `ReleaseInputController { input_id }`.
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` and the kernel
+  `Effect` and `EffectKind` gain `InputControllerReleased`. The kernel
+  `generated::meerkat::TransitionId` gains `HoldInputControllerIdle`,
+  `HoldInputControllerAttached`, `HoldInputControllerRunning`,
+  `HoldInputControllerRetired`, `HoldInputControllerStopped`,
+  `ReleaseInputControllerIdle`, `ReleaseInputControllerAttached`,
+  `ReleaseInputControllerRunning`, `ReleaseInputControllerRetired` and
+  `ReleaseInputControllerStopped`. Every new variant is appended last, so no
+  existing variant's implicit discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm; a `MeerkatMachineState` literal that ends with
+  `..Default::default()` keeps compiling.
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `NativeWorkAuthorizationHost::authenticate_retained_resume`, and through it
+  the scoped composition's `RetainedControllerOwner::reacquire_controller`,
+  are now also called for an admitted resume of retained work whose
+  controller client did not survive the store, with its stored input (no
+  ingress context, no retained-resume grant): once at registration recovery,
+  then from the runtime loop, once at its next pass while the input is not
+  held and once per pause of 3 seconds while it is held (an input held at
+  recovery is next asked after the pause). There
+  `Readiness(UnsupportedScope)` (and `Ok(None)` from the controller owner)
+  ends the input as `Abandoned { ResumeRefused }`, and every other readiness
+  answer holds the input, with its attempts, for up to 30 seconds from its
+  first such answer. A run left open that a kept resume is bound to now
+  resumes under the destination its inputs were staged for, and on a host
+  that requires scoped destinations it waits, marked, until the
+  registration owner binds one again.
+  Before, each staging of such an input failed until it ended
+  `Abandoned { MaxAttemptsExhausted }`. `InputAbandonReason::ResumeRefused`
+  now also ends a single queued input that belongs to no run, and a kept
+  governed input admitted under its own authority association, which an
+  attachment ends before it serves (see Known limitations).
 - Behaviour-only (not measured by the gate): `meerkat-authorization`: the
   native work owner's operation-time steps (`LocalWorkAuthorization`'s
   `WorkAuthorization::run_if_current_within`,
@@ -280,12 +321,17 @@ them.
   approval it carried was then withdrawn as `NoticeInputEnded`. The notice
   now waits in the queue lane for the session's next turn, and a requeue
   stop no longer ends it. Whether the run it resumes after the next start
-  can take the approval over follows the resume rules, unchanged (on a
-  stock governed realm, see the 0.9.7 known limitation below). Every other
-  notice (fork_off and council outcomes, and any other producer's) keeps
-  steering. A consent notice an earlier version admitted with steer
-  handling is still recognized as its delivery's admission, so an upgrade
-  that finds its admission reserved neither conflicts nor retries it.
+  can take the approval over follows the rules for a kept resume of retained
+  work in the `meerkat-runtime` entry below: the next registration asks the
+  installed host for the notice's controller client again, a definite
+  refusal ends the notice as a refused resume and withdraws the approval,
+  and a host that cannot say yet holds it for a bounded time. On a stock
+  governed realm a kept notice still cannot run after a registration change
+  and now ends refused at once (see also the 0.9.7 known limitation below).
+  Every other notice (fork_off and council outcomes, and any other
+  producer's) keeps steering. A consent notice an earlier version admitted
+  with steer handling is still recognized as its delivery's admission, so an
+  upgrade that finds its admission reserved neither conflicts nor retries it.
 
 - `meerkat-session`: the compaction summary request no longer presents
   omitted media in a form a summarizer reads as the agent having been unable
@@ -302,6 +348,47 @@ them.
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
 
+- `meerkat-runtime`: an admitted governed resume of retained work (for
+  example a consent notice) that a graceful requeue stop kept, or that a
+  restart found in the store, now runs on the session's next registration.
+  Before, its controller client did not survive the store and nothing asked
+  the installed host for it again, so every run of it failed before the model
+  was called, it ended `Abandoned { MaxAttemptsExhausted }` after three
+  attempts, and a consent waiting on it was withdrawn. Now the registration's
+  recovery asks the host for the client again, and then the runtime loop
+  asks: once at its next pass while the input is not held, and once per
+  pause of 3 seconds while it is held (an input held at recovery is next
+  asked after the pause).
+  - A definite answer that the host supplies no client for the resume
+    (`Readiness(UnsupportedScope)`, an actual refusal, a client for another
+    selection), or a destination the session has since superseded, ends the
+    input at once as a refused resume, `Abandoned { ResumeRefused }`, with
+    its runtime-termination receipt, without staging it or using an attempt;
+    a consent waiting on it is withdrawn as before. A run left open by the
+    stop or the restart that such an input is bound to is settled as a
+    refused resume. On the stock governed realm, whose controller pins do
+    not outlive their registration, a kept resume still cannot run after a
+    restart and now ends this way at once.
+  - An answer that the host cannot say now (any other `Readiness`, for
+    example a contended or unavailable owner) makes the runtime machine hold
+    the input: it keeps its attempts, later queued work goes first, and a run
+    left open that it is bound to does not resume, which also holds every
+    other run of the session until that run settles. The runtime asks again
+    once per pause of 3 seconds. Once 30 seconds have passed since the
+    input's first such answer (the bound a resumed run's admission has), the
+    next such answer ends it as a refused resume. While such an input waits
+    without its client, the machine refuses controller grant changes,
+    credential publications (logins and token commits) and auth lease
+    releases and replacements on every session it serves, so that wait is
+    bounded too.
+  - A recovered resume waits for its destination as a recovered governed
+    prompt does: on a host that requires scoped destinations it is not
+    selected until the registration owner binds its destination again, so its
+    run never stages on an unbound document, where every destination-scoped
+    operation of the run would be refused. A run left open that such a resume
+    is bound to waits the same way, marked, and then resumes under the
+    destination its inputs were staged for, so its destination-scoped
+    operations and its scoped reply run under that destination.
 - `meerkat-core`, `meerkat-authorization`, `meerkat`: a governed tool step
   taken through the new waiting forms (see Added) no longer fails on
   transient contention with a concurrent actor on the same authorization
@@ -328,7 +415,6 @@ them.
   they meet after a refusal to rebuild. This is shell synchronization only:
   no machine input, generated authority or owner fact changed, and the
   review spend stays single and machine-owned.
-
 - `meerkat-runtime`: native admission of a scoped original no longer
   reports an owner change it meets as an unavailable policy. The scoped
   original check (`ScopedOriginalIngress`) resolved the admitted
@@ -353,6 +439,34 @@ them.
   `PolicyChanged` with the change, and the next attempt answers
   `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
+
+### Known limitations
+
+- `meerkat-runtime`: a governed input admitted under its own authority
+  association (a governed prompt, for example) that a graceful requeue stop
+  keeps, or that a restart finds in the store, cannot run on the next
+  registration: its controller client does not survive the store, and the
+  host contract can supply it again only with a fresh authentication of its
+  caller. Each attachment now ends such a queued input before it serves, as a
+  refused resume (`Abandoned { ResumeRefused }`) with its runtime-termination
+  receipt, and settles a run left open whose first input is such an input
+  the same way, instead of stopping the runtime loop when that run would
+  resume. Before, it ended `Abandoned { MaxAttemptsExhausted }` after three
+  failed runs, and while it waited controller grant changes and credential
+  publications were refused. Submit such a prompt again, with a fresh
+  authentication of its caller.
+- `meerkat-runtime`: queued work admitted after a kept resume whose host
+  cannot say yet whether it supplies its controller client runs first. When
+  that work binds a newer generation of the resume's destination, the resume
+  then ends as a refused resume (its destination was superseded) instead of
+  running once its host answers.
+- `meerkat-runtime`: only a runtime loop asks a kept resume's host again,
+  and a registration runs one only once an executor attaches. A registration
+  with no executor attached asks only at its recovery: a kept resume held
+  there is not asked again and its 30-second bound does not end it, so the
+  machine-wide refusals of controller grant changes, credential
+  publications and auth lease releases and replacements last until an
+  executor attaches or the registration ends.
 
 ## [0.9.7] - 2026-10-28
 

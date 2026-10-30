@@ -1342,6 +1342,12 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
     ],
+    // A kept governed input held while its host cannot say yet whether it
+    // supplies its controller client again, and released once it does.
+    InputQueueLifecycle => [
+        HoldInputController,
+        ReleaseInputController,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

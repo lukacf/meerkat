@@ -900,7 +900,8 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     assert_eq!(
         parts,
         [
-            "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g"
+            "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
+            "audits-h"
         ],
         "every audit shard runs"
     );

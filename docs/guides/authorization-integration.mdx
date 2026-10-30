@@ -689,6 +689,60 @@ session is closed and reopened in the same process, the notice stays owed
 until the session's destination is next bound, and then fails visibly. The
 stock servers compose no notice delivery of their own.
 
+A notice, or any other admitted resume of retained work, that a graceful
+requeue stop kept, or that a restart found in the store, comes back without
+its controller client: a client never survives the store. The runtime asks the
+host for it again through
+`NativeWorkAuthorizationHost::authenticate_retained_resume` (on a scoped
+composition, through `RetainedControllerOwner::reacquire_controller`):
+
+- The call gets the stored input, with no ingress context and no
+  retained-resume grant, and the runtime does not check the original
+  contributors against its ledger again first: validate what the answer needs
+  through your own owners. A resume whose destination its session has since
+  superseded is refused before the host is asked.
+- It is asked once when the registration recovers the input, then from the
+  runtime loop: once at the loop's next pass while the input is not held, and
+  once per pause of 3 seconds while the runtime machine holds it (an input
+  held at recovery is next asked after the pause). The loop asks while it
+  holds the session's turn boundary, queue authority and driver lock, and
+  recovery while it holds the driver: answer from the host's own records,
+  without calling back into the runtime or waiting on a credential
+  publication. Only a runtime loop asks again, and a registration runs one
+  only once an executor attaches: until then, a held input is not asked
+  again, its bound does not end it, and the refusals below last.
+- Supply the client to run the resume. Answer `Readiness(UnsupportedScope)`
+  (a controller owner: `Ok(None)`), or an actual verdict, when you will never
+  supply it: the input ends at once as a refused resume
+  (`Abandoned { ResumeRefused }`) with its runtime-termination receipt, a run
+  left open that it is bound to is settled the same way, and a consent the
+  notice carries is withdrawn.
+- Any other `Readiness` answer says you cannot say now. The machine holds the
+  input: it keeps its attempts, later queued work runs first, and a run left
+  open that it is bound to does not resume, which holds every other run of the
+  session too. Once 30 seconds have passed since its first such answer, the
+  next such answer ends it as a refused resume.
+- While such an input waits without its client, the runtime refuses
+  controller grant changes, credential publications (logins and token
+  commits) and auth lease releases and replacements on every session it
+  serves.
+- On a host that requires scoped destinations, a kept resume also waits until
+  the registration owner binds its destination again, and so does a run left
+  open that it is bound to: that run then resumes under the destination its
+  inputs were staged for. A bind does not wake the runtime: after binding on
+  a registration whose executor is already attached, wake it
+  (`MeerkatMachine::wake_runtime_if_active_inputs`), as for any recovered
+  governed work that waits for its destination.
+
+The stock governed composition's controller pins do not outlive their
+registration, so a kept notice there cannot run after a registration change:
+it ends refused at once, and its consent is withdrawn.
+
+A governed prompt that a requeue stop kept, or that a restart found, cannot
+run again: only a fresh authentication of its caller could supply its client.
+Each attachment ends such an input as a refused resume, with its
+runtime-termination receipt, before it serves; submit the prompt again.
+
 Reusable consent applies only to a requirement that owner policy explicitly
 makes reusable, with a defined scope, use limits where bounded, expiry or an
 explicit until-revoked lifetime, and revocation.

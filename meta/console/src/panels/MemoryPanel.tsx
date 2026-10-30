@@ -3853,7 +3853,7 @@ export function MemoryPanel({
         ) : null}
         {sortMode === "utility" ? (
           <Notice testId="memory-utility-note">
-            {`Least useful first: records injected at least ${DEAD_INJECTION_THRESHOLD} times and never judged useful lead, marked Never useful. Space spent is estimated from the injections and the record's size.`}
+            {`Least useful first: records given to agents at least ${DEAD_INJECTION_THRESHOLD} times and never judged useful lead, marked Never useful. Space spent is estimated from how often each was given and its size.`}
           </Notice>
         ) : null}
         {multiRealm && !filter.realm?.trim() ? (

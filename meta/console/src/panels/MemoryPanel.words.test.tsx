@@ -259,6 +259,15 @@ describe("Memory panel words", () => {
     expect(/realm/i.test(text(view, "memory-panel"))).toBe(false);
   });
 
+  it("says records are given to agents in the usefulness view, never injected", () => {
+    const view = renderPanel();
+    openTab(view, "records");
+    fireEvent.change(view.getByTestId("memory-sort"), { target: { value: "utility" } });
+    const note = text(view, "memory-utility-note");
+    expect(note.includes("records given to agents at least 3 times and never judged useful lead")).toBe(true);
+    expect(/inject/i.test(note)).toBe(false);
+  });
+
   it("calls the injection history the memory given to agents", () => {
     const given: MemoryLedgerEntry = {
       realm: "ops",

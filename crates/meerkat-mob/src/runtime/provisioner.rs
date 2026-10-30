@@ -8405,11 +8405,77 @@ impl RuntimeTurnFinalizationBoundaryLease {
     }
 }
 
+/// The runtime a member's session actor is materialized on: the runtime of
+/// the task that asks for the member, which is the mob actor's and so the
+/// host's.
+///
+/// The owned create and recovery tails below run on the process-wide cleanup
+/// runtime, so their custody of the transaction survives the caller. The
+/// actor they materialize must not live there: the session task is spawned
+/// on the runtime that runs the materialization, and every turn of the
+/// member, its tool calls and whatever those spawn would then run on the
+/// cleanup runtime's two workers, with that runtime's stack instead of the
+/// host's. So the materialization runs as a task on the caller's runtime and
+/// the cleanup task awaits it, keeping its custody: a materialization that
+/// ends without an answer (its runtime shut down, or it panicked) fails the
+/// create and takes the same cleanup as a failed one.
+#[cfg(feature = "runtime-adapter")]
+struct MemberActorRuntime {
+    /// `None` outside a Tokio runtime. wasm32 has one event loop for every
+    /// task, so the materialization runs in the calling task there.
+    #[cfg(not(target_arch = "wasm32"))]
+    handle: Option<tokio::runtime::Handle>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl MemberActorRuntime {
+    /// The runtime of the calling task.
+    fn of_caller() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            handle: tokio::runtime::Handle::try_current().ok(),
+        }
+    }
+
+    /// Materialize the member's session actor on this runtime and await the
+    /// service's answer. `Err` means the materialization task ended without
+    /// one.
+    async fn materialize(
+        &self,
+        session_service: Arc<dyn MobSessionService>,
+        req: meerkat_core::service::CreateSessionRequest,
+        route: super::session_service::SessionActorMaterializationRoute,
+        actor_witness_slot: meerkat_session::LiveSessionActorWitnessSlot,
+    ) -> Result<Result<meerkat_core::RunResult, SessionError>, MobError> {
+        let materialization = async move {
+            super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
+                session_service.as_ref(),
+                req,
+                route,
+                &actor_witness_slot,
+            )
+            .await
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(handle) = self.handle.as_ref() {
+                return handle.spawn(materialization).await.map_err(|error| {
+                    MobError::Internal(format!(
+                        "member session actor materialization ended without an answer: {error}"
+                    ))
+                });
+            }
+        }
+        Ok(materialization.await)
+    }
+}
+
 /// Reconstruct the service-owned actor for one already-serving exact executor
 /// attachment. The complete create -> witness publication -> machine commit
 /// runs in the process-owned cleanup runtime while retaining B and exact M, so
 /// caller cancellation may lose the response but cannot leave a half-published
-/// actor or replace the executor attachment.
+/// actor or replace the executor attachment. The actor itself is materialized
+/// on the caller's runtime ([`MemberActorRuntime`]).
 #[cfg(feature = "runtime-adapter")]
 struct AttachedSessionActorRecoveryContext {
     session_id: SessionId,
@@ -8459,22 +8525,23 @@ async fn create_attached_session_actor_recovery_owned(
     };
     let cleanup_spawner = meerkat_runtime::RuntimeCleanupTaskSpawner::acquire()
         .map_err(|error| MobError::Internal(error.to_string()))?;
+    let actor_runtime = MemberActorRuntime::of_caller();
     let wait_session_id = session_id.clone();
     let (result_tx, result_rx) = oneshot::channel();
     cleanup_spawner.spawn_detached(async move {
         let _boundary = boundary;
-        let create_result =
-            super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
-                session_service.as_ref(),
+        let create_result = actor_runtime
+            .materialize(
+                Arc::clone(&session_service),
                 req,
                 super::session_service::SessionActorMaterializationRoute::AttachedActorRecovery {
                     preparation,
                 },
-                &actor_witness_slot,
+                actor_witness_slot.clone(),
             )
             .await;
         let result = match create_result {
-            Ok(created) if created.session_id != session_id => {
+            Ok(Ok(created)) if created.session_id != session_id => {
                 let cleanup = match actor_witness_slot.witness() {
                     Some(actor_witness) => session_service
                         .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
@@ -8495,7 +8562,7 @@ async fn create_attached_session_actor_recovery_owned(
                     ),
                 }))
             }
-            Ok(created) => {
+            Ok(Ok(created)) => {
                 let actor_witness = match actor_witness_slot.witness() {
                     Some(actor_witness) => actor_witness,
                     None => {
@@ -8564,7 +8631,25 @@ async fn create_attached_session_actor_recovery_owned(
                     }
                 }
             }
-            Err(error) => Err(MobError::from(error)),
+            Ok(Err(error)) => Err(MobError::from(error)),
+            // The materialization task ended without an answer. An actor it
+            // published before then is discarded like an unexpected one:
+            // nothing will commit it.
+            Err(lost) => match actor_witness_slot.witness() {
+                Some(actor_witness) => {
+                    let cleanup = session_service
+                        .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
+                        .await
+                        .map(|_| ());
+                    Err(match cleanup {
+                        Ok(()) | Err(SessionError::NotFound { .. }) => lost,
+                        Err(cleanup_error) => MobError::Internal(format!(
+                            "{lost}; exact recovered-actor cleanup also failed: {cleanup_error}"
+                        )),
+                    })
+                }
+                None => Err(lost),
+            },
         };
         // A lost response after successful commit is an ambiguous distributed
         // outcome. The actor and attachment remain one valid resumable
@@ -8865,7 +8950,9 @@ impl PreparedServiceActorTransaction {
     /// runtime while that task owns Prepared+B+the actor witness slot. If the
     /// caller disappears, the owned task finishes every possibly detached
     /// durable write before exact volatile cleanup. A completed durable create
-    /// remains discoverable and may be explicitly resumed.
+    /// remains discoverable and may be explicitly resumed. The actor itself is
+    /// materialized on the caller's runtime ([`MemberActorRuntime`]), so the
+    /// member's session task, and every turn it runs, lives there.
     ///
     /// A held setup's `held_bound` is observed in this task too: after its
     /// registration witness wait, after each host registration hook returns,
@@ -8887,6 +8974,7 @@ impl PreparedServiceActorTransaction {
         restored: Option<RestoredMemberRefusalCleanup>,
     ) -> Result<(meerkat_core::RunResult, Self), MobError> {
         let cleanup_spawner = self.cleanup_spawner.clone();
+        let actor_runtime = MemberActorRuntime::of_caller();
         let session_id = self.session_id.clone();
         let wait_session_id = session_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
@@ -8999,14 +9087,15 @@ impl PreparedServiceActorTransaction {
                     if let Some(stop) = held_stop() {
                         return Err(stop);
                     }
-                    let created = super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
-                        transaction.session_service.as_ref(),
-                        req,
-                        route,
-                        transaction.actor_witness_slot(),
-                    )
-                    .await
-                    .map_err(MobError::SessionError)?;
+                    let created = actor_runtime
+                        .materialize(
+                            Arc::clone(&transaction.session_service),
+                            req,
+                            route,
+                            transaction.actor_witness_slot().clone(),
+                        )
+                        .await?
+                        .map_err(MobError::SessionError)?;
                     // The member is built but not yet published, and its
                     // first turn is deferred: the host checks the actual
                     // surface before anything can use it. This check

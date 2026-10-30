@@ -372,6 +372,24 @@ them.
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
 
+- `meerkat-mob`: a runtime-backed member's session actor is materialized on
+  the runtime of the task that provisions the member (the mob actor's,
+  which is the host's), so the member's turns, its tool calls and whatever
+  those spawn run there, on the host's workers and with their stack.
+  Before, the actor was materialized from the owned create tail on the
+  process-wide `meerkat-machine-cleanup` runtime, and its session task, and
+  with it every turn of the member, ran on that runtime's two workers: a
+  member tool that blocked its thread stalled every session's cleanup in
+  the process, and member work that needed more stack than those threads
+  had aborted the process with a stack overflow on
+  `meerkat-machine-cleanup`. The create tail itself stays on the cleanup
+  runtime and keeps custody of the create: a materialization that ends
+  without an answer, because its runtime shut down or it panicked, fails
+  the create and is cleaned up like any failed create. The recovery of an
+  attached member's actor materializes on its caller's runtime the same
+  way. Size the workers of the runtime a mob runs on for its members'
+  turns, as for the turns of the sessions the host creates directly.
+
 - `meerkat-runtime`: an admitted governed resume of retained work (for
   example a consent notice) that a graceful requeue stop kept, or that a
   restart found in the store, now runs on the session's next registration.
@@ -1919,7 +1937,9 @@ them.
   since 0.8.39. A tool that blocks its thread holds one of those workers, and
   with both blocked every member's turn and every session's cleanup in the
   process waits: keep member tools non-blocking (move blocking work off the
-  worker, for example with `tokio::task::spawn_blocking`).
+  worker, for example with `tokio::task::spawn_blocking`). Resolved after
+  0.9.8: a member's turns run on the runtime that provisions the member,
+  which is the host's.
 
 - `meerkat-mob`: the lift of a stopped mob (`MobHandle::resume`) applies the
   0.9.6 recovery rules to the members it rebuilds: it waits for a held hosting

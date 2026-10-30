@@ -2699,7 +2699,7 @@ export function ChatPane({
           {readOnly && <><span>·</span><span>view only</span></>}
           {!readOnly && sendWithheld && <><span>·</span><span>send not permitted</span></>}
           {!readOnly && !canAttachImages && <><span>·</span><span>model cannot see images</span></>}
-          {attachmentError && <><span>·</span><span style={{ color: "var(--bad)" }}>{attachmentError}</span></>}
+          {attachmentError && <><span>·</span><span style={{ color: "var(--crit-ink)" }}>{attachmentError}</span></>}
         </div>
       </div>
     </div>

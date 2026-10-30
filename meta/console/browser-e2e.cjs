@@ -238,6 +238,9 @@ function startMockConsoleServer(options = {}) {
   const includeBusyWorker = options.includeBusyWorker === true;
   const includeToolOnlyWorker = options.includeToolOnlyWorker === true;
   const includeLifecycleActions = options.includeLifecycleActions === true;
+  // Fails meta/gating/audit after this many successful calls (null: never).
+  const failGatingAuditAfter = Number.isInteger(options.failGatingAuditAfter) ? options.failGatingAuditAfter : null;
+  let gatingAuditCalls = 0;
   const collapseWorkersSection = options.collapseWorkersSection === true;
   const extraSidebarAgents = Array.isArray(options.extraSidebarAgents) ? options.extraSidebarAgents : [];
   const agentListConfig = options.agentListConfig && typeof options.agentListConfig === "object"
@@ -722,6 +725,12 @@ function startMockConsoleServer(options = {}) {
           return;
         }
         if (payload.method === "meta/gating/audit") {
+          gatingAuditCalls += 1;
+          if (failGatingAuditAfter !== null && gatingAuditCalls > failGatingAuditAfter) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: rpcId, error: { code: -32000, message: "audit store unavailable" } }));
+            return;
+          }
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({
             jsonrpc: "2.0",
@@ -3237,6 +3246,30 @@ async function runHeadlessControlSurfaceBrowserProof() {
   }
 }
 
+async function runGatingAuditRefreshErrorProof() {
+  // The first audit load succeeds; every later one fails.
+  const server = await startMockConsoleServer({ failGatingAuditAfter: 1 });
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    await page.getByTestId("nav:gating").click();
+    await page.getByTestId("gating-panel").waitFor({ timeout: 10_000 });
+    await waitForRpcMethod(server, "meta/gating/audit");
+    await page.getByTestId("gating-tab:audit").click();
+    await page.getByRole("button", { name: "Refresh approvals" }).click();
+    const error = page.getByTestId("gating-audit-error");
+    await error.waitFor({ timeout: 10_000 });
+    assert.match(await error.innerText(), /Couldn't refresh the approval records/);
+    assert.equal(await error.getAttribute("role"), "alert");
+    process.stdout.write("browser gating audit refresh error ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
 async function runTopologyUnavailableBrowserProof() {
   const server = await startMockConsoleServer();
   let browser;
@@ -4757,6 +4790,7 @@ const allScenarios = [
     { id: "sidebar-manual-agent-order", family: "console", backend: "mock", run: runSidebarManualAgentOrderProof },
     { id: "sidebar-long-roster-order", family: "console", backend: "mock", run: runSidebarLongRosterOrderProof },
     { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
+    { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
   ];
 
 module.exports = { scenarios: allScenarios };

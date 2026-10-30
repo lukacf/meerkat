@@ -3493,9 +3493,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // after a save, and when the owner signals a newer access revision
   // (access_changed); a refresh caused by activity leaves it out.
   // The recorded approvals behind the Approvals panel's Audit and Auto tabs.
+  const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
   const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
-    const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
-    setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+    try {
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
+      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      setGatingAuditError(null);
+    } catch (error) {
+      // The panel keeps the loaded records and shows why the refresh failed.
+      setGatingAuditError(errorMessage(error));
+      throw error;
+    }
   }), [baseUrl, panelRefreshFlight]);
 
   const refreshPanelData = React.useCallback(async ({ access = true }: { access?: boolean } = {}) => {
@@ -5628,6 +5636,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void approvalResourceRef.current?.refresh()}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
+          auditError={gatingAuditError}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5687,6 +5696,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void approvalResourceRef.current?.refresh()}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
+          auditError={gatingAuditError}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}

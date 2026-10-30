@@ -44,6 +44,8 @@ interface GatingInboxPanelProps {
   onRefreshAudit?: () => void;
   /** When the recorded approvals last loaded. */
   auditUpdatedAtMs?: number | null;
+  /** Why the last refresh of the recorded approvals failed, if it did. */
+  auditError?: string | null;
   selectedPendingId?: string;
 }
 
@@ -248,6 +250,7 @@ export function GatingInboxPanel({
   onRefresh,
   onRefreshAudit,
   auditUpdatedAtMs,
+  auditError,
   selectedPendingId,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
@@ -379,6 +382,10 @@ export function GatingInboxPanel({
   // Pending, the recorded approvals on Audit and Auto, nothing on Policies.
   const refreshShown = tab === "pending" ? onRefresh : tab === "policies" ? undefined : onRefreshAudit;
   const updatedShown = tab === "pending" ? resource?.updatedAtMs : tab === "policies" ? undefined : auditUpdatedAtMs ?? undefined;
+  // A failed refresh keeps the records already loaded and says so.
+  const errorShown = (tab === "auto" || tab === "audit") && auditError
+    ? `Couldn't refresh the approval records (${auditError}). Showing the ones loaded before.`
+    : null;
 
   return (
     <PanelShell className="gating-inbox" testId="gating-panel">
@@ -404,7 +411,7 @@ export function GatingInboxPanel({
           { id: "policies", label: "Policies", testId: "gating-tab:policies" },
         ]}
       />
-      <StatusRow updatedAt={updatedShown} />
+      <StatusRow updatedAt={updatedShown} error={errorShown} errorTestId="gating-audit-error" />
       <PanelBody className="gating-inbox__body">
         <div className="gating-inbox__content" ref={listRef}>{content}</div>
       </PanelBody>

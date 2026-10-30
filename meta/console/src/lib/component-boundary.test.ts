@@ -251,6 +251,37 @@ test("warning text keeps 4.5:1 on toned chips and on the Logs warning row in eve
   assert.equal(pairs.length, 12, `six variant and theme pairs, two places each: ${pairs.join("; ")}`);
 });
 
+test("the Topology Edges tag uses the text-safe meta ink, not the faint ink", () => {
+  const css = fs.readFileSync(path.join(componentsSrc, "styles", "topology.css"), "utf8");
+  const rule = /\.topo__viewbar-tag \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.match(rule, /color: var\(--_cc-foreground-meta\);/);
+  assert.doesNotMatch(rule, /--ink-faint/);
+});
+
+test("stock console inline styles use only custom properties a stylesheet defines", () => {
+  // An undefined custom property silently paints the inherited colour:
+  // the composer's attachment error once used a var(--bad) nothing defines.
+  const panelsDir = path.join(root, "console", "src", "panels");
+  const sources = [
+    stockConsoleAppSource,
+    ...fs.readdirSync(panelsDir).filter((name) => name.endsWith(".tsx") && !name.includes(".test.")).map((name) => path.join(panelsDir, name)),
+  ];
+  const used = new Set<string>();
+  for (const file of sources) {
+    for (const match of fs.readFileSync(file, "utf8").matchAll(/var\((--[A-Za-z0-9_-]+)/g)) used.add(match[1]);
+  }
+  const stylesheets = [
+    path.join(root, "console", "src", "console-host.css"),
+    ...fs.readdirSync(path.join(componentsSrc, "styles")).filter((name) => name.endsWith(".css")).map((name) => path.join(componentsSrc, "styles", name)),
+  ];
+  const defined = new Set<string>();
+  for (const file of stylesheets) {
+    for (const match of fs.readFileSync(file, "utf8").matchAll(/(--[A-Za-z0-9_-]+)\s*:/g)) defined.add(match[1]);
+  }
+  assert.ok(used.size > 0, "the guard finds the inline custom properties");
+  assert.deepEqual([...used].filter((name) => !defined.has(name)).sort(), []);
+});
+
 test("stock console runtime path is backed by the headless controller", () => {
   const source = fs.readFileSync(stockConsoleAppSource, "utf8");
 

@@ -253,3 +253,16 @@ describe("refresh and freshness follow the shown tab", () => {
     expect(view.queryByText(/^Updated /) === null).toBe(true);
   });
 });
+
+describe("GatingInboxPanel audit refresh errors", () => {
+  it("says a refresh of the recorded approvals failed and keeps the loaded records", () => {
+    const audit = [{ audit_id: "audit-1", action_id: "tag-release", event_type: "evaluated", outcome: "allowed", risk_tier: "r1" }];
+    const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={vi.fn()} onRefreshAudit={vi.fn()} auditError="audit store unavailable" />);
+    expect(view.queryByTestId("gating-audit-error") === null).toBe(true);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const error = view.getByTestId("gating-audit-error");
+    expect(error.getAttribute("role")).toBe("alert");
+    expect(error.textContent).toBe("Couldn't refresh the approval records (audit store unavailable). Showing the ones loaded before.");
+    expect(view.container.querySelectorAll(".gitem").length).toBe(1);
+  });
+});

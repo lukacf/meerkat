@@ -307,7 +307,8 @@
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--ink-faint);
+  /* Small text: the text-safe meta ink, never the faint ink. */
+  color: var(--_cc-foreground-meta);
   padding: 0 8px;
   display: inline-flex;
   align-items: center;

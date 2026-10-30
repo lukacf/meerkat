@@ -5034,12 +5034,19 @@ impl MeerkatMachine {
                         // durable fact mean "recoverable" or "permanently
                         // unusable" purely by who owned the caller.
                         //
-                        // Two states are deliberately still refused, because
-                        // disposal would park rather than converge: a runtime
-                        // loop that has not yet handed its executor back may
-                        // run arbitrarily long before publishing, and a
-                        // handoff mid-claim by another cleanup owner is not
-                        // this caller's to consume.
+                        // Two states are still refused rather than rerouted.
+                        // A runtime loop that has not yet handed its
+                        // executor back would make this caller wait for the
+                        // loop's exit: the reload-required discard no longer
+                        // parks on such a loop (it hands off the session's
+                        // degraded settlement, which detaches the loop and
+                        // hard-cancels its exact current run), but
+                        // registration answers at once instead of waiting
+                        // for that settlement. The typed refusal leaves the
+                        // reload to the caller, and a registration retried
+                        // once the loop handed its executor back reloads
+                        // here. A handoff mid-claim by another cleanup owner
+                        // is not this caller's to consume.
                         // A registration no runtime loop holds has no
                         // executor to hand back: its disposal takes the
                         // mutation fence itself.
@@ -5929,8 +5936,9 @@ impl MeerkatMachine {
             Err(required) => {
                 // Another holder keeps M, so the cleanup below, which takes
                 // M, refuses as well. Release the parked loop first, without
-                // M, or it waits on its serving release for good and the
-                // reload-required discard waits for it.
+                // M: otherwise it waits on its serving release until a
+                // degraded settlement can take M and detach it, and the
+                // reload-required discard waits for it as long.
                 self.release_unserved_runtime_loop(&witness, &registration_gate)
                     .await;
                 let mut refusal = degraded_gate_wait_refusal(required);
@@ -6646,12 +6654,17 @@ impl MeerkatMachine {
     /// Quiesce and discard only the exact process-local registration whose
     /// persistent shell has entered `ReloadRequired`.
     ///
-    /// This is recovery disposal, not lifecycle retirement. It does not route
-    /// through cancel, hard-cancel, Stop, Retire, input abandonment, or a live
-    /// lifecycle persistence write. The durable RuntimeStore remains the sole
-    /// source for the next cold registration. Admission takes the stable
-    /// registration transaction before the witness's opaque mutation gate, so
-    /// an old witness cannot remove a same-SessionId successor.
+    /// This is recovery disposal, not lifecycle retirement: it persists no
+    /// stop, retirement, input abandonment or live lifecycle write, and the
+    /// durable RuntimeStore remains the sole source for the next cold
+    /// registration. A runtime loop that is still attached is detached
+    /// through the session's degraded gate settlement, as a ready-gated
+    /// caller that meets the degraded session detaches it: once the mutation
+    /// gate is free, the settlement drops the attachment and hard-cancels the
+    /// loop's exact current run, and the discard then claims the loop's
+    /// teardown handoff. Admission takes the stable registration transaction
+    /// before the witness's opaque mutation gate, so an old witness cannot
+    /// remove a same-SessionId successor.
     pub async fn recover_or_discard_reload_required_registration_if_current(
         &self,
         witness: &RuntimeSessionRegistrationWitness,

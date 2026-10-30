@@ -834,7 +834,7 @@ mod tests {
     }
     use meerkat_auth_core::auth_store::{
         FileLockCoordinator, FileTokenStore, PersistedTokens, ProviderAuthPersistence, TokenKey,
-        TokenStore, TokenStoreError,
+        TokenStore, TokenStoreError, TokenStoreObservation,
     };
     use meerkat_core::{ApprovalService, ConfigStore, FileConfigStore};
     use sha2::{Digest, Sha256};
@@ -864,6 +864,14 @@ mod tests {
     impl TokenStore for ControlledStore {
         async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
             self.inner.load(key).await
+        }
+        // Presence is a status read. The trait default answers NotObserved,
+        // which the finalizer must refuse; the file vault answers it.
+        async fn observe_status(
+            &self,
+            key: &TokenKey,
+        ) -> Result<TokenStoreObservation, TokenStoreError> {
+            self.inner.observe_status(key).await
         }
         async fn save(
             &self,
@@ -1425,11 +1433,14 @@ mod tests {
             let config = selection
                 .secret_configuration(&BTreeSet::from(["list_cards".into()]))
                 .unwrap();
+            // The governed realm's own native owner, as the continuation
+            // reopens it; an ordinary startup open of it is refused.
+            let native = crate::stdio::tests::realm_native_owner(&fixture.storage).await;
             let mut startup = SessionStartup {
                 storage: fixture.storage.clone(),
                 config: meerkat::Config::default(),
                 factory: fixture.factory.clone(),
-                persistence: None,
+                persistence: Some(native),
                 connector_auth: None,
                 standalone: None,
             };
@@ -1641,10 +1652,11 @@ mod tests {
                             .user_rkat_root()
                             .unwrap()
                             .join("config.toml");
+                        // The user document reaches a realm's chain only through
+                        // a [realm.global] section, as the bootstrap template states.
                         FileConfigStore::new(global, meerkat_models::canonical())
-                            .patch(ConfigDelta(
-                                json!({"tools":{"mcp_servers":[fixture.config.clone()]}}),
-                            ))
+                            .patch(ConfigDelta(json!({"realm":{"global":{}},
+                                "tools":{"mcp_servers":[fixture.config.clone()]}})))
                             .await
                             .unwrap();
                         assert!(

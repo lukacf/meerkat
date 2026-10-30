@@ -673,12 +673,15 @@ fn schema4_owner_output_is_required_and_matches_finished_member_facts() {
         .unwrap();
     unowned.capture(0, &surface(false)).unwrap();
     unowned.capture(1, &surface(true)).unwrap();
-    assert!(
+    // The owner is retained only with the helper, as one final authority
+    // selection (retain_authorities_with_helper_access); without it the
+    // output is refused before anything is written.
+    assert_eq!(
         unowned
             .complete_bundle(&root.join("unowned"))
             .err()
-            .unwrap()
-            .contains("owner")
+            .unwrap(),
+        "schema4 authority selections were not finalized"
     );
     assert!(!root.join("unowned").exists());
     // Use a separate preparation's retained artifact namespace for the owned

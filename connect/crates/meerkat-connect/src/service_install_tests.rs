@@ -2718,8 +2718,9 @@ mod application_policy_tests {
             let phase = tokio::task::spawn_blocking(move || {
                 lifetime.with_current_setup(|| {
                     // Nonblocking acquisition only: never wait for State under entry.
-                    // Once both are held, an entry-first contender must refuse without
-                    // trying State; a State-first contender cannot complete yet.
+                    // A contender's phase observation reads the phase machine and
+                    // does not take entry, so it passes and then waits for this
+                    // State; it cannot complete or reach an effect meanwhile.
                     let state = observing.shared.state.try_lock().map_err(|_| {
                         meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
                     })?;
@@ -2734,7 +2735,7 @@ mod application_policy_tests {
             let runtime = tokio::runtime::Handle::current();
             let owner = f.owner.clone();
             let worker_approvals = approvals.clone();
-            let (attempt_completed, completed) = tokio::sync::oneshot::channel();
+            let (attempt_completed, mut completed) = tokio::sync::oneshot::channel();
             let operation = tokio::task::spawn_blocking(move || {
                 let call = ToolCallView {
                     id: "install",
@@ -2760,18 +2761,25 @@ mod application_policy_tests {
                 };
                 let _ = attempt_completed.send(result);
             });
-            // Completion must occur while setup holds both entry and State.
-            // A State-first path times out without trapping either worker: release
-            // and join before inspecting any result.
-            let contended = tokio::time::timeout(Duration::from_secs(2), completed).await;
+            // While setup holds entry and State, neither path may complete or
+            // reach an effect: the record keeps its reservation and the spent
+            // attempt keeps its own. Release and join before inspecting any
+            // result, then let the contender finish.
+            let while_held = tokio::time::timeout(Duration::from_secs(2), &mut completed).await;
+            let completed_while_held = while_held.is_ok();
             let effects_while_held = f.count();
             let released_while_held = policy.released.load(Ordering::SeqCst);
             let _ = phase_release.send(());
             let phase_result = phase.await;
+            let contended = match while_held {
+                Ok(result) => Ok(result),
+                Err(_) => tokio::time::timeout(Duration::from_secs(10), completed).await,
+            };
             let operation_result = operation.await;
 
-            // The refused record did not consume its proposal. After release, the
-            // same real review/entry paths must succeed without changing authority.
+            // Once setup released State, the record completed as the
+            // policy-approved dispatch of its own reservation, and entry admits
+            // that exact spent attempt without changing authority.
             let args = serde_json::value::to_raw_value(&install(true)).unwrap();
             let call = ToolCallView {
                 id: "install",
@@ -2780,15 +2788,6 @@ mod application_policy_tests {
             };
             let context =
                 ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-            let uncontended_review = if entry_check {
-                None
-            } else {
-                Some(
-                    f.approvals
-                        .await_service_dispatch(&f.owner, call, &context, None)
-                        .await,
-                )
-            };
             let uncontended_entry = f.approvals.check_service_entry(call, &context);
             let current = f.approvals.check_session(&f.session);
             let records = f.approvals.shared.service.list(Default::default());
@@ -2814,21 +2813,10 @@ mod application_policy_tests {
             assert_eq!(ready.unwrap().unwrap(), expected_custody);
             assert_eq!(phase_result.unwrap().unwrap(), (true, expected_custody));
             assert!(operation_result.is_ok());
-            assert_eq!(
-                contended.unwrap().unwrap(),
-                Err(ToolError::unavailable(
-                    f.install_name(),
-                    meerkat_core::ToolUnavailableReason::TemporarilyUnavailable
-                ))
-            );
+            assert!(!completed_while_held);
+            assert_eq!(contended.unwrap().unwrap(), Ok(()));
             assert_eq!(effects_while_held, 0);
-            assert_eq!(released_while_held, if entry_check { 0 } else { 1 });
-            if !entry_check {
-                assert!(matches!(
-                    uncontended_review,
-                    Some(Ok(SoftwareReviewOutcome::Approved))
-                ));
-            }
+            assert_eq!(released_while_held, 0);
             assert!(uncontended_entry.is_ok());
             assert!(current.is_ok());
             let records = records.unwrap();
@@ -2843,14 +2831,9 @@ mod application_policy_tests {
             assert!(reusable);
             assert_eq!(f.count(), 0);
             assert!(policy.lock.try_write().is_ok());
-            assert_eq!(
-                policy.calls.load(Ordering::SeqCst),
-                if entry_check { 1 } else { 2 }
-            );
-            assert_eq!(
-                policy.released.load(Ordering::SeqCst),
-                if entry_check { 1 } else { 2 }
-            );
+            // One reservation in either path, released once by settlement.
+            assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(policy.released.load(Ordering::SeqCst), 1);
         }
     }
 

@@ -1241,38 +1241,21 @@ impl CheckedInstalls {
         let key = hex(&response, "validation_id", 32)
             .ok_or_else(unconfirmed)?
             .to_owned();
-        let install = match kind {
-            Kind::Library => {
-                if !exact_keys(&request, &["family", "profile", "operations", "values"])
-                    || request["family"].as_str().is_none()
-                    || request["profile"].as_str().is_none()
-                    || response["scope"] != "configuration_only"
-                    || response["family"] != request["family"]
-                    || response["profile"] != request["profile"]
+        let (install, metadata) = match Self::proposal_candidate(kind, &request, &response, &key) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                // An answer for a retained validation id that is not a valid
+                // proposal differs from it like any changed answer: it
+                // invalidates that proposal before it is refused.
+                let state = self.state.lock().map_err(|_| unconfirmed())?;
+                if !state.retired
+                    && epoch == self.inner.execution_binding_epoch(call.name)
+                    && let Some(old) = state.proposals.get(&key)
                 {
-                    return Err(unconfirmed());
+                    Self::invalidate_proposal(old)?;
                 }
-                let digest = hex(&response, "configuration_sha256", 64).ok_or_else(unconfirmed)?;
-                let mut install = request.clone();
-                install["validation_id"] = key.clone().into();
-                install["configuration_sha256"] = digest.into();
-                install
+                return Err(error);
             }
-            Kind::Selected => {
-                if response["scope"] != "selected_software_inputs_only"
-                    || request["profile"].as_str().is_none()
-                    || response["profile"] != request["profile"]
-                {
-                    return Err(unconfirmed());
-                }
-                let digest = hex(&response, "effect_sha256", 64).ok_or_else(unconfirmed)?;
-                json!({"validation_id":key,"effect_sha256":digest})
-            }
-        };
-        let metadata = if kind == Kind::Selected {
-            selected_service_metadata(&response)?
-        } else {
-            None
         };
         // This is the actual owner's response, not a local reconstruction of
         // its package plan, validation, expected account, or install receipt.
@@ -1294,11 +1277,7 @@ impl CheckedInstalls {
             {
                 Ok(())
             } else {
-                *old.operation_names.lock().map_err(|_| unavailable())? =
-                    OperationMetadata::default();
-                if let Some(readback) = &old.readback {
-                    readback.receipt.lock().map_err(|_| unavailable())?.matched = false;
-                }
+                Self::invalidate_proposal(old)?;
                 Err(unconfirmed())
             };
         }
@@ -1324,6 +1303,61 @@ impl CheckedInstalls {
                 })),
             },
         );
+        Ok(())
+    }
+
+    /// The proposal an owner's check answer describes: the exact install
+    /// request and, for a selected package, its operation metadata. A refusal
+    /// means the answer is not a valid proposal.
+    fn proposal_candidate(
+        kind: Kind,
+        request: &Value,
+        response: &Value,
+        key: &str,
+    ) -> Result<(Value, Option<OperationEvidence>), ToolError> {
+        let install = match kind {
+            Kind::Library => {
+                if !exact_keys(request, &["family", "profile", "operations", "values"])
+                    || request["family"].as_str().is_none()
+                    || request["profile"].as_str().is_none()
+                    || response["scope"] != "configuration_only"
+                    || response["family"] != request["family"]
+                    || response["profile"] != request["profile"]
+                {
+                    return Err(unconfirmed());
+                }
+                let digest = hex(response, "configuration_sha256", 64).ok_or_else(unconfirmed)?;
+                let mut install = request.clone();
+                install["validation_id"] = key.into();
+                install["configuration_sha256"] = digest.into();
+                install
+            }
+            Kind::Selected => {
+                if response["scope"] != "selected_software_inputs_only"
+                    || request["profile"].as_str().is_none()
+                    || response["profile"] != request["profile"]
+                {
+                    return Err(unconfirmed());
+                }
+                let digest = hex(response, "effect_sha256", 64).ok_or_else(unconfirmed)?;
+                json!({"validation_id":key,"effect_sha256":digest})
+            }
+        };
+        let metadata = if kind == Kind::Selected {
+            selected_service_metadata(response)?
+        } else {
+            None
+        };
+        Ok((install, metadata))
+    }
+
+    /// A retained proposal whose validation id answered differently selects
+    /// nothing any more: its operation metadata and readback match are cleared.
+    fn invalidate_proposal(proposal: &Proposal) -> Result<(), ToolError> {
+        *proposal.operation_names.lock().map_err(|_| unavailable())? = OperationMetadata::default();
+        if let Some(readback) = &proposal.readback {
+            readback.receipt.lock().map_err(|_| unavailable())?.matched = false;
+        }
         Ok(())
     }
 

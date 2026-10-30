@@ -2196,6 +2196,27 @@ for (const path of [
     planFor([connectLib]).main_feature_unit_shards.some((suite) => suite.package_flags === "-p meerkat-connect --features console"),
     "a Connect push runs its Console suite",
   );
+  // Its Console process controls (resources::local_round) run a synthetic
+  // protocol child under an explicitly selected Python and refuse to guess
+  // one, so every unit job selects it, whichever wave or event holds the row.
+  // The tests see it only when the shell that runs nextest exported it first:
+  // in that step, before the nextest command.
+  const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+    const jobBody = jobLines(unitJobs, job);
+    assert.match(
+      jobBody.join("\n"),
+      /^ {10}TOOLKIT_SHARED_TEST_PYTHON="\$\(command -v python3\)"\n {10}export TOOLKIT_SHARED_TEST_PYTHON$/m,
+      `${job} selects the Python of Connect's Console process controls`,
+    );
+    const exportAt = jobBody.indexOf("          export TOOLKIT_SHARED_TEST_PYTHON");
+    const nextestAt = jobBody.findIndex((line) => line.includes("nextest run"));
+    assert.ok(exportAt >= 0 && exportAt < nextestAt, `${job} exports the Python before nextest runs`);
+    assert.ok(
+      !jobBody.slice(exportAt, nextestAt).some((line) => /^ {6}- /.test(line)),
+      `${job} exports the Python in the step that runs nextest`,
+    );
+  }
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

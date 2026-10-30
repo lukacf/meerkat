@@ -3,7 +3,7 @@
 use super::*;
 use crate::stdio::tests::{
     connector_fixture_with_owners, connector_http, connector_http_reply, connector_metadata,
-    connector_operations, connector_unprimed_fixture,
+    connector_operations, connector_unprimed_fixture, realm_native_owner,
 };
 use meerkat_auth_core::auth_store::{FileLockCoordinator, FileTokenStore, ProviderAuthPersistence};
 use meerkat_core::mcp_config::McpConnectorBinding;
@@ -63,7 +63,10 @@ fn definition(storage: &ResolvedStorage, issuer: &str, name: &str) -> McpServerC
     });
     config
 }
-async fn fixture(root: &std::path::Path, issuer: &str) -> TerminalConnectors {
+/// The terminal owner and the startup retaining its realm's native owner.
+/// Keep the startup while using the owner: native OAuth flows persist in that
+/// owner's runtime store, which the exported auth authority holds only weakly.
+async fn fixture(root: &std::path::Path, issuer: &str) -> (TerminalConnectors, SessionStartup) {
     let storage = crate::RealmOptions {
         context_root: root.into(),
         state_root: Some(root.join("state")),
@@ -97,16 +100,20 @@ async fn fixture(root: &std::path::Path, issuer: &str) -> TerminalConnectors {
         Arc::new(FileTokenStore::new(root.join("credentials"))),
         Arc::new(FileLockCoordinator::new(root.join("locks"))),
     );
+    // The governed realm's own owner, as the standalone continuation reopens
+    // it. An ordinary startup open of a governed realm is refused.
+    let native = realm_native_owner(&storage).await;
     let (startup, auth, control) =
-        connector_fixture_with_owners(root, issuer, storage.clone(), persistence, None).await;
+        connector_fixture_with_owners(root, issuer, storage.clone(), persistence, Some(native))
+            .await;
     let profiles = Arc::new(meerkat::RealmConnectorClients::from_realm_source(
         crate::realm::config_source(&storage).unwrap(),
         storage.locator.realm.clone(),
     ));
     let (send, requests) = mpsc::channel(1);
-    TerminalConnectors {
+    let owner = TerminalConnectors {
         storage,
-        factory: startup.factory,
+        factory: startup.factory.clone(),
         auth,
         control,
         profiles,
@@ -114,7 +121,8 @@ async fn fixture(root: &std::path::Path, issuer: &str) -> TerminalConnectors {
         requests,
         reviewed: None,
         prior_finalizations: Arc::from([]),
-    }
+    };
+    (owner, startup)
 }
 fn snapshot(storage: &ResolvedStorage) -> Vec<Option<Vec<u8>>> {
     let config = crate::realm::config_source(storage)
@@ -221,7 +229,7 @@ async fn entered_completion_and_cancel_race_join_once_for_initial_and_existing_s
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut owner = fixture(root.path(), &origin).await;
+        let (mut owner, _native) = fixture(root.path(), &origin).await;
         let selected = ExistingConnector::select(&owner.storage, "mail")
             .await
             .unwrap();
@@ -365,7 +373,7 @@ async fn terminal_cancel_during_exchange_keeps_its_winner_after_caller_loss() {
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut owner = fixture(root.path(), &origin).await;
+        let (mut owner, _native) = fixture(root.path(), &origin).await;
         let selected = ExistingConnector::select(&owner.storage, "mail")
             .await
             .unwrap();
@@ -545,7 +553,7 @@ fn historical_profile_binding_requires_an_exact_current_match_and_returns_only_i
 async fn existing_definition_selection_refuses_foreign_ambiguous_or_changed_sources() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let root = tempfile::tempdir().unwrap();
-        let owner = fixture(root.path(), "https://issuer.invalid").await;
+        let (owner, _native) = fixture(root.path(), "https://issuer.invalid").await;
         let selected = ExistingConnector::select(&owner.storage, "mail")
             .await
             .unwrap();
@@ -604,7 +612,7 @@ async fn shared_terminal_ceremony_preserves_initial_and_existing_login_custody()
             let root = tempfile::tempdir().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
-            let mut owner = fixture(root.path(), &origin).await;
+            let (mut owner, _native) = fixture(root.path(), &origin).await;
             let selected = ExistingConnector::select(&owner.storage, "mail")
                 .await
                 .unwrap();
@@ -795,7 +803,7 @@ async fn reviewed_disconnect_is_slot_wide_and_keeps_configuration_and_grants() {
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut owner = fixture(root.path(), &origin).await;
+        let (mut owner, _native) = fixture(root.path(), &origin).await;
         let (_, generation) = crate::realm::read_own_mcp_config(&owner.storage)
             .await
             .unwrap();
@@ -903,7 +911,7 @@ async fn reconnect_recovers_native_inputs_and_refuses_definition_change_after_re
             let root = tempfile::tempdir().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
-            let mut owner = fixture(root.path(), &origin).await;
+            let (mut owner, _native) = fixture(root.path(), &origin).await;
             let selected = ExistingConnector::select(&owner.storage, "mail")
                 .await
                 .unwrap();

@@ -3009,7 +3009,7 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
         Some(json!([])),
         Some(Value::Null),
         Some(json!({})),
-        Some(json!([{"field":"token_env","reference":"SELECTED_TOKEN"}])),
+        Some(json!([{"field_path":["config","token_env"],"environment_variable":"SELECTED"}])),
     ] {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::RealmOptions {
@@ -3031,6 +3031,19 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
                 value.clone();
         }
         fixture.prime(true).await;
+        if references.as_ref().is_some_and(|value| value != &json!([])) {
+            // Malformed rows, or rows for a field help does not declare, are
+            // refused by the checked reference contract. Refusal is not
+            // evidence of absent or empty references.
+            assert!(
+                fixture
+                    .owner
+                    .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))
+                    .is_err(),
+                "malformed or undeclared credential evidence must not be selectable"
+            );
+            continue;
+        }
         let selected = fixture
             .owner
             .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))
@@ -3520,6 +3533,36 @@ pub(crate) async fn connector_fixture_with_owners(
     (startup, auth, control)
 }
 
+/// A governed realm's own native owner, opened by its durable posture exactly
+/// as `StandaloneContinuation::reopen` reopens it. `SessionStartup`'s own lazy
+/// open is ordinary, and Core refuses that for a governed realm
+/// (`RealmGoverned`). Provider authority exported from this owner keeps its
+/// execution custody but only a weak reference to its runtime store.
+pub(crate) async fn realm_native_owner(
+    storage: &meerkat_core::ResolvedStorage,
+) -> meerkat::PersistenceBundle {
+    let (_, bundle) = meerkat::governed_realm::open_stock_realm_persistence_as(
+        &meerkat::DiskStorageProvider,
+        &storage.locator.state_root,
+        storage.locator.realm.as_str(),
+        None,
+        Some(meerkat_store::RealmOrigin::Explicit),
+        Some(storage.layout.clone()),
+        meerkat::governed_realm::stock::issuance::DEFAULT_STOCK_AGENT,
+    )
+    .await
+    .unwrap();
+    // This open serves an ungoverned realm the ordinary way, and the
+    // continuation's reopen refuses an owner without stock governance.
+    // Require it here, for every caller, so a fixture that stops governing
+    // its realm fails instead of its rows passing on the ordinary path.
+    assert!(
+        bundle.stock_governance().is_some(),
+        "realm_native_owner needs a stock-governed realm, as the reopen does"
+    );
+    bundle
+}
+
 async fn connector_native_session(startup: SessionStartup) -> Arc<ConnectSession> {
     let artifacts = crate::resources::reserve_setup_artifacts(&startup.storage).unwrap();
     let (approvals, _presenter) = LocalApprovals::create_browser(
@@ -3612,7 +3655,11 @@ async fn connector_start_retirement_joins_discovery_and_retires_late_attempt() {
     assert!(d.connector_busy);
     let (mut socket, _) = tokio::select! { value=listener.accept()=>value.unwrap(),
     _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
-    let (header, _) = connector_http(&mut socket).await;
+    // The native client writes its request only while the start worker is
+    // polled (its connection must become ready first). Keep driving the
+    // worker while reading, as the driver's own loop does.
+    let (header, _) = tokio::select! { value=connector_http(&mut socket)=>value,
+    _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
     assert!(header.starts_with("GET /.well-known/oauth-authorization-server "));
     retire(&mut d);
     d.settle();

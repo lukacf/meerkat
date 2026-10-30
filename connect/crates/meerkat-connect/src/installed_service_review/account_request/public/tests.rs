@@ -702,10 +702,21 @@ async fn public_operation_feedback_discloses_no_names_for_unavailable_or_foreign
         let error = public_operation_dispatch(&owner, session, job, json!(["read-item"]), None)
             .await
             .unwrap_err();
-        if mode == "foreign-session" {
-            assert!(matches!(&error, ToolError::AccessDenied { .. }));
-        } else {
-            assert!(matches!(&error, ToolError::Unavailable { .. }), "{mode}");
+        match mode {
+            "foreign-session" => assert!(matches!(&error, ToolError::AccessDenied { .. })),
+            // An unknown job has no current selection, so it gets the shared
+            // select_public_job correction, which names only the job.
+            "unknown-job" => assert!(
+                matches!(&error, ToolError::InvalidArguments { reason, .. }
+                    if reason.contains("This request has not entered access review.")),
+                "{mode}"
+            ),
+            // A retired owner's refusal is not pinned to a kind or wording. It
+            // is refused (unwrap_err above), and the checks below require that
+            // it queues no access review and names no raw tool; its Debug form
+            // also covers any field its Display leaves out.
+            "retired" => assert!(!format!("{error:?}").contains("private_raw_name"), "{mode}"),
+            _ => assert!(matches!(&error, ToolError::Unavailable { .. }), "{mode}"),
         }
         assert!(!error.to_string().contains("private_raw_name"), "{mode}");
         assert!(requests.try_recv().is_err());

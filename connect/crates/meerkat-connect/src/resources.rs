@@ -237,6 +237,14 @@ mod tests {
             fs::write(&full, "inert separately selected resource").unwrap();
             fs::set_permissions(&full, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // create_dir_all inherits the process umask; the verifier refuses
+        // group- or world-writable directories. Normalize as Fixture::new does.
+        for path in inventory(&fixture.root).unwrap() {
+            let path = fixture.root.join(path);
+            if path.is_dir() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
         let mut manifest = fixture.manifest();
         manifest["npm_acquisition"] = group.clone();
         let pin = fixture.pin(manifest.clone());
@@ -345,10 +353,13 @@ mod tests {
         // An owned executable models only the preparer's canonical-parent
         // precondition. It refuses the old lexical handoff before emitting any
         // usable connection, without requiring Python or a product archive.
+        // Argv: -I -B prepare.py --destination D --realm-state-root S --realm R.
         fs::write(fixture.root.join("runtime/python/bin/python3.11"), br##"#!/bin/sh
 set -eu
-[ "$#" -eq 5 ]
+[ "$#" -eq 9 ]
 [ "$4" = "--destination" ]
+[ "$6" = "--realm-state-root" ]
+[ "$8" = "--realm" ]
 parent=${5%/*}
 canonical=$(CDPATH= cd "$parent" && pwd -P)
 [ "$parent" = "$canonical" ]

@@ -955,6 +955,28 @@ mod tests {
             .await
             .unwrap()
     }
+    // A governed realm's terminal owner takes the governed native owner, as the
+    // standalone continuation reopens it; `owner` opens ordinarily, which Core
+    // refuses for a governed realm (`RealmGoverned`).
+    async fn governed_owner(root: &Path, storage: ResolvedStorage) -> TerminalConnectors {
+        let native = crate::stdio::tests::realm_native_owner(&storage).await;
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(FileTokenStore::new(root.join("credentials"))),
+            Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
+        );
+        let mut startup = SessionStartup {
+            storage,
+            config: meerkat::Config::default(),
+            factory: meerkat::AgentFactory::new(root.join("factory"))
+                .with_provider_auth_persistence(persistence),
+            persistence: Some(native),
+            connector_auth: None,
+            standalone: None,
+        };
+        Box::pin(TerminalConnectors::open(&mut startup))
+            .await
+            .unwrap()
+    }
     #[derive(Clone, Default)]
     struct Seen(Arc<std::sync::Mutex<Vec<u8>>>);
     impl Seen {
@@ -971,7 +993,13 @@ mod tests {
             Ok(())
         }
     }
-    async fn answer(seen: &Seen, lines: &mpsc::Sender<io::Result<String>>, approve: bool) {
+    // Change review requires a protected terminal (`require_terminal`); scripted
+    // input is a non-terminal by design. The human types on the PTY master.
+    fn protected_terminal() -> (TerminalInput, std::os::fd::OwnedFd) {
+        let pair = nix::pty::openpty(None, None).unwrap();
+        (TerminalInput::from_owned_fd(pair.slave), pair.master)
+    }
+    async fn answer(seen: &Seen, lines: &std::os::fd::OwnedFd, approve: bool) {
         while !seen.text().contains("Type 'approve ") {
             tokio::task::yield_now().await;
         }
@@ -983,13 +1011,8 @@ mod tests {
             .split('\'')
             .next()
             .unwrap();
-        lines
-            .send(Ok(format!(
-                "{} {id}",
-                if approve { "approve" } else { "deny" }
-            )))
-            .await
-            .unwrap();
+        let line = format!("{} {id}\n", if approve { "approve" } else { "deny" });
+        nix::unistd::write(lines, line.as_bytes()).unwrap();
     }
     fn request(session: &SessionId, change: Change) -> (Request, oneshot::Receiver<Value>) {
         let (response, receive) = oneshot::channel();
@@ -1224,8 +1247,7 @@ mod tests {
                 let (approvals, mut presenter) =
                     LocalApprovals::create_paired_host(root.path()).unwrap();
                 approvals.bind_session(&session).unwrap();
-                let (lines, receive_lines) = mpsc::channel(1);
-                let mut input = TerminalInput::scripted(receive_lines);
+                let (mut input, lines) = protected_terminal();
                 let seen = Seen::default();
                 let mut output = seen.clone();
                 for (request_session, proposal) in [
@@ -1385,8 +1407,7 @@ mod tests {
                     let (approvals, mut presenter) =
                         LocalApprovals::create_paired_host(root.path()).unwrap();
                     approvals.bind_session(&session).unwrap();
-                    let (lines, receive_lines) = mpsc::channel(1);
-                    let mut input = TerminalInput::scripted(receive_lines);
+                    let (mut input, lines) = protected_terminal();
                     let seen = Seen::default();
                     let mut output = seen.clone();
                     let (request, receive) = request(&session, change("mail", "reader"));
@@ -1527,13 +1548,12 @@ mod tests {
             .await
             .unwrap();
             let (_, reviewed_generation) = owned(&selected).await.unwrap();
-            let mut owner = owner(root.path(), selected.clone()).await;
+            let mut owner = governed_owner(root.path(), selected.clone()).await;
             let session = SessionId::new();
             let (approvals, mut presenter) =
                 LocalApprovals::create_paired_host(root.path()).unwrap();
             approvals.bind_session(&session).unwrap();
-            let (lines, receive_lines) = mpsc::channel(1);
-            let mut input = TerminalInput::scripted(receive_lines);
+            let (mut input, lines) = protected_terminal();
             let seen = Seen::default();
             let mut output = seen.clone();
             let target = Change::Revoke {
@@ -1632,6 +1652,9 @@ mod tests {
             assert!(approvals.check_session(&session).is_ok());
             assert_eq!(owned(&selected).await.unwrap(), before);
             assert!(credential_artifact(&root.path().join("credentials")) == credentials);
+            // As main does after setup closes, drop the terminal owner and its
+            // realm execution custody before native administration.
+            drop(owner);
             // The queued action has not been finalized. A separate public
             // native revoke, awaited outside an observer timeout, proves its
             // original target selection survived review unchanged.
@@ -1658,8 +1681,7 @@ mod tests {
             let (approvals, mut presenter) =
                 LocalApprovals::create_paired_host(root.path()).unwrap();
             approvals.bind_session(&session).unwrap();
-            let (lines, receive_lines) = mpsc::channel(1);
-            let mut input = TerminalInput::scripted(receive_lines);
+            let (mut input, lines) = protected_terminal();
             let seen = Seen::default();
             let mut output = seen.clone();
             let (request, receive) = request(
@@ -1702,7 +1724,8 @@ mod tests {
                 }
             });
             // Native fixture setup is complete. This timeout observes only
-            // the presenter and scripted answer, never a native finalizer.
+            // the presenter and the answer typed on its PTY, never a native
+            // finalizer.
             let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
                 tokio::join!(
                     present(
@@ -1775,8 +1798,7 @@ mod tests {
                 let (approvals, mut presenter) =
                     LocalApprovals::create_paired_host(root.path()).unwrap();
                 approvals.bind_session(&session).unwrap();
-                let (lines, receive_lines) = mpsc::channel(1);
-                let mut input = TerminalInput::scripted(receive_lines);
+                let (mut input, lines) = protected_terminal();
                 let seen = Seen::default();
                 let mut output = seen.clone();
                 let (first, receive) = request(&session, change("mail", "reader"));

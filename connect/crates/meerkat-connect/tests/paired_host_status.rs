@@ -357,6 +357,9 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
             .await
             .unwrap();
         let outcome = timeout(Duration::from_secs(20), completion.wait()).await;
+        // Observe the presenter while the approvals are live: retirement
+        // closes it, after which next() ends at once without a prompt.
+        let prompted = timeout(Duration::from_millis(10), presenter.next()).await;
         if outcome.is_err() {
             approvals.retire();
             session.cancel(&admission).await.unwrap();
@@ -368,12 +371,7 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
             meerkat_runtime::completion::CompletionOutcome::Completed(_)
         ));
         assert!(!approvals.has_uncertain_dispatch());
-        assert!(
-            timeout(Duration::from_millis(10), presenter.next())
-                .await
-                .is_err(),
-            "readback cannot create an approval"
-        );
+        assert!(prompted.is_err(), "readback cannot create an approval");
         let results = probe.results.lock().unwrap();
         assert!(!results["prior-status"].is_error);
         let observed: Value =

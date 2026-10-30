@@ -20913,6 +20913,7 @@ impl RetirementStartedAnchorCrash {
                     retiring_peer_endpoint: Some(retiring_peer_endpoint),
                     preserve_machine_topology: true,
                     rotation: None,
+                    cause: None,
                 },
             })
             .await
@@ -21182,6 +21183,7 @@ async fn test_shutdown_joins_recovered_retirement_worker_before_reply() {
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
                 rotation: None,
+                cause: None,
             },
         })
         .await
@@ -41780,6 +41782,7 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
                 retiring_peer_endpoint: Some(replacement_peer_endpoint),
                 preserve_machine_topology: false,
                 rotation: None,
+                cause: None,
             },
         })
         .await
@@ -90304,7 +90307,6 @@ fn mob_runtime_parity_field_value(
         // Residency and definition-wiring bookkeeping the parity snapshot
         // does not project yet: the parity probes never read it.
         "member_wake_bound"
-        | "member_host_preparation_pending"
         | "runtime_retire_archive_only"
         | "owed_edge_repairs"
         | "owed_external_edge_repairs"
@@ -90312,13 +90314,17 @@ fn mob_runtime_parity_field_value(
         | "unborn_seat_sessions"
         | "member_definition_wiring_exempt"
         // Identity entries: the parity probes declare none.
-        | "spawn_exec_entry_custody" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "spawn_exec_entry_custody"
+        | "identity_entry_retiring" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
+        | "member_host_preparation_causes"
         | "member_rotation_session_ids"
         | "member_rotation_peer_endpoints"
         | "member_rotation_targets"
-        | "identity_entry_origins" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "identity_entry_origins"
+        | "identity_entry_unseated"
+        | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }

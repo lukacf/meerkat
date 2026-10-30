@@ -305,6 +305,29 @@ impl MobActor {
         }
         let state = self.dsl_authority.state();
         let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);
+        // A dormant seat never takes an identity entry its host creates: one
+        // hosted on its first use (placed or externally bound) or one
+        // awaiting its held creation (MobMachine's dormant seat refuses both
+        // too, entry_neither_hosted_nor_held).
+        if mode == SeatPlanMode::Seat
+            && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
+        {
+            match cause {
+                mob_dsl::UnseatedEntryCause::HostedOnFirstUse => {
+                    return Err(MobError::WiringError(format!(
+                        "'{agent_identity}' cannot be seated dormant: the identity entry is hosted \
+                         on its first use, and its host creates its member"
+                    )));
+                }
+                mob_dsl::UnseatedEntryCause::HeldCreation => {
+                    return Err(MobError::WiringError(format!(
+                        "'{agent_identity}' cannot be seated dormant: the identity entry awaits \
+                         its held creation, which the host's held protocol carries out"
+                    )));
+                }
+                mob_dsl::UnseatedEntryCause::SeatOwed => {}
+            }
+        }
         // A seat with entry custody of an identity a worker holds is not
         // that worker's seat: the worker keeps the name.
         if mode == SeatPlanMode::Seat
@@ -474,6 +497,17 @@ impl MobActor {
             self.dsl_authority.state(),
             &session_id,
         );
+        // A resume seat of an identity entry on the session MobMachine
+        // recorded when the entry's member retired brings the entry back on
+        // it: the preparation admits that archived session.
+        let revives_archived_session = launch == DormantSeatLaunch::Resume
+            && spec.entry_custody
+            && self
+                .dsl_authority
+                .state()
+                .identity_entry_archived_sessions
+                .get(&dsl_identity)
+                == Some(&mob_dsl::SessionId::from_domain(&session_id));
         // Whether this mob recorded the session's comms endpoint: then its
         // key pair must exist, and a missing one is refused, never minted.
         let session_endpoint_recorded = self
@@ -493,6 +527,10 @@ impl MobActor {
             // observation: a fresh seat's absent session is unborn, as is a
             // session no build created.
             session_unborn: false,
+            revives_archived_session,
+            // Decided by the preparation: a revival's archived session.
+            session_archived: false,
+            history_unavailable: spec.history_unavailable.clone(),
             runtime_mode,
             labels: spec.labels.clone().unwrap_or_default(),
             continuity_intent,
@@ -864,8 +902,9 @@ impl MobActor {
             runtime_mode,
             bridge_session_id: dsl_session.clone(),
             member_peer_endpoint: endpoint.as_ref().map(mob_dsl::MemberPeerEndpoint::from),
-            // An archived session was answered at preparation, typed.
-            session_archived: false,
+            // An archived session was answered at preparation, typed, but
+            // the identity entry's own, which this seat revives.
+            session_archived: candidate.session_archived,
             // A spec that owes a kickoff is embodied at the plan; the machine
             // refuses a seat that owes one.
             kickoff_owed: candidate.kickoff_owed,
@@ -1778,8 +1817,9 @@ impl MobActor {
         let spawned = spawned.with_resume_from_role(rotation.resume_from_role.clone());
         // Durable: the rotation keeps the identity's standing, and the next
         // incarnation's row records the identity entry MobMachine holds for
-        // it, so replay (which ends the entry with the retired incarnation)
-        // records it again.
+        // it, so replay (which keeps the entry unseated between the retired
+        // incarnation's row and this one) records it on the next incarnation
+        // again.
         let identity_entry = super::super::identity_entry::machine_entry_origin(
             prepared.authority.state(),
             identity,
@@ -2126,12 +2166,15 @@ impl SettledSeatChunk {
                 // Durable: the identity entry MobMachine recorded for the
                 // seated member in the seat's own step, so replay records it
                 // again.
-                let event = seat.member_spawned(&transitions)?.with_identity_entry(
-                    super::super::identity_entry::machine_entry_origin(
+                let event = seat
+                    .member_spawned(&transitions)?
+                    .with_identity_entry(super::super::identity_entry::machine_entry_origin(
                         state,
                         &seat.candidate.agent_identity,
-                    ),
-                );
+                    ))
+                    // A fresh seat of an identity whose archived session is
+                    // gone from the store records the notice.
+                    .with_history_unavailable(seat.candidate.history_unavailable.clone());
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

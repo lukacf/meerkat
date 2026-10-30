@@ -12,6 +12,7 @@ use super::transaction::LifecycleRollback;
 use super::*;
 
 pub(super) mod boot_lift;
+mod declared_apply;
 mod dormant_kickoff;
 mod dormant_seat;
 mod dormant_wiring;
@@ -31554,6 +31555,17 @@ impl MobActor {
                     .await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::DeclareIdentityEntries {
+                    declarations,
+                    reply_tx,
+                } => {
+                    let result = Box::pin(self.declare_identity_entries(declarations)).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::SealDeclaredRoster { desired, reply_tx } => {
+                    let result = self.seal_declared_roster(desired);
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,
@@ -35893,6 +35905,9 @@ impl MobActor {
             // Folded into the ceiling above.
             inherited_operator_authority_bound: _,
             fresh_session_id,
+            // Only a dormant seat's row records it; an embodied seat's spawn
+            // does not.
+            history_unavailable: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -38178,6 +38193,7 @@ impl MobActor {
             inherited_operator_authority_bound: _,
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
+            history_unavailable: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -38192,12 +38208,22 @@ impl MobActor {
                  definition's wiring rules is local"
             )));
         }
-        // An identity entry's member is local: a placed spawn never acts for
-        // one (MobMachine's remote ladder refuses entry custody as well).
-        if entry_custody {
+        // A placed spawn acts for an identity entry only when the host
+        // declared the entry hosted on its first use (MobMachine's remote
+        // ladder refuses any other entry custody too,
+        // placed_custody_hosted_on_first_use): any other is refused typed
+        // here, before anything is created.
+        if entry_custody
+            && self
+                .dsl_authority
+                .state()
+                .identity_entry_unseated
+                .get(&mob_dsl::AgentIdentity::from_domain(&identity))
+                != Some(&mob_dsl::UnseatedEntryCause::HostedOnFirstUse)
+        {
             fail!(MobError::WiringError(format!(
-                "'{identity}' cannot be placed on a member host: an identity entry's member is \
-                 local"
+                "'{identity}' cannot be placed on a member host with entry custody: only an \
+                 identity entry the host declared hosted on its first use is placed"
             )));
         }
         if tool_dispatch_admission.is_some() {
@@ -39809,6 +39835,7 @@ impl MobActor {
             inherited_operator_authority_bound: _,
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
+            history_unavailable: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -40900,6 +40927,13 @@ impl MobActor {
             spawned.fork_source = ctx.fork_source.clone();
             spawned.fork_overlay = ctx.fork_overlay;
             spawned.definition_wiring = ctx.definition_wiring;
+            // Durable: the identity entry MobMachine recorded for the placed
+            // member in its membership commit (a spawn holding the entry's
+            // custody), so replay records the entry again after the carrier.
+            let spawned = spawned.with_identity_entry(super::identity_entry::machine_entry_origin(
+                self.dsl_authority.state(),
+                &identity,
+            ));
             boxed_arm_future(|| {
                 self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
             })
@@ -63829,6 +63863,18 @@ impl MobActor {
                 entry.agent_identity
             )));
         }
+        // The retirement of an identity entry the declared apply's seal
+        // unlisted (MobMachine's identity_entry_retiring mark) records its
+        // cause, so a replay marks the entry again and the end of the
+        // retirement ends the entry, as it does live. The seal marks only a
+        // member whose retirement has not started and never drops the mark of
+        // one whose retirement has, so the mark here is the mark at the end.
+        let cause = self
+            .dsl_authority
+            .state()
+            .identity_entry_retiring
+            .contains(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
+            .then_some(super::MemberRetirementCause::Unlisted);
         let desired = MobEventKind::MemberRetirementStarted {
             agent_identity: entry.agent_identity.clone(),
             agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -63839,6 +63885,7 @@ impl MobActor {
             retiring_peer_endpoint,
             preserve_machine_topology,
             rotation: rotation.map(Box::new),
+            cause,
         };
         let append = self
             .events

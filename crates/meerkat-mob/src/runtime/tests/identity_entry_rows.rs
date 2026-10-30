@@ -10,7 +10,7 @@ use crate::machines::mob_machine as dsl;
 use crate::runtime::{
     DormantSeatOutcome, EntryStanding, IDENTITY_ENTRY_PAGE_MAX, IdentityEntryOrigin,
     IdentityEntryRead, LegacyIdentityEntryAdoption, MemberLifecycleEvent, MobJournalCursor,
-    ReconcileOptions,
+    ReconcileOptions, UnseatedEntryCause,
 };
 
 const STEP: Duration = Duration::from_mins(1);
@@ -112,6 +112,18 @@ impl EntryMob {
     async fn restart(&mut self) {
         let storage = self.storage.clone();
         self.restart_into(storage).await;
+    }
+
+    /// Where `name`'s identity entry stands, when it is one.
+    fn standing(&self, name: &str) -> Option<EntryStanding> {
+        match self
+            .handle
+            .identity_entry(&id(name))
+            .expect("the entry read answers")
+        {
+            IdentityEntryRead::Entry(view) => Some(view.standing),
+            IdentityEntryRead::NotAnEntry { .. } => None,
+        }
     }
 
     /// The entry's origin when `name` is an identity entry.
@@ -399,10 +411,16 @@ async fn agent_lane_retire_of_an_entry_is_refused_identity_member() {
         .retire(id("lane-entry"))
         .await
         .expect("the host retires its own entry");
+    // The entry outlives a retirement the declared apply did not start: it
+    // stays unseated, owed its seat, and the host's next apply seats it again.
     assert_eq!(
         mob.entry("lane-entry"),
-        None,
-        "the retirement ends the entry"
+        Some(IdentityEntryOrigin::Declared),
+        "the retirement keeps the entry"
+    );
+    assert_eq!(
+        mob.standing("lane-entry"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed))
     );
 }
 
@@ -762,10 +780,11 @@ async fn respawn_and_rotation_keep_an_entry_across_a_restart() {
     }
 }
 
-/// A placed spawn never acts for an identity entry: one with entry custody
+/// A placed spawn acts for an identity entry only when the host declared the
+/// entry hosted on its first use: one with entry custody of any other name
 /// is refused typed at the shell before anything is created (MobMachine's
-/// remote ladder has no arm for it either; see the machine test
-/// `a_placed_spawn_with_entry_custody_has_no_arm`).
+/// remote ladder refuses it too; see the machine test
+/// `a_placed_spawn_holds_entry_custody_only_for_an_entry_hosted_on_its_first_use`).
 ///
 /// RED: drop the shell refusal in the placed lane
 /// (`enqueue_spawn_remote_inner`): the spawn reaches the remote ladder,
@@ -991,7 +1010,11 @@ async fn a_host_retire_beside_an_agent_retire_of_an_entry_retires_it() {
         "{agent:?}"
     );
     host.expect("the host retires its own entry");
-    assert_eq!(mob.entry("slot-entry"), None);
+    // The entry outlives the host's retirement of its member, unseated.
+    assert_eq!(
+        mob.standing("slot-entry"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed))
+    );
     assert!(
         !mob.handle
             .list_members()
@@ -1274,9 +1297,10 @@ fn the_legacy_label_scans_see_a_planted_second_reader() {
 }
 
 /// The journal a reader that predates identity entries reads: every row as
-/// written, with the internal `identity_entry` fields absent (its decoder
-/// ignores the keys it does not know).
-async fn predating_reader_journal(
+/// written, with the internal fields of identity entries absent (its decoder
+/// ignores the keys it does not know): the `identity_entry` fields, a seat's
+/// `history_unavailable` notice and a retirement start's `cause`.
+pub(super) async fn predating_reader_journal(
     events: &Arc<dyn MobEventStore>,
     through: Option<u64>,
 ) -> Arc<dyn MobEventStore> {
@@ -1296,9 +1320,13 @@ async fn predating_reader_journal(
         }
         if let Some(spawned) = event.kind.member_spawned_mut() {
             spawned.identity_entry = None;
+            spawned.history_unavailable = None;
         }
         if let Some(recovered) = event.kind.member_session_binding_recovered_mut() {
             recovered.identity_entry = None;
+        }
+        if let MobEventKind::MemberRetirementStarted { cause, .. } = &mut event.kind {
+            *cause = None;
         }
         let row = crate::event::NewMobEvent {
             mob_id: event.mob_id,
@@ -1513,7 +1541,7 @@ async fn legacy_adoption_row_replays_as_a_no_op_under_097() {
 /// Create the fixture mob `mob_id` on a persistent store in `dir`, let
 /// `populate` seat its members, and shut it down: what the published
 /// binaries resume.
-async fn write_rollback_fixture<F, Fut>(dir: &std::path::Path, mob_id: &str, populate: F)
+pub(super) async fn write_rollback_fixture<F, Fut>(dir: &std::path::Path, mob_id: &str, populate: F)
 where
     F: FnOnce(MobHandle) -> Fut,
     Fut: std::future::Future<Output = ()>,

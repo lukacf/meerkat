@@ -1154,7 +1154,7 @@ fn seat_machine_facts(
                 state.member_seat_session_unborn.contains(&id),
                 state.member_peer_endpoints.contains_key(&id),
                 state.member_peer_ids.contains_key(&id),
-                state.member_host_preparation_pending.contains(&id),
+                state.member_host_preparation_causes.contains_key(&id),
                 state.member_boot_obligation_owed.get(&id),
                 state.member_wake_attempts.get(&id),
                 state.member_profile_names.get(&id),

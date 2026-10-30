@@ -214,6 +214,11 @@ mod bridge_request_claim_test_support;
 pub use boot_plan::{
     MemberRestorePolicy, MobBootSetBasis, MobBootSetUnobservedCause, MobCompositionAuthority,
 };
+mod declared_apply;
+pub use declared_apply::{
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
+    DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest, UnlistedEntryOutcome,
+};
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
 pub(crate) use dormant_seat::{SeatBuild, SeatBuildInputs, SeatLocalBuildInputs};
@@ -524,10 +529,11 @@ pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_h
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use host_schedule::HostObservationScheduleMobHost;
 pub use identity_entry::{
-    EntryStanding, IDENTITY_ENTRY_PAGE_MAX, IdentityCensus, IdentityEntryOrigin, IdentityEntryPage,
-    IdentityEntryRead, IdentityEntryView, LegacyIdentityEntryAdoption, MemberBrokenFact,
-    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MobJournalCursor,
-    SeatedMember, WorkerMember,
+    EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
+    LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
+    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, SeatedMember,
+    UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
 };
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,

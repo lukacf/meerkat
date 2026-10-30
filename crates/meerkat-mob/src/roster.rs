@@ -1773,6 +1773,7 @@ mod tests {
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
                 rotation: None,
+                cause: None,
             },
         );
         let roster = Roster::project(&[spawned.clone(), recovered.clone()]);
@@ -2271,6 +2272,7 @@ mod tests {
             retiring_peer_endpoint: None,
             preserve_machine_topology: false,
             rotation: None,
+            cause: None,
         };
         retirement
             .set_retiring_peer_endpoint(endpoint)

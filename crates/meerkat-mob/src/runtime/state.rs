@@ -762,6 +762,9 @@ pub(super) enum ScopeAdmissionSubject {
     /// The legacy adoption of this member as an identity entry: a host
     /// verb, which an agent never runs.
     LegacyAdoption(crate::ids::AgentIdentity),
+    /// The declared apply of a host's roster of identity entries: a host
+    /// verb, which an agent never runs.
+    DeclaredApply,
 }
 
 pub(super) enum MobCommand {
@@ -1530,6 +1533,20 @@ pub(super) enum MobCommand {
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },
+    /// Decide one chunk of a declared roster's identities in one MobMachine
+    /// step (`MobHandle::apply_declared_roster`): each identity's verdict.
+    DeclareIdentityEntries {
+        declarations: Vec<super::declared_apply::IdentityDeclaration>,
+        reply_tx: oneshot::Sender<
+            Result<Vec<super::declared_apply::DeclarationVerdict>, crate::MobError>,
+        >,
+    },
+    /// Seal a complete declared roster in one MobMachine step: `desired` is
+    /// every identity the roster lists.
+    SealDeclaredRoster {
+        desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
+    },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
     ProjectMemberStatusObserved {
@@ -2295,6 +2312,8 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2527,6 +2546,8 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
+            Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
+            Self::SealDeclaredRoster { .. } => "SealDeclaredRoster",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

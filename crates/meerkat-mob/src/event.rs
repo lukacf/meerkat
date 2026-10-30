@@ -224,7 +224,11 @@ impl<'de> Deserialize<'de> for MemberRef {
 // ordinary member there. A stored `MemberRetirementStarted` may also carry the
 // internal `rotation` record of the rotation the retirement carries out; a
 // reader that predates it ignores it and replays the retirement as a plain
-// one.
+// one. A stored `MemberRetirementStarted` may also carry the internal `cause`
+// of an unlisted identity entry's retirement, and a stored `MemberSpawned`
+// the internal `history_unavailable` notice of a seat on a fresh session whose
+// identity's archived session is gone; a reader that predates them ignores
+// them.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -546,6 +550,16 @@ pub enum MobEventKind {
         /// one, and journals written before it decode it as absent.
         #[serde(skip, default)]
         rotation: Option<Box<crate::runtime::MemberRotationRecord>>,
+        /// Why the retirement started, when it is recorded: the declared
+        /// apply's seal unlisted the member's identity entry
+        /// ([`crate::runtime::MemberRetirementCause::Unlisted`]), so the end
+        /// of the retirement ends the entry. Replay marks the entry again
+        /// (`RecoverIdentityEntryRetiring`). Stored only by the internal event
+        /// codec; a reader that predates it ignores it and replays the
+        /// retirement as one the seal did not start, and journals written
+        /// before it decode it as absent.
+        #[serde(skip, default)]
+        cause: Option<crate::runtime::MemberRetirementCause>,
     },
     /// A peer-only member runtime has acknowledged retirement, while
     /// supervisor revocation and terminal member archival are still pending.
@@ -1177,6 +1191,13 @@ pub struct MemberSpawnedEvent {
     /// journals written before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) resume_from_role: Option<ProfileName>,
+    /// The notice that this row seats its identity on a fresh session because
+    /// the archived session the identity was last bound to is gone from the
+    /// store (a declared apply's seat of an entry whose history is lost).
+    /// Stored only by the internal event codec; a reader that predates it
+    /// ignores it, and journals written before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
 }
 
 impl MemberSpawnedEvent {
@@ -1214,7 +1235,20 @@ impl MemberSpawnedEvent {
             seat_build_inputs: None,
             identity_entry: None,
             resume_from_role: None,
+            history_unavailable: None,
         }
+    }
+
+    pub(crate) fn with_history_unavailable(
+        mut self,
+        history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    ) -> Self {
+        self.history_unavailable = history_unavailable;
+        self
+    }
+
+    pub(crate) fn history_unavailable(&self) -> Option<&crate::runtime::HistoryUnavailable> {
+        self.history_unavailable.as_ref()
     }
 
     pub(crate) fn with_resume_from_role(mut self, resume_from_role: Option<ProfileName>) -> Self {
@@ -1498,6 +1532,14 @@ impl MobEventKind {
             _ => None,
         }
     }
+
+    /// The cause a retirement start row records, if any.
+    pub(crate) fn retirement_cause(&self) -> Option<crate::runtime::MemberRetirementCause> {
+        match self {
+            Self::MemberRetirementStarted { cause, .. } => *cause,
+            _ => None,
+        }
+    }
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -1654,6 +1696,21 @@ impl MobEventKind {
             }
             _ => Err(stored_mob_event_format_error(
                 "stored rotation belongs only to MemberRetirementStarted",
+            )),
+        }
+    }
+
+    pub(crate) fn set_retirement_cause(
+        &mut self,
+        retirement_cause: crate::runtime::MemberRetirementCause,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::MemberRetirementStarted { cause, .. } => {
+                *cause = Some(retirement_cause);
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored cause belongs only to MemberRetirementStarted",
             )),
         }
     }
@@ -1840,6 +1897,23 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
         kind.insert("rotation".to_string(), serde_json::to_value(rotation)?);
+    }
+    if let Some(cause) = event.kind.retirement_cause()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "cause".to_string(),
+            Value::String(cause.as_stored().to_string()),
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(history_unavailable) = member_spawned.history_unavailable()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "history_unavailable".to_string(),
+            serde_json::to_value(history_unavailable)?,
+        );
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -2100,6 +2174,33 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(crate::runtime::MemberRotationRecord::from_stored)
         .transpose()?;
+    // A cause this build does not know (a row a later release wrote) replays
+    // as a retirement the seal did not start.
+    let retirement_cause = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_retirement_started") {
+                kind.remove("cause")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<String>)
+        .transpose()?
+        .and_then(|token| crate::runtime::MemberRetirementCause::from_stored(&token));
+    let spawned_history_unavailable = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("history_unavailable")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<crate::runtime::HistoryUnavailable>)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2183,6 +2284,14 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     }
     if let Some(rotation) = retirement_rotation {
         event.kind.set_retirement_rotation(rotation)?;
+    }
+    if let Some(cause) = retirement_cause {
+        event.kind.set_retirement_cause(cause)?;
+    }
+    if let Some(history_unavailable) = spawned_history_unavailable
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.history_unavailable = Some(history_unavailable);
     }
     Ok(event)
 }
@@ -2965,6 +3074,7 @@ mod tests {
             retiring_peer_endpoint: None,
             preserve_machine_topology: false,
             rotation: None,
+            cause: None,
         };
         kind.set_retirement_rotation(record.clone())
             .expect("a retirement start carries a rotation");
@@ -3021,6 +3131,96 @@ mod tests {
             .is_err(),
             "an unreadable record fails the decode"
         );
+    }
+
+    /// The declared apply's internal fields ride their rows: the cause a
+    /// retirement start records (the seal unlisted the identity) and the
+    /// notice a seat on a fresh session records (the identity's archived
+    /// session was gone from the store). The stored rows carry them, the
+    /// public payloads never do, a reader that predates them parses the rows
+    /// and ignores them, and a cause this build does not know decodes as no
+    /// cause.
+    #[test]
+    fn stored_retirement_cause_and_history_notice_roundtrip_and_stay_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("declared-identity");
+        let mut start = MobEventKind::MemberRetirementStarted {
+            agent_identity: identity.clone(),
+            agent_runtime_id: AgentRuntimeId::new(identity.clone(), Generation::new(0)),
+            generation: Generation::new(0),
+            role: ProfileName::from("worker"),
+            releasing: None,
+            session_id: Some(sid.clone()),
+            retiring_peer_endpoint: None,
+            preserve_machine_topology: false,
+            rotation: None,
+            cause: None,
+        };
+        start
+            .set_retirement_cause(crate::runtime::MemberRetirementCause::Unlisted)
+            .expect("a retirement start carries a cause");
+        let notice = crate::runtime::HistoryUnavailable::new(sid);
+        let spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::new(1),
+            FenceToken::new(1),
+            AgentRuntimeId::new(identity, Generation::new(1)),
+            ProfileName::from("worker"),
+        )
+        .with_history_unavailable(Some(notice.clone()));
+        let row = |kind: MobEventKind| MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind,
+        };
+        let mut stored_start = None;
+        for (event, key) in [
+            (row(start), "cause"),
+            (
+                row(MobEventKind::MemberSpawned(spawned)),
+                "history_unavailable",
+            ),
+        ] {
+            let public = serde_json::to_value(&event).expect("public event payload");
+            assert!(
+                public["kind"].get(key).is_none(),
+                "the public event never carries {key}"
+            );
+            let encoded = encode_stored_mob_event(&event).expect("encode");
+            let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+            assert!(
+                stored["event"]["kind"].get(key).is_some(),
+                "the stored row carries {key}"
+            );
+            let decoded = decode_stored_mob_event(&encoded).expect("decode").kind;
+            if key == "cause" {
+                assert_eq!(
+                    decoded.retirement_cause(),
+                    Some(crate::runtime::MemberRetirementCause::Unlisted)
+                );
+                stored_start = Some(stored.clone());
+            } else {
+                assert_eq!(
+                    decoded
+                        .member_spawned()
+                        .and_then(MemberSpawnedEvent::history_unavailable),
+                    Some(&notice)
+                );
+            }
+            let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
+                .expect("a payload with the unknown key still parses");
+            assert_eq!(older_reader.cursor, 1, "{key}");
+        }
+
+        // A cause a later release wrote decodes as no cause: the retirement
+        // replays as one the seal did not start.
+        let mut later = stored_start.expect("the start row was stored");
+        later["event"]["kind"]["cause"] = json!("a_later_cause");
+        let decoded = decode_stored_mob_event(&serde_json::to_vec(&later).expect("encode"))
+            .expect("a later cause decodes")
+            .kind;
+        assert_eq!(decoded.retirement_cause(), None);
     }
 
     #[test]
@@ -3622,6 +3822,7 @@ mod tests {
             ),
             preserve_machine_topology: true,
             rotation: None,
+            cause: None,
         };
         let public_value = serde_json::to_value(&event).expect("serialize retirement-start event");
         let public_json = serde_json::to_string(&public_value).expect("render retirement-start");

@@ -167,7 +167,11 @@ impl MobCommand {
             // Adopting a legacy member as an identity entry changes the
             // member's standing: no worker reconcile or agent-lane command
             // acts on it afterwards.
-            | Self::AdoptLegacyIdentityEntry { .. } => Some(ControlScope::Retire),
+            | Self::AdoptLegacyIdentityEntry { .. }
+            // The declared apply decides identity entries' standing and its
+            // seal retires the members of unlisted ones.
+            | Self::DeclareIdentityEntries { .. }
+            | Self::SealDeclaredRoster { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -450,9 +454,13 @@ impl MobCommand {
             Self::AdmitControlScope { subject, .. } => match subject {
                 ScopeAdmissionSubject::Mob => AgentLaneAdmission::Unaddressed,
                 ScopeAdmissionSubject::Member(member) => AgentLaneAdmission::Members(vec![member]),
-                ScopeAdmissionSubject::LegacyAdoption(_) => AgentLaneAdmission::HostOnly,
+                ScopeAdmissionSubject::LegacyAdoption(_) | ScopeAdmissionSubject::DeclaredApply => {
+                    AgentLaneAdmission::HostOnly
+                }
             },
-            Self::AdoptLegacyIdentityEntry { .. } => AgentLaneAdmission::HostOnly,
+            Self::AdoptLegacyIdentityEntry { .. }
+            | Self::DeclareIdentityEntries { .. }
+            | Self::SealDeclaredRoster { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -725,6 +733,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::AdoptLegacyIdentityEntry { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::DeclareIdentityEntries { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SealDeclaredRoster { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes

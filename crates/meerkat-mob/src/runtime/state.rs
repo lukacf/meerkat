@@ -750,6 +750,20 @@ pub(super) enum ShutdownAnswerClass {
     ActorCompletion,
 }
 
+/// What a [`MobCommand::AdmitControlScope`] admission is for: chokepoint (a)
+/// applies to it the lane rules the admitted operation meets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScopeAdmissionSubject {
+    /// The operation addresses the mob, or nothing the lane rules name.
+    Mob,
+    /// A member command addressed to this member: an agent never acts on
+    /// an identity entry's member.
+    Member(crate::ids::AgentIdentity),
+    /// The legacy adoption of this member as an identity entry: a host
+    /// verb, which an agent never runs.
+    LegacyAdoption(crate::ids::AgentIdentity),
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -1227,8 +1241,12 @@ pub(super) enum MobCommand {
     },
     /// Actor-linearized operator admission for composite/projection paths
     /// whose first semantic action is not itself a scoped MobCommand.
+    /// `subject` names what the admitted operation acts on, so chokepoint
+    /// (a) applies the lane rules the operation itself meets before the
+    /// caller does anything (a retirement before it elects its shared slot).
     AdmitControlScope {
         required: mob_dsl::ControlScope,
+        subject: ScopeAdmissionSubject,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Actor-authorized capacity reclamation for the durable member-operator

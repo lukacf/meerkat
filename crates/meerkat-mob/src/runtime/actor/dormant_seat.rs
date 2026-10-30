@@ -58,17 +58,22 @@ impl MobActor {
         &mut self,
         specs: Vec<super::super::handle::SpawnMemberSpec>,
     ) -> DormantSeatPlan {
-        // Every spec's next generation from one probe of the machine for the
-        // whole chunk (one fork), each answer the one its own probe gives.
-        let mut minted = self.mint_spawn_generations(specs.iter().map(|spec| &spec.identity));
+        // Every spec's next generation and member-admission verdict from one
+        // probe of the machine for the whole chunk (one fork), each answer
+        // the one its own probe gives.
+        let mut probes = self.probe_seat_chunk(
+            specs
+                .iter()
+                .map(|spec| (&spec.identity, spec.entry_custody)),
+        );
         let mut named = BTreeSet::new();
         let mut entries = Vec::with_capacity(specs.len());
         for spec in specs {
             let agent_identity = spec.identity.clone();
             let entry = if named.insert(agent_identity.clone()) {
-                let generation = minted.remove(&agent_identity);
+                let probed = probes.remove(&agent_identity);
                 match self
-                    .plan_dormant_seat(spec, SeatPlanMode::Seat, generation)
+                    .plan_dormant_seat(spec, SeatPlanMode::Seat, probed)
                     .await
                 {
                     Ok(entry) => entry,
@@ -129,16 +134,23 @@ impl MobActor {
     }
 
     /// Plan one spec. Every check a spawn makes before anything exists is
-    /// made here; the machine makes the rest at the commit. `minted` is the
-    /// spec's next generation when the chunk probed it already; without it
-    /// the generation is probed here.
+    /// made here; the machine makes the rest at the commit. `probed` is the
+    /// spec's next generation and member-admission verdict when its chunk
+    /// probed them already; without them they are probed here.
     async fn plan_dormant_seat(
         &mut self,
         mut spec: super::super::handle::SpawnMemberSpec,
         mode: SeatPlanMode,
-        minted: Option<Result<crate::ids::Generation, MobError>>,
+        probed: Option<SeatChunkProbe>,
     ) -> Result<DormantSeatPlanEntry, MobError> {
         let agent_identity = spec.identity.clone();
+        let (minted, admission) = match probed {
+            Some(SeatChunkProbe {
+                generation,
+                admission,
+            }) => (Some(generation), Some(admission)),
+            None => (None, None),
+        };
         // CommitDormantSeat and BeginMemberRotation are Running-only: a
         // stopped mob seats and rotates nothing, refused here before any
         // session is created or any retirement starts.
@@ -214,13 +226,16 @@ impl MobActor {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
         // A seat without entry custody never takes an identity entry's name:
         // MobMachine's admission verdict refuses it typed, seated or not.
-        if mode == SeatPlanMode::Seat
-            && self.member_admission_verdict(&agent_identity, spec.entry_custody)?
-                == mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected
-        {
-            return Err(MobError::IdentityMember {
-                member_id: agent_identity,
-            });
+        if mode == SeatPlanMode::Seat {
+            let admission = match admission {
+                Some(admission) => admission?,
+                None => self.member_admission_verdict(&agent_identity, spec.entry_custody)?,
+            };
+            if admission == mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected {
+                return Err(MobError::IdentityMember {
+                    member_id: agent_identity,
+                });
+            }
         }
         let state = self.dsl_authority.state();
         let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);

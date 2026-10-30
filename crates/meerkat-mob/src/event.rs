@@ -1356,14 +1356,17 @@ impl MemberSessionBindingRecoveredEvent {
     }
 
     /// The row the adoption of a legacy member as an identity entry writes:
-    /// the member's current binding, unchanged, with the entry's origin.
+    /// the member's current binding, unchanged, with its durable endpoint
+    /// when there is one, and the entry's origin.
     pub(crate) fn identity_entry_adopted(
         agent_identity: AgentIdentity,
         agent_runtime_id: AgentRuntimeId,
         bridge_session_id: SessionId,
+        member_peer_endpoint: Option<TrustedPeerDescriptor>,
         origin: crate::runtime::IdentityEntryOrigin,
     ) -> Self {
         Self {
+            member_peer_endpoint,
             identity_entry: Some(origin),
             ..Self::new(agent_identity, agent_runtime_id, bridge_session_id)
         }
@@ -2743,6 +2746,7 @@ mod tests {
                     identity.clone(),
                     runtime_id.clone(),
                     sid.clone(),
+                    None,
                     declared,
                 ),
             ),

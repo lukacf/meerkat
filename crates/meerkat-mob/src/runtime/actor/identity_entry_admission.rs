@@ -1,33 +1,55 @@
-//! Identity entries on the actor: the agent lane's refusal of member commands
-//! addressed to an entry, and the adoption of a legacy member as an entry.
+//! Identity entries on the actor: the agent lane's own rules (no member
+//! command addressed to an entry, no host-only verb) and the adoption of a
+//! legacy member as an entry.
 //!
 //! MobMachine decides both (`ResolveAgentLaneMemberAdmission`,
 //! `AdoptLegacyIdentityEntry`); the actor realizes the verdicts. See
 //! `runtime::identity_entry` for the entry concept and its reads.
 
 use super::*;
+use crate::runtime::scope_gate::AgentLaneAdmission;
 
 impl MobActor {
-    /// The agent lane's admission of a member command
-    /// ([`MobCommand::agent_lane_member_targets`]): MobMachine answers for
-    /// each member the command addresses (`ResolveAgentLaneMemberAdmission`,
-    /// a pure verdict in every lifecycle phase), and the first identity entry
-    /// among them refuses the command with [`MobError::IdentityMember`].
-    /// `Ok(None)` admits it; its own arms decide the rest.
-    pub(super) fn agent_lane_identity_member_refusal(
+    /// The agent lane's own rules for `cmd`
+    /// ([`MobCommand::agent_lane_admission`]), on the agent lane and on the
+    /// console lane acting for an agent. A member command: MobMachine
+    /// answers for each member it addresses (`ResolveAgentLaneMemberAdmission`,
+    /// a pure verdict in every lifecycle phase, all on one fork of the
+    /// machine), and the first identity entry among them refuses the command
+    /// with [`MobError::IdentityMember`]. A host-only verb is refused
+    /// [`MobError::ScopeDenied`] for `required`: an agent presents no host
+    /// scope. `Ok(None)` admits the command; its own arms decide the rest.
+    pub(super) fn agent_lane_refusal(
         &self,
         cmd: &MobCommand,
+        required: mob_dsl::ControlScope,
     ) -> Result<Option<MobError>, MobError> {
-        for agent_identity in cmd.agent_lane_member_targets() {
+        let members = match cmd.agent_lane_admission() {
+            AgentLaneAdmission::Unaddressed => return Ok(None),
+            AgentLaneAdmission::HostOnly => {
+                return Ok(Some(MobError::ScopeDenied(ScopeDenial {
+                    required,
+                    presented: BTreeSet::new(),
+                })));
+            }
+            AgentLaneAdmission::Members(members) => members,
+        };
+        let mut probe = self.dsl_authority.fork();
+        for agent_identity in members {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
-            let prepared = self.prepare_dsl_input(
+            let transition = mob_dsl::MobMachineMutator::apply(
+                &mut probe,
                 mob_dsl::MobMachineInput::ResolveAgentLaneMemberAdmission {
                     agent_identity: dsl_identity.clone(),
                 },
-                "agent_lane_member_admission",
-            )?;
-            let admission = prepared
-                .effects
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "DSL authority probe (agent_lane_member_admission) rejected '{agent_identity}': {error}"
+                ))
+            })?;
+            let admission = transition
+                .effects()
                 .iter()
                 .find_map(|effect| match effect {
                     mob_dsl::MobMachineEffect::AgentLaneMemberAdmissionResolved {
@@ -123,9 +145,12 @@ impl MobActor {
 
 /// The adoption's row, from the state the adoption's own step left: the
 /// member's current incarnation and session binding, unchanged, with the
-/// origin MobMachine recorded for the entry. It carries no endpoint: the
-/// replay of a binding row without one records nothing about the member's
-/// endpoint, so the row moves nothing but the entry.
+/// origin MobMachine recorded for the entry, and the member's durable
+/// endpoint when MobMachine holds one. With the endpoint, a reader that
+/// predates identity entries keeps its strict endpoint check for the
+/// member, and this build's replay finds the endpoint already current;
+/// without one, the replay of the row records nothing about the endpoint.
+/// Either way the row moves nothing but the entry.
 fn legacy_adoption_row(
     state: &mob_dsl::MobMachineState,
     agent_identity: &AgentIdentity,
@@ -151,6 +176,11 @@ fn legacy_adoption_row(
     })?;
     let origin = super::super::identity_entry::machine_entry_origin(state, agent_identity)
         .ok_or_else(|| missing("entry"))?;
+    let member_peer_endpoint = state
+        .member_peer_endpoints
+        .get(&dsl_identity)
+        .map(super::super::builder::trusted_peer_descriptor_from_dsl_member_endpoint)
+        .transpose()?;
     Ok(
         crate::event::MemberSessionBindingRecoveredEvent::identity_entry_adopted(
             agent_identity.clone(),
@@ -159,6 +189,7 @@ fn legacy_adoption_row(
                 crate::ids::Generation::new(generation.0),
             ),
             session_id,
+            member_peer_endpoint,
             origin,
         ),
     )

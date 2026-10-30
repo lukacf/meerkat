@@ -435,24 +435,27 @@ impl ResumeOperationRegistry {
     }
 }
 
+/// The typed refusal of a worker reconcile or ensure spec that carries entry
+/// custody: those paths spawn workers, and an identity entry is declared
+/// with [`MobHandle::spawn_spec`] or [`MobHandle::seat_dormant_members`].
+fn worker_reconcile_refuses_entry_custody(identity: &AgentIdentity) -> MobError {
+    MobError::WiringError(format!(
+        "'{identity}' carries entry custody: the worker reconcile spawns workers only; declare an \
+         identity entry with spawn_spec or seat_dormant_members"
+    ))
+}
+
 /// What a caller that joined a singleflight retirement slot answers for the
 /// slot's published result. A scoped step's declined re-check is an outcome,
 /// not an error, so every error a slot publishes reaches its joiners exactly
-/// as before: anything but an in-progress, admission-pending or stuck answer,
-/// or the refusal of an identity entry's retirement on the agent lane, is a
-/// shared retirement failure.
+/// as before: anything but an in-progress, admission-pending or stuck answer
+/// is a shared retirement failure.
 fn joined_retirement_result(
     result: &Result<RetireStepOutcome, Arc<MobError>>,
 ) -> Result<RetireStepOutcome, MobError> {
     match result {
         Ok(outcome) => Ok(outcome.clone()),
         Err(error) => Err(match error.as_ref() {
-            // The agent lane's admission refused the retirement of an
-            // identity entry before anything ran: the typed refusal, as the
-            // other member commands answer it.
-            MobError::IdentityMember { member_id } => MobError::IdentityMember {
-                member_id: member_id.clone(),
-            },
             MobError::RetirementInProgress { session_id, stage } => {
                 MobError::RetirementInProgress {
                     session_id: session_id.clone(),
@@ -527,6 +530,43 @@ pub(super) fn pending_retirement_result_publication(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(key)
         .map(|pending| pending.result_rx.clone())
+}
+
+/// Test-only stale observations of the legacy identity entry adoption,
+/// keyed by member identity, which each test keeps unique: the next `count`
+/// observations of that identity name the generation after the one the
+/// binding history holds, so MobMachine answers each of them stale.
+#[cfg(test)]
+pub(super) mod legacy_observation_hold {
+    use crate::ids::{AgentIdentity, Generation};
+    use std::sync::{Mutex, PoisonError};
+
+    static STALE: Mutex<Vec<(AgentIdentity, usize)>> = Mutex::new(Vec::new());
+
+    /// Name the next `count` observations of `identity` stale.
+    pub(crate) fn force_stale(identity: &AgentIdentity, count: usize) {
+        STALE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((identity.clone(), count));
+    }
+
+    /// The observation the adoption uses: `observed`, or a stale one while a
+    /// forced count for `identity` remains.
+    pub(crate) fn observed(
+        identity: &AgentIdentity,
+        observed: Option<(Generation, bool)>,
+    ) -> Option<(Generation, bool)> {
+        let mut stale = STALE.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(position) = stale
+            .iter()
+            .position(|(held, count)| held == identity && *count > 0)
+        else {
+            return observed;
+        };
+        stale[position].1 -= 1;
+        observed.and_then(|(generation, legacy)| generation.next().map(|next| (next, legacy)))
+    }
 }
 
 /// Test-only holds between the steps of a scoped retire, keyed by the root
@@ -8421,8 +8461,14 @@ impl MobHandle {
         // command revalidates again after the singleflight election. Scope
         // admission belongs to the same absolute retirement budget: a
         // parked actor mailbox must return typed not-yet-admitted state
-        // instead of defeating the bounded public contract.
-        let admission = self.admit_control_scope(mob_dsl::ControlScope::Retire);
+        // instead of defeating the bounded public contract. The admission
+        // names the member, so an agent's retirement of an identity entry
+        // is refused here, before it elects a slot another caller could
+        // join.
+        let admission = self.admit_control_scope_for(
+            mob_dsl::ControlScope::Retire,
+            super::state::ScopeAdmissionSubject::Member(agent_identity.clone()),
+        );
         if bound_admission {
             let remaining = operation_deadline.saturating_duration_since(Instant::now());
             tokio::time::timeout(remaining, admission)
@@ -10041,14 +10087,17 @@ impl MobHandle {
     /// acts on it, and it never says whether a member is materialized in this
     /// process. The handle's principal must hold
     /// [`crate::ControlScope::List`]; a refusal is
-    /// [`MobError::ScopeDenied`].
+    /// [`MobError::ScopeDenied`]. A machine fact the read needs that is
+    /// missing or malformed (an entry with no seated member, a seated member
+    /// with no generation, profile or runtime mode) is answered
+    /// [`MobError::Internal`], never filled in.
     pub fn identity_entry(
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::IdentityEntryRead, MobError> {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
             super::identity_entry::identity_entry_read(state, identity)
-        })
+        })?
     }
 
     /// One page of this mob's identity entries, in identity order: the
@@ -10056,7 +10105,7 @@ impl MobHandle {
     /// of them, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`]. The page's
     /// `next` is the identity to read the next page after; `None` on the
     /// last page. Read as [`Self::identity_entry`] is: no actor command, no
-    /// wake, the [`crate::ControlScope::List`] scope.
+    /// wake, the [`crate::ControlScope::List`] scope, no fact filled in.
     pub fn identity_entries(
         &self,
         after: Option<&AgentIdentity>,
@@ -10064,17 +10113,17 @@ impl MobHandle {
     ) -> Result<super::IdentityEntryPage, MobError> {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
             super::identity_entry::identity_entry_page(state, after, limit)
-        })
+        })?
     }
 
     /// The counts of this mob's identity entries: declared, seated,
     /// retiring, Broken, host preparation pending, rotation in flight. Read
     /// as [`Self::identity_entry`] is: no actor command, no wake, the
-    /// [`crate::ControlScope::List`] scope.
+    /// [`crate::ControlScope::List`] scope, no fact filled in.
     pub fn identity_census(&self) -> Result<super::IdentityCensus, MobError> {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
             super::identity_entry::identity_census(state)
-        })
+        })?
     }
 
     /// The members whose run starts this mob's host holds for `reason`, in
@@ -10172,9 +10221,17 @@ impl MobHandle {
     /// [`super::LegacyIdentityEntryAdoption::NonAuthoritative`]. None of
     /// these changes anything.
     ///
-    /// Refused typed unless the mob is Running. The handle's principal must
-    /// hold [`crate::ControlScope::Retire`]. A storage composition without
-    /// the built-in atomic identity/member store refuses with
+    /// Refused typed unless the mob is Running, except that an identity that
+    /// is an entry already answers
+    /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] in any
+    /// lifecycle phase. The handle's principal must hold
+    /// [`crate::ControlScope::Retire`]; the adoption is a host verb, so the
+    /// agent lane (and a principal acting for an agent) is refused
+    /// [`MobError::ScopeDenied`], whatever the member. An observation that
+    /// keeps naming an incarnation MobMachine has replaced is answered
+    /// [`MobError::LifecycleOperationPending`], which is retryable. A storage
+    /// composition without the built-in atomic identity/member store refuses
+    /// with
     /// [`crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable`].
     pub async fn adopt_legacy_identity_entry(
         &self,
@@ -10183,6 +10240,13 @@ impl MobHandle {
         // An observation whose incarnation moved before MobMachine decided
         // is observed again, a bounded number of times.
         const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
+        // The scope and the lane first: nothing is answered, not even from
+        // the entry, to a caller the adoption is refused to.
+        self.admit_control_scope_for(
+            mob_dsl::ControlScope::Retire,
+            super::state::ScopeAdmissionSubject::LegacyAdoption(identity.clone()),
+        )
+        .await?;
         // The adoption ran: the spawn row is not read again.
         let already_an_entry = super::identity_entry::machine_entry_origin(
             &self.machine_state_watch_rx.borrow(),
@@ -10201,13 +10265,27 @@ impl MobHandle {
                 .member_binding_fold
                 .read(store.as_ref(), self.mob_id())
                 .await?;
-            let (generation, legacy_roster_member) = match history.last_binding(identity) {
-                Some(binding) => (
+            let observation = history.last_binding(identity).map(|binding| {
+                (
                     binding.generation(),
                     super::identity_entry::legacy_roster_member(binding),
-                ),
-                // No incarnation since the latest mob reset: MobMachine
-                // answers from its own seat.
+                )
+            });
+            #[cfg(test)]
+            let observation = legacy_observation_hold::observed(identity, observation);
+            let (generation, legacy_roster_member) = match observation {
+                Some(observation) => observation,
+                // No incarnation of the identity since the latest mob reset
+                // in the history while MobMachine seats one: the history has
+                // not caught up with the seat yet, so it is observed again.
+                None if super::identity_entry::machine_seats(
+                    &self.machine_state_watch_rx.borrow(),
+                    identity,
+                ) =>
+                {
+                    continue;
+                }
+                // No member holds the identity: MobMachine answers so.
                 None => (crate::ids::Generation::INITIAL, false),
             };
             let verdict = self
@@ -10222,10 +10300,10 @@ impl MobHandle {
                 return Ok(answer);
             }
         }
-        Err(MobError::MobMachineRejected {
-            context: "adopt_legacy_identity_entry",
-            reason: format!(
-                "the incarnation of '{identity}' changed each time its spawn row was observed"
+        Err(MobError::LifecycleOperationPending {
+            intent: format!(
+                "legacy identity entry adoption of member {identity}: its incarnation changed \
+                 each time its spawn row was observed"
             ),
         })
     }
@@ -14278,6 +14356,9 @@ impl MobHandle {
         spec: SpawnMemberSpec,
     ) -> Result<EnsureMemberOutcome, MobError> {
         let identity = spec.identity.clone();
+        if spec.entry_custody {
+            return Err(worker_reconcile_refuses_entry_custody(&identity));
+        }
         // MobMachine owns the spawn-vs-retain decision: `EnsureMember` emits
         // `MemberSpawnRequired` (member absent) or `MemberRetainRequired`
         // (member already present). The handle mirrors the emitted effect.
@@ -14383,6 +14464,11 @@ impl MobHandle {
         desired: Vec<SpawnMemberSpec>,
         options: ReconcileOptions,
     ) -> Result<ReconcileReport, MobError> {
+        // The worker reconcile spawns workers only: a spec that acts for an
+        // identity entry is refused before anything is reconciled.
+        if let Some(spec) = desired.iter().find(|spec| spec.entry_custody) {
+            return Err(worker_reconcile_refuses_entry_custody(&spec.identity));
+        }
         // MobMachine owns the membership decision: `ReconcileRunning` recomputes
         // `members_to_spawn`/`members_to_retire`/`desired_members` from its own
         // roster. The handle reads those machine-owned sets from the returned
@@ -19331,8 +19417,29 @@ impl MobHandle {
         &self,
         required: mob_dsl::ControlScope,
     ) -> Result<(), MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::AdmitControlScope { required, reply_tx })
-            .await?
+        self.send_actor_command(|reply_tx| MobCommand::AdmitControlScope {
+            required,
+            subject: super::state::ScopeAdmissionSubject::Mob,
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// [`Self::admit_control_scope`] for an operation addressed to
+    /// `subject`: chokepoint (a) applies the lane rules the operation itself
+    /// meets (an agent never acts on an identity entry's member, and never
+    /// runs a host-only verb) before the caller does anything.
+    async fn admit_control_scope_for(
+        &self,
+        required: mob_dsl::ControlScope,
+        subject: super::state::ScopeAdmissionSubject,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::AdmitControlScope {
+            required,
+            subject,
+            reply_tx,
+        })
+        .await?
     }
 
     /// Ask the actor to derive the exact current placed-residency set from its

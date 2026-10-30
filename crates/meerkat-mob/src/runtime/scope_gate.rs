@@ -47,6 +47,18 @@ pub(super) enum ScopeAdmission {
     Denied,
 }
 
+/// How the agent lane's own rules answer a command
+/// ([`MobCommand::agent_lane_admission`]).
+pub(super) enum AgentLaneAdmission<'a> {
+    /// The command addresses no member the rules name: admitted.
+    Unaddressed,
+    /// A member command addressed to these members: refused when one of
+    /// them is an identity entry (MobMachine's agent-lane member admission).
+    Members(Vec<&'a crate::ids::AgentIdentity>),
+    /// A host verb the agent lane never runs: refused.
+    HostOnly,
+}
+
 /// One wall-clock read per enforcement DECISION (DEC-P5P-6): UNIX epoch ms,
 /// read at the seam and passed to `ResolvedControlPolicy::resolve` as data.
 /// Saturates to u64::MAX on a pre-epoch clock: a broken clock must FAIL
@@ -385,18 +397,24 @@ impl MobCommand {
         }
     }
 
-    /// The members an agent-lane command addresses as members: the ones the
-    /// agent lane's identity-entry admission
-    /// (`ResolveAgentLaneMemberAdmission`) answers for, and an identity
+    /// How the agent lane's own rules answer this command, on the agent lane
+    /// and on the console lane acting for an agent. A member command names
+    /// the members it addresses: MobMachine's agent-lane member admission
+    /// (`ResolveAgentLaneMemberAdmission`) answers for each, and an identity
     /// entry among them refuses the command with
     /// [`MobError::IdentityMember`]. The agent lane does not retire, respawn,
     /// rotate, release, reload, cancel or wire an entry's member, nor release
-    /// its host's run-start hold. Spawns and seats are not listed: their own
+    /// its host's run-start hold; the legacy identity entry adoption is a
+    /// host verb it never runs. Spawns and seats address no member: their own
     /// admission refuses an entry's name to a request without entry custody,
-    /// and an agent-lane request never carries it. Reads and work deliveries
-    /// are not member commands. A member command added later names its
-    /// targets here.
-    pub(super) fn agent_lane_member_targets(&self) -> Vec<&crate::ids::AgentIdentity> {
+    /// and an agent-lane request never carries it. Reads, work deliveries,
+    /// wakes, live sessions, objectives and the mob's own lifecycle address
+    /// no member either. Exhaustive (no wildcard), as
+    /// [`Self::required_control_scope`] is, so a new command is classified
+    /// here too.
+    pub(super) fn agent_lane_admission(&self) -> AgentLaneAdmission<'_> {
+        use super::handle::PeerTarget;
+        use super::state::ScopeAdmissionSubject;
         match self {
             Self::Retire { agent_identity, .. }
             | Self::Respawn { agent_identity, .. }
@@ -405,21 +423,202 @@ impl MobCommand {
             | Self::ReleaseMemberRunStarts { agent_identity, .. }
             | Self::ForceCancel { agent_identity, .. }
             | Self::HardCancelMember { agent_identity, .. }
-            | Self::StopMemberRun { agent_identity, .. }
-            | Self::AdoptLegacyIdentityEntry { agent_identity, .. } => vec![agent_identity],
-            Self::PlanMemberRotation { spec, .. } => vec![&spec.identity],
-            Self::StartMemberRotation { candidate, .. } => vec![&candidate.agent_identity],
-            Self::Wire { local, target, .. } | Self::Unwire { local, target, .. } => match target {
-                super::handle::PeerTarget::Local(peer) => vec![local, peer],
-                super::handle::PeerTarget::ExternalName(_)
-                | super::handle::PeerTarget::ExternalBinding(_)
-                | super::handle::PeerTarget::External(_) => vec![local],
+            | Self::StopMemberRun { agent_identity, .. } => {
+                AgentLaneAdmission::Members(vec![agent_identity])
+            }
+            Self::CancelAllWork { runtime_id, .. } => {
+                AgentLaneAdmission::Members(vec![&runtime_id.identity])
+            }
+            Self::PlanMemberRotation { spec, .. } => AgentLaneAdmission::Members(vec![&spec.identity]),
+            Self::StartMemberRotation { candidate, .. } => {
+                AgentLaneAdmission::Members(vec![&candidate.agent_identity])
+            }
+            Self::Wire { local, target, .. } | Self::Unwire { local, target, .. } => {
+                AgentLaneAdmission::Members(match target {
+                    PeerTarget::Local(peer) => vec![local, peer],
+                    PeerTarget::ExternalName(_)
+                    | PeerTarget::ExternalBinding(_)
+                    | PeerTarget::External(_) => vec![local],
+                })
+            }
+            Self::WireMembersBatch { edges, .. } => AgentLaneAdmission::Members(
+                edges
+                    .iter()
+                    .flat_map(|(local, peer)| [local, peer])
+                    .collect(),
+            ),
+            Self::AdmitControlScope { subject, .. } => match subject {
+                ScopeAdmissionSubject::Mob => AgentLaneAdmission::Unaddressed,
+                ScopeAdmissionSubject::Member(member) => AgentLaneAdmission::Members(vec![member]),
+                ScopeAdmissionSubject::LegacyAdoption(_) => AgentLaneAdmission::HostOnly,
             },
-            Self::WireMembersBatch { edges, .. } => edges
-                .iter()
-                .flat_map(|(local, peer)| [local, peer])
-                .collect(),
-            _ => Vec::new(),
+            Self::AdoptLegacyIdentityEntry { .. } => AgentLaneAdmission::HostOnly,
+
+            // Spawns, seats, work, flows, objectives and forked participants.
+            Self::Spawn { .. }
+            | Self::SubmitWork { .. }
+            | Self::SendPeerMessage { .. }
+            | Self::PreviewRunFlowAdmission { .. }
+            | Self::RunFlow { .. }
+            | Self::ConcludeObjective { .. }
+            | Self::BindObjectiveOwner { .. }
+            | Self::CreateForkedParticipant { .. }
+            | Self::AttachForkedParticipant { .. }
+            | Self::SpawnAttachedForkedParticipant { .. }
+            | Self::PlanDormantSeats { .. }
+            | Self::CommitDormantSeats { .. }
+            | Self::CancelFlow { .. }
+            | Self::RevokeForkedParticipant { .. }
+            | Self::ReleaseForkedParticipant { .. }
+            // Reads and live sessions.
+            | Self::MemberHistory { .. }
+            | Self::MemberLiveOpen { .. }
+            | Self::MemberLiveClose { .. }
+            | Self::MemberLiveStatus { .. }
+            | Self::MemberLiveControl { .. }
+            // The mob's own lifecycle, which the principal's grants gate.
+            | Self::RetireAll { .. }
+            | Self::Stop { .. }
+            | Self::CloseIfIdle { .. }
+            | Self::CloseAdmission { .. }
+            | Self::ResumeLifecycle { .. }
+            | Self::Complete { .. }
+            | Self::Destroy { .. }
+            | Self::Reset { .. }
+            // Identity intents (host adoption), which their own requests gate.
+            | Self::AdoptMemberIdentityDeclaration { .. }
+            | Self::ApplyMemberToolDeclaration { .. }
+            | Self::ResolveIdentityConvergenceBlock { .. }
+            | Self::DriveRouteInstalls { .. }
+            | Self::DeclareMemberOutboundTaint { .. }
+            | Self::BindHost { .. }
+            | Self::IssueHostBindingDescriptor { .. }
+            | Self::RevokeHost { .. }
+            | Self::RotateSupervisor { .. }
+            | Self::PollEvents { .. }
+            | Self::ReplayAllEvents { .. }
+            | Self::FlowStatus { .. }
+            | Self::ProjectMemberStatus { .. }
+            | Self::ProjectMemberList { .. }
+            | Self::GetIdentityIntent { .. }
+            | Self::GetIdentityConvergenceStatus { .. }
+            | Self::MemberMachineProjection { .. }
+            | Self::QueryPhase { .. }
+            | Self::GrantScopes { .. }
+            | Self::RevokeScopes { .. }
+            | Self::Grants { .. }
+            // Internal and machine-authority plumbing.
+            | Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
+            | Self::MemberTurnAdmissionSettled { .. }
+            | Self::SpawnActivationStageSettled { .. }
+            | Self::SpawnCleanupSettled { .. }
+            | Self::PendingSpawnAnchorSettled { .. }
+            | Self::PolicySpawnSettled { .. }
+            | Self::ReviveMemberLiveMaterialization { .. }
+            | Self::WakeMember { .. }
+            | Self::MemberWakeTimedOut { .. }
+            | Self::RetryOwedMemberWake { .. }
+            | Self::RepairOwedEdge { .. }
+            | Self::StartupMemberRecovered { .. }
+            | Self::ResumeLifecycleReadinessResolved { .. }
+            | Self::ResumeLifecyclePreparationResolved { .. }
+            | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
+            | Self::ResumeLifecycleMemberObserved { .. }
+            | Self::ResumeLifecycleMemberReady { .. }
+            | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberReadinessResolved { .. }
+            | Self::ResumeLifecycleMemberCleanupHeld { .. }
+            | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleBootMemberSettled { .. }
+            | Self::ResumeLifecycleBootMembersPrepared { .. }
+            | Self::ResumeLifecycleRollbackStep { .. }
+            | Self::ResumeLifecycleRollbackFinalized { .. }
+            | Self::ResumePostCommitMemberCompleted { .. }
+            | Self::CompleteAttachedForkedParticipantSpawn { .. }
+            | Self::CompleteHostForkedParticipantSpawn { .. }
+            | Self::RevivePlacedMember { .. }
+            | Self::HostStatusPollCompleted { .. }
+            | Self::HostRuntimeIncarnationObserved { .. }
+            | Self::HostOrphanReleaseCompleted { .. }
+            | Self::PlacedBehaviorCompleted { .. }
+            | Self::ProjectMemberStatusObserved { .. }
+            | Self::CommitFlowRunCommand { .. }
+            | Self::CommitFlowTerminalization { .. }
+            | Self::CommitFlowFrameStorePlan { .. }
+            | Self::ProjectMachineInput { .. }
+            | Self::ApplyMachineInputEffects { .. }
+            | Self::ValidateCommandAuthority { .. }
+            | Self::PruneStaleMemberOperatorRequests { .. }
+            | Self::ReserveRemoteTurnObligation { .. }
+            | Self::CommitRemoteTurnReceipt { .. }
+            | Self::CloseRemoteTurnAfterTrackedCancel { .. }
+            | Self::EnsureRemoteTurnRecord { .. }
+            | Self::FinalizeRemoteTurnPrivacyCleanup { .. }
+            | Self::ConvergeRecoveredFlowRun { .. }
+            | Self::ResolveRemoteTurnOutcome { .. }
+            | Self::AcknowledgeRemoteTurnOutcome { .. }
+            | Self::RequestPlacedCompletionCancellation { .. }
+            | Self::ResolvePlacedCompletionOutcome { .. }
+            | Self::ClosePlacedCompletionOutcome { .. }
+            | Self::AcknowledgePlacedCompletionOutcome { .. }
+            | Self::ResolvePlacedKickoffOutcome { .. }
+            | Self::ResolvePlacedKickoffCancelled { .. }
+            | Self::AcknowledgePlacedKickoffOutcome { .. }
+            | Self::RejectPlacedKickoffBeforeAdmission { .. }
+            | Self::PreviewMachineInput { .. }
+            | Self::QueryMachineState { .. }
+            | Self::ApplyExternalPeerReciprocalTrust { .. }
+            | Self::ProjectMachineSignal { .. }
+            | Self::RecordMissingMemberBridgeSession { .. }
+            | Self::FlowFinished { .. }
+            | Self::FlowCanceledCleanup { .. }
+            | Self::StartupKickoffSnapshot { .. }
+            | Self::EnsureMemberEventPump { .. }
+            | Self::EnsureMemberEventTap { .. }
+            | Self::RecordOperatorActionProvenance { .. }
+            | Self::SetSpawnPolicy { .. }
+            | Self::Shutdown { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(feature = "openai-live")]
+            Self::StartLiveBridgeOperation { .. }
+            | Self::ValidateLiveBridgeMemberEligibility { .. }
+            | Self::ValidateLiveDurableSourceAvailability { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. }
+            | Self::ResumeTopologyCompleted { .. }
+            | Self::ResumeTopologyEffectHeld { .. }
+            | Self::DrainRunsSnapshot { .. }
+            | Self::KickoffOutcomeResolved { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(any(test, feature = "test-support"))]
+            Self::CrashStopPreservingDurableWorkForTest { .. }
+            | Self::RebindMemberSessionForTest { .. }
+            | Self::SpawnHeldLiveMutationForTest { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(test)]
+            Self::AuthorizeMemberTrustCleanupForTest { .. }
+            | Self::StagePendingSpawnForRetireTest { .. }
+            | Self::FlowTrackerCounts { .. }
+            | Self::OrchestratorSnapshot { .. }
+            | Self::LifecycleSnapshot { .. }
+            | Self::LifecycleNotificationBurst { .. }
+            | Self::ParkActorForObservationTest { .. }
+            | Self::QueueRoutedEffectForTest { .. }
+            | Self::WakeMemberFromEffectForTest { .. }
+            | Self::SpawnLiveMutationAwaitingActorForTest { .. }
+            | Self::HonourCompletionForTest { .. }
+            | Self::SpawnLiveMutationSendingCompletionForTest { .. }
+            | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
+            | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
+            | Self::MemberStatusLaneProbe { .. }
+            | Self::DslT2Snapshot { .. } => AgentLaneAdmission::Unaddressed,
         }
     }
 

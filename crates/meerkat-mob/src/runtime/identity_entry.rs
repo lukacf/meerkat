@@ -36,6 +36,7 @@ use std::ops::Bound;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
+use crate::MobError;
 use crate::event::{MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, Generation, MobId, ProfileName};
 use crate::machines::mob_machine as mob_dsl;
@@ -50,6 +51,11 @@ pub const IDENTITY_ENTRY_PAGE_MAX: usize = 256;
 pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 
 /// How an identity became an identity entry.
+///
+/// The handle's entry reads and the journal's rows answer with this type.
+/// MobMachine's own state holds the generated machine enum of the same name
+/// and variants (`machines::mob_machine::IdentityEntryOrigin`); this type is
+/// its public projection, which a new machine variant extends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -309,40 +315,63 @@ pub struct MemberLifecyclePage {
 // Reads over the published machine state
 // ---------------------------------------------------------------------------
 
+/// Where `identity`'s member stands, or `None` when no member holds it. A
+/// seated member always has a generation, a profile and a runtime mode, and
+/// a bound session parses (MobMachine's own invariants): a missing or
+/// malformed fact is a defect, answered as one, never filled in.
 fn seated_member(
     state: &mob_dsl::MobMachineState,
     identity: &mob_dsl::AgentIdentity,
-) -> Option<EntryStanding> {
-    let runtime_id = state.identity_to_runtime.get(identity)?;
+) -> Result<Option<EntryStanding>, MobError> {
+    let Some(runtime_id) = state.identity_to_runtime.get(identity) else {
+        return Ok(None);
+    };
+    let missing = |fact: &str| {
+        MobError::Internal(format!(
+            "seated member '{}' holds no {fact} in the machine state",
+            identity.0
+        ))
+    };
     let generation = state
         .identity_runtime_generations
         .get(identity)
-        .map_or(Generation::INITIAL, |generation| {
-            Generation::new(generation.0)
-        });
+        .map(|generation| Generation::new(generation.0))
+        .ok_or_else(|| missing("generation"))?;
     let session_id = state
         .member_session_bindings
         .get(identity)
-        .and_then(|session| SessionId::parse(&session.0).ok());
-    let profile = state.member_profile_names.get(identity).map_or_else(
-        || ProfileName::from(""),
-        |profile| ProfileName::from(profile.as_str()),
-    );
-    let runtime_mode = state.member_runtime_modes.get(identity).copied().map_or(
-        crate::MobRuntimeMode::AutonomousHost,
-        crate::MobRuntimeMode::from,
-    );
+        .map(|session| SessionId::parse(&session.0))
+        .transpose()
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "seated member '{}' holds an invalid session binding: {error}",
+                identity.0
+            ))
+        })?;
+    let profile = state
+        .member_profile_names
+        .get(identity)
+        .map(|profile| ProfileName::from(profile.as_str()))
+        .ok_or_else(|| missing("profile"))?;
+    let runtime_mode = state
+        .member_runtime_modes
+        .get(identity)
+        .copied()
+        .map(crate::MobRuntimeMode::from)
+        .ok_or_else(|| missing("runtime mode"))?;
     let member = SeatedMember {
         generation,
         session_id,
         profile,
         runtime_mode,
     };
-    if state.member_state_markers.get(runtime_id) == Some(&mob_dsl::MobMemberState::Retiring) {
-        Some(EntryStanding::Retiring(member))
-    } else {
-        Some(EntryStanding::Seated(member))
-    }
+    Ok(Some(
+        if state.member_state_markers.get(runtime_id) == Some(&mob_dsl::MobMemberState::Retiring) {
+            EntryStanding::Retiring(member)
+        } else {
+            EntryStanding::Seated(member)
+        },
+    ))
 }
 
 fn broken_fact(
@@ -362,11 +391,17 @@ fn entry_view(
     state: &mob_dsl::MobMachineState,
     identity: &mob_dsl::AgentIdentity,
     origin: mob_dsl::IdentityEntryOrigin,
-) -> Option<IdentityEntryView> {
-    // Every entry is seated (entry_is_seated_or_has_an_unseated_cause); an
-    // entry without a member would be a machine defect, and is not shown.
-    let standing = seated_member(state, identity)?;
-    Some(IdentityEntryView {
+) -> Result<IdentityEntryView, MobError> {
+    // Every entry is seated (entry_is_seated_or_has_an_unseated_cause): an
+    // entry without a member is a machine defect, answered as one, never
+    // as no entry.
+    let standing = seated_member(state, identity)?.ok_or_else(|| {
+        MobError::Internal(format!(
+            "identity entry '{}' has no seated member in the machine state",
+            identity.0
+        ))
+    })?;
+    Ok(IdentityEntryView {
         identity: AgentIdentity::from(identity.0.as_str()),
         origin: IdentityEntryOrigin::from_machine(origin),
         standing,
@@ -376,23 +411,32 @@ fn entry_view(
     })
 }
 
+/// Whether a member holds `identity` in one published machine state.
+pub(crate) fn machine_seats(state: &mob_dsl::MobMachineState, identity: &AgentIdentity) -> bool {
+    state
+        .identity_to_runtime
+        .contains_key(&mob_dsl::AgentIdentity::from_domain(identity))
+}
+
 /// [`super::MobHandle::identity_entry`] over one published machine state.
 pub(crate) fn identity_entry_read(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
-) -> IdentityEntryRead {
+) -> Result<IdentityEntryRead, MobError> {
     let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-    if let Some(origin) = state.identity_entry_origins.get(&dsl_identity)
-        && let Some(view) = entry_view(state, &dsl_identity, *origin)
-    {
-        return IdentityEntryRead::Entry(view);
+    if let Some(origin) = state.identity_entry_origins.get(&dsl_identity) {
+        return Ok(IdentityEntryRead::Entry(entry_view(
+            state,
+            &dsl_identity,
+            *origin,
+        )?));
     }
-    IdentityEntryRead::NotAnEntry {
-        worker: seated_member(state, &dsl_identity).map(|standing| WorkerMember {
+    Ok(IdentityEntryRead::NotAnEntry {
+        worker: seated_member(state, &dsl_identity)?.map(|standing| WorkerMember {
             standing,
             broken: broken_fact(state, &dsl_identity),
         }),
-    }
+    })
 }
 
 /// [`super::MobHandle::identity_entries`] over one published machine state.
@@ -400,9 +444,9 @@ pub(crate) fn identity_entry_page(
     state: &mob_dsl::MobMachineState,
     after: Option<&AgentIdentity>,
     limit: usize,
-) -> IdentityEntryPage {
+) -> Result<IdentityEntryPage, MobError> {
     let limit = limit.clamp(1, IDENTITY_ENTRY_PAGE_MAX);
-    let range = match after {
+    let mut range = match after {
         Some(after) => state.identity_entry_origins.range((
             Bound::Excluded(mob_dsl::AgentIdentity::from_domain(after)),
             Bound::Unbounded,
@@ -411,23 +455,25 @@ pub(crate) fn identity_entry_page(
             .identity_entry_origins
             .range::<mob_dsl::AgentIdentity, _>(..),
     };
-    let mut remaining = range.filter_map(|(identity, origin)| entry_view(state, identity, *origin));
-    let entries: Vec<IdentityEntryView> = remaining.by_ref().take(limit).collect();
-    let next = if remaining.next().is_some() {
+    let mut entries = Vec::new();
+    for (identity, origin) in range.by_ref().take(limit) {
+        entries.push(entry_view(state, identity, *origin)?);
+    }
+    let next = if range.next().is_some() {
         entries.last().map(|entry| entry.identity.clone())
     } else {
         None
     };
-    IdentityEntryPage { entries, next }
+    Ok(IdentityEntryPage { entries, next })
 }
 
 /// [`super::MobHandle::identity_census`] over one published machine state.
-pub(crate) fn identity_census(state: &mob_dsl::MobMachineState) -> IdentityCensus {
+pub(crate) fn identity_census(
+    state: &mob_dsl::MobMachineState,
+) -> Result<IdentityCensus, MobError> {
     let mut census = IdentityCensus::default();
     for (identity, origin) in &state.identity_entry_origins {
-        let Some(view) = entry_view(state, identity, *origin) else {
-            continue;
-        };
+        let view = entry_view(state, identity, *origin)?;
         match view.origin {
             IdentityEntryOrigin::Declared => census.declared += 1,
         }
@@ -445,7 +491,7 @@ pub(crate) fn identity_census(state: &mob_dsl::MobMachineState) -> IdentityCensu
             census.rotation_in_flight += 1;
         }
     }
-    census
+    Ok(census)
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +729,8 @@ mod tests {
         }
     }
 
+    /// Seat `name` as MobMachine seats a member (its runtime, generation,
+    /// profile and runtime mode), an identity entry when `entry`.
     fn seat(state: &mut mob_dsl::MobMachineState, name: &str, entry: bool) {
         let identity = mob_dsl::AgentIdentity::from(name);
         state.identity_to_runtime.insert(
@@ -692,6 +740,13 @@ mod tests {
         state
             .identity_runtime_generations
             .insert(identity.clone(), mob_dsl::Generation(0));
+        state
+            .member_profile_names
+            .insert(identity.clone(), "worker".to_string());
+        state.member_runtime_modes.insert(
+            identity.clone(),
+            mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
+        );
         if entry {
             state
                 .identity_entry_origins
@@ -709,7 +764,7 @@ mod tests {
             seat(&mut state, name, true);
         }
         seat(&mut state, "worker", false);
-        let first = identity_entry_page(&state, None, 2);
+        let first = identity_entry_page(&state, None, 2).expect("the first page");
         assert_eq!(
             first
                 .entries
@@ -719,25 +774,65 @@ mod tests {
             vec!["entry-a", "entry-b"]
         );
         assert_eq!(first.next, Some(AgentIdentity::from("entry-b")));
-        let second = identity_entry_page(&state, first.next.as_ref(), 2);
+        let second = identity_entry_page(&state, first.next.as_ref(), 2).expect("the second page");
         assert_eq!(second.entries.len(), 1);
         assert_eq!(second.entries[0].identity, AgentIdentity::from("entry-c"));
         assert_eq!(second.next, None);
         assert_eq!(
-            identity_entry_page(&state, None, 0).entries.len(),
+            identity_entry_page(&state, None, 0)
+                .expect("a page")
+                .entries
+                .len(),
             1,
             "a zero limit reads one entry"
         );
-        let census = identity_census(&state);
+        let census = identity_census(&state).expect("the census");
         assert_eq!((census.declared, census.seated, census.retiring), (3, 3, 0));
         assert!(matches!(
             identity_entry_read(&state, &AgentIdentity::from("worker")),
-            IdentityEntryRead::NotAnEntry { worker: Some(_) }
+            Ok(IdentityEntryRead::NotAnEntry { worker: Some(_) })
         ));
         assert!(matches!(
             identity_entry_read(&state, &AgentIdentity::from("nobody")),
-            IdentityEntryRead::NotAnEntry { worker: None }
+            Ok(IdentityEntryRead::NotAnEntry { worker: None })
         ));
+    }
+
+    /// A machine fact the reads need that is missing is a defect, answered
+    /// as one: an entry with no seated member is not read as no entry, and a
+    /// seated member's missing profile or runtime mode is not filled in.
+    #[test]
+    fn the_entry_reads_fill_in_no_missing_machine_fact() {
+        let mut memberless = mob_dsl::MobMachineState::default();
+        memberless.identity_entry_origins.insert(
+            mob_dsl::AgentIdentity::from("memberless"),
+            mob_dsl::IdentityEntryOrigin::Declared,
+        );
+        for read in [
+            identity_entry_read(&memberless, &AgentIdentity::from("memberless")).map(|_| ()),
+            identity_entry_page(&memberless, None, IDENTITY_ENTRY_PAGE_MAX).map(|_| ()),
+            identity_census(&memberless).map(|_| ()),
+        ] {
+            assert!(matches!(read, Err(MobError::Internal(_))), "{read:?}");
+        }
+
+        for fact in ["profile", "runtime mode", "generation"] {
+            let mut state = mob_dsl::MobMachineState::default();
+            seat(&mut state, "entry", true);
+            seat(&mut state, "worker", false);
+            match fact {
+                "profile" => state.member_profile_names.clear(),
+                "runtime mode" => state.member_runtime_modes.clear(),
+                _ => state.identity_runtime_generations.clear(),
+            }
+            for name in ["entry", "worker"] {
+                let read = identity_entry_read(&state, &AgentIdentity::from(name));
+                assert!(
+                    matches!(&read, Err(MobError::Internal(reason)) if reason.contains(fact)),
+                    "{name} without its {fact}: {read:?}"
+                );
+            }
+        }
     }
 
     /// The lifecycle page keeps the mob's member lifecycle facts in journal

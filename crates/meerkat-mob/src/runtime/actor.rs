@@ -6227,6 +6227,14 @@ struct PreparedDslTransition {
     transition: mob_dsl::MobMachineTransition,
 }
 
+/// One seat spec's probes from its chunk's one fork
+/// ([`MobActor::probe_seat_chunk`]): its next generation and MobMachine's
+/// member-admission verdict for its entry custody.
+struct SeatChunkProbe {
+    generation: Result<crate::ids::Generation, MobError>,
+    admission: Result<mob_dsl::MemberAdmissionVerdictKind, MobError>,
+}
+
 pub(super) fn placed_kickoff_snapshot_for_structural_event(
     state: &mob_dsl::MobMachineState,
     agent_identity: &AgentIdentity,
@@ -17752,8 +17760,16 @@ impl MobActor {
             },
             "probe_member_admission",
         )?;
+        Self::member_admission_verdict_from_effects(&prepared.effects)
+    }
+
+    /// The one member-admission verdict a `ProbeMemberAdmission` transition
+    /// emitted.
+    fn member_admission_verdict_from_effects(
+        effects: &[mob_dsl::MobMachineEffect],
+    ) -> Result<mob_dsl::MemberAdmissionVerdictKind, MobError> {
         let mut verdict = None;
-        for effect in &prepared.effects {
+        for effect in effects {
             if let mob_dsl::MobMachineEffect::MemberAdmissionProbed { verdict: kind, .. } = effect {
                 if verdict.replace(*kind).is_some() {
                     return Err(MobError::Internal(
@@ -17799,25 +17815,28 @@ impl MobActor {
         Self::respawn_generation_from_effects(&prepared.effects)
     }
 
-    /// [`Self::mint_spawn_generation`] for each of `identities` (a seat
-    /// chunk's), on ONE fork of the authority instead of a prepared
-    /// authority per identity. `ComputeRespawnGeneration` is a pure probe:
-    /// it changes no state, and the actor's state is fixed while it plans,
+    /// A seat chunk's probes, on ONE fork of the authority instead of a
+    /// prepared authority per identity: for each `(identity, entry_custody)`,
+    /// its next generation ([`Self::mint_spawn_generation`]'s
+    /// `ComputeRespawnGeneration`) and MobMachine's member-admission verdict
+    /// for its entry custody (`ProbeMemberAdmission`). Both are pure probes:
+    /// they change no state, and the actor's state is fixed while it plans,
     /// so every answer, a refusal included, is the one a probe of its own
     /// would give. A prepared authority per identity copied the whole
     /// machine state three times per seat.
-    fn mint_spawn_generations<'a>(
+    fn probe_seat_chunk<'a>(
         &self,
-        identities: impl IntoIterator<Item = &'a AgentIdentity>,
-    ) -> BTreeMap<AgentIdentity, Result<crate::ids::Generation, MobError>> {
+        specs: impl IntoIterator<Item = (&'a AgentIdentity, bool)>,
+    ) -> BTreeMap<AgentIdentity, SeatChunkProbe> {
         let mut probe = self.dsl_authority.fork();
-        identities
+        specs
             .into_iter()
-            .map(|agent_identity| {
-                let minted = mob_dsl::MobMachineMutator::apply(
+            .map(|(agent_identity, entry_custody)| {
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+                let generation = mob_dsl::MobMachineMutator::apply(
                     &mut probe,
                     mob_dsl::MobMachineInput::ComputeRespawnGeneration {
-                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_identity: dsl_identity.clone(),
                     },
                 )
                 .map_err(|error| {
@@ -17826,7 +17845,28 @@ impl MobActor {
                     ))
                 })
                 .and_then(|transition| Self::respawn_generation_from_effects(transition.effects()));
-                (agent_identity.clone(), minted)
+                let admission = mob_dsl::MobMachineMutator::apply(
+                    &mut probe,
+                    mob_dsl::MobMachineInput::ProbeMemberAdmission {
+                        agent_identity: dsl_identity,
+                        entry_custody,
+                    },
+                )
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "DSL authority prepared batch (probe_member_admission) rejected: {error}"
+                    ))
+                })
+                .and_then(|transition| {
+                    Self::member_admission_verdict_from_effects(transition.effects())
+                });
+                (
+                    agent_identity.clone(),
+                    SeatChunkProbe {
+                        generation,
+                        admission,
+                    },
+                )
             })
             .collect()
     }
@@ -24115,18 +24155,17 @@ impl MobActor {
         match authority.kind() {
             // §15.2: the agent authority lane's own gates (machine-composed
             // MobToolAuthorityContext admission) already ran; principal
-            // grants neither gate nor are satisfied here. The agent lane does
-            // not act on an identity entry as a member: MobMachine refuses a
-            // member command addressed to one.
-            CommandAuthorityKind::AgentLane => {
-                match self.agent_lane_identity_member_refusal(&cmd) {
-                    Ok(None) => ScopeAdmission::Admitted(cmd),
-                    Ok(Some(error)) | Err(error) => {
-                        cmd.reject_with_error(error);
-                        ScopeAdmission::Denied
-                    }
+            // grants neither gate nor are satisfied here. The agent lane's
+            // own rules still apply: it does not act on an identity entry
+            // as a member (MobMachine refuses a member command addressed to
+            // one) and runs no host-only verb.
+            CommandAuthorityKind::AgentLane => match self.agent_lane_refusal(&cmd, required) {
+                Ok(None) => ScopeAdmission::Admitted(cmd),
+                Ok(Some(error)) | Err(error) => {
+                    cmd.reject_with_error(error);
+                    ScopeAdmission::Denied
                 }
-            }
+            },
             // An operator-class command minted without authority is a wiring
             // fault: fail closed at runtime, loud in test lanes (ADJ-P5-15).
             // Any legitimate case found later must be explicitly
@@ -24165,6 +24204,17 @@ impl MobActor {
                     if let Err(denial) = policy.require(required) {
                         cmd.reject_scope_denied(denial);
                         return ScopeAdmission::Denied;
+                    }
+                }
+                // A principal acting for an agent (the agent mob tools)
+                // meets the agent lane's own rules too.
+                if authority.acts_for_agent() {
+                    match self.agent_lane_refusal(&cmd, required) {
+                        Ok(None) => {}
+                        Ok(Some(error)) | Err(error) => {
+                            cmd.reject_with_error(error);
+                            return ScopeAdmission::Denied;
+                        }
                     }
                 }
                 ScopeAdmission::Admitted(cmd)

@@ -1979,7 +1979,6 @@ mod tests {
             attempt_count: 0,
         })
         .expect("a refused resume ends it");
-        drop(apply);
         assert!(
             authority.state().input_controller_holds.is_empty(),
             "an input that ends drops its hold"

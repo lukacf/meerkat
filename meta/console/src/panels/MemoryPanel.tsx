@@ -892,6 +892,16 @@ export interface VerdictInputs {
 
 const RECORDS_NOT_READABLE = "Your access does not include reading memory records.";
 
+/// The checks' internal names, kept for the tooltip only.
+const VERDICT_INTERNAL_NAMES: Record<VerdictTile["id"], string> = {
+  "echo-safety": "Echo safety",
+  "taint-wall": "Taint wall",
+  lattice: "Lattice",
+  recall: "Recall",
+  dreams: "Dreams",
+  "store-floor": "Store floor",
+};
+
 export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   const now = inputs.now ?? Date.now();
   const nameScope = inputs.scopeName ?? ((scope: MemoryScopeOverview) => overviewScopeName(scope));
@@ -902,22 +912,22 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   // guessing from partial data.
   tiles.push({
     id: "echo-safety",
-    label: "Echo safety",
+    label: "Repeated injections",
     status: "unverifiable",
     summary: "Not checked automatically",
     lines: [
-      "Echo safety: the same memory should not be injected into an agent again and again.",
+      "The same memory should not be injected into an agent again and again.",
       "This console cannot check it automatically. The injection history on the Knowledge tab marks repeated injections.",
     ],
     targetTab: "knowledge",
   });
   tiles.push({
     id: "taint-wall",
-    label: "Taint wall",
+    label: "Untrusted sessions",
     status: inputs.recordsDenied ? "no-grant" : "unverifiable",
     summary: inputs.recordsDenied ? "No access to records" : "Not checked automatically",
     lines: [
-      "Taint wall: memory written in an untrusted session stays quarantined.",
+      "Memory written in an untrusted session stays quarantined.",
       inputs.recordsDenied
         ? RECORDS_NOT_READABLE
         : "This console cannot check it automatically. The Pipeline tab marks proposals from tainted sessions.",
@@ -926,11 +936,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   });
 
   const latticeScope =
-    "Lattice: records written by agents stay at observed trust or below, and replacement chains have no loops or gaps.";
+    "Records written by agents stay at observed trust or below, and replacement chains have no loops or gaps.";
   if (inputs.recordsDenied) {
     tiles.push({
       id: "lattice",
-      label: "Lattice",
+      label: "Trust rules",
       status: "no-grant",
       summary: "No access to records",
       lines: [latticeScope, RECORDS_NOT_READABLE],
@@ -939,7 +949,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   } else if (!inputs.lattice) {
     tiles.push({
       id: "lattice",
-      label: "Lattice",
+      label: "Trust rules",
       status: "unverifiable",
       summary: inputs.latticeRunning ? "Checking the records" : "Not checked yet",
       lines: [
@@ -961,7 +971,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     const coverage = walk.complete ? "" : ` in the first ${walk.checked}`;
     tiles.push({
       id: "lattice",
-      label: "Lattice",
+      label: "Trust rules",
       status: count > 0 ? "violated" : "holding",
       summary:
         count > 0
@@ -984,11 +994,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     });
   }
 
-  const recallScope = `Recall: a record injected at least ${DEAD_INJECTION_THRESHOLD} times without ever being judged useful counts as never useful; it only costs space.`;
+  const recallScope = `A record injected at least ${DEAD_INJECTION_THRESHOLD} times without ever being judged useful counts as never useful; it only costs space.`;
   if (inputs.recordsDenied) {
     tiles.push({
       id: "recall",
-      label: "Recall",
+      label: "Usefulness",
       status: "no-grant",
       summary: "No access to records",
       lines: [recallScope, RECORDS_NOT_READABLE],
@@ -1000,7 +1010,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     const loaded = inputs.records.length;
     tiles.push({
       id: "recall",
-      label: "Recall",
+      label: "Usefulness",
       status: dead.length > 0 ? "degraded" : "holding",
       summary:
         dead.length > 0
@@ -1015,11 +1025,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     });
   }
 
-  const dreamsScope = "Dreams: the memory steward's dream runs, which review, merge and tidy memory.";
+  const dreamsScope = "The memory steward's dream runs, which review, merge and tidy memory.";
   if (inputs.dreamsDenied) {
     tiles.push({
       id: "dreams",
-      label: "Dreams",
+      label: "Dream runs",
       status: "no-grant",
       summary: "No access to the dream history",
       lines: [dreamsScope, "Your access does not include the dream history."],
@@ -1028,7 +1038,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   } else if (inputs.dreams.length === 0) {
     tiles.push({
       id: "dreams",
-      label: "Dreams",
+      label: "Dream runs",
       status: "unverifiable",
       summary: "No dream has run yet",
       lines: [dreamsScope, "The audit log holds no dream run yet."],
@@ -1043,7 +1053,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     const lastRun = when ? `Last run ${when}` : "Last run time unknown";
     tiles.push({
       id: "dreams",
-      label: "Dreams",
+      label: "Dream runs",
       status: "holding",
       summary:
         quarantined > 0 ? `${lastRun}, ${plural(quarantined, "change")} quarantined` : lastRun,
@@ -1059,11 +1069,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   }
 
   const floorScope =
-    "Store floor: warns when a scope holds close to the per-scope limit of records or space.";
+    "Warns when a scope holds close to the per-scope limit of records or space.";
   if (inputs.overviewDenied) {
     tiles.push({
       id: "store-floor",
-      label: "Store floor",
+      label: "Storage limits",
       status: "no-grant",
       summary: "No access to store totals",
       lines: [floorScope, "Your access does not include the store totals."],
@@ -1072,7 +1082,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   } else if (!inputs.overview) {
     tiles.push({
       id: "store-floor",
-      label: "Store floor",
+      label: "Storage limits",
       status: "unverifiable",
       summary: "Store totals are not available",
       lines: [floorScope, "This runtime does not report store totals."],
@@ -1089,7 +1099,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     const names = floor.pressured.map((scope) => nameScope(scope));
     tiles.push({
       id: "store-floor",
-      label: "Store floor",
+      label: "Storage limits",
       status: floor.status === "ok" ? "holding" : "degraded",
       summary:
         floor.status === "ok"
@@ -1109,7 +1119,9 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     });
   }
 
-  return tiles;
+  // The headline is in plain words; the check's internal name stays
+  // available as the tooltip's last line for people who know it.
+  return tiles.map((tile) => ({ ...tile, lines: [...tile.lines, `Internal name: ${VERDICT_INTERNAL_NAMES[tile.id]}`] }));
 }
 
 

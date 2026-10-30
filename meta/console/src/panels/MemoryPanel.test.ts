@@ -528,6 +528,33 @@ test("verdict strip mounts six tiles; checks this console cannot run say so", ()
   }
 });
 
+test("check tiles lead with plain names; the internal check name is only in the tooltip", () => {
+  const tiles = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: { checked: 3, complete: true, llmCeilingViolations: [], chainViolations: [] },
+  });
+  assert.deepEqual(
+    tiles.map((tile) => tile.label),
+    ["Repeated injections", "Untrusted sessions", "Trust rules", "Usefulness", "Dream runs", "Storage limits"],
+  );
+  const internal: Record<string, string> = {
+    "echo-safety": "Echo safety",
+    "taint-wall": "Taint wall",
+    lattice: "Lattice",
+    recall: "Recall",
+    dreams: "Dreams",
+    "store-floor": "Store floor",
+  };
+  for (const tile of tiles) {
+    const name = internal[tile.id];
+    assert.ok(name, tile.id);
+    assert.doesNotMatch(`${tile.label} ${tile.summary}`, /lattice|recall|store floor|echo safety|taint wall/i, tile.id);
+    // The plain explanation leads the tooltip, without an internal-name prefix.
+    assert.ok(!tile.lines[0]?.startsWith(`${name}:`), `${tile.id}: ${tile.lines[0]}`);
+    assert.equal(tile.lines.at(-1), `Internal name: ${name}`, tile.id);
+  }
+});
+
 test("tiles whose evidence the principal cannot read render no-grant, never green", () => {
   const tiles = computeVerdictTiles({
     ...emptyVerdictInputs,

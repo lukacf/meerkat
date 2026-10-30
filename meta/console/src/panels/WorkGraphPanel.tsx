@@ -246,15 +246,18 @@ export function createWorkGraphRefreshSequencer(): { begin: () => () => boolean 
 
 const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
 
+/// What the agent on a goal does with it, in plain words; the attention
+/// mode's own name ("coordinate", "falsify") stays the tooltip.
 const MODE_WORDS: Record<string, string> = {
-  coordinate: "Coordinating",
-  pursue: "Pursuing",
-  review: "Reviewing",
-  falsify: "Testing",
-  judge: "Judging",
+  pursue: "Doing the work",
+  coordinate: "Leading the work",
+  review: "Reviewing the work",
+  falsify: "Testing the work",
+  judge: "Judging the work",
+  observe: "Watching the work",
 };
 
-/// What an attention binding does with its goal, as a verb. A missing mode
+/// What an attention binding does with its goal, in words. A missing mode
 /// is "pursue", as upstream defaults it.
 export function workGraphModeWord(mode: string | null | undefined): string {
   const key = mode || "pursue";
@@ -276,7 +279,8 @@ function nearMoment(ms: number, now: number): string {
 }
 
 /// A binding's state in words: "Active", "Paused until Fri 11:16",
-/// "Superseded". workGraphBindingStatusLabel keeps the raw form.
+/// "Replaced" (superseded by a newer binding). workGraphBindingStatusLabel
+/// keeps the raw form.
 export function workGraphBindingStateText(
   binding: WorkGraphWireBinding,
   now: number = Date.now(),
@@ -286,6 +290,7 @@ export function workGraphBindingStateText(
     const until = toEpochMs(binding.status?.until);
     return until === null ? "Paused" : `Paused until ${nearMoment(until, now)}`;
   }
+  if (state === "superseded") return "Replaced";
   return humanizeEnum(state);
 }
 
@@ -309,6 +314,17 @@ export function workGraphBindingTarget(
   const kind = target.owner_key?.kind?.trim() || "";
   const key = kind ? `${kind}:${id}` : id;
   return { name: directory?.lookup(key)?.label.trim() || stripAgentKeyPrefix(id), key };
+}
+
+/// The agent a binding rests on, named for a sentence; null for a session
+/// the roster does not know (the row says "Agent session").
+function bindingAgentName(binding: WorkGraphWireBinding | null, directory?: AgentDirectory): string | null {
+  if (!binding) return null;
+  const target = workGraphBindingTarget(binding, directory);
+  if (!target) return null;
+  const sessionId = typeof binding.target?.session_id === "string" ? binding.target.session_id.trim() : "";
+  if (sessionId && !directory?.lookup(sessionId)) return null;
+  return target.name || null;
 }
 
 /// The header summary: "9 items · 3 in progress · 1 blocked".
@@ -437,6 +453,8 @@ export function workGraphEventSentence(
   const named = titleOf(itemId) || textOf(item?.title);
   const subject = named || "A work item";
   const object = named || "a work item";
+  // The agent an attention event is about, by name, when the console knows it.
+  const agentOnGoal = bindingAgentName(attention, context.directory);
   const kind = textOf(event.kind).toLowerCase().replace(/^item_/, "");
   switch (kind) {
     case "created":
@@ -468,15 +486,18 @@ export function workGraphEventSentence(
     }
     case "evidence_added":
       return `Evidence was added to ${object}`;
+    // Attention events say which agent works toward a goal, never
+    // "attention": the agent is put on it, the goal is paused for it, the
+    // agent is taken off it.
     case "attention_created":
-      return `Attention on ${object} started`;
+      return `${agentOnGoal ?? "An agent"} was put on ${object}`;
     case "attention_paused":
-      return `Attention on ${object} was paused`;
+      return `${subject} was paused for ${agentOnGoal ?? "its agent"}`;
     case "attention_updated": {
       const state = attention?.status?.state;
-      if (state === "paused") return `Attention on ${object} was paused`;
-      if (state === "superseded" || state === "stopped") return `Attention on ${object} ended`;
-      return `Attention on ${object} was updated`;
+      if (state === "paused") return `${subject} was paused for ${agentOnGoal ?? "its agent"}`;
+      if (state === "superseded" || state === "stopped") return `${agentOnGoal ?? "An agent"} was taken off ${object}`;
+      return `${agentOnGoal ? `${agentOnGoal}'s` : "An agent's"} part in ${object} changed`;
     }
     case "execution_bound":
       return `Work on ${object} started`;
@@ -624,7 +645,9 @@ function AttentionRow({
         <span className="workgraph-binding__summary">
           <StatusDot tone={statusTone(state)} bound />
           <span className="workgraph-binding__text">
-            <span className="workgraph-binding__mode">{workGraphModeWord(binding.mode)}</span>
+            <span className="workgraph-binding__mode" title={`Attention mode: ${binding.mode || "pursue"}`}>
+              {workGraphModeWord(binding.mode)}
+            </span>
             {" · "}
             {workGraphBindingStateText(binding, now)}
             {target ? <>{" · "}<WorkGraphPerson person={target} /></> : null}
@@ -634,12 +657,12 @@ function AttentionRow({
         {pause || resume || confirm || requestClose || reassignable ? (
           <span className="workgraph-binding__actions">
             {pause ? (
-              <Button size="sm" title="Pause attention on this goal" onClick={() => onAttentionPause?.(bindingInput)}>
+              <Button size="sm" title="Pause this goal for its agent" onClick={() => onAttentionPause?.(bindingInput)}>
                 Pause
               </Button>
             ) : null}
             {resume ? (
-              <Button size="sm" title="Resume attention on this goal" onClick={() => onAttentionResume?.(bindingInput)}>
+              <Button size="sm" title="Resume this goal for its agent" onClick={() => onAttentionResume?.(bindingInput)}>
                 Resume
               </Button>
             ) : null}
@@ -928,7 +951,7 @@ export function WorkGraphPanel({
   const goalRevisionOf = (binding: WorkGraphWireBinding) => workGraphGoalRevisionOf(binding, data.items);
   const titleOf = (itemId: string) => itemById.get(itemId)?.title;
   // A binding renders with its bound item: in the goal's card, under a child
-  // row, or (item not rendered) in "Other attention".
+  // row, or (item not rendered) in "Agents on other goals".
   const bindingsByItem = new Map<string, WorkGraphWireBinding[]>();
   for (const binding of data.attention) {
     const itemId = binding.work_ref?.item_id;
@@ -1010,7 +1033,7 @@ export function WorkGraphPanel({
               />
             </PanelSection>
             {data.attention.length ? (
-              <PanelSection label="Attention" count={data.attention.length}>
+              <PanelSection label={<span title="Attention bindings">Agents on goals</span>} count={data.attention.length}>
                 {attentionList(data.attention)}
               </PanelSection>
             ) : null}
@@ -1064,7 +1087,7 @@ export function WorkGraphPanel({
               </p>
             ) : null}
             {otherAttention.length ? (
-              <PanelSection label="Other attention" count={otherAttention.length}>
+              <PanelSection label={<span title="Attention bindings">Agents on other goals</span>} count={otherAttention.length}>
                 {attentionList(otherAttention)}
               </PanelSection>
             ) : null}

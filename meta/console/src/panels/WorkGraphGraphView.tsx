@@ -25,6 +25,7 @@ import {
   layoutWorkGraph,
   workGraphEdgeMidpoint,
   workGraphEdgePath,
+  workGraphEdgeWord,
   workGraphItemOwner,
   workGraphStatusWord,
 } from "../lib/workgraph-layout";
@@ -542,7 +543,7 @@ export function WorkGraphGraphView({
                 textAnchor={label.anchor}
                 dominantBaseline="central"
               >
-                {edge.kind}
+                {workGraphEdgeWord(edge.kind)}
               </text>
             );
           })}

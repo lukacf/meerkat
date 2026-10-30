@@ -10,11 +10,27 @@ export type ButtonProps = ComponentPropsWithRef<"button"> & {
   size?: ButtonSize;
   /** A leading icon; decorative, the label or aria-label names the button. */
   icon?: ReactNode;
-  /** A square icon button; requires an aria-label. */
-  iconOnly?: boolean;
-  /** Wrap the label so a narrow pane can hide it and keep the icon. */
-  collapsible?: boolean;
-};
+} & ButtonNaming;
+
+/**
+ * A button whose visible label can be missing names itself, and the type
+ * says so: an icon-only button, or one whose label a narrow pane hides,
+ * takes a required aria-label.
+ */
+type ButtonNaming =
+  | {
+      /** A square icon button. */
+      iconOnly: true;
+      collapsible?: boolean;
+      "aria-label": string;
+    }
+  | {
+      iconOnly?: boolean;
+      /** Wrap the label so a narrow pane can hide it and keep the icon. */
+      collapsible: true;
+      "aria-label": string;
+    }
+  | { iconOnly?: false; collapsible?: false };
 
 /**
  * The one console button: outline by default, accent-filled primary, danger

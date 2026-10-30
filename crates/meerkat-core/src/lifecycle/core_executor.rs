@@ -175,13 +175,10 @@ impl CoreApplyFailureCause {
             | AgentError::HookLaunchRefused { .. } => Self::hook_runtime_failure(error.to_string()),
             // The refusal keeps its type, so the failed turn's error carries
             // it to the surface that answers the turn.
-            AgentError::ToolGrantGateRefused(_) => {
-                let cause = Self::runtime_turn(error.to_string());
-                match crate::event::AgentErrorReason::from_agent_error(error) {
-                    Some(reason) => cause.with_reason(reason),
-                    None => cause,
-                }
-            }
+            AgentError::ToolGrantGateRefused(refusal) => Self::runtime_turn(error.to_string())
+                .with_reason(crate::event::AgentErrorReason::ToolGrantGateRefused {
+                    refusal: (**refusal).clone(),
+                }),
             _ => Self::runtime_turn(error.to_string()),
         }
     }

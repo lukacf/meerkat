@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { agentDisplayTitle, agentKindLabel, canonicalConsoleIdentity, normalizeAgents } from "./agents";
+import { agentDirectoryEntry, agentDisplayTitle, agentKindLabel, canonicalConsoleIdentity, normalizeAgents } from "./agents";
 
 test("normalizeAgents preserves identity-status summary fields without invention", () => {
   const agents = normalizeAgents(
@@ -458,4 +458,18 @@ test("agentDisplayTitle keeps a display name and gives an agent without one a hu
     "X",
   );
   assert.equal(agentKindLabel({ role: "", group: "domain_agents" }), "Domain agents");
+});
+
+test("the panels' name directory names an agent the way the sidebar does", () => {
+  const unnamed = { agent_id: "router:main", member_id: "router:main", identity: "router:main", session_id: "session-1", label: "router:main", role: "router" };
+  assert.deepEqual(agentDirectoryEntry(unnamed), {
+    id: "router:main",
+    label: "Router main",
+    role: "router",
+    aliases: ["router:main", "router:main", "session-1"],
+  });
+  const generated = { agent_id: "a", member_id: "agent:01HXYZ8Q9ABCDEF", identity: "agent:01HXYZ8Q9ABCDEF", label: "agent:01HXYZ8Q9ABCDEF", role: "reviewer" };
+  assert.equal(agentDirectoryEntry(generated).label, agentDisplayTitle(generated));
+  assert.equal(agentDirectoryEntry(generated).label, "Reviewer abcdef");
+  assert.equal(agentDirectoryEntry({ ...unnamed, label: "Front Desk" }).label, "Front Desk");
 });

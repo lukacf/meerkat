@@ -78,6 +78,23 @@ describe("AgentDetailsPanel", () => {
     expect(view.queryByTestId("inspect-action:identity:coordinator:respawn") === null).toBe(true);
   });
 
+  it("names an agent without a display name the way the sidebar does", () => {
+    const unnamed = { ...agent, member_id: "router:main", identity: "router:main", agent_id: "router:main", label: "router:main", role: "router" } as ConsoleAgent;
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <AgentDetailsPanel
+          identity="router:main"
+          inspect={inspect({ identity: "router:main", display_name: undefined, role: "router" })}
+          agent={unnamed}
+          stateLabel="active"
+          actions={{}}
+        />
+      </AgentDirectoryProvider>,
+    );
+    const panel = view.getByTestId("inspect-panel:router:main");
+    expect(within(panel).getByRole("heading", { level: 2 }).textContent).toBe("Router main");
+  });
+
   it("takes health from the roster when the inspect payload carries no progress", () => {
     const stalled = {
       ...agent,

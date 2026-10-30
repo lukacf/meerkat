@@ -1,6 +1,7 @@
 import React from "react";
 import type { IdentityInspectViewState } from "@console-core";
 import type { ConsoleAgent } from "../types";
+import { agentDisplayTitle } from "../lib/agents";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import {
   AgentAvatar,
@@ -84,7 +85,10 @@ export function AgentDetailsPanel({
   children?: React.ReactNode;
 }): React.JSX.Element {
   const directory = useAgentDirectory();
-  const name = agent?.label || inspect?.display_name || agentDisplayName(identity, directory) || identity;
+  // Named the way the sidebar names the agent.
+  const name = agent
+    ? agentDisplayTitle({ ...agent, label: agent.label || inspect?.display_name || "" })
+    : inspect?.display_name || agentDisplayName(identity, directory) || identity;
   const role = inspect?.role || agent?.role;
   // The gateway's inspect payload carries no progress; the roster row does.
   const health = inspect?.progress?.health ?? agent?.progress?.health;

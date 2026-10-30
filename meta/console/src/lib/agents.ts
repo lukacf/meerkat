@@ -117,6 +117,22 @@ export function agentDisplayTitle(
   return words[0]!.toUpperCase() + words.slice(1);
 }
 
+/**
+ * An agent's entry in the panels' name directory, named the way the sidebar
+ * names it ({@link agentDisplayTitle}), so a panel and the sidebar never
+ * call the same agent two different things.
+ */
+export function agentDirectoryEntry(
+  agent: Pick<ConsoleAgent, "label" | "identity" | "member_id" | "agent_id" | "session_id" | "labels" | "role" | "group">,
+): { id: string; label: string; role?: string; aliases: (string | undefined)[] } {
+  return {
+    id: agent.identity || agent.agent_id,
+    label: agentDisplayTitle(agent),
+    role: agent.role,
+    aliases: [agent.member_id, agent.agent_id, agent.session_id],
+  };
+}
+
 /** The first well-formed last activity time among a row's sources, as an agent field. */
 function lastActivityField(...values: unknown[]): Pick<ConsoleAgent, "last_activity_ms"> {
   for (const value of values) {

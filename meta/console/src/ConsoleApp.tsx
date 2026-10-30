@@ -57,6 +57,7 @@ import {
 } from "@console-core";
 
 import {
+  agentDirectoryEntry,
   buildConsoleIdentityAliasMap,
   canonicalConsoleIdentityFromMap,
   normalizeAgents,
@@ -933,12 +934,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
   // Display names for every key an agent is known by (identity, member,
   // agent and session ids): panels show names, with the key in a tooltip.
-  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map((agent) => ({
-    id: agent.identity || agent.agent_id,
-    label: agent.label,
-    role: agent.role,
-    aliases: [agent.member_id, agent.agent_id, agent.session_id],
-  }))), [agents]);
+  // Panels name agents the way the sidebar does.
+  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {

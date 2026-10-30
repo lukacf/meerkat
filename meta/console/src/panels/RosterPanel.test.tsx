@@ -2,6 +2,7 @@ import { fireEvent, render, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConsoleAgent } from "../types";
+import { agentDirectoryEntry } from "../lib/agents";
 import { RosterPanel, rosterActivity, rosterDotTone, rosterHealthChip } from "./RosterPanel";
 import { AgentDirectoryProvider, createAgentDirectory } from "../../../packages/console-components/src/panel-kit";
 
@@ -51,7 +52,8 @@ function renderRoster(agents: ConsoleAgent[], extra: Partial<Parameters<typeof R
     onDetails: vi.fn(),
     onLifecycle: vi.fn(),
   };
-  const directory = createAgentDirectory(agents.map((entry) => ({ id: entry.identity || entry.member_id, label: entry.label })));
+  // The directory the console builds: names as the sidebar shows them.
+  const directory = createAgentDirectory(agents.map(agentDirectoryEntry));
   const view = render(
     <AgentDirectoryProvider directory={directory}>
       <RosterPanel agents={agents} canResetLifecycle {...handlers} {...extra} />
@@ -117,6 +119,22 @@ describe("RosterPanel", () => {
 
     fireEvent.click(view.getByRole("button", { name: "All agents" }));
     expect(split?.classList.contains("has-detail")).toBe(false);
+  });
+
+  it("names an agent without a display name the way the sidebar does", () => {
+    const router = agent({ member_id: "router:main", label: "router:main", role: "router" });
+    const generated = agent({ member_id: "agent:01HXYZ8Q9ABCDEF", label: "agent:01HXYZ8Q9ABCDEF", role: "reviewer" });
+    const { view } = renderRoster([router, generated, coordinator]);
+    const row = view.getByTestId("roster-row:router:main");
+    expect(row.querySelector(".cc-row__title")?.textContent).toBe("Router main");
+    expect(row.querySelector(".cc-row__title")?.getAttribute("title")).toBe("router:main");
+    expect(view.getByTestId("roster-row:agent:01HXYZ8Q9ABCDEF").querySelector(".cc-row__title")?.textContent).toBe("Reviewer abcdef");
+    fireEvent.click(row);
+    const detail = view.getByTestId("roster-detail:router:main");
+    expect(within(detail).getByRole("heading", { level: 3 }).textContent).toBe("Router main");
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "reviewer abc" } });
+    expect(view.queryByTestId("roster-row:agent:01HXYZ8Q9ABCDEF") !== null).toBe(true);
+    expect(view.queryByTestId("roster-row:router:main") === null).toBe(true);
   });
 
   it("shows peers by name and selects a known peer", () => {

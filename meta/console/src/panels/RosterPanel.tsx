@@ -1,5 +1,6 @@
 import React from "react";
 import type { ConsoleAgent } from "../types";
+import { agentDisplayTitle } from "../lib/agents";
 import { restartOffered } from "../lib/side-chat";
 import { bucketOf } from "./Sidebar";
 import {
@@ -183,7 +184,7 @@ export function RosterPanel({
     return agents.filter((agent) => {
       if (filter !== "all" && bucketOf(agent) !== filter) return false;
       if (!needle) return true;
-      const hay = `${agent.label} ${agent.role || ""} ${agent.kind || ""} ${agent.member_id} ${agent.identity || ""}`.toLowerCase();
+      const hay = `${agentDisplayTitle(agent)} ${agent.label} ${agent.role || ""} ${agent.kind || ""} ${agent.member_id} ${agent.identity || ""}`.toLowerCase();
       return hay.includes(needle);
     });
   }, [agents, query, filter]);
@@ -228,7 +229,7 @@ export function RosterPanel({
             selected={Boolean(active && agent.member_id === active.member_id)}
             onActivate={() => select(agent)}
             lead={<StatusDot tone={rosterDotTone(agent)} live={isWorking(agent) && !chip} />}
-            title={agent.label}
+            title={agentDisplayTitle(agent)}
             titleAttr={agent.identity || agent.member_id}
             subtitle={joinMeta(roleWords(agent), rosterActivity(agent)) || undefined}
             meta={
@@ -312,6 +313,7 @@ function RosterDetail({
   onLifecycle: RosterPanelProps["onLifecycle"];
   onSelectPeer: (agent: ConsoleAgent) => void;
 }) {
+  const title = agentDisplayTitle(agent);
   const chip = rosterHealthChip(agent);
   const activity = rosterActivity(agent);
   const change = lastChange(agent);
@@ -323,9 +325,9 @@ function RosterDetail({
   return (
     <div className="roster__detail" data-testid={`roster-detail:${agent.member_id}`}>
       <div className="roster__detail-head">
-        <AgentAvatar name={agent.label} size={28} />
+        <AgentAvatar name={title} size={28} />
         <div className="roster__detail-name">
-          <h3 title={identity}>{agent.label}</h3>
+          <h3 title={identity}>{title}</h3>
           <div className="roster__detail-role">{joinMeta(humanizeEnum(agent.role || agent.kind || ""), agent.group ? humanizeEnum(agent.group) : "")}</div>
         </div>
         {chip ? <Chip tone={chip.tone}>{chip.label}</Chip> : null}

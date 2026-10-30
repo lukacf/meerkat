@@ -199,7 +199,7 @@ test("signals rail surfaces blocked quarantine releases as a warning with adapte
   assert.equal(signal?.severity, "warning");
   assert.equal(
     signal?.detail,
-    "Quarantine release blocked for m-42 — matches secret pattern api_key",
+    "Quarantine release blocked for m-42 · matches secret pattern api_key",
   );
 });
 

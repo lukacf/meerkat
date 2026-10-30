@@ -358,6 +358,43 @@ them.
   `meerkat-rpc`, and the session service of `MobMcpState::new_in_memory`
   answer it.
 
+- `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
+  the runtime machine (`MeerkatMachine`) holds an identity creation scope
+  beside the mob operator scopes and answers the identity creation check
+  (see Added). `MeerkatMachineState` (meerkat-machine-schema and
+  meerkat-runtime) and the kernel `State` gain
+  `mob_operator_identity_creation_scope`. The `MeerkatMachineInput` variant
+  `RestoreMobOperatorAuthority` (meerkat-machine-schema and meerkat-runtime)
+  and the kernel `generated::meerkat::inputs` struct
+  `RestoreMobOperatorAuthority` gain the public field
+  `identity_creation_scope`, so code that builds them literally must set it
+  (an empty map keeps the previous behaviour), and a serialized kernel input
+  without the field no longer deserializes. `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime), `MeerkatMachineInputVariant`,
+  `MeerkatMachineRuntimeInternalInput` and the kernel `generated::meerkat`
+  `Input` and `InputKind` gain `SetMobOperatorIdentityCreationInMob {
+  mob_id, mob_incarnation, templates }` and
+  `ResolveMobOperatorIdentityCreation { mob_id, mob_incarnation, template }`.
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` and the kernel
+  `Effect` and `EffectKind` gain `MobOperatorIdentityCreationResolved {
+  verdict }`, whose verdict is the new enum
+  `MobOperatorIdentityCreationVerdict` (`TemplateNotAllowed`, `Admitted`).
+  The kernel `generated::meerkat::TransitionId` gains
+  `SetMobOperatorIdentityCreationInMob`,
+  `RebindMobOperatorIdentityCreationInMob`,
+  `ResolveMobOperatorIdentityCreationAdmitted`,
+  `ResolveMobOperatorIdentityCreationUnbound` and
+  `ResolveMobOperatorIdentityCreationTemplateNotInScope`. Every new variant
+  is appended last, so no existing variant's implicit discriminant moves.
+  Every enum named here is exhaustive, so a downstream exhaustive match
+  needs the new arms, or a wildcard arm; a `MeerkatMachineState` literal
+  that ends with `..Default::default()` keeps compiling.
+
+- `meerkat-runtime`: `mob_operator_authority::MobOperatorAuthorityFacts`
+  gains the public field `identity_creation_scope` (see Added), so a struct
+  literal must set it; one that ends with
+  `..MobOperatorAuthorityFacts::default()` keeps compiling.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -672,6 +709,33 @@ them.
   `PersistentSessionService::session_comms_identity_root` report their
   builder's. `meerkat::session_comms_identity_root_in` gives the root under
   an explicit user-global root, infallibly.
+
+- `meerkat-core`, `meerkat-runtime`: an identity creation scope for agent
+  creators. A mob operator authority can hold, per mob, the templates an
+  agent may create identities from, bound to the mob's incarnation like the
+  manage and spawn-profile scopes: a scope granted for an earlier mob never
+  reaches a later mob under the same id.
+  `mob_operator_authority::grant_identity_creation_in_mob` mints it with the
+  mob's live incarnation witness. A grant at the bound incarnation replaces
+  the templates, so a host mints it again when its creation policy changes;
+  a grant for another incarnation rebinds the mob and drops its manage and
+  spawn-profile scope, and a manage or spawn-profile grant for another
+  incarnation drops its creation scope.
+  `mob_operator_authority::admit_identity_creation_from_template` is the
+  check a creation commit asks of the creator's live authority: the
+  generated machine verdict, which admits a template only from the creation
+  scope of the mob at the incarnation the commit acts on, and refuses
+  `IdentityCreationScopeRefusal::TemplateNotAllowed` otherwise, whatever
+  manage, spawn-profile, create or profile-mutation authority the creator
+  holds. `MobToolAuthorityContext` gains `identity_creation_scope` and
+  `identity_creation_scope_present`. The scope is part of the generated
+  seal and is never serialized: a persisted projection carries none, a
+  reader of the projection (an older release included) finds none, and a
+  restored session holds the scope only when its build mints it again.
+  `MobOperatorAuthorityFacts` gains `identity_creation_scope`, which
+  `mint_mob_operator_authority_from_facts` grants. Nothing mints the scope
+  yet, so behaviour is unchanged. The scope and the check are Rust-only; the
+  wire contracts do not carry them.
 
 ### Changed
 

@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { assertExplicitIdleRoster, assertSidebarCompletion, waitForExplicitIdleRoster, waitForSidebarCompletion } = require("./sidebar-activity-oracle.cjs");
+const { assertActivityRecorded, assertExplicitIdleRoster, assertSidebarCompletion, expectedActivityOrder, waitForExplicitIdleRoster, waitForSidebarCompletion } = require("./sidebar-activity-oracle.cjs");
 
 function idleRoster() {
   return ["domain:delivery", "router:main"].map(identity => ({ identity, response_phase: null, progress: { run_state: "idle" } }));
@@ -112,5 +112,37 @@ for (const [name, corrupt] of [
   test(`completion polling fails under its deadline for ${name}`, async () => {
     const frames = corrupt(completedFrames());
     await assert.rejects(waitForSidebarCompletion({ ...expected, readFrames: async () => frames, timeoutMs: 1 }), /Timed out:.*retained/);
+  });
+}
+
+function activityRoster() {
+  return [
+    { identity: "domain:delivery", label: "Delivery", last_activity_ms: 1_000 },
+    { identity: "router:main", label: "Router", last_activity_ms: 2_000 },
+  ];
+}
+
+test("activity order lists the newest owner activity first and unknown last", () => {
+  assert.deepEqual(expectedActivityOrder(activityRoster()), ["router:main", "domain:delivery"]);
+  assert.deepEqual(expectedActivityOrder([
+    { identity: "c", label: "Agent 10", last_activity_ms: 5 },
+    { identity: "a", label: "agent 2", last_activity_ms: 5 },
+    { identity: "b", label: "Unknown" },
+  ]), ["a", "c", "b"]);
+  const agents = activityRoster();
+  assert.equal(assertActivityRecorded(agents, "router:main"), agents);
+});
+
+for (const [name, corrupt] of [
+  ["empty roster", agents => { agents.length = 0; }],
+  ["missing newest time", agents => { delete agents[1].last_activity_ms; }],
+  ["zero time", agents => { agents[1].last_activity_ms = 0; }],
+  ["non-numeric time", agents => { agents[1].last_activity_ms = "2000"; }],
+  ["negative time", agents => { agents[0].last_activity_ms = -1; }],
+  ["missing identity", agents => { delete agents[0].identity; }],
+]) {
+  test(`activity evidence rejects ${name}`, () => {
+    const agents = activityRoster(); corrupt(agents);
+    assert.throws(() => assertActivityRecorded(agents, "router:main"));
   });
 }

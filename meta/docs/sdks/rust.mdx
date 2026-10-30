@@ -427,15 +427,20 @@ members that owe work as it starts, before the identity bootstrap: each is
 held until that bootstrap's roster pass publishes its customizer tools, with
 one `customize_build`, and its run continues only with them. From then on
 `customize_build` runs right before each build of an identity's member, and
-the build carries the tools it published.
+the build carries the tools it published. A build made at the mob's lift,
+before the roster pass, is held the same way and customized after it.
 
 The identity bootstrap (`install_and_bootstrap_identity_first_context`, or
 `bootstrap_installed_identity_first_context` and its held variants) installs
 the declared customizer as the identity runtime's own. The identity runtime
 and the `IdentityFirstRuntimeContext` carry that same customizer or none:
-another one is refused there, before anything is installed. Declare a
-customizer only for a runtime that bootstraps an identity context: until that
-bootstrap, an identity member the mob builds is held.
+another one is refused there. The context is installed by then, but the
+customizer, its tool registry and the build preparer are not, and the runtime
+shuts down. Declare a customizer only for a runtime that bootstraps an
+identity context: until that bootstrap, an identity member the mob builds is
+held. `activate_without_identity_context` refuses a declaring runtime
+(`InvalidConfig`), and `MobRuntime::bootstrap` refuses a declaring spec, since
+neither would ever release those members.
 `UnifiedRuntimeBuilder` composes its own (`agent_customizer`) and refuses a
 `mob_spec` that declares one.
 

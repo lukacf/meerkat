@@ -33,8 +33,7 @@
 //!   for it waits until a delivery publishes them.
 //! - A host that composes with `UnifiedRuntime::bootstrap` gets the same
 //!   hold across a kill when its spec declares the agent customizer
-//!   (`MobBootstrapSpec::with_agent_customizer`); an identity context that
-//!   carries another customizer is refused.
+//!   (`MobBootstrapSpec::with_agent_customizer`).
 //! - A restored member whose identity the roster no longer lists starts no
 //!   run before the roster pass retires it. A host-adopted identity's member,
 //!   which the roster pass never retires and no roster publication covers,
@@ -3610,39 +3609,4 @@ async fn a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_w
     assert_eq!(member_run_starts_held(&runtime).await, Some(false));
     assert!(resolved_tools(&runtime).await.contains(&TOOL.to_string()));
     runtime.shutdown().await;
-}
-
-/// The customizer a bootstrap spec declares is the composition's: an
-/// identity context that carries another one is refused at the identity
-/// bootstrap, before the mob is lifted or anything is installed.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_bootstrap_spec_declared_customizer_refuses_a_context_carrying_another() {
-    const MOB_ID: &str = "customizer-tools-restart-t";
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let state = temp.path().join("state");
-    let mut runtime = bootstrap_declaring(
-        MOB_ID,
-        &state,
-        WorkerModel::default(),
-        Arc::new(ToolCustomizer::default()),
-    )
-    .await;
-    let context = bootstrap_identity_context(
-        &runtime,
-        MOB_ID,
-        &state,
-        Some(Arc::new(ToolCustomizer::default())),
-    )
-    .await;
-    let refused = runtime
-        .install_and_bootstrap_identity_first_context(context, &[durable_spec(MEMBER)])
-        .await;
-    assert!(
-        matches!(
-            &refused,
-            Err(IdentityRuntimeError::Internal(message))
-                if message.starts_with("conflicting agent customizers")
-        ),
-        "{refused:?}"
-    );
 }

@@ -76,9 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with them. Without the declaration the customizer is taken at the identity
   bootstrap, which covers a clean restart but not those builds. The identity
   runtime and its `IdentityFirstRuntimeContext` carry the declared customizer
-  or none: another one is refused at the identity bootstrap, before anything
-  is installed. `UnifiedRuntimeBuilder::mob_spec` refuses a spec that
-  declares one (`ConflictingConfiguration`): the builder composes its own
+  or none: another one is refused at the identity bootstrap. The context is
+  installed by then, but the customizer, its tool registry and the build
+  preparer are not, and the runtime shuts down. A declaring runtime must
+  bootstrap an identity context: `activate_without_identity_context` refuses
+  it (`InvalidConfig`), since its identity members would stay held for good,
+  and so does `MobRuntime::bootstrap`, which cannot wire the declaration.
+  `UnifiedRuntimeBuilder::mob_spec` refuses a spec that declares one
+  (`ConflictingConfiguration`): the builder composes its own
   (`agent_customizer`).
 
 ### Changed
@@ -155,8 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the `IdentityFirstRuntimeContext` carries, which becomes the runtime's own.
   From the mob's lift on, `customize_build` runs right before each build of
   an identity's member, the first wake after a restart included, and the
-  build carries the tools it published. Without a customizer nothing
-  changes. After a clean shutdown the mob stays stopped until that bootstrap
+  build carries the tools it published; a build the lift itself makes, before
+  the roster pass, is held, and the roster pass customizes it after the build
+  and before its run. Without a customizer nothing changes functionally: Core
+  reads each built member's tool catalog once to report the build, which the
+  inert wiring drops. After a clean shutdown the mob stays stopped until that bootstrap
   lifts it, so no build comes before it; a mob a killed process left running
   restores the members that owe work as it starts, before the identity
   bootstrap, and those builds are covered only when the spec declares the

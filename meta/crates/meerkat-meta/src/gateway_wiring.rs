@@ -185,6 +185,13 @@ impl MemberBuildWiring {
         }
     }
 
+    /// Whether the composition's spec declared its agent customizer: the
+    /// wiring then holds the identity members the mob builds until an
+    /// identity bootstrap binds it.
+    pub(crate) fn is_declared(&self) -> bool {
+        self.declared_customizer.is_some()
+    }
+
     /// The registry the composition installs on its identity runtime, the
     /// one its spawn customizer attaches from.
     pub(crate) fn customizer_tool_registry(&self) -> Option<Arc<CustomizerToolRegistry>> {
@@ -217,7 +224,7 @@ impl MemberBuildWiring {
     /// With one, it becomes the runtime's own when none is installed, the
     /// runtime gets the composition's registry when it has none, the spawn
     /// customizer attaches from the runtime's registry, and the preparer
-    /// publishes tools and is bound. A refusal changes nothing.
+    /// publishes tools and is bound. A refusal installs none of them.
     pub(crate) async fn bind_at_identity_bootstrap(
         &self,
         context: &IdentityFirstRuntimeContext,

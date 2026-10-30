@@ -1078,6 +1078,7 @@ impl UnifiedRuntime {
         persistent_metadata: Arc<dyn PersistentMetadataStore>,
         topology: crate::topology_control::TopologyBootstrapConfig,
     ) -> Result<Self, UnifiedRuntimeBootstrapError> {
+        let mut mob_spec = mob_spec;
         let topology_authority = mob_spec.definition.id.to_string();
         let topology_controller = match topology.state_path {
             Some(path) => {
@@ -1098,11 +1099,14 @@ impl UnifiedRuntime {
         // tools. Without one it is deferred: inert until the identity
         // bootstrap finds a customizer, and from then on it publishes each
         // identity member's tools right before Core builds the member, as
-        // the builder's and the gateways' wiring do.
+        // the builder's and the gateways' wiring do. The declaration comes
+        // off the spec here: `MobRuntime::prepare` refuses a spec that still
+        // carries one, which nothing would wire.
+        let declared_customizer = mob_spec.agent_customizer.take();
         let bootstrap_member_build_wiring = if mob_spec.member_build_preparer.is_some() {
             None
         } else {
-            Some(match mob_spec.agent_customizer.clone() {
+            Some(match declared_customizer {
                 Some(customizer) => crate::gateway_wiring::MemberBuildWiring::declared(customizer),
                 None => crate::gateway_wiring::MemberBuildWiring::deferred(),
             })
@@ -1188,10 +1192,29 @@ impl UnifiedRuntime {
     /// a runtime built by a legacy constructor ([`Self::bootstrap`] and the
     /// `bootstrap_with_*` family) is already active, but it has no
     /// completion until this returns.
+    ///
+    /// A runtime whose spec declares an agent customizer
+    /// (`MobBootstrapSpec::with_agent_customizer`) is refused
+    /// (`InvalidConfig`): it holds every identity member it builds until an
+    /// identity bootstrap publishes the member's tools, so without one they
+    /// would stay held for good.
     pub async fn activate_without_identity_context(&mut self) -> Result<(), MobRuntimeError> {
         if self.identity_first_context.is_some() {
             return Err(MobRuntimeError::InvalidConfig(
                 "cannot activate without identity authority after an identity context is installed"
+                    .to_string(),
+            ));
+        }
+        if self
+            .bootstrap_member_build_wiring
+            .as_ref()
+            .is_some_and(crate::gateway_wiring::MemberBuildWiring::is_declared)
+        {
+            return Err(MobRuntimeError::InvalidConfig(
+                "cannot activate without an identity context: the spec declares an agent \
+                 customizer (MobBootstrapSpec::with_agent_customizer), so the identity members \
+                 the mob builds are held until an identity bootstrap publishes their tools; \
+                 bootstrap an identity context (install_and_bootstrap_identity_first_context)"
                     .to_string(),
             ));
         }
@@ -1546,12 +1569,14 @@ impl UnifiedRuntime {
     /// runtime's own when none is installed, and from the lift on
     /// `customize_build` runs right before each build of an identity's
     /// member (the first wake after a restart included), whose build carries
-    /// the tools it published. A declared customizer also covers the members
-    /// the mob built before this bootstrap: they are held until the roster
-    /// pass publishes their tools. The runtime and the context carry the
-    /// declared customizer or none; another one is refused here, before
-    /// anything is installed. Without a customizer nothing changes. The held
-    /// variants do the same.
+    /// the tools it published. A build the lift itself makes is held and
+    /// customized by the roster pass, after the build and before its run. A
+    /// declared customizer also covers the members the mob built before this
+    /// bootstrap: they are held the same way. The runtime and the context
+    /// carry the declared customizer or none; another one is refused here:
+    /// the context is installed by then, but the customizer, its tool
+    /// registry and the build preparer are not, and the runtime shuts down.
+    /// Without a customizer nothing changes. The held variants do the same.
     pub async fn bootstrap_installed_identity_first_context(
         &mut self,
         roster: &[crate::identity_first::DurableAgentSpec],
@@ -1756,7 +1781,8 @@ impl UnifiedRuntime {
     /// build from the lift on is prepared, and the builds a declared wiring
     /// held before are published by the roster pass; without one a deferred
     /// wiring stays inert. A customizer or registry that conflicts with the
-    /// spec's declaration is refused before anything is installed.
+    /// spec's declaration is refused before the customizer, its registry or
+    /// the preparer is installed.
     async fn bind_bootstrap_member_build_wiring(
         &self,
         context: &crate::identity_first::IdentityFirstRuntimeContext,
@@ -6663,19 +6689,23 @@ mod tests {
             state_root,
             Arc::new(meerkat_client::TestClient::default()),
             None,
+            None,
         )
         .await
     }
 
     /// [`boot_persistent_before_activation`] whose members are built on
-    /// `default_llm_client`, and whose identity context carries `customizer`,
-    /// as a host composing with [`UnifiedRuntime::bootstrap`] hands it one.
+    /// `default_llm_client`, whose identity context carries `customizer`, as
+    /// a host composing with [`UnifiedRuntime::bootstrap`] hands it one, and
+    /// whose spec declares `declared`
+    /// ([`MobBootstrapSpec::with_agent_customizer`]).
     async fn boot_persistent_before_activation_with_client(
         mob_id: &str,
         mob_path: &std::path::Path,
         state_root: &std::path::Path,
         default_llm_client: Arc<dyn meerkat_client::LlmClient>,
         customizer: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
+        declared: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
     ) -> PersistentBootBeforeActivation {
         use crate::identity_first::{
             AgentAddressability, AgentRuntimeServices, ContinuityStore, DurabilityPolicy,
@@ -6711,6 +6741,10 @@ mod tests {
             notify_orchestrator_on_resume: true,
             default_llm_client: Some(default_llm_client),
         });
+        let spec = match declared {
+            Some(declared) => spec.with_agent_customizer(declared),
+            None => spec,
+        };
         let runtime = UnifiedRuntime::bootstrap(
             spec,
             MetaConfig {
@@ -6953,6 +6987,7 @@ mod tests {
             &state_root,
             Arc::new(meerkat_client::TestClient::default()),
             Some(Arc::new(BootstrapToolCustomizer::default())),
+            None,
         )
         .await;
         let first_identity = boot.identity_runtime.clone();
@@ -6967,6 +7002,7 @@ mod tests {
             &state_root,
             Arc::new(meerkat_client::TestClient::default()),
             Some(customizer.clone()),
+            None,
         )
         .await;
         let identity_runtime = boot.identity_runtime.clone();
@@ -7007,6 +7043,119 @@ mod tests {
         );
         runtime.shutdown().await;
         drop((first, first_identity));
+    }
+
+    /// The customizer a bootstrap spec declares is the composition's: an
+    /// identity context that carries another one is refused at the identity
+    /// bootstrap. The context is installed by then, but its identity runtime
+    /// gets no customizer, no customizer tool registry and no build
+    /// preparer, and the runtime shuts down.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bootstrap_spec_declared_customizer_refuses_a_context_carrying_another() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let PersistentBootBeforeActivation {
+            mut runtime,
+            identity_runtime,
+            context,
+            roster,
+        } = boot_persistent_before_activation_with_client(
+            "declared-customizer-conflict",
+            &temp.path().join("mob.sqlite3"),
+            &temp.path().join("state"),
+            Arc::new(meerkat_client::TestClient::default()),
+            Some(Arc::new(BootstrapToolCustomizer::default())),
+            Some(Arc::new(BootstrapToolCustomizer::default())),
+        )
+        .await;
+        let refused = runtime
+            .install_and_bootstrap_identity_first_context(context, &roster)
+            .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::identity_first::IdentityRuntimeError::Internal(message))
+                    if message.starts_with("conflicting agent customizers")
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            identity_runtime
+                .installed_agent_customizer()
+                .await
+                .is_none(),
+            "the refusal installed no customizer"
+        );
+        assert!(
+            identity_runtime
+                .installed_customizer_tool_registry()
+                .await
+                .is_none(),
+            "the refusal installed no customizer tool registry"
+        );
+        assert!(
+            identity_runtime.member_build_preparer().is_none(),
+            "the refusal bound no build preparer"
+        );
+    }
+
+    /// A runtime whose spec declares an agent customizer holds the identity
+    /// members its mob builds until an identity bootstrap publishes their
+    /// tools, so activating it without an identity context is refused
+    /// (`InvalidConfig`) instead of leaving them held for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_declaring_runtime_refuses_activation_without_an_identity_context() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let PersistentBootBeforeActivation { mut runtime, .. } =
+            boot_persistent_before_activation_with_client(
+                "declared-customizer-no-identity",
+                &temp.path().join("mob.sqlite3"),
+                &temp.path().join("state"),
+                Arc::new(meerkat_client::TestClient::default()),
+                None,
+                Some(Arc::new(BootstrapToolCustomizer::default())),
+            )
+            .await;
+        let refused = runtime.activate_without_identity_context().await;
+        assert!(
+            matches!(
+                &refused,
+                Err(MobRuntimeError::InvalidConfig(message))
+                    if message.contains("MobBootstrapSpec::with_agent_customizer")
+            ),
+            "{refused:?}"
+        );
+        runtime.shutdown().await;
+    }
+
+    /// `MobRuntime::bootstrap` cannot wire a declared agent customizer (only
+    /// `UnifiedRuntime::bootstrap` and its family do), so it refuses a spec
+    /// that declares one instead of ignoring the declaration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mob_runtime_bootstrap_refuses_a_spec_declaring_an_agent_customizer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).expect("state root");
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"declared-customizer-mob-runtime\"\n",
+        )
+        .expect("mob definition");
+        let (storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
+            temp.path().join("mob.sqlite3"),
+        )
+        .expect("open persistent mob storage");
+        let spec = MobBootstrapSpec::persistent(definition, storage, provenance, state_root, 16)
+            .await
+            .expect("compose persistent Meta stores")
+            .with_agent_customizer(Arc::new(BootstrapToolCustomizer::default()));
+        let refused = MobRuntime::bootstrap(spec).await.err();
+        assert!(
+            matches!(
+                &refused,
+                Some(MobRuntimeError::InvalidConfig(message))
+                    if message.contains("MobBootstrapSpec::with_agent_customizer")
+            ),
+            "{refused:?}"
+        );
     }
 
     /// Boot twice against one durable store; the second boot's runtime has
@@ -7690,6 +7839,7 @@ mod tests {
             mob_path,
             state_root,
             Arc::new(PinnableTestClient::default()),
+            None,
             None,
         )
         .await;

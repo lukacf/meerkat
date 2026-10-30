@@ -7493,9 +7493,12 @@ impl MobBootstrapSpec {
     /// none, and the identity bootstrap refuses another one. Declare it only
     /// for a mob whose runtime bootstraps an identity context
     /// (`install_and_bootstrap_identity_first_context`): until that
-    /// bootstrap, an identity member the mob builds is held. A spec handed to
-    /// `UnifiedRuntimeBuilder::mob_spec` must not declare one: the builder
-    /// composes its own (`UnifiedRuntimeBuilder::agent_customizer`).
+    /// bootstrap, an identity member the mob builds is held, and
+    /// `UnifiedRuntime::activate_without_identity_context` refuses the
+    /// runtime. Only `UnifiedRuntime::bootstrap` and its family wire the
+    /// declaration: [`MobRuntime::bootstrap`] refuses a spec that carries
+    /// one, and so does `UnifiedRuntimeBuilder::mob_spec`, whose builder
+    /// composes its own customizer (`UnifiedRuntimeBuilder::agent_customizer`).
     #[must_use]
     pub fn with_agent_customizer(
         mut self,
@@ -10101,6 +10104,15 @@ impl MobRuntime {
         {
             return Err(MobRuntimeError::InvalidConfig(
                 "session_identity_config_root() must not be empty: an empty root would resolve the members' comms identity directory against the working directory".into(),
+            ));
+        }
+        // `UnifiedRuntime::bootstrap` wires a declared agent customizer and
+        // takes the declaration off the spec before it prepares the mob. A
+        // spec that still carries one came another way (`Self::bootstrap`),
+        // where nothing would wire it.
+        if spec.agent_customizer.is_some() {
+            return Err(MobRuntimeError::InvalidConfig(
+                "the spec declares an agent customizer (MobBootstrapSpec::with_agent_customizer), which only UnifiedRuntime::bootstrap and the bootstrap_with_* family wire: compose the mob with one of them".into(),
             ));
         }
 

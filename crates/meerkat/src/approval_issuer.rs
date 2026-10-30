@@ -498,10 +498,7 @@ mod tests {
         );
         let open = DecisionId::new(field("open_decision")).expect("decision id");
         let approved = DecisionId::new(field("approved_decision")).expect("decision id");
-        let decisions = ApprovalIssuerSelection::Persistent {
-            store_path: dir.clone(),
-        }
-        .open_decisions();
+        let decisions = ApprovalIssuerSelection::Persistent { store_path: dir }.open_decisions();
         let expired = decisions.get(&open).expect("read");
         assert_eq!(expired.state.phase, DecisionPhase::Expired);
         assert_eq!(expired.state.notice, DecisionNotice::Owed);

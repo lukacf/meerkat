@@ -44,6 +44,7 @@ CREATE TABLE approval_decisions (
     reviewer_key TEXT,
     phase TEXT NOT NULL,
     notice TEXT NOT NULL,
+    permit_issued INTEGER NOT NULL,
     deadline_at_ms INTEGER NOT NULL,
     revision INTEGER NOT NULL,
     row_json BLOB NOT NULL
@@ -114,12 +115,14 @@ pub const APPROVAL_DECISIONS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqli
 const GET_SQL: &str = "SELECT decision_id, row_json FROM approval_decisions WHERE decision_id = ?1";
 
 const INSERT_SQL: &str = "INSERT INTO approval_decisions (decision_id, kind, operation_id, \
-    requester_key, approver_id, reviewer_key, phase, notice, deadline_at_ms, revision, row_json) \
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(decision_id) DO NOTHING";
+    requester_key, approver_id, reviewer_key, phase, notice, permit_issued, deadline_at_ms, \
+    revision, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+    ON CONFLICT(decision_id) DO NOTHING";
 
 const REPLACE_SQL: &str = "UPDATE approval_decisions SET kind = ?2, operation_id = ?3, \
     requester_key = ?4, approver_id = ?5, reviewer_key = ?6, phase = ?7, notice = ?8, \
-    deadline_at_ms = ?9, revision = ?10, row_json = ?11 WHERE decision_id = ?1 AND revision = ?12";
+    permit_issued = ?9, deadline_at_ms = ?10, revision = ?11, row_json = ?12 \
+    WHERE decision_id = ?1 AND revision = ?13";
 
 /// The rows that owe work: approved, or owing their notice. The phase and
 /// notice tokens are `DecisionPhase::Approved` and `DecisionNotice::Owed`.
@@ -127,10 +130,12 @@ const OWED_SQL: &str = "SELECT decision_id, row_json FROM approval_decisions \
     WHERE (phase = 'approved' OR notice = 'owed') AND decision_id > ?1 \
     ORDER BY decision_id LIMIT ?2";
 
-/// The open and approved rows at or past their deadline.
+/// The open rows, and the approved rows with no permit outstanding, at or
+/// past their deadline: an approved decision whose permit is outstanding
+/// waits for its settlement, and is owed instead.
 const DUE_SQL: &str = "SELECT decision_id, row_json FROM approval_decisions \
-    WHERE phase IN ('open', 'approved') AND deadline_at_ms <= ?1 AND decision_id > ?2 \
-    ORDER BY decision_id LIMIT ?3";
+    WHERE phase IN ('open', 'approved') AND deadline_at_ms <= ?1 AND permit_issued = 0 \
+    AND decision_id > ?2 ORDER BY decision_id LIMIT ?3";
 
 /// One operation's connection; the fence guard lives exactly as long as the
 /// connection it admits.
@@ -348,7 +353,7 @@ impl SqliteDecisionStore {
     }
 
     /// Write `row` in one immediate transaction with `sql`, which binds the
-    /// row's columns as `?1`..`?11` and `extra` after them. A statement that
+    /// row's columns as `?1`..`?12` and `extra` after them. A statement that
     /// changes no row is [`ApprovalStoreError::Conflict`].
     fn write(
         &self,
@@ -373,7 +378,8 @@ impl SqliteDecisionStore {
             .map(DecisionPrincipalKey::as_str);
         let phase = row.state.phase.as_str();
         let notice = row.state.notice.as_str();
-        let columns: [&dyn ToSql; 11] = [
+        let permit_issued = i64::from(row.state.permit_issued);
+        let columns: [&dyn ToSql; 12] = [
             &decision_id,
             &kind,
             &operation_id,
@@ -382,6 +388,7 @@ impl SqliteDecisionStore {
             &reviewer_key,
             &phase,
             &notice,
+            &permit_issued,
             &deadline_at_ms,
             &revision,
             &row_json,

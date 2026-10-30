@@ -90,14 +90,19 @@ pub fn decision_owes_work(row: &StoredDecision) -> bool {
     row.state.phase == DecisionPhase::Approved || row.state.notice == DecisionNotice::Owed
 }
 
-/// Whether `row` is due an expiry observation at `now_ms`: open or approved,
-/// with its deadline at or before `now_ms`.
+/// Whether `row` is due an expiry observation at `now_ms`: open, or approved
+/// with no execution permit outstanding, with its deadline at or before
+/// `now_ms`. An approved decision whose permit is outstanding waits for the
+/// permit's settlement instead of expiring; it is owed
+/// ([`decision_owes_work`]), not due.
 #[must_use]
 pub fn decision_is_due(row: &StoredDecision, now_ms: u64) -> bool {
-    matches!(
-        row.state.phase,
-        DecisionPhase::Open | DecisionPhase::Approved
-    ) && row.descriptor.deadline_at_ms <= now_ms
+    let expires = match row.state.phase {
+        DecisionPhase::Open => true,
+        DecisionPhase::Approved => !row.state.permit_issued,
+        _ => false,
+    };
+    expires && row.descriptor.deadline_at_ms <= now_ms
 }
 
 /// The store of durable decision rows.
@@ -175,7 +180,8 @@ pub trait DecisionStore: Send + Sync {
     fn is_persistent(&self) -> bool;
 }
 
-/// In-memory decision store for tests and process-local hosts.
+/// In-memory decision store for tests and process-local hosts. A write holds
+/// the map's lock for that write alone: no owner holds it across calls.
 #[derive(Debug, Default)]
 pub struct InMemoryDecisionStore {
     rows: RwLock<BTreeMap<String, StoredDecision>>,
@@ -220,12 +226,8 @@ impl DecisionStore for InMemoryDecisionStore {
             .map(|row| DecisionRow::Readable(Box::new(row.clone()))))
     }
 
-    /// Never waits: a map held by another owner is
-    /// [`ApprovalStoreError::Contended`].
     fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
-        let Some(mut rows) = self.rows.try_write() else {
-            return Err(ApprovalStoreError::Contended);
-        };
+        let mut rows = self.rows.write();
         if rows.contains_key(row.decision_id.as_str()) {
             return Err(ApprovalStoreError::Conflict);
         }
@@ -238,9 +240,7 @@ impl DecisionStore for InMemoryDecisionStore {
         expected_revision: u64,
         row: &StoredDecision,
     ) -> Result<(), ApprovalStoreError> {
-        let Some(mut rows) = self.rows.try_write() else {
-            return Err(ApprovalStoreError::Contended);
-        };
+        let mut rows = self.rows.write();
         match rows.get_mut(row.decision_id.as_str()) {
             Some(stored) if stored.revision == expected_revision => {
                 *stored = row.clone();

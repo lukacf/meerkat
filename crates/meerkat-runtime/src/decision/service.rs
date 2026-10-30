@@ -1029,8 +1029,11 @@ impl DurableDecisionService {
     }
 
     /// One page of the decisions due an expiry observation at the clock
-    /// reading of the read, after `after`, as stored: a deadline driver
-    /// [`Self::get`]s each to record its expiry.
+    /// reading of the read, after `after`, as stored: open decisions, and
+    /// approved ones with no permit outstanding, at or past their deadline. A
+    /// deadline driver [`Self::get`]s each to record its expiry. An approved
+    /// decision whose permit is outstanding waits for its settlement; it is
+    /// owed ([`Self::owed`]), not due.
     ///
     /// # Errors
     /// Store and clock failures.

@@ -167,7 +167,7 @@ fn writes_are_revision_conditional_and_never_wait() {
         store.insert_if_absent(&open_row("subject-2")),
         Err(ApprovalStoreError::Contended)
     );
-    let mut after = next.clone();
+    let mut after = next;
     after.revision = 3;
     assert_eq!(
         store.replace_if_revision(2, &after),
@@ -357,7 +357,14 @@ fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
         DecisionNotice::Owed,
         50,
     );
-    for row in [&open, &approved, &owed] {
+    let mut held = stored(
+        "subject-held",
+        DecisionPhase::Approved,
+        DecisionNotice::NotDue,
+        50,
+    );
+    held.state.permit_issued = true;
+    for row in [&open, &approved, &owed, &held] {
         store.insert_if_absent(row).expect("insert");
     }
 
@@ -369,22 +376,24 @@ fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
     let mut owed_ids = vec![
         approved.decision_id.as_str().to_owned(),
         owed.decision_id.as_str().to_owned(),
+        held.decision_id.as_str().to_owned(),
     ];
     owed_ids.sort();
     assert_eq!(ids(&store.owed(None, 10).expect("owed").rows), owed_ids);
     assert_eq!(
         ids(&store.due(100, None, 10).expect("due").rows),
-        vec![open.decision_id.as_str().to_owned()]
+        vec![open.decision_id.as_str().to_owned()],
+        "the held decision waits for its permit's settlement"
     );
     let first = store
         .list(&DecisionListFilter::default(), None, 2)
         .expect("first page");
     assert_eq!(first.rows.len(), 2);
-    let after = first.next_after.clone().expect("another page");
+    let after = first.next_after.expect("another page");
     let second = store
         .list(&DecisionListFilter::default(), Some(&after), 2)
         .expect("second page");
-    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows.len(), 2);
     assert_eq!(second.next_after, None);
     let mut all = ids(&first.rows);
     all.extend(ids(&second.rows));
@@ -398,7 +407,7 @@ fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
                 ..DecisionListFilter::default()
             })
             .expect("count"),
-        1
+        2
     );
 
     let conn = rusqlite::Connection::open(store.path()).expect("open");
@@ -417,7 +426,7 @@ fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
     let listed = store
         .list(&DecisionListFilter::default(), None, 10)
         .expect("list");
-    assert_eq!(listed.rows.len(), 3, "the other rows still read");
+    assert_eq!(listed.rows.len(), 4, "the other rows still read");
     assert_eq!(
         listed
             .rows

@@ -53,8 +53,8 @@
 //! Every input has an explicit transition in every held phase, and every
 //! refusal is a typed `Refused` effect that leaves the state byte-identical.
 //! Inputs other than `Hold` against an `Unheld` record are refused by the
-//! generated kernel (`NoMatchingTransition`): the owner service creates a row
-//! only through `Hold`, so it never sends them.
+//! generated kernel (`GuardRejected`: no arm admits them): the owner service
+//! creates a row only through `Hold`, so it never sends them.
 
 use super::OptionValueExt;
 

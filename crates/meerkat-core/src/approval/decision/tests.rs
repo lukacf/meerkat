@@ -376,7 +376,12 @@ fn evidence_digest_changes_with_any_evidence_field() {
 fn principal_keys_compare_qualified_principals() {
     let alice = principal(PrincipalKind::Human, "alice", "example.org");
     let key = DecisionPrincipalKey::of(&alice).expect("key");
-    assert_eq!(key, DecisionPrincipalKey::of(&alice.clone()).expect("key"));
+    assert_eq!(
+        key,
+        DecisionPrincipalKey::of(&principal(PrincipalKind::Human, "alice", "example.org"))
+            .expect("key"),
+        "an equal principal has the same key"
+    );
     assert_eq!(key.as_str(), r#"principal:["human","example.org","alice"]"#);
     for other in [
         principal(PrincipalKind::Human, "alice", "other.example"),
@@ -519,7 +524,14 @@ fn the_in_memory_store_writes_conditionally_and_pages_its_indexes() {
         DecisionNotice::Owed,
         50,
     );
-    for row in [&open, &approved, &owed] {
+    let mut held = stored(
+        "subject-held",
+        DecisionPhase::Approved,
+        DecisionNotice::NotDue,
+        50,
+    );
+    held.state.permit_issued = true;
+    for row in [&open, &approved, &owed, &held] {
         store.insert_if_absent(row).expect("insert");
     }
     assert_eq!(
@@ -561,13 +573,15 @@ fn the_in_memory_store_writes_conditionally_and_pages_its_indexes() {
     let mut owed_ids = vec![
         approved.decision_id.as_str().to_owned(),
         owed.decision_id.as_str().to_owned(),
+        held.decision_id.as_str().to_owned(),
     ];
     owed_ids.sort();
     assert_eq!(ids(store.owed(None, 10).expect("owed")), owed_ids);
     assert_eq!(
         ids(store.due(100, None, 10).expect("due")),
         vec![open.decision_id.as_str().to_owned()],
-        "only the open row is past its deadline"
+        "the approved row is before its deadline, and the held one waits for \
+         its permit's settlement"
     );
     let filter = DecisionListFilter {
         phase: Some(DecisionPhase::Open),
@@ -576,18 +590,18 @@ fn the_in_memory_store_writes_conditionally_and_pages_its_indexes() {
     assert_eq!(store.count(&filter).expect("count"), 1);
     assert_eq!(
         store.count(&DecisionListFilter::default()).expect("count"),
-        3
+        4
     );
 
     let first = store
         .list(&DecisionListFilter::default(), None, 2)
         .expect("first page");
     assert_eq!(first.rows.len(), 2);
-    let after = first.next_after.clone().expect("a next page");
+    let after = first.next_after.expect("a next page");
     let second = store
         .list(&DecisionListFilter::default(), Some(&after), 2)
         .expect("second page");
-    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows.len(), 2);
     assert_eq!(second.next_after, None);
     assert!(!store.is_persistent());
 }

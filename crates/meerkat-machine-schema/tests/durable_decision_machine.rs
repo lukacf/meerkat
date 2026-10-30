@@ -299,8 +299,8 @@ enum Expected {
     Advance(Phase, &'static [&'static str]),
     /// A byte-identical self-loop with exactly these effects.
     SelfLoop(&'static [&'static str]),
-    /// The generated kernel's typed refusal: no transition is declared for
-    /// the pair, and the state is untouched.
+    /// The generated kernel's typed refusal (`GuardRejected`): no arm of the
+    /// input admits the pair, and the state is untouched.
     Refused,
 }
 
@@ -410,10 +410,7 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
                         "({phase:?}, {command}) effects"
                     );
                 }
-                (
-                    Expected::Refused,
-                    Err(TransitionError::NoMatchingTransition { phase: at, .. }),
-                ) => {
+                (Expected::Refused, Err(TransitionError::GuardRejected { phase: at, .. })) => {
                     assert_eq!(at, phase);
                     assert_eq!(
                         authority.state(),

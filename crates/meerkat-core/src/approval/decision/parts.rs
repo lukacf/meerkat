@@ -37,11 +37,11 @@ pub(crate) fn part_ranges(
 ) -> Vec<Range<usize>> {
     let len = rendering.len();
     let Some(max_part_bytes) = max_part_bytes else {
-        return vec![0..len];
+        return std::iter::once(0..len).collect();
     };
     let max = usize::try_from(max_part_bytes.get()).unwrap_or(usize::MAX);
     if len <= max {
-        return vec![0..len];
+        return std::iter::once(0..len).collect();
     }
     let mut ranges = Vec::new();
     let mut start = 0;

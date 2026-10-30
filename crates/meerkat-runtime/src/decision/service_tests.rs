@@ -845,14 +845,14 @@ fn owed_and_due_read_only_their_pages() {
         .map(|row| row.decision_id.clone())
         .collect();
     owed_ids.sort();
-    let mut expected = vec![approved.clone(), rejected.clone()];
+    let mut expected = vec![approved, rejected];
     expected.sort();
     assert_eq!(owed_ids, expected);
 
     store.clear();
     let first = service.owed(None, 1).expect("first page");
     assert_eq!(first.decisions.len(), 1);
-    let after = first.next_after.clone().expect("another page");
+    let after = first.next_after.expect("another page");
     let second = service.owed(Some(&after), 1).expect("second page");
     assert_eq!(second.decisions.len(), 1);
     assert_eq!(second.next_after, None);
@@ -1001,6 +1001,21 @@ fn a_permit_outstanding_across_the_deadline_settles_executed() {
     assert!(
         waiting.state.permit_issued,
         "the decision waits for the settlement"
+    );
+    assert!(
+        service.due(None, 10).expect("due").decisions.is_empty(),
+        "a decision waiting for its settlement is not due"
+    );
+    assert_eq!(
+        service
+            .owed(None, 10)
+            .expect("owed")
+            .decisions
+            .into_iter()
+            .map(|row| row.decision_id)
+            .collect::<Vec<_>>(),
+        vec![decision_id.clone()],
+        "it is owed"
     );
     assert_eq!(
         refusal(

@@ -698,6 +698,31 @@ mod selected_tests {
             .await
             .unwrap()
     }
+    // A governed realm's terminal owner takes the governed native owner, as the
+    // standalone continuation reopens it; `terminal_owner` opens ordinarily,
+    // which Core refuses for a governed realm (`RealmGoverned`).
+    async fn governed_terminal_owner(root: &Path, storage: ResolvedStorage) -> TerminalConnectors {
+        use meerkat_auth_core::auth_store::{
+            FileLockCoordinator, FileTokenStore, ProviderAuthPersistence,
+        };
+        let native = crate::stdio::tests::realm_native_owner(&storage).await;
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(FileTokenStore::new(root.join("credentials"))),
+            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+        );
+        let mut startup = SessionStartup {
+            storage,
+            config: meerkat::Config::default(),
+            factory: meerkat::AgentFactory::new(root.join("factory"))
+                .with_provider_auth_persistence(persistence),
+            persistence: Some(native),
+            connector_auth: None,
+            standalone: None,
+        };
+        Box::pin(TerminalConnectors::open(&mut startup))
+            .await
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn actual_public_and_account_reviews_keep_document_refusals_local_and_presenter_reusable()
@@ -895,9 +920,11 @@ mod selected_tests {
             if mode != "before_review" {
                 parent_server.name = "unrelated-inherited".into();
             }
+            // A user document is the realm's implicit parent only once it
+            // declares `[realm.global]`; declare it as an actual parent does.
             parent_file
                 .patch(ConfigDelta(
-                    json!({"tools":{"mcp_servers":[parent_server]}}),
+                    json!({"realm":{"global":{}},"tools":{"mcp_servers":[parent_server]}}),
                 ))
                 .await
                 .unwrap();
@@ -910,7 +937,7 @@ mod selected_tests {
                 storage.locator.realm.as_str(),
             );
             let owner_path = meerkat_store::grant_owner_store_path(&paths.root);
-            let mut owner = terminal_owner(root.path(), storage.clone()).await;
+            let mut owner = governed_terminal_owner(root.path(), storage.clone()).await;
             let before = crate::realm::read_own_mcp_config(&storage).await.unwrap();
             assert!(before.0.is_empty());
             let before_config = std::fs::read(&config_path).ok();
@@ -1178,7 +1205,7 @@ mod selected_tests {
                 let before_state = std::fs::read(&state_path).unwrap();
                 let before_owner = std::fs::read(&owner_path).unwrap();
                 let before = crate::realm::read_own_mcp_config(&storage).await.unwrap();
-                let mut owner = terminal_owner(root.path(), storage.clone()).await;
+                let mut owner = governed_terminal_owner(root.path(), storage.clone()).await;
                 let (approvals, mut presenter) = LocalApprovals::create_paired_host(root.path()).unwrap();
                 approvals.bind_session(&selected.installed.session).unwrap();
                 let (lines, receive_lines) = mpsc::channel(1);
@@ -1211,12 +1238,14 @@ mod selected_tests {
                     assert_eq!(reply["reason"], "server_name_already_selected");
                     assert!(!seen.text().contains("Type 'approve "));
                     assert!(owner.take_reviewed().is_none());
+                    owner.retire().unwrap();
                 } else {
                     assert!(seen.text().contains("reuse_exact_saved_configuration"));
                     assert!(seen.text().contains("an earlier uncertain grant may remain"));
                     if mode == "deny" {
                         assert_eq!(reply["state"], "denied");
                         assert!(owner.take_reviewed().is_none());
+                        owner.retire().unwrap();
                     } else {
                         assert_eq!(reply["reason"], "reviewed_finalization_waiting_for_setup_close");
                         let reviewed = owner.take_reviewed().unwrap();
@@ -1229,6 +1258,9 @@ mod selected_tests {
                         }
                         let current_config = std::fs::read(&config_path).unwrap();
                         owner.retire().unwrap();
+                        // As main does after setup closes, drop the terminal owner
+                        // and its realm execution custody before administration.
+                        drop(owner);
                         let finalized = reviewed.finalize_outcome_after_close().await;
                         let result = finalized.display(&mut output);
                         assert_eq!(std::fs::read(&config_path).unwrap(), current_config,
@@ -1255,7 +1287,6 @@ mod selected_tests {
                         }
                     }
                 }
-                owner.retire().unwrap();
                 approvals.retire(); input.check_cleanup().unwrap();
             }
         })).await.expect("saved-service review and actual owner finalization must settle");

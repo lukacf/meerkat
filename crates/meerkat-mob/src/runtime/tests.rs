@@ -3,6 +3,8 @@ use super::*;
 mod before_activation;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod boot_obligation_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod declared_apply_rows;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;

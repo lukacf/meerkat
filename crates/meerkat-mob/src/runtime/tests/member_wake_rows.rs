@@ -420,6 +420,22 @@ impl WakeFixture {
         configure: impl FnOnce(&mut meerkat::Config),
         edit: impl FnOnce(&mut MobDefinition),
     ) -> Self {
+        Self::build(label, configure, edit, false).await
+    }
+
+    /// [`Self::new`], for a mob that seats members Dormant (the declared
+    /// apply, `seat_dormant_members`): it reads its members' comms identities
+    /// under the factory's own session comms identity root.
+    async fn with_member_seats(label: &str) -> Self {
+        Self::build(label, |_| {}, |_| {}, true).await
+    }
+
+    async fn build(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
             .tempdir()
@@ -463,14 +479,18 @@ impl WakeFixture {
         let customizer = Arc::new(VersionedCustomizer::new());
         let mut definition = wake_rows_definition(label);
         edit(&mut definition);
-        let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        let mut mob = MobBuilder::new(definition, MobStorage::in_memory())
             .with_session_service(service.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())
-            .with_spawn_member_customizer(customizer.clone())
-            .create()
-            .await
-            .expect("create the mob");
+            .with_spawn_member_customizer(customizer.clone());
+        if member_seats {
+            mob = mob.with_member_comms_identity_root(
+                meerkat::canonical_session_comms_identity_root(Some(&root_path.join("config")))
+                    .expect("the factory's session comms identity root"),
+            );
+        }
+        let handle = mob.create().await.expect("create the mob");
         Self {
             _root: root,
             handle,
@@ -3355,5 +3375,107 @@ async fn kickoff_notices_to_a_dormant_peer_wake_it_once() {
         .filter(|build| build.identity == dormant)
         .count();
     assert_eq!(builds, 1, "the notices woke the dormant peer once");
+    fixture.finish().await;
+}
+
+/// The declared apply on a durable store: an identity a complete roster
+/// unlisted, then lists again, comes back as the same identity with its
+/// history. The unlisted retirement archives the member's session and
+/// MobMachine records it; the apply that lists the identity again seats it
+/// Dormant on that archived session at its next generation, waking nothing;
+/// the member's first wake revives the session, and its transcript holds
+/// the turn it ran before it was unlisted.
+///
+/// RED: drop the revival admission from the dormant seat's preparation
+/// (`prepare_dormant_seat` answers every archived session `SessionArchived`):
+/// the identity is answered `Failed` and stays unseated. Drop the archived
+/// session record instead: it is seated on a fresh session whose transcript
+/// is empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unlisted_identity_listed_again_wakes_on_its_archived_session_with_its_history() {
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, UnlistedEntryOutcome,
+    };
+
+    let fixture = WakeFixture::with_member_seats("wake-declared-revival").await;
+    let identity = AgentIdentity::from(format!("declared-revival-{}", Uuid::new_v4().simple()));
+    let roster = |listed: bool| {
+        DeclaredRoster::complete(
+            listed.then(|| DeclaredEntry::new(SpawnMemberSpec::new("worker", identity.clone()))),
+        )
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+
+    let seated = apply(roster(true)).await;
+    let session = match seated.entries.get(&identity) {
+        Some(DeclaredEntryOutcome::Seated {
+            session_id,
+            history_unavailable: None,
+        }) => session_id.clone(),
+        other => panic!("the identity is seated: {other:?}"),
+    };
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let before = token("declared-revival");
+    fixture
+        .host_turn(&identity, &before, HandlingMode::Queue)
+        .await;
+    assert_eq!(fixture.delivered_count(&identity, &before).await, 1);
+
+    let unlisted = apply(roster(false)).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&identity),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .is_none()
+    );
+
+    let listed = apply(roster(true)).await;
+    assert!(
+        matches!(
+            listed.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated {
+                session_id,
+                history_unavailable: None,
+            }) if session_id == &session
+        ),
+        "the identity is seated on its archived session: {listed:?}"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the seat wakes nothing"
+    );
+    assert_eq!(
+        fixture.entry(&identity).await.generation,
+        Generation::new(1)
+    );
+
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake revives the archived session");
+    assert_eq!(fixture.session(&identity).await, session);
+    assert!(
+        fixture.transcript(&session).await.contains(&before),
+        "the identity keeps its history"
+    );
     fixture.finish().await;
 }

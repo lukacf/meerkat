@@ -2941,8 +2941,9 @@ pub struct SessionRuntime {
     /// first turn and a recovered session's next turn are applied by the
     /// runtime loop, on Core's private serving runtime, and their actor is
     /// created from that apply. It is created on this runtime instead, so
-    /// every turn of the session runs on the host's workers. `None` when
-    /// built outside a Tokio runtime.
+    /// every turn of the session runs on the host's workers and ends when
+    /// this runtime stops, for the next start's recovery to resume. `None`
+    /// when built outside a Tokio runtime.
     host_runtime: Option<tokio::runtime::Handle>,
     /// Event streams opened while a deferred session is still staged. The
     /// first materializing turn fans out events here, then bridges the stream
@@ -5515,18 +5516,55 @@ impl SessionRuntime {
         )
     }
 
+    /// Await a promotion or recovery task's runtime turn. The task runs on
+    /// the host's runtime, and one that runtime took with it when it stopped
+    /// is a crash of the host's runtime, not a failure of the turn: the
+    /// session's registration is degraded to require a cold reload from
+    /// durable state before the runtime loop sees the error, as the session
+    /// service does for a turn whose session task its runtime took, so the
+    /// loop writes nothing more for the run and the session's next
+    /// registration recovers and resumes it.
     async fn await_service_apply_runtime_turn(
+        &self,
         session_id: &SessionId,
         result_rx: ServiceApplyRuntimeTurnResultReceiver,
     ) -> Result<CoreApplyOutput, RpcError> {
-        result_rx.await.map_err(|_| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!(
-                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-            ),
-            data: None,
-        })?
-        .map_err(staged_apply_runtime_turn_error_to_rpc)
+        let Ok(result) = result_rx.await else {
+            if self.host_runtime_stopped() {
+                self.runtime_adapter
+                    .require_session_durability_reload(
+                        session_id,
+                        "session_task_runtime_stopped",
+                        "the runtime turn's promotion task ended with the host's runtime",
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    "a runtime turn's promotion task ended with the host's runtime; the run is \
+                     left to the session's next registration"
+                );
+            }
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+                ),
+                data: None,
+            });
+        };
+        result.map_err(staged_apply_runtime_turn_error_to_rpc)
+    }
+
+    /// Whether the runtime this session runtime was built on has shut down.
+    /// A runtime that is shutting down cancels every task spawned on it
+    /// before `spawn` returns, so the probe answers at once; a live runtime
+    /// has not run the probe yet, or ran it.
+    fn host_runtime_stopped(&self) -> bool {
+        use futures::FutureExt as _;
+        self.host_runtime.as_ref().is_some_and(|handle| {
+            let probe = tokio::task::unconstrained(handle.spawn(std::future::ready(())));
+            matches!(probe.now_or_never(), Some(Err(error)) if error.is_cancelled())
+        })
     }
 
     async fn await_service_apply_runtime_turn_with_recoverable_admission(
@@ -10426,7 +10464,9 @@ impl SessionRuntime {
                 build_config.keep_alive,
                 generated_machine_archived_resume_admission,
             );
-            let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await;
+            let output = self
+                .await_service_apply_runtime_turn(session_id, output_rx)
+                .await;
             self.bridge_pending_session_event_streams(session_id).await;
             return output;
         }
@@ -10586,7 +10626,9 @@ impl SessionRuntime {
             active_turn,
             keep_alive,
         );
-        let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await?;
+        let output = self
+            .await_service_apply_runtime_turn(session_id, output_rx)
+            .await?;
         Ok(output)
     }
 
@@ -33045,8 +33087,9 @@ mod tests {
             admission.into_admission(),
             false,
         );
-        let rejected =
-            SessionRuntime::await_service_apply_runtime_turn(&session_id, result_rx).await;
+        let rejected = runtime
+            .await_service_apply_runtime_turn(&session_id, result_rx)
+            .await;
         assert!(
             rejected
                 .as_ref()

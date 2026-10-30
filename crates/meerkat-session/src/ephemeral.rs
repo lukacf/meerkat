@@ -2722,6 +2722,9 @@ struct SessionHandle {
     // reading it.
     #[cfg_attr(not(any(test, feature = "session-store")), allow(dead_code))]
     task_handle: tokio::task::JoinHandle<()>,
+    /// The runtime the session task runs on.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    actor_runtime: SessionTaskRuntime,
     command_tx: mpsc::Sender<SessionCommand>,
     state_tx: watch::Sender<SessionState>,
     state_rx: watch::Receiver<SessionState>,
@@ -2877,6 +2880,37 @@ impl SessionHandle {
             executor.close_admission();
         }
         self.actor_witness.revoke();
+    }
+}
+
+/// The runtime a session task runs on: the runtime that created the session,
+/// an embedding host's for a member's or a hosted session's actor. It is kept
+/// to tell, when the task stops taking commands, whether that runtime stopped
+/// and took the task with it (see
+/// `EphemeralSessionService::session_task_ended_with_its_runtime`).
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+struct SessionTaskRuntime {
+    handle: Option<tokio::runtime::Handle>,
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+impl SessionTaskRuntime {
+    /// The runtime a task spawned here runs on.
+    fn current() -> Self {
+        Self {
+            handle: tokio::runtime::Handle::try_current().ok(),
+        }
+    }
+
+    /// Whether this runtime has shut down. A runtime that is shutting down
+    /// cancels every task spawned on it before `spawn` returns, so the probe
+    /// answers at once; a live runtime has not run the probe yet, or ran it.
+    fn has_stopped(&self) -> bool {
+        use futures::FutureExt as _;
+        self.handle.as_ref().is_some_and(|handle| {
+            let probe = tokio::task::unconstrained(handle.spawn(std::future::ready(())));
+            matches!(probe.now_or_never(), Some(Err(error)) if error.is_cancelled())
+        })
     }
 }
 
@@ -5268,6 +5302,24 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })
             .await
             .flatten()
+    }
+
+    /// Whether `id`'s session task ended because the runtime it ran on
+    /// stopped: the actor this service still holds for the session (not
+    /// retired or replaced) takes no commands, and its runtime has shut
+    /// down. That runtime is the one that created the session, an embedding
+    /// host's for a member's or a hosted session's actor. A task that
+    /// panicked, or that this service retired, ended some other way.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn session_task_ended_with_its_runtime(&self, id: &SessionId) -> bool {
+        self.sessions
+            .with_handle(id, |handle| {
+                handle.actor_witness.is_live()
+                    && handle.command_tx.is_closed()
+                    && handle.actor_runtime.has_stopped()
+            })
+            .await
+            .unwrap_or(false)
     }
 
     /// Read the native Agent's complete display projection only while its
@@ -8900,7 +8952,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
 
-        // Spawn the session task using the platform-appropriate task API.
+        // Spawn the session task using the platform-appropriate task API, on
+        // the runtime this call runs on.
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        let actor_runtime = SessionTaskRuntime::current();
         #[cfg(not(target_arch = "wasm32"))]
         let task_handle = tokio::spawn(session_task(
             agent,
@@ -8960,6 +9015,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             tool_restrictions,
             #[cfg(not(target_arch = "wasm32"))]
             task_handle,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            actor_runtime,
             command_tx: command_tx.clone(),
             state_tx: state_tx_handle,
             state_rx,

@@ -1041,6 +1041,21 @@ fn split_member_comms_name(value: &str) -> Option<(&str, &str, &str)> {
     Some((mob_id, role, member))
 }
 
+/// The role a member session was last built under, read as a resumed
+/// build reads it (`admit_resumed_member_identity`): its mob member
+/// binding's role, or, for a session that records no binding, the role
+/// segment of its comms name. `None` when it records neither.
+pub(crate) fn stored_member_role_name(metadata: &SessionMetadata) -> Option<&str> {
+    match metadata.mob_member_binding.as_ref() {
+        Some(binding) => Some(binding.role.as_str()),
+        None => metadata
+            .comms_name
+            .as_deref()
+            .and_then(split_member_comms_name)
+            .map(|(_, role, _)| role),
+    }
+}
+
 pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
     let (mob_id, role, member) = split_member_comms_name(current)?;
     let legacy_member = member

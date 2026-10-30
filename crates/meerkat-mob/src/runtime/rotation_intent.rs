@@ -20,9 +20,10 @@
 //! ([`MemberRotationRecord`], a field the internal event codec stores and the
 //! public event payload never carries), so after a crash the restarted mob
 //! records the rotation again (`RecoverMemberRotationIntent`) and finishes it
-//! itself, with no host record. A host that keeps its own record of a rotation
-//! marks the identity host-pending, and the restarted mob leaves the rotation
-//! to the host's re-issue.
+//! itself, with no host record. A host that keeps its own record of a
+//! FreshSession rotation marks the identity host-pending, and the restarted
+//! mob leaves that rotation to the host's re-issue; a same-session rotation
+//! is always finished by the mob.
 
 use std::collections::BTreeMap;
 
@@ -160,21 +161,12 @@ impl MemberRotationRecord {
             .map(mob_dsl::MemberPeerEndpoint::from)
     }
 
-    /// Decode a stored record. A record this build cannot read (a later
-    /// release's target, or a damaged one) is `None`: the retirement then
-    /// replays as a plain one, as a reader that predates the record replays
-    /// it.
-    pub(crate) fn from_stored(value: serde_json::Value) -> Option<Self> {
-        match serde_json::from_value(value) {
-            Ok(record) => Some(record),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "a stored rotation record could not be read; its retirement replays as a plain one"
-                );
-                None
-            }
-        }
+    /// Decode a stored record. A record this build cannot read (a damaged
+    /// one, or a later release's target) fails the decode: its retirement
+    /// never replays as a plain one, which would end the member (and, for a
+    /// same-session rotation, archive its conversation).
+    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value)
     }
 }
 
@@ -269,14 +261,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_stored_record_replays_as_no_record() {
+    fn an_unreadable_stored_record_fails_its_decode() {
         assert!(
             MemberRotationRecord::from_stored(serde_json::json!({
                 "target": "a_later_target",
                 "session_id": "00000000-0000-4000-8000-000000000001",
                 "successor": {}
             }))
-            .is_none()
+            .is_err()
         );
     }
 }

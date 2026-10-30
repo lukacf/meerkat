@@ -53,6 +53,12 @@ pub(super) struct MemberRotation {
     /// successor takes another one (a declared role migration): the
     /// session's next build declares it and restamps the session.
     pub(super) resume_from_role: Option<ProfileName>,
+    /// The plan's observation of the session the rotation seats on: lost or
+    /// archived. A same-session rotation's start passes it to MobMachine,
+    /// whose `session_not_archived` guard refuses the start. A fresh
+    /// rotation's next session is new, and a recorded rotation's start was
+    /// admitted already: neither observes one.
+    pub(super) session_archived: bool,
 }
 
 impl MemberRotation {
@@ -977,6 +983,7 @@ impl MobActor {
                     target: crate::runtime::RotationTarget::FreshSession,
                     spawned_by: None,
                     resume_from_role: None,
+                    session_archived: false,
                 }),
                 reply: super::retirement_io::RotationReply::Session(reply),
             },
@@ -1034,26 +1041,29 @@ impl MobActor {
                     intent: format!("rotation of member {}", entry.agent_identity),
                 });
             }
-            None => inputs.push(mob_dsl::MobMachineInput::BeginMemberRotation {
-                agent_identity: dsl_identity,
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
-                generation: mob_dsl::Generation::from_domain(entry.generation),
-                session_id: next_session,
-                // A same-session successor keeps the member's own endpoint.
-                peer_endpoint: if rotation.keeps_session() {
-                    None
-                } else {
-                    rotation
-                        .endpoint
-                        .as_ref()
-                        .map(mob_dsl::MemberPeerEndpoint::from)
-                },
-                // An archived session was answered at preparation (a fresh
-                // seat's) or at the plan (the member's own), typed.
-                session_archived: false,
-                target,
-            }),
+            None => {
+                inputs.push(mob_dsl::MobMachineInput::BeginMemberRotation {
+                    agent_identity: dsl_identity,
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                    generation: mob_dsl::Generation::from_domain(entry.generation),
+                    session_id: next_session,
+                    // A same-session successor keeps the member's own endpoint.
+                    peer_endpoint: if rotation.keeps_session() {
+                        None
+                    } else {
+                        rotation
+                            .endpoint
+                            .as_ref()
+                            .map(mob_dsl::MemberPeerEndpoint::from)
+                    },
+                    // The plan's observation of the session the rotation
+                    // seats on: MobMachine refuses a start onto a lost or
+                    // archived one (the plan probed that verdict already).
+                    session_archived: rotation.session_archived,
+                    target,
+                });
+            }
         }
         // Under the rotation's intent the granting arm records the
         // candidate's authority, replacing any grant an earlier attempt left.
@@ -1099,13 +1109,21 @@ impl MobActor {
     /// member's own session, with the member's labels, overrides, wiring
     /// exemption, continuity and spawner, and the profile and runtime mode
     /// `request` names or the member's own. Refused typed, before anything
-    /// starts, for a member a same-session successor cannot serve: a placed
-    /// member (its member host owns its materialization), a member bound to
-    /// no session (a peer-only member), a member on a service that keeps no
-    /// durable sessions (its session ends with its runtime), and a member
-    /// whose session is lost or archived. A member whose retirement started
-    /// is planned only when that retirement is this very rotation (a
-    /// re-drive of the same successor).
+    /// starts, for a member a same-session successor cannot serve. From
+    /// MobMachine's facts: a placed member (its member host owns its
+    /// materialization) and a member bound to no session (a peer-only
+    /// member). From the shell's own facts, which no machine holds: a member
+    /// that is not runtime-backed, a member on a service that keeps no
+    /// durable sessions (its session ends with its runtime), a fork-derived
+    /// member and one holding a forked participant attachment (the lineage
+    /// belongs to the incarnation that holds it), and a member whose
+    /// session's creation, continuity or (for a role migration) last role
+    /// cannot be read. A member whose session is lost or archived is refused
+    /// by MobMachine's start verdict (`session_not_archived`), which the plan
+    /// probes for its observation of the session, and the start takes the
+    /// same observation ([`MemberRotation::session_archived`]). A member
+    /// whose retirement started is planned only when that retirement is this
+    /// very rotation (a re-drive of the same successor).
     pub(super) async fn plan_member_respawn(
         &mut self,
         agent_identity: &AgentIdentity,
@@ -1194,15 +1212,46 @@ impl MobActor {
             ));
         }
         // A seat session no build created yet stays unborn: the successor's
-        // first wake creates it. Any other session must be there to keep.
+        // first wake creates it. Any other session must be there to keep:
+        // the plan observes it, and MobMachine's start refuses a rotation
+        // onto a lost or archived one (`session_not_archived`).
         let unborn =
             super::super::boot_plan::domain_member_seat_session_unborn(state, agent_identity);
-        if !unborn
-            && !super::member_session_present(self.session_service.as_ref(), &session_id).await?
+        let session_archived = !unborn
+            && !super::member_session_present(self.session_service.as_ref(), &session_id).await?;
+        if session_archived {
+            // MobMachine's start verdict for that observation, probed on a
+            // copy of the authority that is never committed, so its refusal
+            // is answered typed before anything starts.
+            let mut probe = self.dsl_authority.prepare_authority();
+            let start = mob_dsl::MobMachineInput::BeginMemberRotation {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                generation: mob_dsl::Generation::from_domain(entry.generation),
+                session_id: mob_dsl::SessionId::from_domain(&session_id),
+                peer_endpoint: None,
+                session_archived,
+                target: mob_dsl::RotationTarget::SameSession,
+            };
+            if probe.apply_batch([start]).is_err() {
+                return Err(unsupported(
+                    "the member's session is lost or archived: a same-session successor cannot keep it",
+                ));
+            }
+        }
+        // The kept session's creation record is the successor's: a record
+        // that cannot be read refuses the successor, which is never recorded
+        // under a creation it does not have.
+        if let Err(error) = self
+            .roster
+            .read()
+            .await
+            .member_creation_for_session(&session_id)
         {
-            return Err(unsupported(
-                "the member's session is lost or archived: a same-session successor cannot keep it",
-            ));
+            return Err(unsupported(&format!(
+                "the creation the member's session recorded cannot be read ({error}): a same-session successor cannot keep it"
+            )));
         }
         let role = request
             .profile
@@ -1211,13 +1260,25 @@ impl MobActor {
         // The next incarnation declares the role its kept session was last
         // built under, when it takes another one (a declared role migration,
         // or an earlier one no build applied yet): the session's next build
-        // restamps it. A session no build created has none.
-        let resume_from_role = if unborn {
+        // restamps it. A session no build created has none. A built session
+        // that records no role refuses a migration it could not declare.
+        let resume_from_role = if unborn || session_archived {
             None
         } else {
-            super::super::fork_build::stored_member_role(self.session_service.as_ref(), &session_id)
-                .await?
-                .filter(|stored| stored != &role)
+            match super::super::fork_build::stored_member_role(
+                self.session_service.as_ref(),
+                &session_id,
+            )
+            .await?
+            {
+                Some(stored) => Some(stored).filter(|stored| stored != &role),
+                None if role != entry.role => {
+                    return Err(unsupported(
+                        "the member's session records no role it was built under: a same-session successor cannot declare its role migration",
+                    ));
+                }
+                None => None,
+            }
         };
         let mut spec =
             super::super::handle::SpawnMemberSpec::new(role.clone(), agent_identity.clone());
@@ -1230,13 +1291,20 @@ impl MobActor {
             spec.model_override = entry.effective_model_override.clone();
         }
         spec.definition_wiring = entry.definition_wiring;
+        // The continuity the current incarnation was spawned with (its spawn
+        // row's). An incarnation no spawn row records (a legacy reset) has
+        // none to keep: refused, never defaulted.
         spec.continuity_intent = self
             .roster
             .read()
             .await
             .spawn_continuity_intent(agent_identity)
             .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                unsupported(
+                    "no spawn row records the member's current continuity: a same-session successor cannot keep it",
+                )
+            })?;
         spec.initial_message = request.initial_message.clone();
         spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: session_id,
@@ -1257,6 +1325,7 @@ impl MobActor {
             target: crate::runtime::RotationTarget::SameSession,
             spawned_by: entry.spawned_by,
             resume_from_role,
+            session_archived,
         })
     }
 
@@ -1361,6 +1430,8 @@ impl MobActor {
             target: record.target,
             spawned_by: successor.spawned_by.clone(),
             resume_from_role: successor.resume_from_role.clone(),
+            // The recorded start was admitted: its re-drive applies none.
+            session_archived: false,
         })
     }
 
@@ -1636,7 +1707,9 @@ impl MobActor {
         // respawn's is: it keeps the creation the retiring incarnation's own
         // session recorded (the same creation id, Successor provenance). The
         // rotation spec's origin names a fresh member, which it is not. A
-        // same-session successor's session keeps the creation it recorded.
+        // same-session successor's session keeps the creation it recorded; a
+        // session that recorded none (or another member's) is unproven, and
+        // a record that cannot be read fails the terminal, never a guess.
         let creation = if rotation.keeps_session() {
             match self
                 .roster
@@ -1647,10 +1720,15 @@ impl MobActor {
                 Ok(Some(previous)) if previous.member_binding.member == identity.as_str() => {
                     previous.creation
                 }
-                _ => crate::MemberCreationRecord {
+                Ok(_) => crate::MemberCreationRecord {
                     creation_id: Some(crate::MemberCreationId::new()),
                     provenance: crate::MemberCreationProvenance::Unproven,
                 },
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "the same-session successor of '{identity}' cannot read the creation its session recorded: {error}"
+                    )));
+                }
             }
         } else {
             self.roster

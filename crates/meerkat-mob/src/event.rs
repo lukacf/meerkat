@@ -2086,9 +2086,8 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or(false);
-    // A rotation record this build cannot read replays as no record: the
-    // retirement then replays as a plain one, as a reader that predates the
-    // record replays it.
+    // A rotation record this build cannot read fails the decode, typed: its
+    // retirement never replays as a plain one, which would end the member.
     let retirement_rotation = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2099,7 +2098,8 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
                 None
             }
         })
-        .and_then(crate::runtime::MemberRotationRecord::from_stored);
+        .map(crate::runtime::MemberRotationRecord::from_stored)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2994,13 +2994,10 @@ mod tests {
             .expect("a payload with the unknown key still parses");
         assert_eq!(older_reader.cursor, 1);
 
-        for (replacement, label) in [
-            (None, "a row written before the field"),
-            (
-                Some(serde_json::json!({ "target": "a_later_target" })),
-                "a record a later release wrote",
-            ),
-        ] {
+        // A row written before the field decodes as a plain retirement
+        // start; a record this build cannot read fails the decode, typed,
+        // instead of replaying as one.
+        let variant = |replacement: Option<serde_json::Value>| {
             let mut variant = stored.clone();
             let kind = variant
                 .get_mut("event")
@@ -3011,15 +3008,19 @@ mod tests {
             if let Some(record) = replacement {
                 kind.insert("rotation".to_string(), record);
             }
-            let bytes = serde_json::to_vec(&variant).expect("encode variant");
-            let decoded = decode_stored_mob_event(&bytes)
-                .expect("decode variant")
-                .kind;
-            assert!(
-                decoded.retirement_rotation().is_none(),
-                "{label} decodes as a plain retirement start"
-            );
-        }
+            serde_json::to_vec(&variant).expect("encode variant")
+        };
+        let without = decode_stored_mob_event(&variant(None))
+            .expect("a row written before the field decodes")
+            .kind;
+        assert!(without.retirement_rotation().is_none());
+        assert!(
+            decode_stored_mob_event(&variant(Some(
+                serde_json::json!({ "target": "a_later_target" })
+            )))
+            .is_err(),
+            "an unreadable record fails the decode"
+        );
     }
 
     #[test]

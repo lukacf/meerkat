@@ -1113,10 +1113,12 @@ async fn read_resumed_member_view(
     ))
 }
 
-/// The role `session_id` was last built under, from its persisted metadata
-/// (its mob member binding): what a build of it under another role declares
+/// The role `session_id` was last built under, from its persisted metadata,
+/// read as its resumed build reads it (its mob member binding's role, or
+/// its comms name's role segment for a session that records no binding):
+/// what a build of it under another role declares
 /// (`MemberLaunchMode::Resume::resume_from_role`). `None` when the session
-/// records no member binding. A failed read is a typed error.
+/// records neither. A failed read is a typed error.
 pub(crate) async fn stored_member_role(
     session_service: &dyn super::session_service::MobSessionService,
     session_id: &SessionId,
@@ -1127,8 +1129,9 @@ pub(crate) async fn stored_member_role(
         .map_err(MobError::SessionError)?;
     Ok(metadata
         .and_then(|view| view.session_metadata)
-        .and_then(|metadata| metadata.mob_member_binding)
-        .map(|binding| crate::ids::ProfileName::from(binding.role)))
+        .and_then(|metadata| {
+            crate::build::stored_member_role_name(&metadata).map(crate::ids::ProfileName::from)
+        }))
 }
 
 /// The provider-params override the customizer gives `entry`'s rebuild on a

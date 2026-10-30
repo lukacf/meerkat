@@ -7854,10 +7854,6 @@ struct RespawnSnapshot {
     /// Whether the definition's wiring rules apply to the member, carried to
     /// the replacement incarnation.
     definition_wiring: crate::DefinitionWiring,
-    /// Whether the member is an identity entry (MobMachine's
-    /// `identity_entry_origins`): its replacement is spawned with entry
-    /// custody, so the successor is the entry's member.
-    entry_custody: bool,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -50731,6 +50727,21 @@ impl MobActor {
             // The successor keeps the creation of the incarnation it
             // replaces, read from that incarnation's own session record.
             let creation_witness = roster.successor_creation_witness(&entry);
+            // MobMachine's fact, read in the snapshot's own actor step: an
+            // identity entry's member is respawned on its own session
+            // (above), never here. This path seats a worker's successor,
+            // which never takes an entry's custody.
+            if self
+                .dsl_authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity))
+            {
+                return Err(MobRespawnError::from(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "an identity entry's successor keeps its session: it is not respawned with a fresh life".to_string(),
+                }));
+            }
             RespawnSnapshot {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
@@ -50747,14 +50758,6 @@ impl MobActor {
                 ),
                 fork_job: entry.fork_job,
                 definition_wiring: entry.definition_wiring,
-                // MobMachine's fact, read in the snapshot's own actor step:
-                // the successor of an identity entry's member is the
-                // entry's member.
-                entry_custody: self
-                    .dsl_authority
-                    .state()
-                    .identity_entry_origins
-                    .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity)),
                 cleanup_retry,
             }
         };
@@ -50833,11 +50836,11 @@ impl MobActor {
             &mut replacement_spec,
         )
         .map_err(MobRespawnError::from)?;
-        // The member's standing belongs to the identity, read from MobMachine
-        // with the snapshot: the successor of an identity entry's member is
-        // the entry's member again, and a worker's successor is a worker,
-        // whatever the successor spec or a customizer says.
-        replacement_spec.entry_custody = snapshot.entry_custody;
+        // The member's standing belongs to the identity: this path respawns
+        // only a worker (an identity entry's member was refused with the
+        // snapshot), and a worker's successor is a worker, whatever the
+        // successor spec or a customizer says.
+        replacement_spec.entry_custody = false;
         if replacement_spec.identity != original_identity {
             return Err(MobRespawnError::from(MobError::Internal(format!(
                 "spawn customizer cannot change respawn identity from '{original_identity}' to '{}'",

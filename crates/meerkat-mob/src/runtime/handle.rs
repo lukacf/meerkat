@@ -2168,6 +2168,11 @@ pub struct MemberRespawnReceipt {
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
     #[serde(skip)]
     pub(crate) fence_token: FenceToken,
+    /// The error of the wake a respawn asked for
+    /// ([`MobHandle::respawn_member`] with `MemberRespawn::wake`), when it
+    /// failed after the successor was committed.
+    #[serde(skip)]
+    pub(crate) wake_error: Option<std::sync::Arc<MobError>>,
 }
 
 impl MemberRespawnReceipt {
@@ -2182,6 +2187,7 @@ impl MemberRespawnReceipt {
             agent_runtime_id,
             previous_fence_token,
             fence_token,
+            wake_error: None,
         }
     }
 
@@ -2189,6 +2195,14 @@ impl MemberRespawnReceipt {
     #[must_use]
     pub fn runtime_id(&self) -> &AgentRuntimeId {
         &self.agent_runtime_id
+    }
+
+    /// The error of the wake the respawn asked for, when it failed after the
+    /// successor was committed: the respawn is done and the successor stays
+    /// seated Dormant, so a caller wakes it again rather than respawning.
+    #[must_use]
+    pub fn wake_error(&self) -> Option<&MobError> {
+        self.wake_error.as_deref()
     }
 }
 
@@ -9680,15 +9694,26 @@ impl MobHandle {
     /// name-based session (the same generation always names the same
     /// session). No host record is needed. A host that keeps one passes the
     /// identity host-pending ([`super::MobBuilder::with_host_pending_members`])
-    /// and calls this again after the restart: the restarted mob leaves that
-    /// rotation to the call, which finishes it once. While the rotation
-    /// stands, a call with the same spec re-drives it (a stuck one included)
-    /// and answers its session; a call that names another next session, and
-    /// a call for a member whose retirement started without a rotation
-    /// (unless the member is host-pending), are refused retryable
-    /// ([`MobError::LifecycleOperationPending`]) before anything starts. A
-    /// call made after the rotation finished rotates the member again. Needs
-    /// the members' comms transport, as [`Self::seat_dormant_members`] does.
+    /// and calls this again with the same spec after the restart: the
+    /// restarted mob holds that rotation for the call (recorded stuck at
+    /// admission, with a cause that names the wait, see
+    /// [`Self::retirement_settlement`]), which finishes it once. Without the
+    /// host-pending mark the restarted mob finishes the rotation itself, so a
+    /// host that does not mark the member must not re-issue an unanswered
+    /// call after a restart: a call made after the rotation finished rotates
+    /// the member again. While the rotation stands, a call with the same spec
+    /// re-drives it (a stuck one included) and answers its session; a
+    /// recorded rotation whose next incarnation cannot be planned again (its
+    /// profile left the definition) stays stuck until a call whose spec
+    /// plans the same next session. A call that names another next session
+    /// is refused retryable ([`MobError::LifecycleOperationPending`]) before
+    /// anything starts; a same-session rotation of the member (a respawn) is
+    /// finished by the mob itself, after which the call can be made again. A
+    /// call for a member whose retirement started without a rotation is
+    /// refused the same way unless the member is host-pending, and a retry
+    /// alone does not succeed: that retirement must finish, or be re-driven
+    /// ([`Self::redrive_retirement`]), first. Needs the members' comms
+    /// transport, as [`Self::seat_dormant_members`] does.
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
         use super::dormant_seat::DormantSeatCommitEntry;
 
@@ -14374,16 +14399,21 @@ impl MobHandle {
     /// ends stopped, typed. An initial message runs once as the next
     /// incarnation's first turn on the kept session. With `request.wake`,
     /// the next incarnation is woken before the call answers
-    /// ([`Self::ensure_member_live`]); a wake that fails is answered after
-    /// the successor is seated, and the member stays seated Dormant.
+    /// ([`Self::ensure_member_live`]). A wake that fails after the successor
+    /// is committed does not fail the call: the respawn is done, the member
+    /// stays seated Dormant, and the receipt reports the wake's error
+    /// ([`MemberRespawnReceipt::wake_error`]). Calling again would respawn
+    /// the member again.
     ///
     /// Refused typed ([`MobError::UnsupportedForMode`]) before anything
     /// starts for a member a same-session successor cannot serve: a placed
     /// member, a member bound to no session of its own, a member that is not
     /// runtime-backed or whose service keeps no durable sessions, a member
-    /// whose session is lost or archived, a fork-derived member, and a
-    /// member holding a forked participant attachment. A member whose
-    /// retirement is in flight is refused retryable
+    /// whose session is lost or archived (MobMachine's start refuses it), a
+    /// fork-derived member, a member holding a forked participant
+    /// attachment, and a member whose session's creation record, spawn
+    /// continuity or (for a role migration) last role cannot be read. A
+    /// member whose retirement is in flight is refused retryable
     /// ([`MobError::LifecycleOperationPending`]); a call that finds this
     /// rotation itself stuck re-drives it.
     pub async fn respawn_member(
@@ -14406,8 +14436,9 @@ impl MobHandle {
                 MobRespawnError::Mob(error) => error,
                 other => MobError::Internal(other.to_string()),
             })?;
-        if wake {
-            self.ensure_member_live(&identity).await?;
+        let mut receipt = receipt;
+        if wake && let Err(error) = self.ensure_member_live(&identity).await {
+            receipt.wake_error = Some(std::sync::Arc::new(error));
         }
         Ok(receipt)
     }

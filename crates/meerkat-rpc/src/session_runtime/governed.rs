@@ -515,8 +515,9 @@ impl SessionRuntime {
     /// session task is spawned on the runtime that runs the materialization,
     /// and every turn of the session would then run on the cleanup runtime's
     /// two workers. A materialization that ends without an answer (its
-    /// runtime shut down, or it panicked) is reported as a failed one.
-    /// Outside a Tokio runtime it runs in the calling task.
+    /// runtime shut down, or it panicked) is reported as a failed one, by
+    /// that kind only: its own report, a panic's payload included, goes to
+    /// the host's log. Outside a Tokio runtime it runs in the calling task.
     async fn materialize_staged_actor_on(
         self: &Arc<Self>,
         actor_runtime: Option<tokio::runtime::Handle>,
@@ -545,10 +546,22 @@ impl SessionRuntime {
         };
         match handle.spawn(materialization).await {
             Ok(materialized) => materialized,
-            Err(error) => Err(RuntimeDriverError::Internal(format!(
-                "staged session actor materialization ended without an answer: {error}"
-            ))
-            .into()),
+            Err(error) => {
+                let ended = if error.is_panic() {
+                    "panicked"
+                } else {
+                    "was cancelled: the host's runtime stopped"
+                };
+                tracing::error!(
+                    %error,
+                    "the staged session's actor materialization on the host's runtime {ended}"
+                );
+                Err(RuntimeDriverError::Internal(format!(
+                    "the staged session's actor materialization on the host's runtime {ended}; \
+                     inspect host logs"
+                ))
+                .into())
+            }
         }
     }
 

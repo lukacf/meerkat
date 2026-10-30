@@ -8450,12 +8450,27 @@ impl MemberHostRuntime {
     {
         match self.handle.as_ref() {
             Some(handle) => handle.spawn(call).await.map_err(|error| {
-                MobError::Internal(format!(
-                    "member registration hook call ended without an answer: {error}"
-                ))
+                Self::ended_without_an_answer("a member registration hook call", &error)
             }),
             None => Ok(call.await),
         }
+    }
+
+    /// The error a task on this runtime that ended without an answer gives
+    /// its caller: whether it panicked or was cancelled, read from the join
+    /// error's kind. The task's own report, a panic's payload included, goes
+    /// to the host's log only.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ended_without_an_answer(work: &str, error: &tokio::task::JoinError) -> MobError {
+        let ended = if error.is_panic() {
+            "panicked"
+        } else {
+            "was cancelled: the host's runtime stopped"
+        };
+        tracing::error!(%error, "{work} on the host's runtime {ended}");
+        MobError::Internal(format!(
+            "{work} on the host's runtime {ended}; inspect host logs"
+        ))
     }
 
     /// Call host-supplied member registration hook code in the calling task:
@@ -8491,9 +8506,10 @@ impl MemberHostRuntime {
         {
             if let Some(handle) = self.handle.as_ref() {
                 return handle.spawn(materialization).await.map_err(|error| {
-                    MobError::Internal(format!(
-                        "member session actor materialization ended without an answer: {error}"
-                    ))
+                    Self::ended_without_an_answer(
+                        "the member's session actor materialization",
+                        &error,
+                    )
                 });
             }
         }

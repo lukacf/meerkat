@@ -30,7 +30,7 @@ type State = SessionDocumentMachineState;
 type Transition = SessionDocumentMachineTransition;
 type TransitionError = SessionDocumentMachineTransitionError;
 
-const ARMS: [&str; 28] = [
+const ARMS: [&str; 29] = [
     "RecoverSessionInstructionState",
     "RecoverSessionInstructionTarget",
     "RecoverSessionInstructionEffective",
@@ -49,6 +49,7 @@ const ARMS: [&str; 28] = [
     "SetSessionInstructionSlotLimitExceeded",
     "SetSessionInstructionUnknownSlot",
     "RebindInstructionOwner",
+    "RebindInstructionOwnerUnowned",
     "ReleaseInstructionTarget",
     "ReleaseInstructionTargetAlreadyUnowned",
     "ReleaseInstructionTargetOwnedByOtherMob",
@@ -691,8 +692,8 @@ fn a_record_from_another_mob_is_refused_until_the_owning_mob_releases_the_target
         &refused(InstructionWriteRefusal::OwnedByOtherMob),
     );
 
-    // The owning mob releases: the target empties and is unowned, what is
-    // in effect stays, and nothing is pending.
+    // The owning mob releases: the target empties and is unowned, and the
+    // release applies nothing by itself.
     let transition = apply(&mut authority, release("mob-a"));
     assert_eq!(
         transition.effects(),
@@ -705,16 +706,11 @@ fn a_record_from_another_mob_is_refused_until_the_owning_mob_releases_the_target
     assert_eq!(
         effective(&authority),
         in_effect,
-        "a release applies nothing"
+        "a release applies nothing by itself"
     );
     assert_eq!(entry_sequence(&authority), Some(1));
-    assert_verdict_only(
-        &mut authority,
-        fresh_run(InstructionLowering::MidConversation, false),
-        &[Effect::InstructionEntryNotNeeded],
-    );
 
-    // Only now may another mob bind.
+    // Only now may another mob bind, and it starts from an empty target.
     let transition = apply(&mut authority, record("mob-b", 1, &other));
     assert_eq!(
         transition.effects(),
@@ -722,6 +718,76 @@ fn a_record_from_another_mob_is_refused_until_the_owning_mob_releases_the_target
     );
     assert_eq!(owner_mob(&authority).as_deref(), Some("mob-b"));
     assert_eq!(target(&authority), other);
+}
+
+#[test]
+fn release_empties_the_target_and_the_next_fresh_run_start_revokes_what_was_in_effect() {
+    let in_effect = Slots::empty()
+        .active("tone", 1, DIGEST_X, 9)
+        .active("style", 2, DIGEST_Y, 4);
+    for (lowering, transcript_is_system_prefix) in [
+        (InstructionLowering::MidConversation, false),
+        (InstructionLowering::LeadingPrefixOnly, true),
+    ] {
+        let mut authority =
+            seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect.clone()));
+        apply(&mut authority, release("mob-a"));
+        assert_eq!(
+            target(&authority),
+            Slots::empty(),
+            "a release empties the target"
+        );
+        let transition = apply(
+            &mut authority,
+            fresh_run(lowering, transcript_is_system_prefix),
+        );
+        assert_eq!(
+            transition.effects(),
+            [Effect::InstructionEntryAuthorized {
+                entry_sequence: 2,
+                generation: 0
+            }]
+            .as_slice(),
+            "{lowering:?}: the released mob's instructions are revoked"
+        );
+        assert_eq!(
+            effective(&authority),
+            Slots::empty(),
+            "{lowering:?}: nothing of the released mob stays in effect"
+        );
+        assert_verdict_only(
+            &mut authority,
+            fresh_run(lowering, transcript_is_system_prefix),
+            &[Effect::InstructionEntryNotNeeded],
+        );
+    }
+
+    // A prefix-only model after conversation rows defers the revoke, and a
+    // compaction at the next run's first request folds the empty target.
+    let mut authority =
+        seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect.clone()));
+    apply(&mut authority, release("mob-a"));
+    assert_verdict_only(
+        &mut authority,
+        fresh_run(InstructionLowering::LeadingPrefixOnly, false),
+        &[Effect::InstructionApplicationDeferred {
+            reason: InstructionDeferReason::LeadingPrefixOnly,
+        }],
+    );
+    let transition = apply(
+        &mut authority,
+        fold(true, InstructionLowering::LeadingPrefixOnly),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::InstructionFoldAuthorized {
+            entry_sequence: 2,
+            source: InstructionFoldSource::Target,
+            generation: 0
+        }]
+        .as_slice()
+    );
+    assert_eq!(effective(&authority), Slots::empty());
 }
 
 #[test]
@@ -1024,15 +1090,42 @@ fn rebind_starts_the_new_owner_from_the_slots_in_effect() {
 #[test]
 fn rebind_takes_an_unowned_target_and_a_session_target_only_for_a_mob() {
     // An unowned target binds a session owner (a host's standalone
-    // adoption) or a mob (an attach).
+    // adoption) or a mob (an attach). The new owner starts from an empty
+    // target: whatever is still in effect (a released mob's instructions)
+    // is revoked at the next fresh run start.
+    let in_effect = Slots::empty().active("tone", 1, DIGEST_X, 5);
     for (to, mob) in [
         (InstructionTargetOwner::Session, ""),
         (InstructionTargetOwner::Mob, "mob-a"),
     ] {
-        let mut authority = seeded(&Seed::empty());
-        apply(&mut authority, rebind(to, mob));
+        let mut authority = seeded(&Seed::empty().in_effect(2, in_effect.clone()));
+        let transition = apply(&mut authority, rebind(to, mob));
+        assert_eq!(
+            transition.effects(),
+            [Effect::InstructionOwnerRebound { owner: to }].as_slice()
+        );
         assert_eq!(owner(&authority), Some(to));
         assert_eq!(owner_mob(&authority).as_deref(), Some(mob));
+        assert_eq!(generation(&authority), Some(0));
+        assert_eq!(
+            target(&authority),
+            Slots::empty(),
+            "{to:?}: an empty target"
+        );
+        assert_eq!(effective(&authority), in_effect, "a rebind applies nothing");
+        let transition = apply(
+            &mut authority,
+            fresh_run(InstructionLowering::MidConversation, false),
+        );
+        assert_eq!(
+            transition.effects(),
+            [Effect::InstructionEntryAuthorized {
+                entry_sequence: 3,
+                generation: 0
+            }]
+            .as_slice()
+        );
+        assert_eq!(effective(&authority), Slots::empty());
     }
     for (case, seed, to, mob) in [
         (
@@ -1238,11 +1331,27 @@ fn resume_and_no_run_starts_never_apply() {
 }
 
 #[test]
-fn an_unowned_target_has_nothing_pending() {
-    // Slots in effect that an unowned target does not name are not revoked:
-    // nothing is pending until an owner binds.
+fn an_unowned_target_revokes_what_is_in_effect_at_the_next_fresh_run_start() {
+    // An unowned target is empty: whatever is still in effect is revoked
+    // at the next fresh run start.
     let mut authority =
         seeded(&Seed::empty().in_effect(3, Slots::empty().active("tone", 1, DIGEST_X, 5)));
+    let transition = apply(
+        &mut authority,
+        fresh_run(InstructionLowering::MidConversation, false),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::InstructionEntryAuthorized {
+            entry_sequence: 4,
+            generation: 0
+        }]
+        .as_slice()
+    );
+    assert_eq!(effective(&authority), Slots::empty());
+
+    // A session that never had a target has nothing to revoke.
+    let mut authority = seeded(&Seed::empty());
     assert_verdict_only(
         &mut authority,
         fresh_run(InstructionLowering::MidConversation, false),
@@ -1309,6 +1418,26 @@ fn run_start_fold_applies_the_target() {
 }
 
 #[test]
+fn a_run_start_fold_of_an_unowned_target_revokes_what_is_in_effect() {
+    let mut authority =
+        seeded(&Seed::empty().in_effect(1, Slots::empty().active("tone", 1, DIGEST_X, 5)));
+    let transition = apply(
+        &mut authority,
+        fold(true, InstructionLowering::MidConversation),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::InstructionFoldAuthorized {
+            entry_sequence: 2,
+            source: InstructionFoldSource::Target,
+            generation: 0
+        }]
+        .as_slice()
+    );
+    assert_eq!(effective(&authority), Slots::empty());
+}
+
+#[test]
 fn other_folds_keep_the_slots_in_effect() {
     for (case, seed, at_run_start, lowering) in [
         (
@@ -1334,12 +1463,6 @@ fn other_folds_keep_the_slots_in_effect() {
             pending_seed(),
             true,
             InstructionLowering::Unavailable,
-        ),
-        (
-            "at a run start of an unowned target",
-            Seed::empty().in_effect(1, Slots::empty().active("tone", 1, DIGEST_X, 5)),
-            true,
-            InstructionLowering::MidConversation,
         ),
     ] {
         let mut authority = seeded(&seed);

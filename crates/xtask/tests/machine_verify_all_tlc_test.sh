@@ -725,12 +725,13 @@ fi
 # reaches the target with one entry per run start, an applied revoke holds,
 # a mid-run fold keeps what is in effect, a session write never lowers a
 # revision, a leading-prefix-only model applies only on a leading System
-# prefix, an unowned target applies nothing, a mob-owned target changes
-# owner only by its own mob's release, a rebind starts from what is in
-# effect, and the target stays within the active budget. It first checks
-# that the generated model defines every arm it drives, and requires its
-# four witnesses reached. --mutants refuses seven seeded defects, each by
-# the invariant it targets. Not yet measured on a hosted runner; it joins
+# prefix, a mob-owned target changes owner only by its own mob's release, a
+# release empties the target and the next fresh run start revokes what the
+# released mob had in effect, a rebind starts from the right target, and the
+# target stays within the active budget. It first checks that the generated
+# model defines every arm it drives, and requires its five witnesses
+# reached. --mutants refuses nine seeded defects, each by the invariant it
+# targets. Not yet measured on a hosted runner; it joins
 # this shard as the lightest one measured locally.
 instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
 if [[ ! -x "${instruction_boundary_audit}" ]]; then

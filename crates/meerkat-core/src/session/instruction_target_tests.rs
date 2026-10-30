@@ -810,10 +810,10 @@ fn a_record_from_another_mob_is_refused_until_its_owner_releases_the_target() {
     assert!(state.slots().is_empty());
     assert_eq!(state.entry_sequence(), 1);
     let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
-    assert_eq!(effective.active_count(), 1, "a release applies nothing");
     assert_eq!(
-        fresh_run(&mut session),
-        RunStartInstructionOutcome::NotNeeded
+        effective.active_count(),
+        1,
+        "a release applies nothing by itself"
     );
     let released = session.to_persisted_bytes().unwrap();
     assert_eq!(
@@ -826,8 +826,9 @@ fn a_record_from_another_mob_is_refused_until_its_owner_releases_the_target() {
         "a repeated release writes nothing"
     );
 
-    // Only now may another mob bind; its snapshot replaces the target, so
-    // the next run start revokes what the released mob put in effect.
+    // Only now may another mob bind, and it starts from an empty target: the
+    // next run start revokes what the released mob put in effect and
+    // applies the new snapshot.
     let receipt = session
         .record_instruction_target(mob_record(
             "mob-b",
@@ -903,6 +904,10 @@ fn a_rebind_never_takes_a_mob_owned_target() {
         .unwrap();
     let state = session.instruction_target_state().unwrap().unwrap();
     assert_eq!(state.owner(), &InstructionTargetOwner::Session);
+    assert!(
+        state.slots().is_empty(),
+        "the new owner starts from an empty target"
+    );
 }
 
 #[test]
@@ -968,4 +973,109 @@ fn the_active_budget_counts_the_target_as_the_write_leaves_it() {
         InstructionSetErrorCode::ActiveSetBudgetExceeded
     );
     assert_eq!(member.instruction_target_state().unwrap(), None);
+}
+
+#[test]
+fn a_release_revokes_the_mob_instructions_at_the_next_fresh_run_start() {
+    let mut session = conversed_session();
+    session
+        .record_instruction_target(mob_record(
+            "mob-a",
+            1,
+            vec![
+                ("tone", 1, Some("Be brief.")),
+                ("style", 1, Some("Use short sentences.")),
+            ],
+        ))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    session.release_instruction_target("mob-a").unwrap();
+
+    // The next fresh run start revokes every instruction the released mob
+    // had in effect, in one entry, and nothing stays pending.
+    assert_eq!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 2,
+            target_generation: 0,
+        }
+    );
+    let revocation = entries(&session).pop().expect("the revocation entry");
+    assert!(revocation.active().is_empty());
+    assert!(
+        revocation
+            .changes()
+            .iter()
+            .all(|change| matches!(change, InstructionChange::Revoke { .. }))
+    );
+    assert_eq!(revocation.changes().len(), 2);
+    let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
+    assert_eq!(effective.active_count(), 0);
+    assert_eq!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::NotNeeded
+    );
+
+    // A later owner starts from an empty target, and its write revokes
+    // nothing it did not name.
+    session
+        .rebind_instruction_owner(InstructionTargetOwner::Session)
+        .unwrap();
+    assert!(
+        session
+            .instruction_target_state()
+            .unwrap()
+            .unwrap()
+            .slots()
+            .is_empty()
+    );
+    session
+        .set_session_instruction(activate("tone", 2, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let latest = entries(&session).pop().expect("the write's entry");
+    assert_eq!(latest.changes().len(), 1, "the write names one slot");
+    assert!(matches!(
+        latest.changes()[0],
+        InstructionChange::Activate { .. }
+    ));
+}
+
+#[test]
+fn a_release_before_any_run_start_still_revokes_what_was_in_effect() {
+    // A write that a later owner makes before the next run start does not
+    // keep the released mob's instructions: the release already revokes
+    // them, and the write adds only its own slot.
+    let mut session = conversed_session();
+    session
+        .record_instruction_target(mob_record("mob-a", 1, vec![("tone", 1, Some("Be brief."))]))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    session.release_instruction_target("mob-a").unwrap();
+    session
+        .set_session_instruction(activate("style", 1, "Use short sentences."))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
+    assert_eq!(effective.active_count(), 1);
+    assert!(matches!(
+        effective.slot(&slot("style")),
+        Some(style) if style.effect() == InstructionEffect::Active
+    ));
+    assert!(matches!(
+        effective.slot(&slot("tone")),
+        Some(tone) if tone.effect() == InstructionEffect::Absent
+    ));
 }

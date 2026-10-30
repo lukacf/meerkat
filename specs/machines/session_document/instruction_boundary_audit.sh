@@ -6,9 +6,10 @@
 # every earlier write into one entry, an applied revoke holds until a later
 # write, a mid-run fold, a write, a record, a rebind and a release leave the
 # slots in effect alone, a session write never lowers a revision, a
-# leading-prefix-only model applies only on a leading System prefix, an
-# unowned target applies nothing, a mob-owned target changes owner only when
-# its own mob releases it, a rebind starts from what is in effect, and the
+# leading-prefix-only model applies only on a leading System prefix, a
+# mob-owned target changes owner only when its own mob releases it, a
+# release empties the target and the next fresh run start revokes what the
+# released mob had in effect, a rebind starts from the right target, and the
 # target stays within the active budget.
 #
 # usage: instruction_boundary_audit.sh [--mutants] [extra tlc args...]
@@ -20,7 +21,7 @@
 # arm or field fails the run instead of a vacuous pass. It then checks the
 # invariants (safety), and reruns with the reachability witnesses' negations
 # as extra invariants under -continue, requiring TLC to report each of them
-# violated. With --mutants it seeds seven defects into a copy of the
+# violated. With --mutants it seeds nine defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
 # targets:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
@@ -30,7 +31,10 @@
 #   - accept another mob's record (the owning-mob guard dropped);
 #   - let a rebind take a mob-owned target (the rebind guard dropped);
 #   - record a session write over the active budget (its budget guard
-#     dropped).
+#     dropped);
+#   - keep a released mob's instructions at a run start (the no-change arm
+#     taken whatever is pending);
+#   - keep the target on a release (its revision map left as it was).
 # An anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
@@ -79,6 +83,7 @@ arms = {
     "SetSessionInstructionSlotLimitExceeded": write,
     "SetSessionInstructionUnknownSlot": write,
     "RebindInstructionOwner": rebind,
+    "RebindInstructionOwnerUnowned": rebind,
     "ReleaseInstructionTarget": release,
     "ReleaseInstructionTargetAlreadyUnowned": release,
     "ReleaseInstructionTargetOwnedByOtherMob": release,
@@ -123,12 +128,13 @@ audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
   AuditMidRunFoldKeepsEffective
   AuditSessionWriteNeverLowersRevision
   AuditPrefixOnlyAppliesInLeadingPrefix
-  AuditUnownedAppliesNothing
   AuditMobTargetBoundUntilReleased
-  AuditRebindStartsFromWhatIsInEffect
+  AuditReleaseEmptiesTheTarget
+  AuditUnownedRunStartRevokesWhatIsInEffect
+  AuditRebindStartsFromTheRightTarget
   AuditTargetWithinBudget"
 
-witnesses="NotAuditWitnessApplied NotAuditWitnessRevokeApplied NotAuditWitnessMobOwnedEffective NotAuditWitnessReboundAfterRelease"
+witnesses="NotAuditWitnessApplied NotAuditWitnessRevokeApplied NotAuditWitnessMobOwnedEffective NotAuditWitnessReboundAfterRelease NotAuditWitnessReleasedInstructionsRevoked"
 
 # usage: write_cfg <file> <extra invariant lines>
 write_cfg() {
@@ -257,5 +263,11 @@ PY
   mutate budget_exceeded_write_accepted AuditTargetWithinBudget \
     SetSessionInstructionNew '1048576 >= ' \
     '    /\ TRUE'
+  mutate unowned_run_start_keeps_released_instructions AuditUnownedRunStartRevokesWhatIsInEffect \
+    ResolveRunStartInstructionsNoChange 'instruction_change_pending(' \
+    '    /\ TRUE'
+  mutate release_keeps_the_target AuditReleaseEmptiesTheTarget \
+    ReleaseInstructionTarget "session_instruction_target_revision' =" \
+    "    /\\ session_instruction_target_revision' = session_instruction_target_revision"
 fi
 echo "instruction boundary audit passed"

@@ -75,6 +75,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   token in the gateway's credential store; name the route with
   `member_auth_binding`.
 
+- `MobBootstrapSpec::with_agent_customizer` declares the agent customizer of
+  the identity runtime a host composes with `UnifiedRuntime::bootstrap` (or
+  the `bootstrap_with_*` family). The bootstrap then wires the mob's member
+  builds when it builds the mob, before the mob restores anything, so the
+  members a killed process left owing work, which the start builds before the
+  identity bootstrap, are held until its roster pass publishes their
+  customizer tools (one `customize_build` each), and their runs continue only
+  with them. Without the declaration the customizer is taken at the identity
+  bootstrap, which covers a clean restart but not those builds. The identity
+  runtime and its `IdentityFirstRuntimeContext` carry the declared customizer
+  or none: another one is refused at the identity bootstrap. The context is
+  installed by then, but the customizer, its tool registry and the build
+  preparer are not, and the runtime shuts down. A declaring runtime must
+  bootstrap an identity context: `activate_without_identity_context` refuses
+  it (`InvalidConfig`), since its identity members would stay held for good,
+  and so does `MobRuntime::bootstrap`, which cannot wire the declaration.
+  `UnifiedRuntimeBuilder::mob_spec` refuses a spec that declares one
+  (`ConflictingConfiguration`): the builder composes its own
+  (`agent_customizer`).
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's
@@ -140,6 +160,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first (`IdentityHostAdopted`), held or not, then a name the runtime does
   not hold (`UnknownIdentity`), as delete does; the host's retired-member
   hook is not called for such a name.
+- Docs: the Python and TypeScript `register_tool` docstrings and the scope
+  comments of the SDK dispatchers and of the gateway customizer still said
+  `customize_build` runs at a restore or a reconcile, and the Rust
+  `AgentCustomizer` docs said `after_create` follows every session creation.
+  Since 0.9.6 `customize_build` runs when an identity is seated, starts a
+  fresh life or moves to a declared new role, and right before each build of
+  its member, the first build after a restart (its first wake) included. At a
+  restart it runs only for the members the start builds (for example,
+  members that owe work or a kickoff, or every member under
+  `member_restore: "eager"`), after they are built and before they run; a
+  restart calls it for none of the other members until they are built.
+  `after_create` follows a seat, a create, a fresh life or a role migration,
+  never a wake's build. A new test row pins this for a governed input after
+  a clean restart: no `customize_build` before the input, exactly one at its
+  wake with the context of the member's last build, no `after_create`, and
+  the member's next tool call served by the handler that build registered.
+- A runtime `UnifiedRuntimeBuilder` composes gives its identity bridge the
+  controller pin source of its mob runtime, as both gateways do. Before, its
+  bridge had none: every governed send, governed dispatch and governed
+  Console send to a member was refused `Unsupported` ("no controller pin
+  source is installed for this bridge") after Meta had woken and built the
+  member, before the host's binder was asked, and
+  `PublicIdentityRuntime::attach_live_mcp_server` always answered
+  `Unsupported`. It now reaches the member's session owner and gives that
+  owner's documented answers: `Refused(NotCurrent)` for a member with no
+  live actor, `Busy` while its turn boundary is held, and `Unsupported` for
+  a session with no live attachment entry. The builder and both gateways
+  now build their identity bridge with one helper,
+  `gateway_wiring::identity_session_bridge`, so the three compositions
+  cannot drift apart again.
+- A runtime composed with `UnifiedRuntime::bootstrap` (or the
+  `bootstrap_with_*` family) prepares its members' builds as the builder and
+  the gateways do. Before, its mob had no build preparer: a member a restart
+  left Dormant was woken and built without `customize_build`, so it lacked
+  its customizer tools. Its identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) now
+  takes the agent customizer installed on the identity runtime, else the one
+  the `IdentityFirstRuntimeContext` carries, which becomes the runtime's own.
+  From the mob's lift on, `customize_build` runs right before each build of
+  an identity's member, the first wake after a restart included, and the
+  build carries the tools it published; a build the lift itself makes, before
+  the roster pass, is held, and the roster pass customizes it after the build
+  and before its run. Without a customizer nothing changes functionally: Core
+  reads each built member's tool catalog once to report the build, which the
+  inert wiring drops. After a clean shutdown the mob stays stopped until that bootstrap
+  lifts it, so no build comes before it; a mob a killed process left running
+  restores the members that owe work as it starts, before the identity
+  bootstrap, and those builds are covered only when the spec declares the
+  customizer (`MobBootstrapSpec::with_agent_customizer`, see Added). The
+  builder, the stdio gateway and the bootstrap now wire their members'
+  builds with one shared construction.
 
 ### Known limitations
 

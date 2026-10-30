@@ -4,7 +4,7 @@ description: "Unified agent and module envelopes, structural mob events, lossy W
 icon: "timeline"
 ---
 
-*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [c8dc87990c60](https://github.com/lukacf/meerkat/commit/c8dc87990c60c67b2248130555145fa1dada4ed5) on 2026-10-29; MobKit version 0.9.6 at that commit.*
 
 Meta exposes three related event surfaces:
 
@@ -141,6 +141,8 @@ There is no special agent-before-module tie rule.
 The module boundary accepts direct `EventEnvelope<UnifiedEvent>` JSON and a supported flat event form. Normalization verifies that the `source` agrees with the `UnifiedEvent` variant and rejects malformed input. It does not mint missing IDs, enforce ID uniqueness, deduplicate events, or rewrite timestamps.
 
 `insert_event_sorted` uses the same ordering when runtime operations add later events.
+
+The merged envelopes are a recent-event buffer, not a history: the runtime keeps at least the newest 4,096 and drops older ones in batches as new ones arrive. Every forwarded member event lands there, text deltas included. For history, read the event log (`meta/query_events`, when one is configured) or the console timeline.
 
 ## Structural mob events
 

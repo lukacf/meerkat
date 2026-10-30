@@ -1434,6 +1434,18 @@ impl UnifiedRuntimeBuilder {
             ));
         }
 
+        // The builder composes its own agent customizer, so a spec's
+        // declaration would be dropped or fight it.
+        if self
+            .mob_spec
+            .as_ref()
+            .is_some_and(|spec| spec.agent_customizer.is_some())
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "mob_spec() declares an agent customizer (MobBootstrapSpec::with_agent_customizer), which only UnifiedRuntime::bootstrap composes: declare it with agent_customizer() on the builder".into(),
+            ));
+        }
+
         if self.mob_spec.is_some() && self.session_identity_config_root.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased; the supplied spec's session service reports the root its agent builds use, and MobBootstrapSpec::with_session_identity_config_root overrides it".into(),
@@ -2010,28 +2022,16 @@ impl UnifiedRuntimeBuilder {
         // Identity-first `customize_build` tools follow each member across
         // meerkat-side rebuilds through one stable dispatcher per identity
         // (#563). Composed into the single customizer slot, never replacing.
-        let customizer_tool_registry = (wants_identity_first && agent_customizer.is_some())
-            .then(crate::identity_first::CustomizerToolRegistry::new);
-        if let Some(registry) = customizer_tool_registry.as_ref() {
-            mob_spec.spawn_member_customizer =
-                Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                    mob_spec.spawn_member_customizer.take(),
-                    Arc::new(crate::identity_first::CustomizerToolsSpawnCustomizer::new(
-                        registry.clone(),
-                    )),
-                ));
-        }
-        // Core asks this preparer before every identity member it builds, on
+        // Core asks the preparer before every identity member it builds, on
         // both start paths and at every wake: it publishes the member's
         // customizer tools with the identity runtime's real context, holds a
         // build that comes before that runtime is composed until the roster
         // pass publishes, and records each build's tools.
-        let member_build_preparer = wants_identity_first.then(|| {
-            crate::identity_first::IdentityBuildPreparer::new(customizer_tool_registry.is_some())
-        });
-        if let Some(preparer) = member_build_preparer.as_ref() {
-            mob_spec = mob_spec.with_member_build_preparer(preparer.clone());
-        }
+        let member_build_wiring = crate::gateway_wiring::MemberBuildWiring::new(
+            wants_identity_first && agent_customizer.is_some(),
+            wants_identity_first,
+        );
+        mob_spec = member_build_wiring.install(mob_spec);
         if let Some(restore) = self.member_restore {
             mob_spec = mob_spec.with_member_restore(restore);
         }
@@ -2186,29 +2186,13 @@ impl UnifiedRuntimeBuilder {
             // The composition's own bridge (kept in its state and inside its
             // identity runtime) is a back-edge, so it is non-owning; exports
             // carry the public owner separately (`PublicIdentityRuntime`,
-            // `PublicSessionBridge`).
-            let handle = runtime.mob_runtime.handle();
-            let session_service = runtime.mob_runtime.session_service().cloned();
-            let mut bridge: crate::identity_first::bridge::MobSessionBridge =
-                if let Some(service) = session_service {
-                    crate::identity_first::bridge::MobSessionBridge::with_session_service(
-                        handle, service,
-                    )
-                } else {
-                    crate::identity_first::bridge::MobSessionBridge::new(handle)
-                };
-            // Heal seam (2026-07-29 incident): without the recoverer, the
-            // continuity repair supervisor can only reset entries — a
-            // cosmetic heal that materialization re-Breaks when the durable
-            // head is an intra-turn projection.
-            if let Some(recoverer) = runtime.mob_runtime.committed_boundary_recoverer() {
-                bridge = bridge.with_committed_boundary_recoverer(recoverer);
-            }
-            // Image deliveries are judged with the member builder's host
-            // config, so a self-hosted model's `vision` flag counts.
-            if let Some(config) = runtime.mob_runtime.member_model_config() {
-                bridge = bridge.with_member_model_config(config);
-            }
+            // `PublicSessionBridge`). It is built as both gateways build
+            // theirs, with every seam the mob runtime recorded: the controller
+            // pin source among them, so governed input reaches the host's bind.
+            let bridge = crate::gateway_wiring::identity_session_bridge(
+                &runtime.mob_runtime,
+                runtime.mob_runtime.handle(),
+            );
             Some(Arc::new(bridge) as Arc<dyn crate::identity_first::bridge::SessionBridge>)
         };
 
@@ -2305,7 +2289,7 @@ impl UnifiedRuntimeBuilder {
                 .set_agent_customizer(agent_customizer.clone())
                 .await;
             identity_runtime
-                .set_customizer_tool_registry(customizer_tool_registry.clone())
+                .set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
                 .await;
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
             identity_runtime.seed_host_pending(host_pending_seeded);
@@ -2317,14 +2301,12 @@ impl UnifiedRuntimeBuilder {
             // The preparer meets the identity runtime once its customizer,
             // registry and records are installed: the builds it held before
             // are pending on the runtime, and the roster pass publishes them.
-            if let Some(preparer) = member_build_preparer.as_ref() {
-                preparer
-                    .bind(
-                        &identity_runtime,
-                        runtime.mob_runtime.session_service().cloned(),
-                    )
-                    .await;
-            }
+            member_build_wiring
+                .bind(
+                    &identity_runtime,
+                    runtime.mob_runtime.session_service().cloned(),
+                )
+                .await;
             identity_runtime
                 .set_agent_memory(agent_memory_injector.clone())
                 .await;
@@ -3937,6 +3919,41 @@ mod tests {
                 "{root:?}"
             );
         }
+    }
+
+    /// A supplied spec that declares an agent customizer is refused: the
+    /// builder composes its own customizer, which the declaration would be
+    /// dropped beside or fight.
+    #[tokio::test]
+    async fn supplied_spec_declaring_an_agent_customizer_is_refused_before_bootstrap() {
+        struct Customizer;
+        #[async_trait::async_trait]
+        impl crate::identity_first::AgentCustomizer for Customizer {
+            async fn customize_build(
+                &self,
+                _: &crate::identity_first::AgentBuildContext,
+                _: &crate::identity_first::DurableAgentSpec,
+                _: &mut crate::identity_first::AgentBuildDraft,
+            ) -> Result<(), crate::identity_first::CustomizerError> {
+                panic!("a refused composition builds no member")
+            }
+        }
+        let definition = MobDefinition::from_toml("[mob]\nid = \"declared-customizer-spec\"\n")
+            .expect("fixture definition");
+        let spec = UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .resolve_mob_spec()
+            .await
+            .expect("empty fixture spec")
+            .with_agent_customizer(Arc::new(Customizer));
+        let result = UnifiedRuntimeBuilder::default()
+            .mob_spec(spec)
+            .build()
+            .await;
+        assert!(matches!(result,
+            Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(detail))
+                if detail.contains("MobBootstrapSpec::with_agent_customizer")
+                    && detail.contains("agent_customizer()")));
     }
 
     /// The builder's fork instruction policy reaches the spec of each

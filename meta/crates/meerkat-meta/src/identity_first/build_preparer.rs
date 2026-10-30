@@ -27,6 +27,14 @@
 //! publish. The preparation reads only through the request's read handle:
 //! it runs inside Core's wake and inside the boot restore, so it never
 //! issues a mob command.
+//!
+//! A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+//! declares its agent customizer (`MobBootstrapSpec::with_agent_customizer`)
+//! gets this preparer as the builder's runtime does. Without a declaration
+//! it learns whether it composes a customizer only at its identity
+//! bootstrap, so its mob is built with a deferred preparer: inert (Core
+//! builds as if the mob had none) until that bootstrap finds a customizer,
+//! and inert for good when it finds none.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
@@ -50,8 +58,9 @@ pub(crate) const PUBLISHED_ONCE_COMPOSED: &str =
 /// to the identity runtime once that exists (`bind`).
 pub struct IdentityBuildPreparer {
     /// Whether builds are prepared with customizer tools: the composition
-    /// has an agent customizer.
-    publishes_tools: bool,
+    /// has an agent customizer. Unset while a deferred preparer's
+    /// composition has not decided: the preparer is then inert.
+    publishes_tools: std::sync::OnceLock<bool>,
     /// The identity runtime, once bound. Weak: the runtime owns this
     /// preparer through its composition, never the other way round.
     runtime: std::sync::OnceLock<Weak<IdentityRuntime>>,
@@ -81,6 +90,19 @@ impl IdentityBuildPreparer {
     /// (`publishes_tools`) or not. Without one, builds are prepared with
     /// nothing to publish, and their reports are still recorded.
     pub fn new(publishes_tools: bool) -> Arc<Self> {
+        Self::with_publishes_tools(std::sync::OnceLock::from(publishes_tools))
+    }
+
+    /// A preparer for a composition that learns whether it composes an
+    /// agent customizer only at its identity bootstrap
+    /// ([`Self::bind_publishing`]). Until then it is inert: Core builds as
+    /// if the mob had no preparer, and no build is held or recorded. A
+    /// composition that has no customizer leaves it inert.
+    pub(crate) fn deferred() -> Arc<Self> {
+        Self::with_publishes_tools(std::sync::OnceLock::new())
+    }
+
+    fn with_publishes_tools(publishes_tools: std::sync::OnceLock<bool>) -> Arc<Self> {
         Arc::new(Self {
             publishes_tools,
             runtime: std::sync::OnceLock::new(),
@@ -96,7 +118,24 @@ impl IdentityBuildPreparer {
     }
 
     pub(crate) fn publishes_tools(&self) -> bool {
-        self.publishes_tools
+        self.publishes_tools.get().copied().unwrap_or(false)
+    }
+
+    /// A deferred preparer whose composition has not decided yet.
+    fn inert(&self) -> bool {
+        self.publishes_tools.get().is_none()
+    }
+
+    /// Decide a deferred preparer for a composition that composes an agent
+    /// customizer, and bind it to `runtime` ([`Self::bind`]). A preparer
+    /// created decided keeps its decision.
+    pub(crate) async fn bind_publishing(
+        self: &Arc<Self>,
+        runtime: &Arc<IdentityRuntime>,
+        session_service: Option<Arc<dyn MobSessionService>>,
+    ) {
+        let _ = self.publishes_tools.set(true);
+        self.bind(runtime, session_service).await;
     }
 
     /// Bind this preparer to `runtime`, once its customizer, customizer tool
@@ -233,7 +272,7 @@ impl IdentityBuildPreparer {
         {
             let mut state = self.lock_state();
             state.building.insert(member.clone(), identity.clone());
-            if !self.publishes_tools {
+            if !self.publishes_tools() {
                 return Ok(MemberBuildPrepared::Prepared);
             }
         }
@@ -344,6 +383,10 @@ impl MemberBuildPreparer for IdentityBuildPreparer {
         &self,
         request: MemberBuildPreparation,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal> {
+        // An inert preparer answers as if the mob had none: it reads nothing.
+        if self.inert() {
+            return Ok(MemberBuildPrepared::Prepared);
+        }
         let runtime = match self.bound_runtime() {
             Some(Ok(runtime)) => Some(runtime),
             Some(Err(())) => {
@@ -365,6 +408,9 @@ impl MemberBuildPreparer for IdentityBuildPreparer {
     }
 
     async fn member_built(&self, report: MemberBuildReport) {
+        if self.inert() {
+            return;
+        }
         self.record_member_build(
             &report.agent_identity,
             report.session_id,

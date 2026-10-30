@@ -5210,6 +5210,18 @@ impl IdentityRuntime {
         *self.customizer_tools.write().await = registry;
     }
 
+    /// The agent customizer the composition installed, if any.
+    pub(crate) async fn installed_agent_customizer(&self) -> Option<Arc<dyn AgentCustomizer>> {
+        self.customizer.read().await.clone()
+    }
+
+    /// The customizer tool registry the composition installed, if any.
+    pub(crate) async fn installed_customizer_tool_registry(
+        &self,
+    ) -> Option<Arc<super::customizer_tools::CustomizerToolRegistry>> {
+        self.customizer_tools.read().await.clone()
+    }
+
     /// Publish one successful `customize_build` result for `identity` and
     /// point the draft at the identity's stable dispatcher, so the spawn (or
     /// the adopted occupant, which already holds it) serves the new tools.

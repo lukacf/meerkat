@@ -88,9 +88,10 @@ class CallbackDispatcher:
         self._tool_handlers: dict[tuple[str, str], Any] = {}
         # Track scope_ids so we can clean up handlers when a scope is released
         self._scope_tools: dict[str, list[str]] = {}
-        # customize_build is re-invoked with a fresh scope on every restore; track
-        # the latest scope per identity so we can release the previous one (the
-        # gateway has no scope-release signal — newest-wins is the semantics).
+        # customize_build runs again, with a fresh scope, at each seat, fresh
+        # life, role migration and build of an identity; track the latest
+        # scope per identity so we can release the previous one (the gateway
+        # has no scope-release signal: newest wins).
         self._customizer_scope_by_identity: dict[str, str] = {}
         # Identity-first providers (REQ-45)
         self._roster_provider: Any | None = None
@@ -688,9 +689,10 @@ class CallbackDispatcher:
             handlers = draft.tool_handlers
             if scope_id and handlers:
                 # Release the previous scope for this identity before registering
-                # the new one — customize_build is re-invoked per restore and the
-                # gateway never signals scope release, so this bounds growth to one
-                # live scope per identity (newest wins).
+                # the new one: customize_build runs again at each seat, fresh
+                # life, role migration and build of the identity, and the
+                # gateway never signals scope release, so this bounds growth to
+                # one live scope per identity (newest wins).
                 prior = self._customizer_scope_by_identity.get(context.identity)
                 if prior and prior != scope_id:
                     self.release_scope(prior)

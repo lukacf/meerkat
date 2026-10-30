@@ -511,12 +511,32 @@ fn same_dispatcher(a: &Arc<dyn AgentToolDispatcher>, b: &Arc<IdentityCustomizerT
 /// that target the identity's member id. Members that are not registered
 /// identities are left untouched.
 pub struct CustomizerToolsSpawnCustomizer {
-    registry: Arc<CustomizerToolRegistry>,
+    /// The registry it attaches from. Unset while the composition that
+    /// installed it has not learned whether it composes an agent customizer:
+    /// it then attaches nothing.
+    registry: std::sync::OnceLock<Arc<CustomizerToolRegistry>>,
 }
 
 impl CustomizerToolsSpawnCustomizer {
     pub fn new(registry: Arc<CustomizerToolRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry: std::sync::OnceLock::from(registry),
+        }
+    }
+
+    /// A customizer that attaches nothing until [`Self::arm`] gives it its
+    /// registry: what a composition installs on its mob before it knows
+    /// whether it composes an agent customizer.
+    pub(crate) fn deferred() -> Self {
+        Self {
+            registry: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach from `registry` from now on. A customizer that has its
+    /// registry already keeps it.
+    pub(crate) fn arm(&self, registry: Arc<CustomizerToolRegistry>) {
+        let _ = self.registry.set(registry);
     }
 }
 
@@ -537,13 +557,16 @@ impl CustomizerToolsSpawnCustomizer {
     /// meerkat-mob constructs it. The attachment does not depend on the spawn
     /// source: every build of a registered identity member gets it.
     fn apply(&self, spec: &mut SpawnMemberSpec) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
         // A member Meta built for an identity carries the
         // runtime-authoritative `agent_identity` label (raw member creation
         // may not supply it), and the roster entry keeps it. That marks a
         // restored identity member even when meerkat restores the mob before
         // Meta has seen the roster, so it is registered here, at its first
         // build, and receives the identity's tools when they are published.
-        let entry = match self.registry.for_member(&spec.identity) {
+        let entry = match registry.for_member(&spec.identity) {
             Some(entry) => entry,
             None if spec
                 .labels
@@ -551,7 +574,7 @@ impl CustomizerToolsSpawnCustomizer {
                 .and_then(crate::member_comms_id::durable_identity_label)
                 .is_some() =>
             {
-                self.registry.ensure_member(&spec.identity)
+                registry.ensure_member(&spec.identity)
             }
             None => return,
         };

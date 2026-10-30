@@ -6553,6 +6553,10 @@ pub struct MobBootstrapSpec {
     /// member it builds, on both start paths and at every wake
     /// ([`crate::identity_first::IdentityBuildPreparer`]).
     pub(crate) member_build_preparer: Option<Arc<dyn meerkat_mob::MemberBuildPreparer>>,
+    /// The agent customizer the host declares for the identity runtime this
+    /// mob serves ([`Self::with_agent_customizer`]): `UnifiedRuntime::bootstrap`
+    /// wires the mob's member builds with it when it builds the mob.
+    pub(crate) agent_customizer: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
     /// How the mob materializes its seated members when it starts
     /// (`runtime_options.member_restore`), forwarded to
     /// `MobBuilder::with_member_restore_policy`.
@@ -6824,6 +6828,7 @@ impl MobBootstrapSpec {
             member_auth_binding_recorded: None,
             member_runtime_registration_hook: None,
             member_build_preparer: None,
+            agent_customizer: None,
             member_restore: crate::identity_first::MemberRestore::default(),
             host_pending_members: Vec::new(),
             session_identity_config_root: None,
@@ -7492,6 +7497,38 @@ impl MobBootstrapSpec {
         preparer: Arc<dyn meerkat_mob::MemberBuildPreparer>,
     ) -> Self {
         self.member_build_preparer = Some(preparer);
+        self
+    }
+
+    /// Declare the agent customizer of the identity runtime a host composes
+    /// over this mob with [`crate::UnifiedRuntime::bootstrap`] (or the
+    /// `bootstrap_with_*` family). The bootstrap then wires the mob's member
+    /// builds before the mob restores anything: a member the start builds
+    /// (one a killed process left with an open run, say) is held until the
+    /// identity bootstrap's roster pass publishes its customizer tools, and
+    /// every later build is prepared with them. Without the declaration the
+    /// wiring is decided at the identity bootstrap
+    /// (`install_and_bootstrap_identity_first_context`), which covers the
+    /// builds from the mob's lift on, as after a clean shutdown, but not the
+    /// builds of a start that does not wait for that lift.
+    ///
+    /// The declaration is the composition's customizer: the identity runtime
+    /// and its `IdentityFirstRuntimeContext` carry this same customizer or
+    /// none, and the identity bootstrap refuses another one. Declare it only
+    /// for a mob whose runtime bootstraps an identity context
+    /// (`install_and_bootstrap_identity_first_context`): until that
+    /// bootstrap, an identity member the mob builds is held, and
+    /// `UnifiedRuntime::activate_without_identity_context` refuses the
+    /// runtime. Only `UnifiedRuntime::bootstrap` and its family wire the
+    /// declaration: [`MobRuntime::bootstrap`] refuses a spec that carries
+    /// one, and so does `UnifiedRuntimeBuilder::mob_spec`, whose builder
+    /// composes its own customizer (`UnifiedRuntimeBuilder::agent_customizer`).
+    #[must_use]
+    pub fn with_agent_customizer(
+        mut self,
+        customizer: Arc<dyn crate::identity_first::AgentCustomizer>,
+    ) -> Self {
+        self.agent_customizer = Some(customizer);
         self
     }
 
@@ -10110,6 +10147,15 @@ impl MobRuntime {
         {
             return Err(MobRuntimeError::InvalidConfig(
                 "session_identity_config_root() must not be empty: an empty root would resolve the members' comms identity directory against the working directory".into(),
+            ));
+        }
+        // `UnifiedRuntime::bootstrap` wires a declared agent customizer and
+        // takes the declaration off the spec before it prepares the mob. A
+        // spec that still carries one came another way (`Self::bootstrap`),
+        // where nothing would wire it.
+        if spec.agent_customizer.is_some() {
+            return Err(MobRuntimeError::InvalidConfig(
+                "the spec declares an agent customizer (MobBootstrapSpec::with_agent_customizer), which only UnifiedRuntime::bootstrap and the bootstrap_with_* family wire: compose the mob with one of them".into(),
             ));
         }
 

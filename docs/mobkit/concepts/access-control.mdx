@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [c8dc87990c60](https://github.com/lukacf/meerkat/commit/c8dc87990c60c67b2248130555145fa1dada4ed5) on 2026-10-29; MobKit version 0.9.6 at that commit.*
 
 Meta ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -59,9 +59,22 @@ read-only policy gate to allow mutation.
 
 Members spawned **by an agent** (via `mob_spawn_member`, `delegate`, and the other agent-facing spawn tools) inherit their spawning parent's permissions. The spawn path records a `spawned_by` label as console metadata, and agent checks evaluate the member **and its spawn ancestors**: a rule that matches the parent — by identity, role, or labels — also matches the members it spawned, transitively. Deny-overrides is preserved across the chain, so a `deny` on the parent also denies its descendants, and a member-specific `deny` beats any inherited `allow`.
 
-This is what makes agent-fanned-out workers governable without per-worker rules: granting `agent.view` on a coordinator lets the operator watch everything that coordinator spawns, and hiding a sensitive lead also hides its helpers. Lineage resolution is bounded (depth 8) and cycle-safe, and members can always carry their own labels or rules to override the inherited outcome (subject to deny-overrides).
+This is what makes agent-fanned-out workers governable without per-worker rules: granting `agent.view` on a coordinator lets the operator watch everything that coordinator spawns, and hiding a sensitive lead also hides its helpers. Lineage resolution is cycle-safe and bounded: a check walks the member and seven ancestors, and a member whose lineage goes deeper than that is refused for everyone but an admin (a deny on an ancestor past the bound would not be seen), on every agent check and on the timeline frames it wrote. Members can always carry their own labels or rules to override the inherited outcome (subject to deny-overrides).
 
 Lineage is **runtime-derived only**: `spawned_by` and `via_tool` come from the spawn path's own record of who performed the spawn. A `spawned_by` claim arriving through caller-controlled labels (spawn specs, roster labels) is stripped at every enforcement seam — an unverified claim could otherwise mint inherited visibility, or hide a member behind a denied parent. The lineage registry is in-memory: it repopulates as members are spawned and does not survive a runtime restart.
+
+### Side chats
+
+A Console **side chat** (`meta/fork_member`) is decided as the agent it was forked from: its `side_chat_of` label names that agent, and agent checks evaluate the side chat, then the agent and the agent's own ancestors. Every decision on a side chat is the agent's:
+
+- an `allow` must match the agent or one of its ancestors. A rule that matches only the side chat itself (its name, its role, or a label only the side chat carries, such as its own console flags) grants nothing, so a grant on a side chat's name never widens what its agent allows;
+- a `deny` that matches the side chat, the agent or any of its ancestors refuses, as everywhere.
+
+So a rule that matches the agent covers its side chats for every action (`agent.view`, `agent.send`, `agent.retire`, ...), a rule on another identity does not, and a deny on the agent hides them. Closing a side chat is a retire of it, so it needs `agent.retire` on the agent. Forking one needs `agent.view` **and** `agent.send` on the agent, plus `agent.spawn` on the side chat's name: a side chat runs with the agent's tools, so a viewer who may only read an agent can neither fork it nor drive its tools through a side chat. A side chat's lineage is its agent's and one link more, so an agent whose lineage already fills the walk (the agent and seven ancestors) is refused for a fork (`-32030`, `reason: "lineage_too_deep"`): no one but an admin could open its side chat.
+
+A Console with no local runtime (one that serves its runtimes through the aggregator) records those runtimes' members before it decides a send, as every route does, so a send to a side chat is decided as its agent there too; a member whose record names a lineage the cache still does not know is refused rather than decided by its bare name.
+
+The relation is runtime-derived, from Meerkat's durable record of the fork, so unlike the spawn registry it survives a restart, and it holds after the agent is respawned or retired. A `side_chat_of` claim in caller-controlled labels (spawn specs, roster labels, an identity's declaration) is stripped like `spawned_by`. A multi-runtime Console names the agent with its runtime's prefix, as it names the side chat, so a rule on the prefixed agent (`b/ops-lead`) reaches its side chats and one on the bare name does not.
 
 <Warning>
 Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.

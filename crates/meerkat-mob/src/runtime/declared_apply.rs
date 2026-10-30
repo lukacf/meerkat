@@ -381,28 +381,78 @@ fn failure_outcome(error: MobError) -> DeclaredEntryOutcome {
     }
 }
 
-/// The open declared apply of one [`super::MobHandle::apply_declared_roster`]
-/// call: closed when the call ends, and, when the call is dropped before it
-/// ends, by a task the drop spawns, so the mob's next apply is never refused
-/// for a call that is gone.
-struct DeclaredApplyOpen {
-    handle: Option<super::MobHandle>,
+/// MobMachine's answer to the opening of a declared apply
+/// (`OpenDeclaredApply`).
+pub(in crate::runtime) enum DeclaredApplyOpening {
+    /// The apply is open, under the lease of its open fact.
+    Opened(DeclaredApplyLease),
+    /// Another apply of the mob is open: refused, retryable.
+    Busy,
 }
 
-impl DeclaredApplyOpen {
-    fn arm(handle: super::MobHandle) -> Self {
+/// The lease of an open declared apply's fact (MobMachine's
+/// `declared_apply_open`), made by the actor in the step that opened it and
+/// owned by the one call that opened it. Closing it, or dropping it anywhere
+/// before (an opening answer that never reached its call, a call dropped in
+/// its body or while it closes), closes the fact, so the mob's next apply is
+/// never refused for a call that is gone. It stays armed until its close
+/// command is on the actor's channel, never shorter.
+pub(in crate::runtime) struct DeclaredApplyLease {
+    close: Option<(
+        crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
+        crate::control_policy::CommandAuthority,
+    )>,
+}
+
+impl DeclaredApplyLease {
+    /// The lease of the fact the actor just opened: its close is sent on
+    /// `command_tx` under `authority`, the opening call's own.
+    pub(in crate::runtime) fn new(
+        command_tx: crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
+        authority: crate::control_policy::CommandAuthority,
+    ) -> Self {
         Self {
-            handle: Some(handle),
+            close: Some((command_tx, authority)),
         }
     }
 
+    /// Give the close up: the actor closed the fact itself.
+    pub(in crate::runtime) fn disarm(&mut self) {
+        self.close = None;
+    }
+
+    fn close_command(
+        authority: crate::control_policy::CommandAuthority,
+    ) -> (
+        super::scope_gate::RoutedMobCommand,
+        crate::tokio::sync::oneshot::Receiver<Result<(), MobError>>,
+    ) {
+        let (reply_tx, reply_rx) = crate::tokio::sync::oneshot::channel();
+        (
+            super::scope_gate::RoutedMobCommand {
+                authority,
+                cmd: MobCommand::CloseDeclaredApply { reply_tx },
+            },
+            reply_rx,
+        )
+    }
+
+    /// Close the open fact, and wait for the actor's answer. The lease is
+    /// disarmed only once the close command is on the actor's channel, so a
+    /// call dropped while it waits for room still closes.
     async fn close(mut self) {
-        let Some(handle) = self.handle.take() else {
+        let Some((command_tx, authority)) = self.close.clone() else {
             return;
         };
-        if let Err(error) = handle.close_declared_apply().await {
+        let (command, reply_rx) = Self::close_command(authority);
+        let sent = command_tx.send(command).await;
+        self.close = None;
+        // An actor that is gone took its open fact with it.
+        if sent.is_err() {
+            return;
+        }
+        if let Ok(Err(error)) = reply_rx.await {
             tracing::warn!(
-                mob_id = %handle.mob_id(),
                 %error,
                 "closing the declared apply failed; the mob's next apply is refused until it closes"
             );
@@ -410,19 +460,19 @@ impl DeclaredApplyOpen {
     }
 }
 
-impl Drop for DeclaredApplyOpen {
+impl Drop for DeclaredApplyLease {
     fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
+        let Some((command_tx, authority)) = self.close.take() else {
             return;
         };
+        let (command, _reply_rx) = Self::close_command(authority);
+        let command = match command_tx.try_send(command) {
+            Ok(()) | Err(crate::tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            Err(crate::tokio::sync::mpsc::error::TrySendError::Full(command)) => command,
+        };
+        // A full channel: a task sends the close once there is room.
         let close = async move {
-            if let Err(error) = handle.close_declared_apply().await {
-                tracing::warn!(
-                    mob_id = %handle.mob_id(),
-                    %error,
-                    "closing a dropped declared apply failed"
-                );
-            }
+            let _ = command_tx.send(command).await;
         };
         // The browser runtime has one local executor and no runtime handle.
         #[cfg(target_arch = "wasm32")]
@@ -553,30 +603,25 @@ impl super::MobHandle {
         .await?;
         // One apply of the mob at a time (MobMachine's open fact): a second
         // one while this one runs is refused, typed and retryable. The open
-        // fact is closed whatever the outcome, and when this call is dropped.
-        let verdict = self
-            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
+        // fact is closed whatever the outcome, and when this call is dropped
+        // at any point (the lease the actor answers with).
+        let opening = self
+            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply {
+                close_authority: self.command_authority.clone(),
+                reply_tx,
+            })
             .await??;
-        match verdict {
-            mob_dsl::DeclaredApplyOpenVerdict::Opened => {}
-            mob_dsl::DeclaredApplyOpenVerdict::Busy => {
+        let lease = match opening {
+            DeclaredApplyOpening::Opened(lease) => lease,
+            DeclaredApplyOpening::Busy => {
                 return Err(MobError::LifecycleOperationPending {
                     intent: "apply a declared roster while another apply of this mob runs"
                         .to_string(),
                 });
             }
-            // The actor answers a mob that is not running with its own
-            // invalid transition.
-            mob_dsl::DeclaredApplyOpenVerdict::MobNotRunning => {
-                return Err(MobError::Internal(
-                    "the opening of a declared apply answered a mob that is not running"
-                        .to_string(),
-                ));
-            }
-        }
-        let open = DeclaredApplyOpen::arm(self.clone());
+        };
         let outcome = self.apply_open_declared_roster(roster).await;
-        open.close().await;
+        lease.close().await;
         outcome
     }
 
@@ -1160,11 +1205,6 @@ impl super::MobHandle {
     }
 
     /// Close the open declared apply (`CloseDeclaredApply`).
-    async fn close_declared_apply(&self) -> Result<(), MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::CloseDeclaredApply { reply_tx })
-            .await?
-    }
-
     /// A seated member's first-boot `Fresh` request: its rotation onto a
     /// fresh session under the declared spec, once it is idle.
     async fn fresh_life_of_seated(&self, entry: &DeclaredEntry) -> DeclaredEntryOutcome {

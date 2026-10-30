@@ -749,7 +749,7 @@ impl MobCommand {
             Self::SealDeclaredRoster { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            Self::OpenDeclaredApply { reply_tx } => {
+            Self::OpenDeclaredApply { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CloseDeclaredApply { reply_tx } => {

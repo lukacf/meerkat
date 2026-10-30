@@ -31622,9 +31622,36 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::OpenDeclaredApply { reply_tx } => {
-                    let result = self.open_declared_apply();
-                    let _ = reply_tx.send(result);
+                MobCommand::OpenDeclaredApply {
+                    close_authority,
+                    reply_tx,
+                } => {
+                    let result = self.open_declared_apply().map(|verdict| {
+                        if verdict == mob_dsl::DeclaredApplyOpenVerdict::Opened {
+                            super::declared_apply::DeclaredApplyOpening::Opened(
+                                super::declared_apply::DeclaredApplyLease::new(
+                                    self.command_tx.clone(),
+                                    close_authority,
+                                ),
+                            )
+                        } else {
+                            super::declared_apply::DeclaredApplyOpening::Busy
+                        }
+                    });
+                    // A call gone before its opening is answered: the fact it
+                    // opened closes at once, so the mob's next apply opens.
+                    if let Err(Ok(super::declared_apply::DeclaredApplyOpening::Opened(mut lease))) =
+                        reply_tx.send(result)
+                    {
+                        lease.disarm();
+                        if let Err(error) = self.close_declared_apply() {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                %error,
+                                "closing a declared apply whose call is gone failed"
+                            );
+                        }
+                    }
                 }
                 MobCommand::CloseDeclaredApply { reply_tx } => {
                     let result = self.close_declared_apply();

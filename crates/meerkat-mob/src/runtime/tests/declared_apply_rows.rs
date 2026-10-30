@@ -1976,6 +1976,101 @@ async fn an_unlisted_retirement_start_row_replays_as_a_plain_retirement_without_
     mob.wake("listed").await;
 }
 
+/// A dropped apply never leaves the mob's applies refused. An opening whose
+/// call is gone before the actor answers it is closed by the actor at once;
+/// an apply dropped in its body is closed by the lease of its open fact. The
+/// next apply opens either way.
+///
+/// RED: answer the opening with a bare verdict and arm the close guard in
+/// the call once the answer arrives (the shape before this fix): the
+/// opening whose call is gone leaves the open fact set, and the next apply
+/// is refused `LifecycleOperationPending` for the life of the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_apply_never_refuses_the_next_one() {
+    let mob = ApplyMob::new("apply-dropped").await;
+
+    // An opening whose call is gone before the parked actor answers it.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let parked = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+            entered_tx,
+            release_rx,
+            reply_tx,
+        })
+        .await
+        .expect("enqueue the parking command");
+    entered_rx.await.expect("the actor parks");
+    let opening = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::OpenDeclaredApply {
+            close_authority: mob.handle.command_authority.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue an opening behind the parked actor");
+    drop(opening);
+    let _ = release_tx.send(());
+    let _ = parked.await;
+    let opened = mob
+        .apply(DeclaredRoster::partial([declared("after-dropped-opening")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&opened, "after-dropped-opening"),
+            DeclaredEntryOutcome::Seated { .. }
+        ),
+        "{opened:?}"
+    );
+
+    // An apply dropped in its body: it waits on the role read of an unseated
+    // identity's archived session.
+    mob.apply(DeclaredRoster::partial([declared("revived")]))
+        .await;
+    mob.wake("revived").await;
+    tokio::time::timeout(STEP, mob.handle.retire(id("revived")))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert!(
+        mob.archived_record("revived").is_some(),
+        "the retirement archived the session"
+    );
+    let reads = mob.service.persisted_session_metadata_load_call_count();
+    mob.service
+        .set_persisted_session_metadata_delay_ms(3_600_000);
+    let reading = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::partial([declared("revived")]))
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.service.persisted_session_metadata_load_call_count() == reads {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the apply never reached its role read"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    reading.abort();
+    let _ = reading.await;
+    mob.service.set_persisted_session_metadata_delay_ms(0);
+    let opened = mob
+        .apply(DeclaredRoster::partial([declared("after-dropped-body")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&opened, "after-dropped-body"),
+            DeclaredEntryOutcome::Seated { .. }
+        ),
+        "{opened:?}"
+    );
+}
+
 /// Rollback of an unlisted retirement, lane-run leg: needs the published
 /// Core 0.9.7 (`meerkat-mob` 0.9.7).
 ///

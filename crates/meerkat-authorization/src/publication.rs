@@ -23,9 +23,13 @@ struct PublicationInner {
     writer: Mutex<()>,
     /// Reservations of `writer` alive now, published or not. A waiting hint
     /// only ([`LocalAuthorizationPublication::change_or_reservation_in_progress`]),
-    /// never read for a stamp, an observation or a decision. Counted after
-    /// the writer is taken and released after the writer is, so it is never
-    /// zero while a reservation holds the writer.
+    /// never read for a stamp, an observation or a decision. A guard counts
+    /// itself once it holds the writer and stops counting only after it
+    /// released the writer, so the count is never zero while a guard exists.
+    /// The writer is also held uncounted: briefly, between taking it and
+    /// building the guard, and by [`LocalAuthorizationPublication::retire`],
+    /// which never counts. A step refused then may read no hold; its waiting
+    /// form then pauses and rebuilds, as one of its free rebuilds.
     reservations: AtomicUsize,
 }
 

@@ -816,15 +816,29 @@ bounds.
   `EnteredDispatchOperation` (async), wait after each such refusal with a
   fresh `OwnerChangeChurn` that reports as the call's, within the call's
   remaining tool time, and take the step again; with no change in progress at
-  that read they take it once more, as a preparation rebuilds once. Every
-  attempt is the synchronous step, decided afresh, and releases the
-  exclusion, the owner locks, the run's custody read and the review owner's
-  step admission before any wait. An attempt whose operation ran is the
-  step's answer. The dispatch issuance makes its single consuming entry once,
-  its staging waiting out a change in progress as the root staging does, then
-  retries through the entry's witness: a review or consent is spent exactly
-  once. Past the bounds the last attempt's typed refusal is returned. This is
-  shell synchronization, like `OwnerChangeChurn`: no machine input changes.
+  that read (the holder may have finished in between) they pause 1 ms and take
+  it again. Every retry is one of the churn's free rebuilds, within its one
+  deadline. Every attempt is the synchronous step, decided afresh, and
+  releases the exclusion, the owner locks, the run's custody read and the
+  review owner's step admission before any wait. An attempt whose operation
+  ran is the step's answer. The dispatch issuance makes its single consuming
+  entry once, its staging waiting out a change in progress within the
+  dispatch attempt's own bounds (site `tool_entry`, sharing the attempt's
+  churn with its other stagings and its review's post-verdict check). It then
+  issues once under that entry, as the synchronous form does: the entering
+  decision and no step admission, so an approval read or another holder of
+  the review owner cannot refuse it after the spend. Only after a refusal to
+  rebuild does it wait and issue again through the entry's witness, whose
+  steps are each admitted by the review owner: a review or consent is spent
+  exactly once. Unlike the root staging, the issuance's staging never reviews
+  again: at R2 a change it meets supersedes the reviewed decision, and the
+  call answers `review_unsatisfied` (`context_changed`) once the change
+  completes; R1 goes on, and so does an R3 consent, which its spend
+  re-adjudicates. Past the bounds the last attempt's typed refusal is
+  returned. A streaming tool's inactivity window is not part of the remaining
+  tool time: a wait longer than the window left ends as the tool's inactivity
+  timeout, as a gate wait does. This is shell synchronization, like
+  `OwnerChangeChurn`: no machine input changes.
 - A governed helper admission fence and a helper child issuance answer
   `Unavailable` instead of `Denied` when their check refuses to rebuild, on the
   prepared and dispatch paths alike: under the owner-change exclusion they
@@ -833,8 +847,11 @@ bounds.
   `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
   first on the dispatch and entered paths (through the waiting dispatch
   steps) and answers `Unavailable` only past the bounds; its prepared path
-  never waits. The fence runs inside the WorkGraph store callback and never
-  waits.
+  never waits. Once the dispatch path spent an R2 or R3 review, issuing again
+  through it answers `Denied` (the review is spent): a caller that may issue
+  again enters once and issues through `GovernedHelperChildIssuance::from_entered`,
+  whose steps never spend. The fence runs inside the WorkGraph store callback
+  and never waits.
 - `OwnerChangeWait::trace` records each wait as one `debug` event of target
   `meerkat::authz::owner_change_wait` with `site` (`model_request`,
   `compaction_summary`, `tool_dispatch`, `tool_entry`, `tool_policy_entry`,

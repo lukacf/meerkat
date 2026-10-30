@@ -266,15 +266,30 @@ rebuild (`ReprepareRequired`: nothing ran and nothing was appended) and names
 the hold through `owner_change_in_progress` until it ends, published or not.
 The waiting forms wait for that hold outside every lock, with the bounds above
 and never past the call's remaining tool time, then take the step again; with
-no change in progress at that read they take it once more. They are
+no change in progress at that read (the holder may have finished in between)
+they pause 1 ms and take it again. Every retry is one of the three free
+rebuilds, within one deadline. They are
 `GovernedDispatchOperation::run_if_current_within_after_owner_change` and
 `issue_child_if_current_within_after_owner_change`, the same two on
 `EnteredDispatchOperation`, and
 `GovernedHelperChildIssuance::issue_or_recover_after_owner_change`. A
-dispatch's issuance makes its single consuming entry once and retries through
-the entry's witness, so an R2 review or an R3 consent is spent exactly once.
+dispatch's issuance makes its single consuming entry once, its staging waiting
+within the dispatch attempt's own bounds (site `tool_entry`; it shares the
+attempt's deadline and free rebuilds with the attempt's other stagings), then
+issues once under that entry as the synchronous form does, and only after a
+refusal to rebuild waits and issues again through the entry's witness. An R2
+review or an R3 consent is spent exactly once, and no approval read or other
+holder of the review owner can refuse the first issuance after the spend.
+That staging never reviews again: at R2 a change it meets supersedes the
+reviewed decision, so the call answers `review_unsatisfied`
+(`context_changed`) once the change completes, as a later synchronous call
+would; R1 and an R3 consent go on.
 Past the bounds the step's typed refusal is returned (a helper issuance
-answers `Unavailable`). The synchronous steps, the helper admission fence
+answers `Unavailable`; after a dispatch-path spend at R2 or R3, issuing again
+on that path answers `Denied`, so a caller that may retry enters once and
+issues through `GovernedHelperChildIssuance::from_entered`). Inside a
+streaming tool a wait longer than the inactivity window left ends as the
+tool's inactivity timeout. The synchronous steps, the helper admission fence
 (which runs inside the WorkGraph store callback) and the host-facing entries
 that never wait answer at once, as before, and a poisoned publication is
 `Unavailable` and is never waited for. This is shell synchronization: no

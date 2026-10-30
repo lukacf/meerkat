@@ -115,8 +115,12 @@ them.
   or not (`LocalAuthorizationPublication::change_in_progress` is
   unchanged), so every owner-change wait now lasts until the holder releases
   the writer, and a consent re-adjudication refused to rebuild while one is
-  held decides nothing now, as during a published change (a read keeps the
-  consent unchanged, a decision answers the retryable `StoreUnavailable`).
+  held decides nothing now, as during a published change: a read keeps the
+  consent unchanged, a decision answers the retryable `StoreUnavailable`,
+  and a fresh attempt of a consented candidate is refused at once as
+  `ReviewUnavailable` (`OwnerUnavailable`), with the consent kept and a
+  run's own attempt counted as not made, where it re-adjudicated again
+  within its bound. The spend at entry is unchanged.
   The governed helper fence and child issuance still answer `Unavailable`
   for the hold, and the host-facing entries that never wait
   (`LocalGrantAuthority::try_with_owner_changes_excluded`,
@@ -180,14 +184,19 @@ them.
   hold of the work owners' exclusion), they wait for the change to complete
   with `OwnerChangeChurn` (2 s and three free rebuilds, never past the
   call's `ToolDispatchContext::remaining_tool_time`), outside every lock, and
-  take the step again; with no change in progress at that read they take it
-  once more. Past the bounds they return the step's typed refusal. An
-  attempt whose operation ran is the step's answer. Each wait is traced at
-  site `tool_step` or `tool_child_issuance` and reported as the call's to
-  the operation refusal observer. The dispatch issuance makes its single
-  consuming entry once, its staging waiting as the dispatch's root staging
-  does, and retries through the entry's witness, so an R2 review or an R3
-  consent is spent exactly once. `meerkat`:
+  take the step again; with no change in progress at that read (the holder
+  may have finished in between) they pause 1 ms and take it again. Every
+  retry is one of the three free rebuilds, within one deadline. Past the
+  bounds they return the step's typed refusal. An attempt whose operation
+  ran is the step's answer. Each wait is traced at site `tool_step` or
+  `tool_child_issuance` and reported as the call's to the operation refusal
+  observer. The dispatch issuance makes its single consuming entry once,
+  its staging waiting within the dispatch attempt's own bounds (traced at
+  site `tool_entry`). It then issues once under that entry, as the
+  synchronous form does, and only after a refusal to rebuild waits and
+  issues again through the entry's witness, so an R2 review or an R3
+  consent is spent exactly once and no other holder of the review owner can
+  refuse the first issuance after the spend. `meerkat`:
   `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
   the same way on the dispatch and entered paths, and answers `Unavailable`
   only past the bounds; its prepared path does not wait.
@@ -293,21 +302,29 @@ them.
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
 
-- `meerkat-core`, `meerkat-authorization`, `meerkat`: concurrent actors on
-  one authorization publication no longer fail a governed tool step on
-  transient writer contention. While one actor briefly held the
-  publication's writer (an issuance with its fsync'd append, a dispatch's
-  final entry or an owner change), another actor's step (a child issuance,
-  a further step of an entered operation) failed at once as temporarily
-  unavailable: the step's reservation never waits, it answered contention
-  as unavailability, and Core's bounded owner-change wait never engaged,
-  since a hold that had not published was no change in progress. The step
-  now refuses to rebuild, the native work owner names the hold as a change
-  in progress until it ends, and the step's waiting form waits for it
-  within the existing owner-change bound, outside every lock, and takes it
-  again (see Added). This is shell synchronization only: no machine input,
-  generated authority or owner fact changed, and the review spend stays
-  single and machine-owned.
+- `meerkat-core`, `meerkat-authorization`, `meerkat`: a governed tool step
+  taken through the new waiting forms (see Added) no longer fails on
+  transient contention with a concurrent actor on the same authorization
+  publication. While one actor briefly held the publication's writer (an
+  issuance with its fsync'd append, a dispatch's final entry, a held
+  exclusion or an owner change), another actor's step (a child issuance, a
+  further step of an entered operation) failed at once: as temporarily
+  unavailable while the hold had not published (the step's reservation
+  never waits, and Core's bounded owner-change wait did not count such a
+  hold as a change in progress), and as a refusal to rebuild that nothing
+  waited out once it had published. The step now refuses to rebuild for
+  both, the native work owner names the hold as a change in progress until
+  it ends, and the waiting forms wait for it within the existing
+  owner-change bound and the call's remaining tool time, outside every
+  lock, and take the step again. The synchronous steps still answer at
+  once, now as a refusal to rebuild for both, and the governed helper
+  fence, which runs inside a synchronous WorkGraph store callback, never
+  waits. Core's existing owner-change waits (dispatch preparation, entry
+  staging, the review's post-verdict check, model requests, compaction
+  summaries, the delegated web search) also wait out an unpublished hold
+  they meet after a refusal to rebuild. This is shell synchronization only:
+  no machine input, generated authority or owner fact changed, and the
+  review spend stays single and machine-owned.
 
 ## [0.9.7] - 2026-10-28
 

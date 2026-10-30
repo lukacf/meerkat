@@ -2664,8 +2664,10 @@ origin.
 A refused or failed send fails that occurrence (`delivery_failed` in the
 schedule store), and the schedule keeps its later times. That covers a
 sender who lost `agent.send`, a console that turned read-only, and an agent
-that was retired or removed: the schedule stays listed until it is deleted,
-and its fires succeed again if the agent comes back.
+the console no longer knows (a deleted identity, or a member without one
+that was retired): the schedule stays listed until it is deleted. An
+identity released with `meta/retire` is materialized by the fire, as by any
+console send.
 
 | Code | `data.kind` | When |
 |------|-------------|------|

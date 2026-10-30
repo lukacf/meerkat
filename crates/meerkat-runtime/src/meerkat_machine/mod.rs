@@ -7942,6 +7942,12 @@ impl MeerkatMachine {
     /// waiters that leave after it spawn nothing, since its settlement is
     /// theirs too. Without a cleanup runtime the next ready-gated caller
     /// settles inline instead.
+    ///
+    /// The other callers that leave a degraded session without settling it
+    /// hand off the same way: an input admission whose store write degraded
+    /// the session (past its deadline, or answered with an error), and the
+    /// reload-required discard of a registration whose runtime loop is still
+    /// attached.
     fn hand_off_degraded_gate_settlement(&self, session_id: &SessionId, gate: SessionMutationGate) {
         #[cfg(test)]
         self.test_degraded_gate_settlement_hand_offs
@@ -11849,16 +11855,20 @@ pub struct MeerkatMachineShared {
     /// stores' commit outcome declarations in.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_commit_busy_window: StdMutex<Option<std::time::Duration>>,
-    /// Test probe: how many ready-gated waiters left on the degradation
-    /// signal and handed the degraded settlement to a process-owned task.
+    /// Test probe: how many times a caller that left a degraded session
+    /// without settling it handed the degraded settlement to a process-owned
+    /// task (a ready-gated waiter that left on the degradation signal, an
+    /// input admission whose store write degraded the session, or the
+    /// reload-required discard of a registration whose runtime loop is still
+    /// attached). Counts calls: a call that finds a task already waiting for
+    /// the gate spawns nothing (see `test_degraded_gate_settlement_spawns`).
     #[cfg(test)]
     test_degraded_gate_settlement_hand_offs: std::sync::atomic::AtomicUsize,
     /// The mutation gates, by address, with a degraded settlement task
-    /// waiting to run. A ready-gated waiter that leaves on the degradation
-    /// signal spawns that task only for a gate that has none, so callers that
-    /// keep arriving behind one holder add no tasks. The task keeps its gate
-    /// alive while the gate is listed, so a listed address is never another
-    /// gate's.
+    /// waiting to run. A caller that hands the settlement off spawns that
+    /// task only for a gate that has none, so callers that keep arriving
+    /// behind one holder add no tasks. The task keeps its gate alive while
+    /// the gate is listed, so a listed address is never another gate's.
     pending_degraded_gate_settlements: StdMutex<HashSet<usize>>,
     /// Test probe: how many degraded settlement tasks were spawned.
     #[cfg(test)]
@@ -14853,6 +14863,9 @@ mod durability_gate_wait_tests;
 
 #[cfg(test)]
 mod commit_deadline_tests;
+
+#[cfg(test)]
+mod lost_admission_ack_tests;
 
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;

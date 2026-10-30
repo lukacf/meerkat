@@ -171,6 +171,30 @@ them.
   contention matches the refusal to rebuild instead, or uses the waiting
   forms (see Added).
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: the
+  reload-required discard of a durability-degraded registration whose
+  runtime loop is still attached
+  (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`) now detaches
+  that loop itself, and so does an input admission whose failed store
+  write degraded the session. Both hand off the session's degraded gate
+  settlement: once the session's mutation gate is free, it detaches the
+  runtime loop and hard-cancels the loop's exact current run through the
+  executor's interrupt handle, as a ready-gated caller on a degraded
+  session already did. Through 0.9.7 the discard waited for the loop to
+  hand its executor back on its own (a run in flight first reached its
+  refused commit, and an idle loop never did), and a failed admission left
+  the loop attached until such a caller came. After the detach,
+  `current_executor_attachment_witness` answers `None` and
+  `session_attachment_state` reports `ReloadRequired` without an
+  attachment, so the attachment witness of an executor that is not
+  machine-managed no longer names the registration
+  (`reload_required_registration_until_settled_if_current` answers
+  `NotCurrent` for it). This supersedes the 0.9.4 note that the discard
+  waits for an attached loop's handoff.
+
 ### Added
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
@@ -439,6 +463,31 @@ them.
   `PolicyChanged` with the change, and the next attempt answers
   `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
+
+- `meerkat-runtime`, `meerkat-mob`: the reload of a session whose input
+  admission lost its commit acknowledgement no longer waits forever. An
+  admission whose store committed the admission and then answered an error
+  (a lost acknowledgement, for example) degrades the session to need a
+  reload (`admission_commit`) and refuses typed, as before, but its error
+  path did not run the session's degraded gate settlement, and nothing else
+  did: a retry can be refused before it reaches the runtime, and an
+  unregister refuses at its first durable write. The idle runtime loop then
+  stayed attached and never handed its executor off, so the reload-required
+  discard (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`, and the mob
+  member reload that awaits it) waited for that handoff without bound: a mob
+  member's reload answered `MemberReloadTimedOut` at its deadline and kept
+  the member's admission lane. An admission whose failed store write
+  degraded the session now hands the degraded settlement off as it leaves,
+  as an admission past its commit deadline already does, and a reload hands
+  it off itself for a registration whose runtime loop is still attached,
+  whatever degraded it: once the session's mutation gate is free, the
+  settlement detaches the loop and hard-cancels the exact current run, and
+  the reload proceeds (see Breaking). The committed input stays durably
+  admitted and pending in the cold successor, and a resubmission with the
+  same idempotency key is deduplicated against it.
 
 ### Known limitations
 

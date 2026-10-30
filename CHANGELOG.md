@@ -354,6 +354,29 @@ them.
   `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
 
+- `meerkat-runtime`, `meerkat-mob`: the reload of a session whose input
+  admission lost its commit acknowledgement no longer waits forever. An
+  admission whose store committed the admission and then answered an error
+  (a lost acknowledgement, for example) degrades the session to need a
+  reload (`admission_commit`) and refuses typed, as before, but its error
+  path did not run the session's degraded gate settlement, and nothing else
+  did: a retry can be refused before it reaches the runtime, and an
+  unregister refuses at its first durable write. The idle runtime loop then
+  stayed attached and never handed its executor off, so the reload-required
+  discard (`recover_or_discard_reload_required_registration_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`, and the mob
+  member reload that awaits it) waited for that handoff without bound: a mob
+  member's reload answered `MemberReloadTimedOut` at its deadline and kept
+  the member's admission lane. The failed admission now hands the degraded
+  settlement off as it leaves, as an admission past its commit deadline
+  already does, and a reload hands it off itself for a registration whose
+  runtime loop is still attached, whatever degraded it: once the session's
+  mutation gate is free, the settlement detaches the loop and hard-cancels
+  the exact current run, and the reload proceeds. The committed input stays
+  durably admitted and pending in the cold successor, and a resubmission
+  with the same idempotency key is deduplicated against it.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

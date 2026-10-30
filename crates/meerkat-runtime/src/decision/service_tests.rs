@@ -1,8 +1,9 @@
 //! Rows of the durable decision owner: attested decisions bound to the
 //! subject digest, execution once under a permit across a restart, the
-//! deadline and the permit, conflicts, candidate launches, lazy reads, and
-//! torn rows.
+//! deadline and the permit, conflicts, candidate launches, lazy reads, torn
+//! rows, and the stores' work queries checked against the machine.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,13 +17,17 @@ use meerkat_core::approval::decision::{
     DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
     DecisionRequestBody, DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore,
     DecisionSubjectKey, DecisionTier, InMemoryDecisionStore, PresentationAudience,
-    PresentationRecord, Sha256Digest, StoredDecision,
+    PresentationRecord, Sha256Digest, StoredDecision, decision_is_due, decision_owes_work,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState, ApprovalStoreError};
 use meerkat_core::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
+use meerkat_store::SqliteDecisionStore;
 
-use super::dsl::{DecisionDigest, DurableDecisionEffect};
-use super::service::issued_permit;
+use super::dsl::{
+    DecisionDigest, DurableDecisionEffect, DurableDecisionInput, DurableDecisionMachineAuthority,
+    DurableDecisionMachineMutator, DurableDecisionMachineState, DurableDecisionPhase,
+};
+use super::service::{issued_permit, machine_state};
 use super::{
     DecisionClock, DecisionClockError, DecisionError, DecisionRefusal, DecisionWithdrawer,
     DecisionWriteMode, DurableDecisionService,
@@ -1457,4 +1462,233 @@ fn withdraw_is_open_only_by_requester_or_host() {
         .expect("the host withdraws");
     assert_eq!(withdrawn.state.phase, DecisionPhase::Withdrawn);
     assert_eq!(withdrawn.state.notice, DecisionNotice::NotRequired);
+}
+
+#[test]
+fn an_approved_decision_with_no_permit_past_its_deadline_is_due() {
+    let (_store, clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    clock.set(DEADLINE - 1);
+    assert!(
+        service.due(None, 10).expect("due").decisions.is_empty(),
+        "before its deadline it is not due"
+    );
+
+    clock.set(DEADLINE);
+    let due = service.due(None, 10).expect("due");
+    assert_eq!(
+        due.decisions
+            .iter()
+            .map(|row| row.decision_id.clone())
+            .collect::<Vec<_>>(),
+        vec![decision_id.clone()]
+    );
+    assert_eq!(
+        due.decisions[0].state.phase,
+        DecisionPhase::Approved,
+        "listed as stored"
+    );
+    let expired = service
+        .get(&decision_id)
+        .expect("the deadline driver's read records the expiry");
+    assert_eq!(expired.state.phase, DecisionPhase::Expired);
+    assert!(
+        service.due(None, 10).expect("due").decisions.is_empty(),
+        "once recorded it is due no more"
+    );
+}
+
+/// The machine of `row`, rebuilt as the owner rebuilds it, after `input`:
+/// its effects, and the state it left.
+fn machine_after(
+    row: &StoredDecision,
+    input: DurableDecisionInput,
+) -> (Vec<DurableDecisionEffect>, DurableDecisionMachineState) {
+    let mut authority =
+        DurableDecisionMachineAuthority::recover_from_state(machine_state(&row.state))
+            .unwrap_or_else(|error| panic!("{} recovers: {error}", row.decision_id));
+    let effects = DurableDecisionMachineMutator::apply(&mut authority, input)
+        .unwrap_or_else(|error| panic!("{} answers: {error}", row.decision_id))
+        .into_effects();
+    (effects, authority.state().clone())
+}
+
+/// Whether the machine's `Expire` at `now_ms` records an expiry: the
+/// decision is due an expiry observation then.
+fn machine_expires(row: &StoredDecision, now_ms: u64) -> bool {
+    machine_after(row, DurableDecisionInput::Expire { now_ms })
+        .0
+        .iter()
+        .any(|effect| matches!(effect, DurableDecisionEffect::Expired { .. }))
+}
+
+/// Whether the machine owes its owner work: an approved decision (to
+/// execute, settle or expire), or a notice its receipt would settle.
+fn machine_owes_work(row: &StoredDecision) -> bool {
+    let (_, settled) = machine_after(row, DurableDecisionInput::SettleNotice { delivered: true });
+    settled.lifecycle_phase == DurableDecisionPhase::Approved
+        || settled.notice != machine_state(&row.state).notice
+}
+
+#[test]
+fn store_due_and_owed_predicates_agree_with_the_machine() {
+    let (store, clock, service) = fixture();
+    let rendering = rendering();
+    let hold = |subject: &str, routable: bool| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                routable,
+            )
+            .expect("hold")
+            .decision_id
+    };
+    let decide = |decision_id: &DecisionId, approve: bool| {
+        service
+            .present(decision_id, &presentation(&rendering))
+            .expect("present");
+        service
+            .decide(
+                decision_id,
+                &attested("alice", rendering.subject_digest(), approve),
+                &Eligibility::current(),
+            )
+            .expect("decide");
+    };
+    let permit = |decision_id: &DecisionId| {
+        service
+            .authorize_execution(decision_id, &operation_id(), &request_digest())
+            .expect("permit")
+    };
+
+    // One row in every phase, the approval with and without its permit,
+    // and every notice state, each reached through the owner's own calls.
+    hold("phase:open", true);
+    hold("phase:open-unroutable", false);
+    let approved = hold("phase:approved", true);
+    decide(&approved, true);
+    let permitted = hold("phase:permitted", true);
+    decide(&permitted, true);
+    let _outstanding = permit(&permitted);
+    let rejected = hold("phase:rejected", true);
+    decide(&rejected, false);
+    let delivered = hold("phase:rejected-delivered", true);
+    decide(&delivered, false);
+    service
+        .settle_notice(
+            &delivered,
+            &ApprovalConsentDeliveryState::Admitted {
+                session_id: SessionId::new(),
+                input_id: "input-1".to_owned(),
+            },
+        )
+        .expect("deliver the notice");
+    let withdrawn = hold("phase:withdrawn", false);
+    service
+        .withdraw(&withdrawn, &DecisionWithdrawer::Host)
+        .expect("withdraw");
+    let executed = hold("phase:executed", true);
+    decide(&executed, true);
+    let executing = permit(&executed);
+    service
+        .record_executed(
+            &executed,
+            executing.operation_id(),
+            executing.request_digest(),
+        )
+        .expect("executed");
+    let refused = hold("phase:refused", true);
+    decide(&refused, true);
+    service
+        .close_refused(permit(&refused), &reference("quota_exceeded"))
+        .expect("refused");
+    service
+        .settle_notice(
+            &refused,
+            &ApprovalConsentDeliveryState::Failed {
+                reason: "unreachable".to_owned(),
+            },
+        )
+        .expect("the notice failed");
+    let expired = hold("phase:expired", true);
+    clock.set(DEADLINE);
+    service.get(&expired).expect("the read records the expiry");
+    clock.set(HELD_AT);
+
+    let rows: Vec<StoredDecision> = store
+        .inner
+        .list(&DecisionListFilter::default(), None, 100)
+        .expect("list")
+        .rows
+        .into_iter()
+        .map(|row| match row {
+            DecisionRow::Readable(row) => *row,
+            DecisionRow::Unreadable(row) => panic!("unreadable row {row:?}"),
+        })
+        .collect();
+    let phases: BTreeSet<&str> = rows.iter().map(|row| row.state.phase.as_str()).collect();
+    assert_eq!(phases.len(), 7, "every phase: {phases:?}");
+    let notices: BTreeSet<&str> = rows.iter().map(|row| row.state.notice.as_str()).collect();
+    assert_eq!(notices.len(), 5, "every notice state: {notices:?}");
+    for permit_issued in [false, true] {
+        assert!(
+            rows.iter()
+                .any(|row| row.state.phase == DecisionPhase::Approved
+                    && row.state.permit_issued == permit_issued),
+            "an approval with permit_issued {permit_issued}"
+        );
+    }
+
+    // The same rows in a fresh in-memory store and a fresh SQLite file.
+    let memory = InMemoryDecisionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sqlite = SqliteDecisionStore::in_store_path(dir.path());
+    for row in &rows {
+        memory.insert_if_absent(row).expect("insert");
+        sqlite.insert_if_absent(row).expect("insert");
+    }
+    let ids = |page: DecisionPage| -> BTreeSet<String> {
+        page.rows
+            .iter()
+            .map(|row| row.decision_id().to_owned())
+            .collect()
+    };
+
+    // Owed exactly when the machine owes its owner work.
+    let owed_in_memory = ids(memory.owed(None, 100).expect("owed"));
+    let owed_in_sqlite = ids(sqlite.owed(None, 100).expect("owed"));
+    for row in &rows {
+        let id = row.decision_id.as_str();
+        let owes = machine_owes_work(row);
+        assert_eq!(decision_owes_work(row), owes, "{id}: decision_owes_work");
+        assert_eq!(owed_in_memory.contains(id), owes, "{id}: in-memory owed");
+        assert_eq!(owed_in_sqlite.contains(id), owes, "{id}: SQLite owed");
+    }
+
+    // Due exactly when the machine's Expire records the expiry: before,
+    // at and after the deadline.
+    for now_ms in [DEADLINE - 1, DEADLINE, DEADLINE + 1] {
+        let due_in_memory = ids(memory.due(now_ms, None, 100).expect("due"));
+        let due_in_sqlite = ids(sqlite.due(now_ms, None, 100).expect("due"));
+        for row in &rows {
+            let id = row.decision_id.as_str();
+            let due = machine_expires(row, now_ms);
+            assert_eq!(
+                decision_is_due(row, now_ms),
+                due,
+                "{id} at {now_ms}: decision_is_due"
+            );
+            assert_eq!(
+                due_in_memory.contains(id),
+                due,
+                "{id} at {now_ms}: in-memory due"
+            );
+            assert_eq!(
+                due_in_sqlite.contains(id),
+                due,
+                "{id} at {now_ms}: SQLite due"
+            );
+        }
+    }
 }

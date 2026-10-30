@@ -597,3 +597,51 @@ fn the_in_memory_store_writes_conditionally_and_pages_its_indexes() {
     assert_eq!(second.next_after, None);
     assert!(!store.is_persistent());
 }
+
+#[test]
+fn an_approved_decision_with_no_permit_past_its_deadline_is_due() {
+    let store = InMemoryDecisionStore::new();
+    let lapsed = stored(
+        "subject-lapsed",
+        DecisionPhase::Approved,
+        DecisionNotice::NotDue,
+        50,
+    );
+    let mut held = stored(
+        "subject-held",
+        DecisionPhase::Approved,
+        DecisionNotice::NotDue,
+        50,
+    );
+    held.state.permit_issued = true;
+    let fresh = stored(
+        "subject-fresh",
+        DecisionPhase::Approved,
+        DecisionNotice::NotDue,
+        500,
+    );
+    for row in [&lapsed, &held, &fresh] {
+        store.insert_if_absent(row).expect("insert");
+    }
+    let due = |now_ms: u64| -> Vec<String> {
+        store
+            .due(now_ms, None, 10)
+            .expect("due")
+            .rows
+            .iter()
+            .map(|row| row.decision_id().to_owned())
+            .collect()
+    };
+    let lapsed_only = vec![lapsed.decision_id.as_str().to_owned()];
+    assert!(due(49).is_empty(), "before its deadline nothing is due");
+    assert_eq!(due(50), lapsed_only, "at its deadline it is due");
+    assert_eq!(
+        due(100),
+        lapsed_only,
+        "past it, while the held one waits for its permit's settlement"
+    );
+    assert!(decision_is_due(&lapsed, 50));
+    assert!(!decision_is_due(&lapsed, 49));
+    assert!(!decision_is_due(&held, 100));
+    assert!(!decision_is_due(&fresh, 100));
+}

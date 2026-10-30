@@ -52,12 +52,6 @@ impl DecisionPhase {
             Self::ExecutionRefused => "execution_refused",
         }
     }
-
-    /// Whether the decision ended: no input moves it again.
-    #[must_use]
-    pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Open | Self::Approved)
-    }
 }
 
 /// Who decides an open decision now.

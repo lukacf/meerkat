@@ -271,7 +271,7 @@ fn audience_party(audience: &PresentationAudience) -> DecisionParty {
 }
 
 /// The generated machine's state of a stored state.
-fn machine_state(state: &DecisionMachineState) -> DurableDecisionMachineState {
+pub(super) fn machine_state(state: &DecisionMachineState) -> DurableDecisionMachineState {
     DurableDecisionMachineState {
         lifecycle_phase: match state.phase {
             DecisionPhase::Open => DurableDecisionPhase::Open,

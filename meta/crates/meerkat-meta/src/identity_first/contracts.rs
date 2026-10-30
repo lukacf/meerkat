@@ -689,13 +689,13 @@ impl RosterProvider for ProjectedRosterProvider {
 /// Build-time agent customization provider.
 ///
 /// `customize_build` runs when an identity is seated and the mob held no
-/// member for it, when a reset, a delete or a declared role migration starts
-/// the identity's fresh life, and right before each build of its member,
-/// including the first build after a restart (the member's first wake). A
-/// restart over members the mob already holds calls it for none of them
-/// until they are built. It receives read-only context (identity, peers,
-/// topology) and the roster spec, and may mutate the `AgentBuildDraft`
-/// (model, prompts, labels, tools, etc.).
+/// member for it, when a reset or a delete starts the identity's fresh life,
+/// when a declared role migration moves it to its new role, and right before
+/// each build of its member, including the first build after a restart (the
+/// member's first wake). A restart over members the mob already holds calls
+/// it for none of them until they are built. It receives read-only context
+/// (identity, peers, topology) and the roster spec, and may mutate the
+/// `AgentBuildDraft` (model, prompts, labels, tools, etc.).
 ///
 /// Resume selection is NOT part of this contract — Meta owns resume
 /// injection after customize_build completes.
@@ -709,10 +709,11 @@ pub trait AgentCustomizer: Send + Sync {
         draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError>;
 
-    /// Called once after each seat, create or fresh life of the identity that
-    /// ran `customize_build`, with the session the identity is bound to. A
-    /// member's build at a wake, the first one after a restart included,
-    /// never calls it. Best-effort: an error is logged and the seat stands.
+    /// Called once after each seat, create, fresh life or role migration of
+    /// the identity that ran `customize_build`, with the session the identity
+    /// is bound to. A member's build at a wake, the first one after a restart
+    /// included, never calls it. Best-effort: an error is logged and nothing
+    /// is undone.
     async fn after_create(
         &self,
         identity: &AgentIdentity,

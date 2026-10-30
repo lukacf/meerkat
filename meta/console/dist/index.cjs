@@ -23071,7 +23071,9 @@ function agentDisplayTitle(agent) {
   const ids = [agent.identity, agent.member_id, agent.agent_id, agent.labels?.agent_identity].map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean);
   if (label && !ids.includes(label)) return label;
   const id = label || ids[0] || "";
-  const parts = stripAgentKeyPrefix(id).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const bare = stripAgentKeyPrefix(id);
+  if (bare.includes("@")) return bare;
+  const parts = bare.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   if (parts.length === 0) return id || "Agent";
   if (parts.some(isOpaqueIdPart)) {
     return "".concat(agentKindLabel(agent) || "Agent", " ").concat(parts.join("").slice(-6).toLowerCase());
@@ -65625,7 +65627,7 @@ function ChatPane({
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("b", { style: { color: "var(--ink-muted)" }, title: identity, children: agentLabel })
             ] }),
             voiceActive && /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7 text to background agent" }),
-            agent?.role && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
+            agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: humanizeEnum(agent.role) })
             ] }),

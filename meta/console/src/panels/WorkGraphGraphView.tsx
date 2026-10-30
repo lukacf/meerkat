@@ -441,7 +441,9 @@ export function WorkGraphGraphView({
       event.currentTarget.ownerSVGElement?.querySelectorAll<SVGGElement>('[data-testid="workgraph-graph-node"]') ?? [],
     ).find((element) => element.getAttribute("data-item-id") === targetId);
     setFocusedId(targetId);
-    target?.focus();
+    // The node's focus handler pans it into the frame; the browser must not
+    // also scroll the panel to it.
+    target?.focus({ preventScroll: true });
   };
 
   return (

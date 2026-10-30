@@ -112,4 +112,17 @@ describe("WorkGraphGraphView keyboard focus and the view", () => {
     });
     expect(inFrame(target)).toBe(true);
   });
+
+  it("moves keyboard focus without scrolling the panel, so only the pan moves the view", () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const view = render(<WorkGraphGraphView items={items} edges={edges} attention={[]} onSelect={vi.fn()} />);
+    const root = view.getAllByTestId("workgraph-graph-node")
+      .find((element) => element.getAttribute("data-item-id") === "root") as unknown as SVGGElement;
+    act(() => root.focus());
+    const focus = vi.spyOn(SVGElement.prototype, "focus");
+    fireEvent.keyDown(root, { key: "End" });
+    expect(document.activeElement?.getAttribute("data-item-id")).toBe("child-stuck");
+    expect(focus.mock.calls.length).toBe(1);
+    expect(JSON.stringify(focus.mock.calls[0])).toBe(JSON.stringify([{ preventScroll: true }]));
+  });
 });

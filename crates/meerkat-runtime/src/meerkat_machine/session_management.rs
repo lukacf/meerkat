@@ -6032,6 +6032,15 @@ impl MeerkatMachine {
         pending
             .settle_expired_stop_requeued_inputs(chrono::Utc::now())
             .await?;
+        // And kept governed work with no way back to its controller client
+        // (its client did not survive the store, and only a fresh
+        // authentication of its caller could supply it again) ends as a
+        // refused resume before anything can serve it, with a kept run whose
+        // first input it is. A kept resume of retained work is not ended
+        // here: the runtime loop asks its host for the client again.
+        pending
+            .settle_kept_governed_inputs_without_controller()
+            .await?;
         Ok(EnsureRuntimeExecutorAttachment::Pending(pending))
     }
 

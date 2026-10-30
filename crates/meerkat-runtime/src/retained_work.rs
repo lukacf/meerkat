@@ -238,6 +238,140 @@ fn refused(reason: RetainedResumeRefusal) -> RuntimeDriverError {
     RuntimeDriverError::RetainedResumeRefused { reason }
 }
 
+/// What the installed host answered when the runtime asked it again for the
+/// controller client of a kept retained-resume row: an admitted resume that a
+/// graceful requeue stop kept, or that a restart found, in the store. A
+/// client never survives persistence, so such a row has none until its host
+/// supplies one again.
+#[derive(Debug)]
+pub(crate) enum RetainedClientReacquisition {
+    /// The host supplied a usable client for exactly the recorded selection.
+    Pinned(meerkat_core::ControllerModelClient),
+    /// A definite answer that no usable client will be supplied for this
+    /// resume: an actual denial, malformed evidence or a client for another
+    /// selection, an actual authorization unavailability, an owner that has
+    /// no client for the resume
+    /// ([`crate::traits::ControllerReadinessFailure::UnsupportedScope`], also
+    /// the answer of a host without a retained-resume owner), no installed
+    /// host at all, or a destination the session has since superseded. The
+    /// row ends as a refused resume
+    /// ([`crate::input_state::InputAbandonReason::ResumeRefused`]) and is never
+    /// staged.
+    Refused,
+    /// The host cannot say now: any other readiness failure, or a policy
+    /// observation it must refresh. The machine holds the row
+    /// (`HoldInputController`): it is not staged, keeps its attempts, and a
+    /// run marked resumable that it is bound to does not resume. The runtime
+    /// asks again once per [`CONTROLLER_HOLD_RETRY_DELAY`]; this answer alone
+    /// never refuses the row, but a row still unanswered once
+    /// [`CONTROLLER_HOLD_BUDGET`] from its first such answer ran out ends as
+    /// a refused resume.
+    NotReady(crate::traits::ControllerReadinessFailure),
+}
+
+/// Classify a host's answer for a kept retained-resume row whose recorded
+/// identity is `identity`. A client for any other selection than the
+/// recorded one is malformed. `Readiness(UnsupportedScope)` is definite here,
+/// unlike at a fresh admission ([`classify_resume_error`]), which keeps the
+/// carrying delivery owed: a kept row is already admitted, and while it
+/// waits without a client the whole machine refuses controller grant
+/// changes, credential publications and auth lease releases, so waiting for
+/// a later composition would hold all of them for good.
+pub(crate) fn classify_reacquired_client(
+    identity: &RetainedWorkIdentity,
+    answer: Result<meerkat_core::ControllerModelClient, RetainedResumeError>,
+) -> RetainedClientReacquisition {
+    use crate::traits::ControllerReadinessFailure;
+    use meerkat_core::OperationRefusalKind;
+    match answer {
+        Ok(client) if identity.controller() == Some(client.selection()) => {
+            RetainedClientReacquisition::Pinned(client)
+        }
+        Ok(_) => RetainedClientReacquisition::Refused,
+        Err(RetainedResumeError::Refused(refusal)) => match refusal.kind() {
+            OperationRefusalKind::Denied | OperationRefusalKind::MalformedFacts => {
+                RetainedClientReacquisition::Refused
+            }
+            OperationRefusalKind::ReprepareRequired => {
+                RetainedClientReacquisition::NotReady(ControllerReadinessFailure::PolicyChanged)
+            }
+        },
+        Err(RetainedResumeError::AuthorizationUnavailable) => RetainedClientReacquisition::Refused,
+        Err(RetainedResumeError::Readiness(ControllerReadinessFailure::UnsupportedScope)) => {
+            RetainedClientReacquisition::Refused
+        }
+        Err(RetainedResumeError::Readiness(reason)) => {
+            RetainedClientReacquisition::NotReady(reason)
+        }
+    }
+}
+
+/// The attempts in a held row's budget, as a resumed run's admission has
+/// ([`crate::RESUMED_RUN_ADMISSION_ATTEMPTS`]).
+pub(crate) const CONTROLLER_HOLD_ATTEMPTS: u32 =
+    crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPTS;
+
+/// The time one attempt counts for in a held row's budget, as for a resumed
+/// run's admission ([`crate::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`]). The
+/// host answers synchronously, so an ask is never cut short: the budget only
+/// counts this much for each attempt.
+#[cfg(not(test))]
+pub(crate) const CONTROLLER_HOLD_ATTEMPT_TIMEOUT: std::time::Duration =
+    crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+#[cfg(test)]
+pub(crate) const CONTROLLER_HOLD_ATTEMPT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+
+/// The pause between two asks for the clients of the held rows, as between
+/// two attempts of a resumed run's admission
+/// ([`crate::RESUMED_RUN_ADMISSION_RETRY_DELAY`]). The runtime loop asks each
+/// held row once per pause.
+#[cfg(not(test))]
+pub(crate) const CONTROLLER_HOLD_RETRY_DELAY: std::time::Duration =
+    crate::resumed_run_admission::RESUMED_RUN_ADMISSION_RETRY_DELAY;
+#[cfg(test)]
+pub(crate) const CONTROLLER_HOLD_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(25);
+
+/// A held row's budget, from its first "cannot say now" answer in its
+/// registration: the bound a resumed run's admission has,
+/// [`CONTROLLER_HOLD_ATTEMPTS`] attempts of [`CONTROLLER_HOLD_ATTEMPT_TIMEOUT`]
+/// with [`CONTROLLER_HOLD_RETRY_DELAY`] between them (30 seconds). A row its
+/// host still cannot answer for at its first ask after the budget ran out
+/// ends as a refused resume.
+pub(crate) const CONTROLLER_HOLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(
+    CONTROLLER_HOLD_ATTEMPT_TIMEOUT.as_millis() as u64 * CONTROLLER_HOLD_ATTEMPTS as u64
+        + CONTROLLER_HOLD_RETRY_DELAY.as_millis() as u64 * (CONTROLLER_HOLD_ATTEMPTS as u64 - 1),
+);
+
+/// What one ask for the controller clients of the kept retained-resume rows
+/// without one did (`EphemeralRuntimeDriver::ask_kept_resume_controllers`).
+#[derive(Debug, Default)]
+pub(crate) struct KeptResumeControllerAsks {
+    /// Queued rows the host refused definitely, or whose budget ran out:
+    /// each ends as a refused resume, and none stages.
+    pub(crate) refused: Vec<meerkat_core::lifecycle::InputId>,
+    /// The run marked resumable, when a row bound to it was refused or ran
+    /// out of budget: the run settles as a refused resume.
+    pub(crate) refused_run: Option<meerkat_core::lifecycle::RunId>,
+    /// A hold was released (its host supplied the client): the loop plans
+    /// again.
+    pub(crate) released: bool,
+    /// A row was held (its host cannot say yet): the loop plans again
+    /// without it.
+    pub(crate) held: bool,
+}
+
+impl KeptResumeControllerAsks {
+    /// Whether the machine's holds changed, or `ended` refused rows ended, so
+    /// the loop plans its lap again. A refused row that did not end (it was
+    /// no longer queued) changes nothing to plan around, so it never makes
+    /// the loop ask again at once.
+    pub(crate) fn changed_plan(&self, ended: usize) -> bool {
+        self.released || self.held || ended > 0
+    }
+}
+
 /// A request to resume retained work, minted only by
 /// [`crate::delivery_inbox::RuntimeDeliveryInbox::retained_resume_request`]
 /// from the committed delivery row at the head of its runtime's inbox.

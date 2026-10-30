@@ -14253,6 +14253,7 @@ pub struct State {
     pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
     pub run_stop_requested: Option<RunId>,
     pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
+    pub input_controller_holds: std::collections::BTreeSet<String>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub registration_live_input_seen: bool,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -15110,6 +15111,7 @@ impl std::fmt::Debug for State {
             )
             .field("run_stop_requested", &self.run_stop_requested)
             .field("run_start_holds", &self.run_start_holds)
+            .field("input_controller_holds", &self.input_controller_holds)
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field(
                 "registration_live_input_seen",
@@ -19012,6 +19014,14 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub generation: Option<Generation>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldInputController {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseInputController {
+        pub input_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19441,6 +19451,8 @@ pub enum Input {
     AuthorizeOperatorDurableTailRepair(inputs::AuthorizeOperatorDurableTailRepair),
     ResolveEmptyResumeRetirement(inputs::ResolveEmptyResumeRetirement),
     ClaimCompositionResidency(inputs::ClaimCompositionResidency),
+    HoldInputController(inputs::HoldInputController),
+    ReleaseInputController(inputs::ReleaseInputController),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20034,6 +20046,8 @@ impl Input {
             }
             Self::ResolveEmptyResumeRetirement(_) => InputKind::ResolveEmptyResumeRetirement,
             Self::ClaimCompositionResidency(_) => InputKind::ClaimCompositionResidency,
+            Self::HoldInputController(_) => InputKind::HoldInputController,
+            Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
         }
     }
 }
@@ -20452,6 +20466,8 @@ pub enum InputKind {
     AuthorizeOperatorDurableTailRepair,
     ResolveEmptyResumeRetirement,
     ClaimCompositionResidency,
+    HoldInputController,
+    ReleaseInputController,
 }
 
 pub mod signals {
@@ -22231,6 +22247,8 @@ pub mod effects {
     pub struct EmptyResumeRetirementResolved {
         pub verdict: EmptyResumeRetirementVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputControllerReleased {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22508,6 +22526,7 @@ pub enum Effect {
     RunSuspendedForStop(effects::RunSuspendedForStop),
     RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
+    InputControllerReleased(effects::InputControllerReleased),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22772,6 +22791,7 @@ pub enum EffectKind {
     RunSuspendedForStop,
     RuntimeRegistrationReleased,
     EmptyResumeRetirementResolved,
+    InputControllerReleased,
 }
 
 pub mod command_capabilities {
@@ -23060,7 +23080,11 @@ pub mod command_capabilities {
         lane: super::InputLane,
         source: RuntimeLoopBatchSource,
     ) -> Option<RuntimeLoopBatchPlan> {
-        let ordered = ordered_queued_lane_inputs(state, lane)?;
+        // A kept governed input held for its controller is never selected: later work of its lane goes first.
+        let ordered: Vec<String> = ordered_queued_lane_inputs(state, lane)?
+            .into_iter()
+            .filter(|input_id| !state.input_controller_holds.contains(input_id))
+            .collect();
         let first = ordered.first()?;
         // AppendContentAndRun owns exactly one SystemNotice per run.
         let selected = if state
@@ -23127,6 +23151,10 @@ pub mod command_capabilities {
                 return None;
             }
             if state.input_run_associations.contains_key(input_id) {
+                return None;
+            }
+            // Mirrors the StageForRun `input_controller_not_held` guard.
+            if state.input_controller_holds.contains(input_id) {
                 return None;
             }
         }
@@ -25938,6 +25966,16 @@ pub enum TransitionId {
     ClaimCompositionResidencyRunning,
     ClaimCompositionResidencyRetired,
     ClaimCompositionResidencyStopped,
+    HoldInputControllerIdle,
+    HoldInputControllerAttached,
+    HoldInputControllerRunning,
+    HoldInputControllerRetired,
+    HoldInputControllerStopped,
+    ReleaseInputControllerIdle,
+    ReleaseInputControllerAttached,
+    ReleaseInputControllerRunning,
+    ReleaseInputControllerRetired,
+    ReleaseInputControllerStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26183,6 +26221,7 @@ pub fn initial_state() -> State {
         input_live_boundary_join_phase: Default::default(),
         run_stop_requested: None,
         run_start_holds: Default::default(),
+        input_controller_holds: Default::default(),
         recovered_admitted_lanes: Default::default(),
         registration_live_input_seen: false,
         op_statuses: Default::default(),

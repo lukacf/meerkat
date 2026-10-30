@@ -6422,6 +6422,10 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         // hot-spins forever (2026-07 "meerkat-machine-cleanup" incident:
         // 9.94s/10s CPU on the one worker dispatching every session command).
         let mut feed_hold: Option<FeedWakeHoldState> = None;
+        // The earliest the controller re-ask may fire again: one pause after
+        // it last fired, so a queue pass that returns before its asking lap
+        // (a stop's cleanup in progress) never spins the loop.
+        let mut controller_reask_floor: Option<meerkat_core::time_compat::Instant> = None;
         // The loop's exit (stop, terminal handoff) can end a run too.
         let _loop_exit_run_settlement = authority_binding.run_settlement_publication();
         // Keep this readiness future across unrelated wakes. With no hooks it
@@ -6466,14 +6470,42 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 }
             };
 
+            // The re-ask of the kept inputs the machine holds for their
+            // controller client: armed exactly while the machine reports
+            // holds, one pause after the last ask, and independent of every
+            // other wake, so unrelated batches never move it and a failed
+            // wake never drops it. It runs a queue pass, whose first lap asks.
+            let controller_reask_at = driver
+                .lock()
+                .await
+                .controller_reask_due_at()
+                .map(|due| controller_reask_floor.map_or(due, |floor| due.max(floor)));
+            let controller_reask = async move {
+                match controller_reask_at {
+                    Some(at) => {
+                        tokio::time::sleep(
+                            at.saturating_duration_since(meerkat_core::time_compat::Instant::now()),
+                        )
+                        .await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             // Parked means nothing can wake the loop on its own: no buffered
             // wake or effect, no unobserved completion-feed advance (the idle
-            // wake resolves at once on one), and no feed hold (it re-polls).
+            // wake resolves at once on one), no feed hold (it re-polls), and
+            // no controller hold (its re-ask wakes the loop).
             let feed_idle = match (completion_feed.as_ref(), ops_lifecycle.as_ref()) {
                 (Some(feed), Some(_)) => feed_hold.is_none() && feed.watermark() <= observed_seq,
                 _ => true,
             };
-            park_marker.park_if_drained(effect_rx.is_empty() && wake_rx.is_empty() && feed_idle);
+            park_marker.park_if_drained(
+                effect_rx.is_empty()
+                    && wake_rx.is_empty()
+                    && feed_idle
+                    && controller_reask_at.is_none(),
+            );
             tokio::select! {
                 biased;
                 maybe_effect = park_marker.unpark_after(effect_rx.recv()) => {
@@ -6738,6 +6770,29 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 hold,
                             );
                         }
+                    }
+                }
+                () = park_marker.unpark_after(controller_reask) => {
+                    // The pause of the held inputs' controller re-ask is
+                    // over: the queue pass's first lap asks their host once
+                    // more, ends any refused or out of budget, and plans
+                    // whatever a released hold lets run.
+                    controller_reask_floor = Some(
+                        meerkat_core::time_compat::Instant::now()
+                            + crate::retained_work::CONTROLLER_HOLD_RETRY_DELAY,
+                    );
+                    if process_queue(
+                        &driver,
+                        executor_or_return!(),
+                        &mut effect_rx,
+                        completions.as_ref(),
+                        &authority_binding,
+                        &loop_process_teardown_slot,
+                        &mut terminal_handoff,
+                    )
+                    .await
+                    {
+                        break;
                     }
                 }
             }
@@ -7229,6 +7284,43 @@ async fn consume_retained_live_boundary_joins_without_commit(
 /// a run-fenced Stop terminalized instead of requeueing.
 const STOPPED_RUN_JOIN_REASON: &str = "durable steer cancelled with its stopped run";
 
+/// Reason carried by the runtime-terminal completion of a kept retained-work
+/// resume whose installed host answered definitely that it supplies no
+/// controller for it any more, or did not answer within its budget. Fixed and
+/// host-neutral, as for a refused resumed run.
+const REFUSED_RETAINED_RESUME_REASON: &str = "the resume of retained work was refused";
+
+/// Publish and resolve the runtime terminations of kept inputs the machine
+/// ended as refused resumes (`settled`, each with the directed owner of its
+/// carrier when it is directed), with `reason`, once the queue authority is
+/// released, as an exact queued-input cancellation publishes its one. A
+/// directed carrier goes through the executor's publication capability.
+async fn publish_refused_retained_resumes(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    executor: &dyn meerkat_core::lifecycle::CoreExecutor,
+    settled: &[(InputId, Option<InputId>)],
+    reason: &str,
+) -> Result<(), crate::RuntimeDriverError> {
+    if settled.is_empty() {
+        return Ok(());
+    }
+    let publication_handle = executor.publication_handle();
+    for (input_id, directed_owner) in settled {
+        crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+            driver,
+            completions,
+            publication_handle.as_deref(),
+            std::slice::from_ref(input_id),
+            directed_owner.as_ref(),
+            reason,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// A run stopped by `StopCurrentRunForRun` never hands an unretained durable
 /// join to a successor: the generated `RunStopped` arm terminalizes each one as
 /// `Cancelled` before the run's own terminal realization, with the same
@@ -7292,6 +7384,20 @@ enum ResumedRunAdmissionLap {
 /// The loop holds neither queue authority nor the driver lock while it asks:
 /// an admission may take its bounded attempts. A refused run is settled at
 /// once, as a stop settles a run, without running.
+///
+/// First, the run must be describable. A run whose first input is kept
+/// governed work with no way back to its controller client (a governed
+/// prompt whose client did not survive the store) can never resume: it is
+/// settled as refused, instead of stopping the loop. A run with an input the
+/// machine holds for its controller (a kept resume of retained work whose
+/// host cannot say yet) waits, marked, with its inputs bound: the loop parks
+/// and the controller re-ask brings it back, which releases the hold or ends
+/// the run as refused. A governed run on a document that requires a
+/// destination waits the same way until the registration owner binds its
+/// destination again (the machine's `resumed_run_destination_attached`); the
+/// owner's bind and the wake that follows it bring the loop back, and the
+/// run then resumes under that destination. Its admission is not asked
+/// before.
 async fn admit_resumed_run(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -7299,6 +7405,29 @@ async fn admit_resumed_run(
     authority_binding: &RuntimeLoopAuthorityBinding,
     run_id: RunId,
 ) -> ResumedRunAdmissionLap {
+    let (lacks_controller, held, waits_for_destination) = {
+        let d = driver.lock().await;
+        (
+            d.resumed_run_first_input_lacks_controller(&run_id),
+            d.run_inputs_controller_held(&run_id),
+            d.resumed_run_waits_for_destination(&run_id),
+        )
+    };
+    if lacks_controller {
+        return settle_refused_resumed_run(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            &run_id,
+            "its first input is kept governed work whose controller cannot be supplied again"
+                .to_string(),
+        )
+        .await;
+    }
+    if held || waits_for_destination {
+        return ResumedRunAdmissionLap::Exit(false);
+    }
     let Some(machine) = authority_binding.machine.upgrade() else {
         return ResumedRunAdmissionLap::Exit(true);
     };
@@ -7693,6 +7822,170 @@ async fn process_queue(
             Err(_) => return true,
         }
 
+        // A kept resume of retained work lost its controller client in the
+        // store. Ask its host for it again before anything else this lap
+        // plans: a row the machine does not hold yet at once, the held rows
+        // once per pause. A definite refusal, or a held row out of budget,
+        // ends the row as a refused resume (or settles the run marked
+        // resumable that it is bound to); a row the host cannot answer for
+        // yet is held, with its attempts, and later work goes first. A
+        // registration that drains for its unregister asks nothing: what it
+        // keeps, the next registration asks about again. It holds each such
+        // row the machine does not hold yet instead, without asking, so no
+        // batch selects one.
+        let (draining, ask_due) = {
+            let d = driver.lock().await;
+            if d.registration_draining() {
+                (true, d.has_unheld_kept_resume_without_client())
+            } else {
+                (
+                    false,
+                    d.kept_resume_controller_ask_due(meerkat_core::time_compat::Instant::now()),
+                )
+            }
+        };
+        if draining && ask_due {
+            let queue_authority_guard = match authority_binding
+                .lock_current_queue_driver_authority(driver, "kept resume controller hold")
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => return true,
+            };
+            let held = driver
+                .lock()
+                .await
+                .hold_kept_resumes_without_client(meerkat_core::time_compat::Instant::now());
+            drop(queue_authority_guard);
+            match held {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = format!(
+                        "a draining registration could not hold its kept retained-work resumes: \
+                         {error}"
+                    );
+                    tracing::error!(%error, "failed closed holding kept resumes while draining");
+                    return stop_runtime_loop_executor_from_dsl_effect(
+                        driver,
+                        completions,
+                        executor,
+                        reason,
+                        handoff,
+                        turn_finalization_guard,
+                    )
+                    .await;
+                }
+            }
+        } else if ask_due {
+            let mut refused_terminals = authority_binding.runless_terminal_announcement();
+            let queue_authority_guard = match authority_binding
+                .lock_current_queue_driver_authority(driver, "kept resume controller re-ask")
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => return true,
+            };
+            match authority_binding
+                .runtime_stop_cleanup_in_progress(driver)
+                .await
+            {
+                Ok(true) => {
+                    drop(queue_authority_guard);
+                    return false;
+                }
+                Ok(false) => {}
+                Err(_) => return true,
+            }
+            let asked = driver
+                .lock()
+                .await
+                .ask_kept_resume_controllers(meerkat_core::time_compat::Instant::now());
+            let asks = match asked {
+                Ok(asks) => asks,
+                Err(error) => {
+                    drop(queue_authority_guard);
+                    let reason = format!(
+                        "the controller re-ask of kept retained-work resumes failed: {error}"
+                    );
+                    tracing::error!(%error, "failed closed asking for kept resume controllers");
+                    return stop_runtime_loop_executor_from_dsl_effect(
+                        driver,
+                        completions,
+                        executor,
+                        reason,
+                        handoff,
+                        turn_finalization_guard,
+                    )
+                    .await;
+                }
+            };
+            // Ended under the queue authority, each in its own durable
+            // commit; published once that authority is released.
+            let ended = if asks.refused.is_empty() {
+                crate::meerkat_machine::SettledRefusedResumes::default()
+            } else {
+                driver
+                    .lock()
+                    .await
+                    .settle_refused_queued_resumes(
+                        &asks.refused,
+                        REFUSED_RETAINED_RESUME_REASON,
+                        || refused_terminals.owe(),
+                    )
+                    .await
+            };
+            drop(queue_authority_guard);
+            let published = publish_refused_retained_resumes(
+                driver,
+                completions,
+                &*executor,
+                &ended.settled,
+                REFUSED_RETAINED_RESUME_REASON,
+            )
+            .await;
+            refused_terminals.release();
+            if let Some(error) = ended.failure.or(published.err()) {
+                let reason = format!("refused retained-work resumes could not be settled: {error}");
+                tracing::error!(%error, "failed closed settling refused retained-work resumes");
+                if let Some(completions) = completions {
+                    let mut completions = completions.lock().await;
+                    fail_completion_waiters(&mut completions, &asks.refused, reason.clone());
+                }
+                return stop_runtime_loop_executor_from_dsl_effect(
+                    driver,
+                    completions,
+                    executor,
+                    reason,
+                    handoff,
+                    turn_finalization_guard,
+                )
+                .await;
+            }
+            if let Some(run_id) = asks.refused_run.clone() {
+                match settle_refused_resumed_run(
+                    driver,
+                    completions,
+                    executor,
+                    authority_binding,
+                    &run_id,
+                    "its host supplied no controller for the retained work an input of the run \
+                     resumes"
+                        .to_string(),
+                )
+                .await
+                {
+                    ResumedRunAdmissionLap::Again | ResumedRunAdmissionLap::Resume(_) => {
+                        continue;
+                    }
+                    ResumedRunAdmissionLap::Exit(wake) => return wake,
+                }
+            }
+            if asks.changed_plan(ended.settled.len()) {
+                continue;
+            }
+        }
+
         // A run the durable session left open resumes ahead of everything
         // else this lap would do. While it is marked no other run can start,
         // and nothing may be appended to the transcript its actor was seeded
@@ -7799,6 +8092,10 @@ async fn process_queue(
             .run_before_queue_authority_test_hook()
             .await;
 
+        // The runless terminals of the kept retained-work resumes this lap
+        // ends as refused. Taken before the queue authority below, so that it
+        // is told only once that authority is released.
+        let mut refused_resume_terminals = authority_binding.runless_terminal_announcement();
         let queue_authority_guard = match authority_binding
             .lock_current_queue_driver_authority(driver, "runtime loop queue processing")
             .await
@@ -7850,6 +8147,10 @@ async fn process_queue(
                 input_ids: Vec<InputId>,
                 reason: String,
             },
+            /// Kept retained-resume rows of the selected batch whose
+            /// destination their session has since superseded: nothing was
+            /// staged, and they end as refused resumes.
+            RetainedResumesRefused { input_ids: Vec<InputId> },
         }
 
         // Dequeue and prepare under the driver lock.
@@ -8008,6 +8309,58 @@ async fn process_queue(
                     };
                 }
             };
+
+            // A kept resume of retained work whose destination its session
+            // has since superseded can never be admitted again, whether or
+            // not its host supplied its controller client again (one pinned
+            // at recovery included): it ends as a refused resume and never
+            // stages. A kept resume still without its client is not selected
+            // here: this lap's controller re-ask either pinned it or held it,
+            // and a held input is never selected.
+            let mut superseded = Vec::new();
+            for input_id in batch.input_ids() {
+                match d.kept_retained_resume_destination_superseded(input_id) {
+                    Ok(true) => superseded.push(input_id.clone()),
+                    Ok(false) => {}
+                    Err(error) => {
+                        break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
+                            input_ids: batch.input_ids().to_vec(),
+                            reason: format!(
+                                "a kept retained-work resume's destination could not be read: \
+                                 {error}"
+                            ),
+                        };
+                    }
+                }
+            }
+            if !superseded.is_empty() {
+                break 'dequeue RuntimeLoopDequeueOutcome::RetainedResumesRefused {
+                    input_ids: superseded,
+                };
+            }
+            // No batch can select a kept resume of retained work still
+            // without its client, by construction: this lap's first step
+            // asked every such row the machine did not hold (a client pins
+            // it, a definite answer ends it, any other answer holds it), or,
+            // while the registration drains for its unregister, held each
+            // through the machine without asking; a released resumable run
+            // holds its requeued kept resumes again; and the machine's batch
+            // filter never selects a held input. One here means the shell
+            // and the machine disagree: fail closed instead of staging it
+            // without its client.
+            if let Some(unpinned) = batch
+                .input_ids()
+                .iter()
+                .find(|input_id| d.kept_retained_resume_without_client(input_id))
+            {
+                break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
+                    input_ids: batch.input_ids().to_vec(),
+                    reason: format!(
+                        "the selected batch names kept retained-work resume {unpinned} without its \
+                         controller client"
+                    ),
+                };
+            }
 
             let run_id = prebound_run_id.unwrap_or_else(RunId::new);
 
@@ -9709,6 +10062,49 @@ async fn process_queue(
                     turn_finalization_guard,
                 )
                 .await;
+            }
+            RuntimeLoopDequeueOutcome::RetainedResumesRefused { input_ids } => {
+                // Ended under the queue authority, each in its own durable
+                // commit and owed as it commits, before anything else is
+                // planned; published once that authority is released.
+                let ended = driver
+                    .lock()
+                    .await
+                    .settle_refused_queued_resumes(
+                        &input_ids,
+                        REFUSED_RETAINED_RESUME_REASON,
+                        || refused_resume_terminals.owe(),
+                    )
+                    .await;
+                drop(queue_authority_guard);
+                let published = publish_refused_retained_resumes(
+                    driver,
+                    completions,
+                    &*executor,
+                    &ended.settled,
+                    REFUSED_RETAINED_RESUME_REASON,
+                )
+                .await;
+                refused_resume_terminals.release();
+                if let Some(error) = ended.failure.or(published.err()) {
+                    let reason =
+                        format!("refused retained-work resumes could not be settled: {error}");
+                    tracing::error!(%error, "failed closed settling refused retained-work resumes");
+                    if let Some(completions) = completions.as_ref() {
+                        let mut completions = completions.lock().await;
+                        fail_completion_waiters(&mut completions, &input_ids, reason.clone());
+                    }
+                    return stop_runtime_loop_executor_from_dsl_effect(
+                        driver,
+                        completions,
+                        executor,
+                        reason,
+                        handoff,
+                        turn_finalization_guard,
+                    )
+                    .await;
+                }
+                continue;
             }
         }
     }

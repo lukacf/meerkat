@@ -11,13 +11,18 @@
 //!
 //! The identity session bridge ([`identity_session_bridge`]) is shared by
 //! both binaries and by `UnifiedRuntimeBuilder`: three compositions, one
-//! construction.
+//! construction. The member build wiring (`MemberBuildWiring`: the
+//! customizer tool registry, its spawn customizer and the member build
+//! preparer) is shared the same way by `UnifiedRuntimeBuilder`, the stdio
+//! gateway and `UnifiedRuntime::bootstrap`.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::identity_first::{
-    ContinuityStore, LocalContinuityStore, LocalLeaseProvider, contracts::LeaseProvider,
+    ContinuityStore, CustomizerToolRegistry, CustomizerToolsSpawnCustomizer, IdentityBuildPreparer,
+    IdentityFirstRuntimeContext, IdentityRuntime, LocalContinuityStore, LocalLeaseProvider,
+    contracts::LeaseProvider,
 };
 
 /// The durable-identity substrate a gateway builds from its state directory:
@@ -98,4 +103,123 @@ pub fn identity_session_bridge(
         bridge = bridge.with_controller_pin_source(source);
     }
     bridge
+}
+
+/// The member build wiring a composition installs on its mob and binds to
+/// its identity runtime: the customizer tool registry, the spawn customizer
+/// that attaches each registered identity's stable customizer tool
+/// dispatcher to every build of its member, and Meta's member build
+/// preparer, which publishes the member's tools right before Core builds
+/// it. `UnifiedRuntimeBuilder`, the stdio gateway and
+/// `UnifiedRuntime::bootstrap` all wire their mob here. A runtime the
+/// bootstrap composed once had no preparer, and a member it restored was
+/// built without its customizer tools.
+pub(crate) struct MemberBuildWiring {
+    /// The registry the spawn customizer attaches from, when the composition
+    /// decided at construction that it composes an agent customizer.
+    registry: Option<Arc<CustomizerToolRegistry>>,
+    spawn_customizer: Option<Arc<CustomizerToolsSpawnCustomizer>>,
+    preparer: Option<Arc<IdentityBuildPreparer>>,
+}
+
+impl MemberBuildWiring {
+    /// The wiring of a composition that knows when it builds its mob whether
+    /// it composes an agent customizer (`customizer_tools`) and whether an
+    /// identity runtime prepares the mob's member builds (`prepares`).
+    pub(crate) fn new(customizer_tools: bool, prepares: bool) -> Self {
+        let registry = customizer_tools.then(CustomizerToolRegistry::new);
+        Self {
+            spawn_customizer: registry
+                .clone()
+                .map(|registry| Arc::new(CustomizerToolsSpawnCustomizer::new(registry))),
+            preparer: prepares.then(|| IdentityBuildPreparer::new(registry.is_some())),
+            registry,
+        }
+    }
+
+    /// The wiring of a composition that learns only at its identity
+    /// bootstrap whether it composes an agent customizer
+    /// (`UnifiedRuntime::bootstrap`): its spawn customizer attaches nothing
+    /// and its preparer is inert until [`Self::bind_deferred`] finds one.
+    pub(crate) fn deferred() -> Self {
+        Self {
+            registry: None,
+            spawn_customizer: Some(Arc::new(CustomizerToolsSpawnCustomizer::deferred())),
+            preparer: Some(IdentityBuildPreparer::deferred()),
+        }
+    }
+
+    /// Install the spawn customizer, composed after those `spec` carries,
+    /// and the preparer on `spec`.
+    pub(crate) fn install(
+        &self,
+        spec: crate::mob_handle_runtime::MobBootstrapSpec,
+    ) -> crate::mob_handle_runtime::MobBootstrapSpec {
+        let spec = match self.spawn_customizer.clone() {
+            Some(customizer) => spec.with_spawn_member_customizer(customizer),
+            None => spec,
+        };
+        match self.preparer.clone() {
+            Some(preparer) => spec.with_member_build_preparer(preparer),
+            None => spec,
+        }
+    }
+
+    /// The registry the composition installs on its identity runtime, the
+    /// one its spawn customizer attaches from.
+    pub(crate) fn customizer_tool_registry(&self) -> Option<Arc<CustomizerToolRegistry>> {
+        self.registry.clone()
+    }
+
+    /// Bind the preparer to `runtime` once its customizer, customizer tool
+    /// registry and identity records are installed: the builds it held
+    /// before are pending on the runtime, and the roster pass publishes them.
+    pub(crate) async fn bind(
+        &self,
+        runtime: &Arc<IdentityRuntime>,
+        session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
+    ) {
+        if let Some(preparer) = self.preparer.as_ref() {
+            preparer.bind(runtime, session_service).await;
+        }
+    }
+
+    /// Bind a deferred wiring to the identity runtime of `context`, before
+    /// its identity bootstrap lifts the mob. Without an agent customizer
+    /// (none installed on the runtime and none in the context) nothing
+    /// changes: the wiring stays inert. With one, the runtime is composed as
+    /// `UnifiedRuntimeBuilder` composes it: the context's customizer becomes
+    /// the runtime's own when none is installed, the runtime gets a
+    /// customizer tool registry when it has none, the spawn customizer
+    /// attaches from the runtime's registry, and the preparer publishes
+    /// tools and is bound.
+    pub(crate) async fn bind_deferred(
+        &self,
+        context: &IdentityFirstRuntimeContext,
+        session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
+    ) {
+        let runtime = &context.runtime;
+        if runtime.installed_agent_customizer().await.is_none() {
+            let Some(customizer) = context.customizer.clone() else {
+                return;
+            };
+            runtime.set_agent_customizer(Some(customizer)).await;
+        }
+        let registry = match runtime.installed_customizer_tool_registry().await {
+            Some(registry) => registry,
+            None => {
+                let registry = CustomizerToolRegistry::new();
+                runtime
+                    .set_customizer_tool_registry(Some(Arc::clone(&registry)))
+                    .await;
+                registry
+            }
+        };
+        if let Some(customizer) = self.spawn_customizer.as_ref() {
+            customizer.arm(registry);
+        }
+        if let Some(preparer) = self.preparer.as_ref() {
+            preparer.bind_publishing(runtime, session_service).await;
+        }
+    }
 }

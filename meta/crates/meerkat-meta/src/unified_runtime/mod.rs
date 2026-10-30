@@ -442,6 +442,10 @@ pub struct UnifiedRuntimeCore {
     // Identity-first session bridge
     session_bridge: Option<Arc<dyn crate::identity_first::bridge::SessionBridge>>,
     identity_first_context: Option<Arc<crate::identity_first::IdentityFirstRuntimeContext>>,
+    /// The member build wiring [`UnifiedRuntime::bootstrap`] installed on a
+    /// mob whose spec brought no build preparer, bound at the identity
+    /// bootstrap (`gateway_wiring::MemberBuildWiring::bind_deferred`).
+    deferred_member_build_wiring: Option<crate::gateway_wiring::MemberBuildWiring>,
 
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
@@ -904,6 +908,7 @@ impl UnifiedRuntime {
                 remote_host_reconnect_task: tokio::sync::Mutex::new(None),
                 session_bridge: None,
                 identity_first_context: None,
+                deferred_member_build_wiring: None,
                 access_controller: None,
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
@@ -1085,6 +1090,20 @@ impl UnifiedRuntime {
             .bind_authority(topology_authority)
             .await
             .map_err(|error| UnifiedRuntimeBootstrapError::Topology(error.to_string()))?;
+        // Every composition wires its mob's member builds the same way
+        // (`gateway_wiring::MemberBuildWiring`). A spec that brings no build
+        // preparer gets the deferred wiring: inert until the identity
+        // bootstrap finds an agent customizer, and from then on it publishes
+        // each identity member's customizer tools right before Core builds
+        // the member, as the builder's and the gateways' wiring do.
+        let deferred_member_build_wiring = mob_spec
+            .member_build_preparer
+            .is_none()
+            .then(crate::gateway_wiring::MemberBuildWiring::deferred);
+        let mob_spec = match deferred_member_build_wiring.as_ref() {
+            Some(wiring) => wiring.install(mob_spec),
+            None => mob_spec,
+        };
         // `prepare`, not `bootstrap`: an identity-first resume of a persistent
         // log must stay Stopped until its continuity owners are registered,
         // because the lift is what triggers session revival.
@@ -1105,6 +1124,7 @@ impl UnifiedRuntime {
                 })
                 .await;
                 runtime.topology_controller = topology_controller;
+                runtime.deferred_member_build_wiring = deferred_member_build_wiring;
                 // Configuration-only; dispatches nothing into the mob.
                 runtime
                     .configure_implicit_delegate_retirement(&runtime_options)
@@ -1510,6 +1530,16 @@ impl UnifiedRuntime {
     /// register each roster identity's customizer-tool dispatcher and
     /// activate the pending mob, then restore the roster. On failure it
     /// drives the complete runtime shutdown order before returning.
+    ///
+    /// On a runtime from [`Self::bootstrap`] or the `bootstrap_with_*`
+    /// family, this is where the member builds are wired as the builder
+    /// wires them, when the identity runtime has an agent customizer or the
+    /// context carries one: the context's customizer becomes the runtime's
+    /// own when none is installed, and from the lift on `customize_build`
+    /// runs right before each build of an identity's member (the first wake
+    /// after a restart included), whose build carries the tools it
+    /// published. Without a customizer nothing changes. The held variants
+    /// do the same.
     pub async fn bootstrap_installed_identity_first_context(
         &mut self,
         roster: &[crate::identity_first::DurableAgentSpec],
@@ -1588,6 +1618,7 @@ impl UnifiedRuntime {
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
         };
+        self.bind_deferred_member_build_wiring(&context).await;
         // The ruled activation order is unchanged (see the unheld path): a
         // held setup runs it first in its tracked operation. The bootstrap
         // edges are reconciled after the roster pass, as on the unheld path.
@@ -1658,6 +1689,7 @@ impl UnifiedRuntime {
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
         };
+        self.bind_deferred_member_build_wiring(&context).await;
         // The ruled activation order: the lift precedes rostering, because a
         // Stopped mob seats nothing. Nothing is published before the lift:
         // Core asks the mob's member build preparer before each member it
@@ -1695,6 +1727,22 @@ impl UnifiedRuntime {
                 self.shutdown().await;
                 Err(error)
             }
+        }
+    }
+
+    /// Bind the deferred member build wiring [`Self::bootstrap`] installed,
+    /// if it installed one, to `context`'s identity runtime. The identity
+    /// bootstrap binds it before it lifts the mob, so with an agent
+    /// customizer every build from the lift on is prepared; without one the
+    /// wiring stays inert.
+    async fn bind_deferred_member_build_wiring(
+        &self,
+        context: &crate::identity_first::IdentityFirstRuntimeContext,
+    ) {
+        if let Some(wiring) = self.deferred_member_build_wiring.as_ref() {
+            wiring
+                .bind_deferred(context, self.mob_runtime.session_service().cloned())
+                .await;
         }
     }
 
@@ -6590,17 +6638,20 @@ mod tests {
             mob_path,
             state_root,
             Arc::new(meerkat_client::TestClient::default()),
+            None,
         )
         .await
     }
 
     /// [`boot_persistent_before_activation`] whose members are built on
-    /// `default_llm_client`.
+    /// `default_llm_client`, and whose identity context carries `customizer`,
+    /// as a host composing with [`UnifiedRuntime::bootstrap`] hands it one.
     async fn boot_persistent_before_activation_with_client(
         mob_id: &str,
         mob_path: &std::path::Path,
         state_root: &std::path::Path,
         default_llm_client: Arc<dyn meerkat_client::LlmClient>,
+        customizer: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
     ) -> PersistentBootBeforeActivation {
         use crate::identity_first::{
             AgentAddressability, AgentRuntimeServices, ContinuityStore, DurabilityPolicy,
@@ -6706,7 +6757,7 @@ mod tests {
             identity_runtime.clone(),
             Arc::new(MutableRosterProvider::new(roster.clone())),
             None,
-            None,
+            customizer,
             Some(runtime.mob_handle().definition().clone()),
         ));
         PersistentBootBeforeActivation {
@@ -6798,6 +6849,139 @@ mod tests {
             "the successor resumed the same session"
         );
         second.shutdown().await;
+        drop((first, first_identity));
+    }
+
+    /// The tool the bootstrap-composed host's customizer declares.
+    const BOOTSTRAP_CUSTOMIZER_TOOL: &str = "bootstrap_lookup";
+
+    /// The host's tools for one build: [`BOOTSTRAP_CUSTOMIZER_TOOL`].
+    struct BootstrapCustomizerTools;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for BootstrapCustomizerTools {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+            vec![Arc::new(meerkat_core::types::ToolDef {
+                audience: Default::default(),
+                name: BOOTSTRAP_CUSTOMIZER_TOOL.into(),
+                description: "Look up the host record.".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                provenance: None,
+            })]
+            .into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            Ok(meerkat_core::ToolResult {
+                host_metadata: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![],
+                is_error: false,
+                settlement_failures: Vec::new(),
+            }
+            .into())
+        }
+    }
+
+    /// A host customizer that declares [`BOOTSTRAP_CUSTOMIZER_TOOL`] and
+    /// counts its builds.
+    #[derive(Default)]
+    struct BootstrapToolCustomizer {
+        builds: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::identity_first::AgentCustomizer for BootstrapToolCustomizer {
+        async fn customize_build(
+            &self,
+            _context: &crate::identity_first::AgentBuildContext,
+            _spec: &crate::identity_first::DurableAgentSpec,
+            draft: &mut crate::identity_first::AgentBuildDraft,
+        ) -> Result<(), crate::identity_first::CustomizerError> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            draft.local_external_tools = crate::identity_first::LocalExternalToolOverlay::new(
+                Arc::new(BootstrapCustomizerTools),
+            );
+            Ok(())
+        }
+    }
+
+    /// A runtime composed with `UnifiedRuntime::bootstrap`, whose identity
+    /// context carries the host's customizer, prepares a restored member's
+    /// first wake as the builder's and the gateways' runtimes do. After a
+    /// clean restart the member is Dormant and no `customize_build` ran; the
+    /// first turn wakes it, the wake makes exactly one `customize_build`, and
+    /// the built member carries the customizer's tool. RED on the base: the
+    /// bootstrap installed no build preparer, so the wake built the member
+    /// without `customize_build` (zero preparations) and without the tool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bootstrap_composed_runtime_prepares_a_restored_members_first_wake() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mob_id = "bootstrap-customizer-restart";
+        let mob_path = temp.path().join("mob.sqlite3");
+        let state_root = temp.path().join("state");
+        let boot = boot_persistent_before_activation_with_client(
+            mob_id,
+            &mob_path,
+            &state_root,
+            Arc::new(meerkat_client::TestClient::default()),
+            Some(Arc::new(BootstrapToolCustomizer::default())),
+        )
+        .await;
+        let first_identity = boot.identity_runtime.clone();
+        let first = boot.activate().await;
+        let session_id = commit_restart_member_turn(&first_identity, "before restart").await;
+        first.shutdown().await;
+
+        let customizer = Arc::new(BootstrapToolCustomizer::default());
+        let boot = boot_persistent_before_activation_with_client(
+            mob_id,
+            &mob_path,
+            &state_root,
+            Arc::new(meerkat_client::TestClient::default()),
+            Some(customizer.clone()),
+        )
+        .await;
+        let identity_runtime = boot.identity_runtime.clone();
+        let runtime = boot.activate().await;
+        let handle = runtime.mob_handle();
+        let member = restart_member_entry(&handle).await.agent_identity;
+        assert!(
+            handle.member_unmaterialized(&member),
+            "the restart leaves the member Dormant"
+        );
+        assert_eq!(
+            customizer.builds.load(Ordering::SeqCst),
+            0,
+            "the restart builds no member, so no customize_build runs"
+        );
+
+        assert_eq!(
+            commit_restart_member_turn(&identity_runtime, "after restart").await,
+            session_id,
+            "the wake resumed the member's session"
+        );
+        assert_eq!(
+            customizer.builds.load(Ordering::SeqCst),
+            1,
+            "the first wake prepared the member's build once"
+        );
+        let tools = crate::mob_handle_runtime::resolved_tools_for_session(
+            runtime.mob_runtime().session_service(),
+            RESTART_MEMBER,
+            session_id,
+        )
+        .await
+        .expect("the woken member's resolved tools")
+        .tools;
+        assert!(
+            tools.iter().any(|tool| tool == BOOTSTRAP_CUSTOMIZER_TOOL),
+            "the woken member's build carries the customizer's tool: {tools:?}"
+        );
+        runtime.shutdown().await;
         drop((first, first_identity));
     }
 
@@ -7482,6 +7666,7 @@ mod tests {
             mob_path,
             state_root,
             Arc::new(PinnableTestClient::default()),
+            None,
         )
         .await;
         let identity_runtime = boot.identity_runtime.clone();

@@ -18758,27 +18758,18 @@ external_addressable = true
     // customizer that wraps it (and runs without one). Gating it on the host
     // flag alone dropped the memory recorder from members of hosts that
     // enable memory without their own customizer.
-    let composes_agent_customizer = has_agent_customizer || gateway_options.agent_memory.is_some();
-    let customizer_tool_registry =
-        composes_agent_customizer.then(crate::identity_first::CustomizerToolRegistry::new);
-    let mob_spec = match customizer_tool_registry.as_ref() {
-        Some(registry) => mob_spec.with_spawn_member_customizer(Arc::new(
-            crate::identity_first::CustomizerToolsSpawnCustomizer::new(registry.clone()),
-        )),
-        None => mob_spec,
-    };
-    // Core asks this preparer before every identity member it builds, on
+    //
+    // Core asks the preparer before every identity member it builds, on
     // both start paths and at every wake. The gateway composes its agent
     // customizer only after the mob build, so a member built before then
     // (a resume of a log left Running) is held until the roster pass
     // publishes its tools; every build's tools are recorded.
-    let member_build_preparer = has_roster_provider.then(|| {
-        crate::identity_first::IdentityBuildPreparer::new(customizer_tool_registry.is_some())
-    });
-    let mob_spec = match member_build_preparer.as_ref() {
-        Some(preparer) => mob_spec.with_member_build_preparer(preparer.clone()),
-        None => mob_spec,
-    };
+    let composes_agent_customizer = has_agent_customizer || gateway_options.agent_memory.is_some();
+    let member_build_wiring = crate::gateway_wiring::MemberBuildWiring::new(
+        composes_agent_customizer,
+        has_roster_provider,
+    );
+    let mob_spec = member_build_wiring.install(mob_spec);
     // Core records a member's binding under the realm that owns it, so the
     // binding's checks accept that form too: declared first, as the checks
     // below are built with it.
@@ -19203,7 +19194,7 @@ external_addressable = true
         // directory, so a restart keeps them; without one they stay in
         // memory.
         irt.set_held_completion_state_dir(persistent_state.clone());
-        irt.set_customizer_tool_registry(customizer_tool_registry.clone())
+        irt.set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
             .await;
         irt.set_identity_records(identity_record_store, runtime.mob_id());
         // A candidate launch's mob build held every stored member's run
@@ -19560,11 +19551,9 @@ external_addressable = true
         // The preparer meets the identity runtime once its customizer,
         // registry and records are installed: the builds it held before are
         // pending on the runtime, and the roster pass publishes them.
-        if let Some(preparer) = member_build_preparer.as_ref() {
-            preparer
-                .bind(&irt, runtime.mob_runtime().session_service().cloned())
-                .await;
-        }
+        member_build_wiring
+            .bind(&irt, runtime.mob_runtime().session_service().cloned())
+            .await;
         // Every seat step ends the host-pending mark of each identity seeded
         // before the mob build.
         irt.seed_host_pending(std::mem::take(&mut host_pending_seeded));

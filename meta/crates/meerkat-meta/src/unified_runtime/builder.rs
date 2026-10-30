@@ -2010,28 +2010,16 @@ impl UnifiedRuntimeBuilder {
         // Identity-first `customize_build` tools follow each member across
         // meerkat-side rebuilds through one stable dispatcher per identity
         // (#563). Composed into the single customizer slot, never replacing.
-        let customizer_tool_registry = (wants_identity_first && agent_customizer.is_some())
-            .then(crate::identity_first::CustomizerToolRegistry::new);
-        if let Some(registry) = customizer_tool_registry.as_ref() {
-            mob_spec.spawn_member_customizer =
-                Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                    mob_spec.spawn_member_customizer.take(),
-                    Arc::new(crate::identity_first::CustomizerToolsSpawnCustomizer::new(
-                        registry.clone(),
-                    )),
-                ));
-        }
-        // Core asks this preparer before every identity member it builds, on
+        // Core asks the preparer before every identity member it builds, on
         // both start paths and at every wake: it publishes the member's
         // customizer tools with the identity runtime's real context, holds a
         // build that comes before that runtime is composed until the roster
         // pass publishes, and records each build's tools.
-        let member_build_preparer = wants_identity_first.then(|| {
-            crate::identity_first::IdentityBuildPreparer::new(customizer_tool_registry.is_some())
-        });
-        if let Some(preparer) = member_build_preparer.as_ref() {
-            mob_spec = mob_spec.with_member_build_preparer(preparer.clone());
-        }
+        let member_build_wiring = crate::gateway_wiring::MemberBuildWiring::new(
+            wants_identity_first && agent_customizer.is_some(),
+            wants_identity_first,
+        );
+        mob_spec = member_build_wiring.install(mob_spec);
         if let Some(restore) = self.member_restore {
             mob_spec = mob_spec.with_member_restore(restore);
         }
@@ -2289,7 +2277,7 @@ impl UnifiedRuntimeBuilder {
                 .set_agent_customizer(agent_customizer.clone())
                 .await;
             identity_runtime
-                .set_customizer_tool_registry(customizer_tool_registry.clone())
+                .set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
                 .await;
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
             identity_runtime.seed_host_pending(host_pending_seeded);
@@ -2301,14 +2289,12 @@ impl UnifiedRuntimeBuilder {
             // The preparer meets the identity runtime once its customizer,
             // registry and records are installed: the builds it held before
             // are pending on the runtime, and the roster pass publishes them.
-            if let Some(preparer) = member_build_preparer.as_ref() {
-                preparer
-                    .bind(
-                        &identity_runtime,
-                        runtime.mob_runtime.session_service().cloned(),
-                    )
-                    .await;
-            }
+            member_build_wiring
+                .bind(
+                    &identity_runtime,
+                    runtime.mob_runtime.session_service().cloned(),
+                )
+                .await;
             identity_runtime
                 .set_agent_memory(agent_memory_injector.clone())
                 .await;

@@ -406,6 +406,24 @@ identity bootstrap instead of starting members without their surface. The
 init failure (`-32603`) carries the variant's text, which tells the operator
 to configure the SDK agent customizer and that a pass-through is enough.
 
+### Agent customizer on a legacy constructor
+
+A runtime from a legacy constructor (`UnifiedRuntime::bootstrap` and the
+`bootstrap_with_*` family) prepares its members' builds as the builder and the
+gateways do, once its identity bootstrap runs
+(`install_and_bootstrap_identity_first_context`, or
+`bootstrap_installed_identity_first_context` and its held variants). That
+bootstrap takes the agent customizer installed on the identity runtime
+(`IdentityRuntime::set_agent_customizer`), else the one the
+`IdentityFirstRuntimeContext` carries, which becomes the runtime's own. From
+the mob's lift on, `customize_build` runs right before each build of an
+identity's member, the first wake after a restart included, and the build
+carries the tools it published. Builds before the identity bootstrap are not
+prepared: after a clean shutdown the mob stays stopped until that bootstrap
+lifts it, but a mob a killed process left running restores the members that
+owe work as it starts, and each gets its tools at its next build. Without a
+customizer the identity bootstrap changes nothing.
+
 ### Member restore
 
 Every roster identity is a member of the mob from ready, and is materialized

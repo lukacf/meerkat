@@ -129,6 +129,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   now build their identity bridge with one helper,
   `gateway_wiring::identity_session_bridge`, so the three compositions
   cannot drift apart again.
+- A runtime composed with `UnifiedRuntime::bootstrap` (or the
+  `bootstrap_with_*` family) prepares its members' builds as the builder and
+  the gateways do. Before, its mob had no build preparer: a member a restart
+  left Dormant was woken and built without `customize_build`, so it lacked
+  its customizer tools. Its identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) now
+  takes the agent customizer installed on the identity runtime, else the one
+  the `IdentityFirstRuntimeContext` carries, which becomes the runtime's own.
+  From the mob's lift on, `customize_build` runs right before each build of
+  an identity's member, the first wake after a restart included, and the
+  build carries the tools it published. Without a customizer nothing
+  changes. Builds before the identity bootstrap stay unprepared, as before:
+  after a clean shutdown the mob stays stopped until that bootstrap lifts it,
+  but a mob a killed process left running restores the members that owe
+  work as it starts, and each gets its tools at its next build. The builder,
+  the stdio gateway and the bootstrap now wire their members' builds with
+  one shared construction.
 
 ### Known limitations
 

@@ -3552,6 +3552,14 @@ pub(crate) async fn realm_native_owner(
     )
     .await
     .unwrap();
+    // This open serves an ungoverned realm the ordinary way, and the
+    // continuation's reopen refuses an owner without stock governance.
+    // Require it here, for every caller, so a fixture that stops governing
+    // its realm fails instead of its rows passing on the ordinary path.
+    assert!(
+        bundle.stock_governance().is_some(),
+        "realm_native_owner needs a stock-governed realm, as the reopen does"
+    );
     bundle
 }
 

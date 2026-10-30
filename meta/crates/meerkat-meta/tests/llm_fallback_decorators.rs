@@ -224,6 +224,7 @@ fn proposal() -> AgentLlmFallbackSwitch {
             }),
             provider_tool_defaults: None,
             provider_native_tools: ProviderNativeToolPolicy::DisableAll,
+            operator_instruction_lowering: meerkat_core::InstructionLowering::LeadingPrefixOnly,
         },
         target_profile,
         skipped_targets: vec![AgentLlmFallbackSkippedTarget {

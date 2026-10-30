@@ -20213,6 +20213,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         temperature: Some(0.2),
                         ..Default::default()
@@ -20286,6 +20287,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                         web_search: Some(OpaqueProviderBody::from_value(
@@ -20400,6 +20402,7 @@ mod tests {
                     model: "turn-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(native_search()),
                     provider_tool_defaults: None,
                 },
@@ -20439,6 +20442,7 @@ mod tests {
             model: model.to_string(),
             credential_identity: None,
             provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+            operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
             provider_params: None,
             provider_tool_defaults: None,
         }
@@ -30067,6 +30071,7 @@ mod tests {
                 model: "backup".to_string(),
                 credential_identity: None,
                 provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                 provider_params: None,
                 provider_tool_defaults: None,
             },
@@ -30788,6 +30793,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -31072,6 +31078,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(
                         crate::lifecycle::run_primitive::ProviderParamsOverride {
                             temperature: Some(0.37),
@@ -31293,6 +31300,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -33659,6 +33667,7 @@ mod tests {
                     model: "claude-backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         provider_tag: Some(if self.mismatched_fallback_tag {
                             ProviderTag::OpenAi(OpenAiProviderTag::default())

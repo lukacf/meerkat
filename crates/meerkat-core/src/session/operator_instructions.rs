@@ -1385,6 +1385,18 @@ impl Session {
         Ok(messages)
     }
 
+    /// Whether the transcript holds an operator-instruction entry row this
+    /// session wrote itself. Every model request carries such a row as a
+    /// System row, whatever the lowering
+    /// ([`Self::messages_for_model_request`] leaves out only rows a fork
+    /// copied), so a wire that carries no System row besides its prompt
+    /// refuses that request.
+    pub fn holds_own_operator_instruction_entries(&self) -> bool {
+        self.carries_operator_instruction_facts()
+            && entry_rows(self.messages())
+                .any(|(_, _, identity)| identity.origin_session_id == self.id)
+    }
+
     /// A fork child that copied operator-instruction entry rows records the
     /// instruction state of a session without a target of its own (unowned,
     /// nothing pending), so the state key alone keeps answering whether its

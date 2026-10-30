@@ -236,6 +236,16 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         session_id: &SessionId,
     ) -> Result<bool, SessionError>;
 
+    /// Whether the live ordered transcript holds operator-instruction entry
+    /// rows the session wrote itself
+    /// ([`meerkat_core::Session::holds_own_operator_instruction_entries`]):
+    /// every request carries them as System rows, so a target whose wire
+    /// carries no System row besides its prompt cannot take them.
+    async fn live_session_has_own_operator_instruction_entries(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError>;
+
     /// Return the exact realm that owned the live session's initial build.
     ///
     /// Hot-swap credential resolution must begin from this per-session realm,
@@ -375,6 +385,16 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
                         if system.instruction_activation.is_some()
                 )
             }))
+    }
+
+    async fn live_session_has_own_operator_instruction_entries(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .export_live_session(session_id)
+            .await?
+            .holds_own_operator_instruction_entries())
     }
 
     async fn live_realm_id(
@@ -590,6 +610,16 @@ impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgen
                         if system.instruction_activation.is_some()
                 )
             }))
+    }
+
+    async fn live_session_has_own_operator_instruction_entries(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .export_session(session_id)
+            .await?
+            .holds_own_operator_instruction_entries())
     }
 
     async fn live_realm_id(
@@ -1268,6 +1298,25 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         if let Some(credential_identity) = selected_credential {
             request_policy.credential_identity = Some(credential_identity);
         }
+        // The policy states how the backend of the binding the swap names (or
+        // just selected) lowers operator-instruction entries. A wire that
+        // carries no System row besides the prompt lowers none, and it
+        // refuses every request that carries the session's own entry rows.
+        if request_policy.operator_instruction_lowering
+            == meerkat_core::InstructionLowering::Unavailable
+            && self
+                .service()?
+                .live_session_has_own_operator_instruction_entries(session_id)
+                .await
+                .map_err(|err| live_session_read_error_to_runtime_driver(session_id, err))?
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "model '{}' cannot represent the operator-instruction entries already applied in session {session_id}: its backend carries no System row besides the prompt",
+                    identity.model
+                ),
+            });
+        }
         self.service()?
             .apply_live_llm_identity_under_runtime_turn_boundary(
                 session_id,
@@ -1439,6 +1488,13 @@ mod tests {
         }
 
         async fn live_session_has_instruction_activations(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            unreachable!("realm selection does not inspect the transcript")
+        }
+
+        async fn live_session_has_own_operator_instruction_entries(
             &self,
             _session_id: &SessionId,
         ) -> Result<bool, SessionError> {
@@ -1638,6 +1694,12 @@ mod tests {
                 unreachable!("realm selection does not read the LLM identity")
             }
             async fn live_session_has_instruction_activations(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<bool, SessionError> {
+                unreachable!("realm selection does not inspect the transcript")
+            }
+            async fn live_session_has_own_operator_instruction_entries(
                 &self,
                 _session_id: &SessionId,
             ) -> Result<bool, SessionError> {

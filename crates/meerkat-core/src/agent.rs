@@ -5453,9 +5453,8 @@ where
     /// How the active model carries an operator-instruction entry, as the
     /// build resolved it from the model as its backend serves it. `None`
     /// derives it from [`Self::active_model_profile`]; a hot swap, whose
-    /// witness is the catalog row, narrows it to the leading prefix, or to
-    /// unavailable when the new binding's backend may carry only one
-    /// leading System row.
+    /// witness is the catalog row, installs the lowering its request policy
+    /// carries, which the host resolved for the new binding's backend.
     pub(crate) operator_instruction_lowering: Option<crate::InstructionLowering>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,

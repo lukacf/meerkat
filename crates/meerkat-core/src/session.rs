@@ -10112,6 +10112,20 @@ pub struct SessionLlmRequestPolicy {
     /// Narrow-only final policy for provider-native server tools.
     #[serde(default)]
     pub provider_native_tools: ProviderNativeToolPolicy,
+    /// How operator-instruction entries lower on the target as its backend
+    /// serves it, resolved with the config that resolves the target's
+    /// binding (`ModelRegistry::instruction_lowering_for_identity`). A live
+    /// hot swap installs it: the agent holds no config to judge the new
+    /// binding itself. Live policy only, never serialized; a deserialized
+    /// policy lowers no entry.
+    #[serde(skip, default = "lowering_of_a_deserialized_request_policy")]
+    pub operator_instruction_lowering: crate::InstructionLowering,
+}
+
+/// A request policy read back from bytes carries no resolved lowering: it
+/// lowers no operator-instruction entry.
+fn lowering_of_a_deserialized_request_policy() -> crate::InstructionLowering {
+    crate::InstructionLowering::Unavailable
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

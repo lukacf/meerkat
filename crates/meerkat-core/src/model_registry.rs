@@ -472,7 +472,7 @@ impl ModelRegistry {
         instruction_lowering_as_served(
             self.profile_for_identity(config, identity).as_ref(),
             crate::connection::binding_admits_additional_leading_system_messages(
-                Some(config),
+                config,
                 identity.provider,
                 identity.auth_binding.as_ref(),
             ),
@@ -516,7 +516,7 @@ impl ModelRegistry {
             &identity.model,
             identity.auth_binding.clone(),
             crate::connection::binding_admits_additional_leading_system_messages(
-                Some(config),
+                config,
                 identity.provider,
                 identity.auth_binding.as_ref(),
             ),

@@ -644,17 +644,16 @@ impl BackendProfile {
 
 /// Whether the wire of a `provider` model served through `auth_binding`
 /// carries more than one System message in the leading system prefix
-/// ([`BackendProfile::admits_additional_leading_system_messages`]), as far
-/// as `config` resolves that binding to its backend.
+/// ([`BackendProfile::admits_additional_leading_system_messages`]), as
+/// `config` resolves that binding to its backend.
 ///
 /// No binding, or the synthetic env-var default, is the provider's API-key
 /// backend: a build or a model change names every configured binding it
-/// resolves on the identity. A named binding that `config` does not
-/// resolve, or any named binding without a `config` to resolve it (a live
-/// model hot swap), has an unknown backend: it carries them only when every
-/// backend kind of `provider` does.
+/// resolves on the identity. A named binding that `config` does not resolve
+/// has an unknown backend: it carries them only when every backend kind of
+/// `provider` does.
 pub(crate) fn binding_admits_additional_leading_system_messages(
-    config: Option<&Config>,
+    config: &Config,
     provider: Provider,
     auth_binding: Option<&AuthBindingRef>,
 ) -> bool {
@@ -664,9 +663,9 @@ pub(crate) fn binding_admits_additional_leading_system_messages(
     if auth_binding.is_env_default() {
         return true;
     }
-    match config.map(|config| resolve_explicit_auth_binding_target(config, auth_binding)) {
-        Some(Ok(target)) => target.backend.admits_additional_leading_system_messages(),
-        Some(Err(_)) | None => match provider {
+    match resolve_explicit_auth_binding_target(config, auth_binding) {
+        Ok(target) => target.backend.admits_additional_leading_system_messages(),
+        Err(_) => match provider {
             Provider::OpenAI => OpenAiBackendKind::ALL
                 .iter()
                 .all(|kind| kind.admits_additional_leading_system_messages()),

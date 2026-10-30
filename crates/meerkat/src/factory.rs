@@ -6259,6 +6259,9 @@ impl AgentFactory {
             } else {
                 meerkat_core::ProviderNativeToolPolicy::Inherit
             },
+            // A live hot swap installs it: the agent cannot judge the binding.
+            operator_instruction_lowering: registry
+                .instruction_lowering_for_identity(config, identity),
         })
     }
 

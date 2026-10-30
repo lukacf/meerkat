@@ -1150,21 +1150,10 @@ where
             .provider_native_tools
             .narrow(request_policy.provider_native_tools);
         let next_auth_credential_identity = request_policy.credential_identity;
-        // The swap's witness is the model's catalog row, not the model as the
-        // new binding's backend serves it, and the agent holds no config to
-        // resolve that binding: operator instructions claim only the leading
-        // System prefix until a build judges it, and nothing when its backend
-        // may carry only one leading System row (the prompt takes it).
-        let next_operator_instruction_lowering =
-            if crate::connection::binding_admits_additional_leading_system_messages(
-                None,
-                identity.provider,
-                identity.auth_binding.as_ref(),
-            ) {
-                crate::InstructionLowering::LeadingPrefixOnly
-            } else {
-                crate::InstructionLowering::Unavailable
-            };
+        // The swap's witness is the model's catalog row, and the agent holds
+        // no config to judge the new binding: operator instructions lower as
+        // the host resolved for that binding's backend.
+        let next_operator_instruction_lowering = request_policy.operator_instruction_lowering;
 
         let _auth_rotation = self.stage_auth_lease_credential_identity(
             self.auth_credential_identity.as_ref(),

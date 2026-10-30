@@ -729,6 +729,7 @@ mod tests {
                 provider_params: None,
                 provider_tool_defaults: None,
                 provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: meerkat_core::InstructionLowering::LeadingPrefixOnly,
             },
             identity,
             client: Arc::new(ScriptedClient {

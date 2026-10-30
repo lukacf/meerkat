@@ -16942,6 +16942,8 @@ mod inline_video_admission_tests {
                     provider_params: None,
                     provider_tool_defaults: None,
                     provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering:
+                        meerkat_core::InstructionLowering::LeadingPrefixOnly,
                 },
             )
             .await
@@ -17008,6 +17010,8 @@ mod inline_video_admission_tests {
                         provider_params: None,
                         provider_tool_defaults: None,
                         provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                        operator_instruction_lowering:
+                            meerkat_core::InstructionLowering::LeadingPrefixOnly,
                     },
                 )
                 .await

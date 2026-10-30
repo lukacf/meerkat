@@ -368,11 +368,17 @@ AuditTerminalLatched ==
                /\ ended_at_ms' = ended_at_ms
                /\ end_reason' = end_reason]_all_vars
 
+\* An option is read through its tag before its value. TLC orders record
+\* fields by the order it first meets their names, and this module is parsed
+\* first: a `value` met before `tag` makes it compare None's string value with
+\* Some's number first, which it refuses.
+AuditIsSome(o) == o.tag = "some"
+
 AuditExpiryNotEarly ==
-    phase = "Expired" => (ended_at_ms # None /\ ended_at_ms.value >= expires_at_ms)
+    phase = "Expired" => (AuditIsSome(ended_at_ms) /\ ended_at_ms.value >= expires_at_ms)
 
 AuditRevokedBeforeDeadline ==
-    phase = "Revoked" => (ended_at_ms # None /\ ended_at_ms.value < expires_at_ms)
+    phase = "Revoked" => (AuditIsSome(ended_at_ms) /\ ended_at_ms.value < expires_at_ms)
 
 AuditVisibleOnlyWhileLive == visible => visible_at < AuditDeadline
 

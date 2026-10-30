@@ -31,6 +31,7 @@ const ERIN: &str = "erin@example.test";
 const FRANK: &str = "frank@example.test";
 const VIEWER: &str = "viewer@example.test";
 const NOBODY: &str = "nobody@example.test";
+const ROBOT: &str = "svc:robot";
 
 /// A console runtime with the agents `alpha` and `beta`, the console
 /// aggregator over it, and, when `firing` is given, the schedule service a
@@ -44,6 +45,9 @@ struct Fixture {
     aggregator: MetaConsoleAggregator,
     events: ConsoleEventStore,
     service: ScheduleService,
+    /// The identity runtime of an identity-first fixture
+    /// ([`identity_first_fixture`]).
+    identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
 }
 
 impl Fixture {
@@ -79,6 +83,7 @@ fn fixture_over(
     temp_dir: tempfile::TempDir,
     owner: Option<crate::unified_runtime::UnifiedRuntime>,
     runtime: MobRuntime,
+    identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
     firing: Option<ScheduleFiringHostBinding>,
 ) -> Fixture {
     let aggregator = MetaConsoleAggregator::in_memory();
@@ -87,7 +92,7 @@ fn fixture_over(
         "default",
         "",
         runtime.clone(),
-        None,
+        identity_runtime.clone(),
         events.clone(),
         Arc::new(AllowAllConsoleVisibilityPolicy),
     );
@@ -102,6 +107,7 @@ fn fixture_over(
         aggregator,
         events,
         service,
+        identity_runtime,
     }
 }
 
@@ -113,7 +119,7 @@ async fn fixture(
 ) -> Result<Fixture, Box<dyn std::error::Error + Send + Sync>> {
     let (temp_dir, runtime) = super::tests::build_empty_console_test_runtime(mob_id).await?;
     spawn_agents(&runtime, "worker").await?;
-    Ok(fixture_over(temp_dir, None, runtime, firing))
+    Ok(fixture_over(temp_dir, None, runtime, None, firing))
 }
 
 /// A console runtime whose agents take console sends: a persistent
@@ -148,16 +154,100 @@ comms = true
         temp_dir,
         Some(owner),
         runtime,
+        None,
+        Some(ScheduleFiringHostBinding::external_driver()),
+    ))
+}
+
+/// A console runtime whose agent `alpha` is a durable identity of an
+/// identity-first runtime, as an identity-first gateway serves it: the
+/// Console sends to it through the identity runtime (the production lane).
+async fn identity_first_fixture(
+    mob_id: &str,
+) -> Result<Fixture, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::identity_first::{
+        AgentAddressability, AgentIdentity, AgentRuntimeServices, DurabilityPolicy,
+        DurableAgentSpec, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
+        LocalLeaseProvider, MobSessionBridge,
+    };
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let owner = crate::unified_runtime::UnifiedRuntimeBuilder::default()
+        .definition(meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+[profiles.agent]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+[profiles.agent.tools]
+comms = true
+"#
+        ))?)
+        .persistent_state(temp_dir.path())
+        .comms(true)
+        .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .build()
+        .await
+        .map_err(|error| error.to_string())?;
+    let session_service = owner
+        .mob_runtime()
+        .session_service()
+        .cloned()
+        .ok_or("a persistent runtime has a session service")?;
+    let bridge = Arc::new(MobSessionBridge::with_session_service(
+        owner.mob_handle(),
+        session_service,
+    ));
+    let identity_runtime = Arc::new(
+        IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(
+                LocalContinuityStore::in_memory().map_err(|error| format!("{error:?}"))?,
+            ),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: format!("{mob_id}-instance"),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(bridge),
+            default_timeout: None,
+        })
+        .with_runtime_services(AgentRuntimeServices::new(owner.mob_handle())),
+    );
+    let spec = DurableAgentSpec {
+        identity: AgentIdentity::parse("alpha").map_err(|error| format!("{error:?}"))?,
+        profile: "agent".into(),
+        addressability: AgentAddressability::Addressable,
+        display_name: None,
+        labels: BTreeMap::new(),
+        context: None,
+        additional_instructions: Vec::new(),
+        initial_message: None,
+        runtime_mode_override: Some(meerkat_mob::MobRuntimeMode::AutonomousHost),
+        backend: None,
+        binding: None,
+        placement: None,
+    };
+    crate::identity_first::restore_flow(&identity_runtime, &[spec], None, None)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let runtime = owner.mob_runtime().clone();
+    Ok(fixture_over(
+        temp_dir,
+        Some(owner),
+        runtime,
+        Some(identity_runtime),
         Some(ScheduleFiringHostBinding::external_driver()),
     ))
 }
 
 /// Who calls: a verified Console human (its principal, with an OIDC subject
-/// of its own) or the open Console's shared account, on a writable or
-/// read-only console, under an access policy or none.
+/// of its own), a service identity, or the open Console's shared account,
+/// on a writable or read-only console, under an access policy or none.
 #[derive(Clone, Copy)]
 struct Caller<'a> {
     principal: Option<&'a str>,
+    /// A service identity: an authenticated principal with no human.
+    service: bool,
     read_only: bool,
     access: Option<&'a AccessController>,
 }
@@ -166,14 +256,23 @@ impl<'a> Caller<'a> {
     fn human(principal: &'a str) -> Self {
         Self {
             principal: Some(principal),
+            service: false,
             read_only: false,
             access: None,
+        }
+    }
+
+    fn service(principal: &'a str) -> Self {
+        Self {
+            service: true,
+            ..Self::human(principal)
         }
     }
 
     fn open_console() -> Self {
         Self {
             principal: None,
+            service: false,
             read_only: false,
             access: None,
         }
@@ -189,6 +288,11 @@ impl<'a> Caller<'a> {
     /// The send scope `/console/send` resolves for this caller.
     fn scope(self) -> ConsoleSendScope {
         match self.principal {
+            Some(principal) if self.service => ConsoleSendScope::Principal {
+                principal: principal.to_string(),
+                provider: "service_identity".to_string(),
+                issuer: ISSUER.to_string(),
+            },
             Some(principal) => ConsoleSendScope::Human {
                 issuer: ISSUER.to_string(),
                 subject: subject_of(principal),
@@ -219,6 +323,7 @@ async fn call(fixture: &Fixture, caller: Caller<'_>, method: &str, params: Value
     let governance = ConsoleSendGovernance {
         human: caller
             .principal
+            .filter(|_| !caller.service)
             .map(|principal| AuthenticatedConsoleHuman::for_test(ISSUER, &subject_of(principal))),
         scope: caller.scope(),
         ..ConsoleSendGovernance::default()
@@ -230,7 +335,7 @@ async fn call(fixture: &Fixture, caller: Caller<'_>, method: &str, params: Value
         None,
         None,
         Some(fixture.aggregator.clone()),
-        None,
+        fixture.identity_runtime.clone(),
         None,
         None,
         &AllowAllConsoleVisibilityPolicy,
@@ -493,6 +598,7 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
         send.sender,
         ConsoleScheduleSender::Human {
             principal: ERIN.to_string(),
+            provider: "generic_oidc".to_string(),
             issuer: ISSUER.to_string(),
             subject: subject_of(ERIN),
         }
@@ -895,6 +1001,18 @@ async fn the_handler_judges_the_schedule_and_its_agent() -> TestResult {
             "an unknown trigger",
         ),
         (
+            json!({
+                "identity": "alpha",
+                "content": "Hello.",
+                "trigger": {
+                    "type": "interval",
+                    "start_at_utc": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    "every_seconds": 30,
+                },
+            }),
+            "an interval under a minute",
+        ),
+        (
             json!({ "content": "Hello.", "trigger": hourly() }),
             "no agent",
         ),
@@ -1040,12 +1158,14 @@ async fn a_governed_agent_takes_no_console_schedule() -> TestResult {
 }
 
 /// The Console send path of `fixture` for console schedule fires, under
-/// `decisions` and `access`, checking sessions against `session_fences`.
+/// `decisions` and `access`, checking sessions against `session_fences`,
+/// with the governed ingress `ingress` installs.
 fn doors(
     fixture: &Fixture,
     decisions: crate::runtime::RuntimeDecisionState,
     access: Option<AccessController>,
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
+    ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
 ) -> ConsoleScheduleDoorSlot {
     let doors = ConsoleScheduleDoorSlot::default();
     doors.install(Arc::new(schedules::ConsoleSendDoor {
@@ -1053,24 +1173,106 @@ fn doors(
         runtime: fixture.runtime.clone(),
         aggregator: fixture.aggregator.clone(),
         access,
-        identity_runtime: None,
+        identity_runtime: fixture.identity_runtime.clone(),
         console_events: fixture.events.clone(),
-        governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot::default(),
+        governed_ingress: ingress,
         operator_resolver: None,
         session_fences,
     }));
     doors
 }
 
-fn open_decisions(read_only: bool) -> crate::runtime::RuntimeDecisionState {
-    crate::runtime::RuntimeDecisionState::local_console(
+/// The Console's decisions at a fire: sign-in required as
+/// `require_app_auth` says, writable or not, trusting [`ISSUER`] under the
+/// generic OIDC provider and admitting `allowlist` where sign-in is required.
+fn console_decisions(
+    require_app_auth: bool,
+    read_only: bool,
+    allowlist: &[&str],
+) -> crate::runtime::RuntimeDecisionState {
+    let mut decisions = crate::runtime::RuntimeDecisionState::local_console(
         crate::ConsolePolicy {
-            require_app_auth: false,
+            require_app_auth,
             read_only,
             ..crate::ConsolePolicy::default()
         },
         None,
+    );
+    decisions.trusted_oidc.discovery_json = trusting(ISSUER);
+    decisions.auth = crate::AuthPolicy {
+        default_provider: crate::AuthProvider::GenericOidc,
+        email_allowlist: strings(allowlist),
+    };
+    decisions
+}
+
+/// An OIDC discovery document naming `issuer`.
+fn trusting(issuer: &str) -> String {
+    json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/jwks") }).to_string()
+}
+
+fn open_decisions(read_only: bool) -> crate::runtime::RuntimeDecisionState {
+    console_decisions(false, read_only, &[])
+}
+
+/// No host governs Console sends.
+fn ungoverned() -> crate::console_governed_ingress::ConsoleGovernedIngressSlot {
+    crate::console_governed_ingress::ConsoleGovernedIngressSlot::default()
+}
+
+/// A host that governs every Console send and binds none of them.
+struct GoverningHost;
+
+impl crate::console_governed_ingress::ConsoleGovernedIngress for GoverningHost {
+    fn governs(&self, _identity: &crate::identity_first::AgentIdentity) -> bool {
+        true
+    }
+
+    fn binder_for(
+        &self,
+        _identity: &crate::identity_first::AgentIdentity,
+        _human: &AuthenticatedConsoleHuman,
+    ) -> Result<Arc<dyn crate::identity_first::GovernedInputBinder>, String> {
+        Err("this host binds no test send".to_string())
+    }
+}
+
+/// A governed ingress slot with [`GoverningHost`] installed.
+fn governed() -> crate::console_governed_ingress::ConsoleGovernedIngressSlot {
+    let slot = crate::console_governed_ingress::ConsoleGovernedIngressSlot::default();
+    slot.install(Arc::new(GoverningHost));
+    slot
+}
+
+/// The id of a console schedule `caller` creates for `alpha`.
+async fn create_as(
+    fixture: &Fixture,
+    caller: Caller<'_>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let created = call(
+        fixture,
+        caller,
+        "meta/schedule/create",
+        create_params("alpha"),
     )
+    .await;
+    if !created["error"].is_null() {
+        return Err(format!("{created:#?}").into());
+    }
+    Ok(created["result"]["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string())
+}
+
+/// A fire the Console refused, for a reason that says `why`.
+fn refused_because(fired: Result<(), meerkat::HostRunnableError>, why: &str) {
+    match fired {
+        Err(meerkat::HostRunnableError::Failed { detail }) => {
+            assert!(detail.contains(why), "{detail}");
+        }
+        other => panic!("the Console refuses the fire ({why}): {other:?}"),
+    }
 }
 
 /// One fire of the stored console schedule `schedule_id` under `key`, as
@@ -1176,6 +1378,7 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
         open_decisions(false),
         Some(controller.clone()),
         fences.clone(),
+        ungoverned(),
     );
 
     let key = format!("schedule:{schedule_id}:occurrence:1");
@@ -1205,25 +1408,20 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
     fire(&fixture, &writable, &schedule_id, &key).await?;
     assert_eq!(sends_under(&fixture, "alpha", &key).await.len(), 1);
 
-    // Judged at the fire: a sender who lost `agent.send` sends nothing.
-    let viewer_only = enforced(vec![grant(
-        "erin-views-alpha",
+    // Judged at the fire, under the live policy: once an edit of the
+    // Console's access policy leaves the sender only `agent.view`, the same
+    // send path sends nothing.
+    controller.upsert_rule(grant(
+        "erin-drives-alpha",
         ERIN,
         &[ACTION_AGENT_VIEW],
         "alpha",
-    )])?;
-    let revoked_grant = doors(
-        &fixture,
-        open_decisions(false),
-        Some(viewer_only),
-        fences.clone(),
-    );
+    ))?;
     let refused_key = format!("schedule:{schedule_id}:occurrence:2");
-    let detail = match fire(&fixture, &revoked_grant, &schedule_id, &refused_key).await {
-        Err(meerkat::HostRunnableError::Failed { detail }) => detail,
-        other => panic!("a sender without agent.send is refused: {other:?}"),
-    };
-    assert!(detail.contains("not allowed to send"), "{detail}");
+    refused_because(
+        fire(&fixture, &writable, &schedule_id, &refused_key).await,
+        "not allowed to send",
+    );
     assert!(
         sends_under(&fixture, "alpha", &refused_key)
             .await
@@ -1236,6 +1434,7 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
         open_decisions(true),
         Some(controller),
         fences.clone(),
+        ungoverned(),
     );
     let refused = fire(&fixture, &read_only, &schedule_id, &refused_key).await;
     assert!(
@@ -1282,6 +1481,7 @@ async fn a_fire_on_a_console_without_sign_in_sends_as_its_shared_account() -> Te
         open_decisions(false),
         None,
         crate::auth::session_fence::ConsoleSessionFences::detached(),
+        ungoverned(),
     );
     let key = format!("schedule:{schedule_id}:occurrence:1");
     fire(&fixture, &open, &schedule_id, &key).await?;
@@ -1301,6 +1501,256 @@ async fn a_fire_on_a_console_without_sign_in_sends_as_its_shared_account() -> Te
         delivered(&fixture, "alpha", &key).await,
         "the agent admitted the scheduled send: {:#?}",
         sends_under(&fixture, "alpha", &key).await
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// On an identity-first Console (the production lane) a fire is the
+/// identity-first console send by its sender: delivered to the durable
+/// identity once under its key, and refused, with nothing sent, once a host
+/// governs the agent's input, since a fire has no Console human present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_takes_the_identity_first_send_and_its_governance() -> TestResult {
+    let fixture = identity_first_fixture("console-schedules-identity-first").await?;
+    let identity_runtime = fixture
+        .identity_runtime
+        .clone()
+        .ok_or("an identity-first fixture")?;
+    let alpha = crate::identity_first::AgentIdentity::parse("alpha")
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(
+        identity_runtime.status(&alpha).await.is_ok(),
+        "the identity runtime holds the agent, so its sends take the identity-first lane"
+    );
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let fences = crate::auth::session_fence::ConsoleSessionFences::detached();
+
+    let open = doors(
+        &fixture,
+        open_decisions(false),
+        None,
+        fences.clone(),
+        ungoverned(),
+    );
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &open, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(sent[0].payload["origin"], json!("console:schedule"));
+    assert_eq!(sent[0].payload["origin_kind"], json!("scheduler"));
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the identity admitted the scheduled send: {:#?}",
+        sends_under(&fixture, "alpha", &key).await
+    );
+    fire(&fixture, &open, &schedule_id, &key).await?;
+    assert_eq!(
+        sends_under(&fixture, "alpha", &key).await.len(),
+        1,
+        "a redelivered occurrence is the same send"
+    );
+
+    let governing = doors(&fixture, open_decisions(false), None, fences, governed());
+    let governed_key = format!("schedule:{schedule_id}:occurrence:2");
+    let refused = fire(&fixture, &governing, &schedule_id, &governed_key).await;
+    assert!(
+        matches!(refused, Err(meerkat::HostRunnableError::Failed { .. })),
+        "a governed agent refuses a fire: {refused:?}"
+    );
+    assert!(
+        sends_under(&fixture, "alpha", &governed_key)
+            .await
+            .is_empty()
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// An agent whose input became governed after its schedule was defined
+/// takes none of its fires, on the member lane too: nothing is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_to_an_agent_governed_since_is_refused() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-governed-since").await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let governing = doors(
+        &fixture,
+        open_decisions(false),
+        None,
+        crate::auth::session_fence::ConsoleSessionFences::detached(),
+        governed(),
+    );
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    let refused = fire(&fixture, &governing, &schedule_id, &key).await;
+    assert!(
+        matches!(refused, Err(meerkat::HostRunnableError::Failed { .. })),
+        "a governed agent refuses a fire: {refused:?}"
+    );
+    assert!(sends_under(&fixture, "alpha", &key).await.is_empty());
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A fire is admitted as a live request by its sender is, under the
+/// Console's decisions at the fire: an anonymous schedule stops once the
+/// Console requires sign-in, and a sender removed from the allowlist, or
+/// signed in under an issuer the Console no longer trusts, sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fires_follow_the_consoles_admission_of_their_sender() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-admission").await?;
+    let anonymous = create_as(&fixture, Caller::open_console()).await?;
+    let erins = create_as(&fixture, Caller::human(ERIN)).await?;
+    let fences = crate::auth::session_fence::ConsoleSessionFences::detached();
+    let door = |decisions| doors(&fixture, decisions, None, fences.clone(), ungoverned());
+    let open = door(console_decisions(false, false, &[]));
+    let signed_in = door(console_decisions(true, false, &[ERIN]));
+    let erin_removed = door(console_decisions(true, false, &[]));
+    let mut moved = console_decisions(true, false, &[ERIN]);
+    moved.trusted_oidc.discovery_json = trusting("https://other.example.test");
+    let other_issuer = door(moved);
+
+    fire(&fixture, &open, &anonymous, "anonymous-1").await?;
+    fire(&fixture, &signed_in, &erins, "erin-1").await?;
+    for key in ["anonymous-1", "erin-1"] {
+        assert_eq!(sends_under(&fixture, "alpha", key).await.len(), 1, "{key}");
+    }
+
+    refused_because(
+        fire(&fixture, &signed_in, &anonymous, "anonymous-2").await,
+        "requires sign-in",
+    );
+    refused_because(
+        fire(&fixture, &erin_removed, &erins, "erin-2").await,
+        "no longer admits",
+    );
+    refused_because(
+        fire(&fixture, &other_issuer, &erins, "erin-3").await,
+        "no longer trusts",
+    );
+    for key in ["anonymous-2", "erin-2", "erin-3"] {
+        assert!(
+            sends_under(&fixture, "alpha", key).await.is_empty(),
+            "{key}"
+        );
+    }
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A service identity's schedule sends as it, in its own send scope, and
+/// stops with its revoked Console sessions, as a human's does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_identitys_schedule_stops_with_its_revoked_sessions() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-service").await?;
+    let schedule_id = create_as(&fixture, Caller::service(ROBOT)).await?;
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.sender,
+        ConsoleScheduleSender::Principal {
+            principal: ROBOT.to_string(),
+            provider: "service_identity".to_string(),
+            issuer: ISSUER.to_string(),
+        }
+    );
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let signed_in = doors(
+        &fixture,
+        console_decisions(true, false, &[ROBOT]),
+        None,
+        fences.clone(),
+        ungoverned(),
+    );
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(
+        sent[0].dedupe_key,
+        Caller::service(ROBOT).scope().dedupe_key(
+            &sent[0].runtime_key,
+            "alpha",
+            "console:schedule",
+            &key
+        ),
+        "the send is deduplicated in the service identity's own send scope"
+    );
+
+    fences.revoke_sessions(ROBOT, std::time::SystemTime::now() + Duration::from_secs(5))?;
+    let revoked_key = format!("schedule:{schedule_id}:occurrence:2");
+    refused_because(
+        fire(&fixture, &signed_in, &schedule_id, &revoked_key).await,
+        "revoked",
+    );
+    assert!(
+        sends_under(&fixture, "alpha", &revoked_key)
+            .await
+            .is_empty()
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// An update and a resume write at the revision they read: a write that
+/// raced a change made meanwhile is answered as a typed conflict and
+/// changes nothing, so it never reverts the other change.
+#[tokio::test]
+async fn a_write_at_a_stale_revision_is_a_conflict() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-conflict",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let id = ScheduleId::parse(&schedule_id)?;
+    let read = fixture.service.get(&id).await?;
+    let changed = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": "Changed meanwhile.",
+        }),
+    )
+    .await;
+    assert!(changed["error"].is_null(), "{changed:#?}");
+    let now = fixture.service.get(&id).await?;
+    assert_ne!(now.revision, read.revision);
+
+    let stale = schedules::update_at(
+        &fixture.service,
+        &id,
+        read.revision,
+        meerkat::UpdateScheduleRequest {
+            name: Some("Stale".to_string()),
+            ..meerkat::UpdateScheduleRequest::default()
+        },
+    )
+    .await;
+    let conflict = match stale {
+        Err(conflict) => conflict,
+        Ok(written) => panic!("a stale write is refused, not written: {written:?}"),
+    };
+    assert_eq!(conflict.code, -32009);
+    assert_eq!(
+        conflict.data,
+        Some(json!({
+            "kind": "schedule_revision_conflict",
+            "expected_revision": read.revision.0,
+            "actual_revision": now.revision.0,
+        }))
+    );
+    let after = fixture.service.get(&id).await?;
+    assert_eq!(
+        after.revision, now.revision,
+        "the stale write changed nothing"
+    );
+    assert_eq!(after.config.name.as_deref(), Some("Morning summary"));
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.content,
+        "Changed meanwhile."
     );
     fixture.stop().await;
     Ok(())

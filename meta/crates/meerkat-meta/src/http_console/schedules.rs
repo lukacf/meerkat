@@ -10,11 +10,13 @@
 //! create, update or resume records that caller as the Console caller the
 //! schedule fires as. The handler judges what the access table cannot: that
 //! the schedule is a console schedule of that agent, and that the agent
-//! takes the Console's sends.
+//! takes the Console's sends. An update and a resume write at the revision
+//! they read, so neither reverts a change made meanwhile.
 //!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
-//! stock send gate, governance and the identity-first or member send, as
-//! `/console/send` runs them, for the schedule's sender.
+//! Console's admission of the schedule's sender, then the very send
+//! `/console/send` runs once it has admitted its caller
+//! ([`send_as_admitted_console_caller`]).
 
 use super::*;
 use crate::console_schedules::{
@@ -22,7 +24,8 @@ use crate::console_schedules::{
 };
 use meerkat::{
     CreateScheduleRequest, OccurrenceFilter, Schedule, ScheduleDomainError, ScheduleId,
-    SchedulePhase, ScheduleService, ScheduleStoreError, TriggerSpec, UpdateScheduleRequest,
+    SchedulePhase, ScheduleRevision, ScheduleService, ScheduleStoreError, TriggerSpec,
+    UpdateScheduleRequest,
 };
 
 /// The read of the family.
@@ -40,6 +43,10 @@ pub(super) const SCHEDULE_WRITE_METHODS: &[&str] = &[
 /// The `origin` of a console schedule's send: the Console deduplicates it
 /// under the occurrence's delivery key in its sender's scope.
 const CONSOLE_SCHEDULE_SEND_ORIGIN: &str = "console:schedule";
+
+/// The shortest interval a console schedule repeats at: a Console caller's
+/// deferred message, not a pacing loop.
+const MIN_CONSOLE_INTERVAL_SECONDS: u64 = 60;
 
 /// Whether `method` writes a console schedule.
 #[cfg(test)]
@@ -183,7 +190,7 @@ async fn update(
     let content = optional_content(call.params)?;
     let trigger = trigger_param(call.params)?;
     let name = optional_string(call.params, "name")?;
-    let (_, current) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    let (read, current) = console_schedule(call, schedules, identity, &schedule_id).await?;
     let target = sendable_target(call, schedules, &current.identity).await?;
     let send = ConsoleScheduledSend::new(
         target,
@@ -191,19 +198,18 @@ async fn update(
         sender,
         now_epoch_seconds(),
     );
-    let schedule = schedules
-        .service
-        .update(
-            &schedule_id,
-            UpdateScheduleRequest {
-                name,
-                trigger,
-                target: Some(send.target().map_err(internal)?),
-                ..UpdateScheduleRequest::default()
-            },
-        )
-        .await
-        .map_err(schedule_error)?;
+    let schedule = update_at(
+        &schedules.service,
+        &schedule_id,
+        read.revision,
+        UpdateScheduleRequest {
+            name,
+            trigger,
+            target: Some(send.target().map_err(internal)?),
+            ..UpdateScheduleRequest::default()
+        },
+    )
+    .await?;
     Ok(schedule_item(&schedules.service, &schedule, &send).await)
 }
 
@@ -238,18 +244,18 @@ async fn resume(
     let target = sendable_target(call, schedules, &current.identity).await?;
     let send = ConsoleScheduledSend::new(target, current.content, sender, now_epoch_seconds());
     // The sender is recorded while the schedule is still paused, so no fire
-    // goes out as the earlier sender once it resumes.
-    schedules
-        .service
-        .update(
-            &schedule_id,
-            UpdateScheduleRequest {
-                target: Some(send.target().map_err(internal)?),
-                ..UpdateScheduleRequest::default()
-            },
-        )
-        .await
-        .map_err(schedule_error)?;
+    // goes out as the earlier sender once it resumes, and at the revision the
+    // resume read, so it never puts back a message changed meanwhile.
+    update_at(
+        &schedules.service,
+        &schedule_id,
+        paused.revision,
+        UpdateScheduleRequest {
+            target: Some(send.target().map_err(internal)?),
+            ..UpdateScheduleRequest::default()
+        },
+    )
+    .await?;
     let schedule = schedules
         .service
         .resume(&schedule_id)
@@ -282,8 +288,15 @@ async fn delete(
 /// access policy keys (a verified human, another authenticated principal, or
 /// the open Console's shared account).
 fn sender(call: &ScheduleCall<'_>) -> Result<ConsoleScheduleSender, JsonRpcError> {
-    ConsoleScheduleSender::of_caller(&call.governance.scope, call.principal)
-        .ok_or_else(|| internal("the console could not resolve its caller"))
+    ConsoleScheduleSender::of_caller(
+        &call.governance.scope,
+        call.principal,
+        call.governance
+            .human
+            .as_ref()
+            .map(crate::runtime::AuthenticatedConsoleHuman::provider),
+    )
+    .ok_or_else(|| internal("the console could not resolve its caller"))
 }
 
 /// The agent a console schedule call names, as this console knows it.
@@ -463,17 +476,66 @@ fn optional_content(params: &Value) -> Result<Option<String>, JsonRpcError> {
 }
 
 fn trigger_param(params: &Value) -> Result<Option<TriggerSpec>, JsonRpcError> {
-    match params.get("trigger") {
-        None | Some(Value::Null) => Ok(None),
+    let trigger: TriggerSpec = match params.get("trigger") {
+        None | Some(Value::Null) => return Ok(None),
         Some(trigger) => serde_json::from_value(trigger.clone())
-            .map(Some)
-            .map_err(|error| invalid(format!("invalid trigger: {error}"))),
+            .map_err(|error| invalid(format!("invalid trigger: {error}")))?,
+    };
+    if let TriggerSpec::Interval(interval) = &trigger
+        && interval.every_seconds < MIN_CONSOLE_INTERVAL_SECONDS
+    {
+        return Err(invalid(format!(
+            "a console schedule repeats at most once every {MIN_CONSOLE_INTERVAL_SECONDS} \
+             seconds"
+        )));
     }
+    Ok(Some(trigger))
 }
 
 fn schedule_id_param(params: &Value) -> Result<ScheduleId, JsonRpcError> {
     let raw = required_string(params, "schedule_id")?;
     ScheduleId::parse(&raw).map_err(|error| invalid(format!("invalid schedule_id: {error}")))
+}
+
+/// Write `request` to the schedule at `expected`, the revision the call
+/// read. A schedule that moved on meanwhile is answered as a conflict and
+/// left as it is: a write never reverts a change it did not see.
+pub(super) async fn update_at(
+    service: &ScheduleService,
+    schedule_id: &ScheduleId,
+    expected: ScheduleRevision,
+    request: UpdateScheduleRequest,
+) -> Result<Schedule, JsonRpcError> {
+    let request = UpdateScheduleRequest {
+        expected_revision: Some(expected),
+        ..request
+    };
+    match service.update(schedule_id, request).await {
+        Ok(schedule) => Ok(schedule),
+        // The service refuses a write at a stale revision as an invalid
+        // schedule; one that moved on is the conflict.
+        Err(error @ ScheduleDomainError::InvalidSchedule(_)) => {
+            match service.get(schedule_id).await {
+                Ok(now) if now.revision != expected => {
+                    Err(revision_conflict(expected, now.revision))
+                }
+                _ => Err(schedule_error(error)),
+            }
+        }
+        Err(error) => Err(schedule_error(error)),
+    }
+}
+
+fn revision_conflict(expected: ScheduleRevision, actual: ScheduleRevision) -> JsonRpcError {
+    JsonRpcError::new(
+        -32009,
+        "the console schedule changed meanwhile; read it again before changing it",
+    )
+    .with_data(json!({
+        "kind": "schedule_revision_conflict",
+        "expected_revision": expected.0,
+        "actual_revision": actual.0,
+    }))
 }
 
 fn invalid(message: impl Into<String>) -> JsonRpcError {
@@ -548,7 +610,9 @@ fn schedule_error(error: ScheduleDomainError) -> JsonRpcError {
 /// The Console's own send path for console schedule fires
 /// (`crate::console_schedules::ConsoleScheduleDoor`): what `/console/send`
 /// sends through, as the console router built last composed it, holding the
-/// runtime's own non-owning back-edges.
+/// runtime's own non-owning back-edges (the mob's observer, never a public
+/// owner). The runtime clears it when the console projection it holds is
+/// replaced and at shutdown.
 pub(crate) struct ConsoleSendDoor {
     pub(crate) decisions: RuntimeDecisionState,
     pub(crate) runtime: MobRuntime,
@@ -564,51 +628,27 @@ pub(crate) struct ConsoleSendDoor {
 
 #[async_trait::async_trait]
 impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
-    /// A fire is a `/console/send` by the schedule's sender, judged now: a
-    /// verified human's Console sessions were not revoked since it defined
-    /// the schedule, the stock send gate passes (a writable console, a valid
-    /// public alias, and `agent.send` for the sender's principal under the
-    /// live access policy), and the send goes through governance (a governed
-    /// target is refused: a fire has no human present) and then the
+    /// A fire is a `/console/send` by the schedule's sender, judged now. The
+    /// Console first admits the sender as it admits a live request by it
+    /// (`ConsoleScheduleSender::admitted_now`: the sign-in requirement, the
+    /// trusted issuer, the provider policy and allowlist, the session
+    /// fence), then sends exactly as `/console/send` does once its caller is
+    /// admitted ([`send_as_admitted_console_caller`]), as the sender: the
+    /// candidate-launch refusal, the stock send gate with `agent.send` for
+    /// the sender under the live access policy, governance (a fire has no
+    /// Console human present, so a governed target refuses it), and the
     /// identity-first send or the member lane, deduplicated under
-    /// `delivery_key` in the sender's send scope, as a live send by the
-    /// sender would be, so a redelivered occurrence never sends twice.
+    /// `delivery_key` in the sender's send scope, so a redelivered occurrence
+    /// never sends twice.
     async fn send(&self, send: &ConsoleScheduledSend, delivery_key: &str) -> Result<(), String> {
         let sender = &send.sender;
-        if let ConsoleScheduleSender::Human { principal, .. } = sender
-            && self
-                .session_fences
-                .not_before(principal)
-                .is_some_and(|not_before| not_before > send.defined_at)
-        {
-            return Err(format!(
-                "the Console sessions of {principal} were revoked after the schedule was defined"
-            ));
-        }
+        sender
+            .admitted_now(&self.decisions, &self.session_fences, send.defined_at)
+            .map_err(|refusal| format!("the Console refused the scheduled send: {refusal}"))?;
         let access_view = self
             .access
             .as_ref()
             .map(|controller| controller.view_for_subject(sender.principal()));
-        console_send_gate(
-            &self.decisions,
-            Some(&self.runtime),
-            Some(&self.aggregator),
-            self.access.as_ref(),
-            access_view.as_ref(),
-            &send.identity,
-        )
-        .await
-        .map_err(|refusal| {
-            format!(
-                "the Console refused the scheduled send: {}",
-                refusal.message()
-            )
-        })?;
-        if let Some(resolver) = self.operator_resolver.as_ref()
-            && let Some(subject) = access_view.as_ref().and_then(AccessView::subject)
-        {
-            resolver.note_interaction(send.identity.as_str(), subject);
-        }
         let governance = ConsoleSendGovernance {
             ingress: self.governed_ingress.current(),
             human: None,
@@ -625,27 +665,48 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             origin_kind: Some(crate::console_aggregator::ConsoleTurnOrigin::Scheduler),
             skill_refs: Vec::new(),
         };
-        let sent = match self.identity_runtime.as_ref() {
-            Some(identity_runtime) => {
-                Box::pin(console_send_governed_with_identity_first_fallback(
-                    &self.aggregator,
-                    Arc::clone(identity_runtime),
-                    Some(&self.console_events),
-                    request,
-                    &governance,
-                ))
-                .await
-            }
-            None => match governance.refuse_ungoverned_delivery(&send.identity) {
-                Ok(()) => Box::pin(self.aggregator.send_scoped(request, &governance.scope)).await,
-                Err(error) => Err(error),
-            },
+        let path = ConsoleSendPath {
+            decisions: &self.decisions,
+            runtime: Some(&self.runtime),
+            aggregator: Some(&self.aggregator),
+            access: self.access.as_ref(),
+            identity_runtime: self.identity_runtime.as_ref(),
+            console_events: Some(&self.console_events),
+            operator_resolver: self.operator_resolver.as_ref(),
         };
-        sent.map(|_accepted| ()).map_err(|error| {
-            format!(
-                "the Console refused the scheduled send: {}",
-                console_send_public_message(&error)
-            )
-        })
+        Box::pin(send_as_admitted_console_caller(
+            &path,
+            access_view.as_ref(),
+            &governance,
+            request,
+        ))
+        .await
+        .map(|_accepted| ())
+        .map_err(|error| scheduled_send_failure(&error))
+    }
+}
+
+/// The occurrence failure detail of a scheduled send the Console did not
+/// accept. A send whose admission it could not observe (a timeout, a failed
+/// probe) may still have been admitted: the detail says so, and a
+/// redelivery under the same key would not send it twice.
+fn scheduled_send_failure(error: &AdmittedConsoleSendError) -> String {
+    let unobserved = matches!(
+        error,
+        AdmittedConsoleSendError::Send(
+            ConsoleSendError::AdmissionTimeout { .. } | ConsoleSendError::ActorProbe(_)
+        )
+    );
+    if unobserved {
+        format!(
+            "the Console could not observe whether the scheduled send was admitted, so it may \
+             have been: {}",
+            error.public_message()
+        )
+    } else {
+        format!(
+            "the Console refused the scheduled send: {}",
+            error.public_message()
+        )
     }
 }

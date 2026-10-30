@@ -11,9 +11,11 @@
 //! Console caller it is sent as, as `/console/send` resolves that caller.
 //!
 //! A fire is a console send by that caller through the Console's own send
-//! path ([`ConsoleScheduleDoor`]), judged at the fire: the Console's send gate
-//! with its access decision for the caller, governance, and Core's host-human
-//! admission. A fire never takes another way to the agent.
+//! path ([`ConsoleScheduleDoor`]), judged at the fire: the Console's admission
+//! of the caller ([`ConsoleScheduleSender::admitted_now`]), then the send a
+//! live `/console/send` by it takes after its admission (the Console's send
+//! gate with its access decision for the caller, governance, and Core's
+//! host-human admission). A fire never takes another way to the agent.
 //!
 //! Only the Console writes console schedules. Agents' schedule tools refuse
 //! to create, change or read one ([`ConsoleScheduleToolGate`]), and SDK and
@@ -26,14 +28,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat::{
     HostRunnable, HostRunnableError, HostRunnableInvocation, HostRunnableName, HostRunnableOutcome,
-    HostRunnableParams, HostRunnableTargetBinding, RunnableProbe, Schedule, ScheduleId,
-    ScheduleRunnableHost, ScheduleService, TargetBinding,
+    HostRunnableParams, HostRunnableTargetBinding, RunnableProbe, Schedule, ScheduleDomainError,
+    ScheduleId, ScheduleRunnableHost, ScheduleService, ScheduleStoreError, TargetBinding,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
+use crate::auth::session_fence::ConsoleSessionFences;
 use crate::console_aggregator::ConsoleSendScope;
+use crate::runtime::RuntimeDecisionState;
 use crate::schedule_wiring::ScheduleFiringHostBinding;
 
 /// The host runnable every console schedule targets. Reserved: Meta
@@ -44,24 +48,28 @@ pub const CONSOLE_SCHEDULE_RUNNABLE: &str = "meta.console.scheduled_send";
 /// The schema of a console schedule's send ([`ConsoleScheduledSend`]).
 pub(crate) const CONSOLE_SCHEDULED_SEND_SCHEMA: &str = "meta.console.scheduled_send.v1";
 
-/// How long a fire waits for the Console's send path when no console router
-/// was built yet. A gateway builds its router right after it starts its
-/// schedule host, so only a fire due at boot waits.
+/// How long after its runtime is built a fire waits for the Console's send
+/// path when no console router was built yet: a gateway builds its router
+/// right after it starts its schedule host, so only a fire due at boot waits.
+/// Past this window a fire with no send path fails at once.
 const CONSOLE_DOOR_WAIT: Duration = Duration::from_secs(30);
 
 /// The Console caller a console schedule fires as: the caller who last
 /// defined it (created, changed or resumed it), as `/console/send` resolves
-/// that caller. A fire judges this caller's access and is deduplicated in
-/// this caller's send scope, as a live send by it would be.
+/// that caller. A fire is admitted as this caller
+/// ([`Self::admitted_now`]), judges this caller's access and is deduplicated
+/// in this caller's send scope, as a live send by it would be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ConsoleScheduleSender {
     /// An anonymous caller of an open Console: its shared local account.
     Anonymous,
     /// A verified Console human: the principal the access policy keys (the
-    /// token's email), with the verified OIDC issuer and `sub`.
+    /// token's email), the provider its token was classified as, and the
+    /// verified OIDC issuer and `sub`.
     Human {
         principal: String,
+        provider: String,
         issuer: String,
         subject: String,
     },
@@ -77,13 +85,19 @@ pub(crate) enum ConsoleScheduleSender {
 
 impl ConsoleScheduleSender {
     /// The sender a Console request's caller is: its send scope, with the
-    /// principal the access policy keys for it. `None` for a scope no Console
+    /// principal the access policy keys for it and, for a verified human, the
+    /// provider its token was classified as. `None` for a scope no Console
     /// route resolves (the public Rust send API's).
-    pub(crate) fn of_caller(scope: &ConsoleSendScope, principal: Option<&str>) -> Option<Self> {
+    pub(crate) fn of_caller(
+        scope: &ConsoleSendScope,
+        principal: Option<&str>,
+        human_provider: Option<&crate::AuthProvider>,
+    ) -> Option<Self> {
         match scope {
             ConsoleSendScope::Anonymous => Some(Self::Anonymous),
             ConsoleSendScope::Human { issuer, subject } => Some(Self::Human {
                 principal: principal?.to_string(),
+                provider: crate::http_console::console_provider_name(human_provider?).to_string(),
                 issuer: issuer.clone(),
                 subject: subject.clone(),
             }),
@@ -131,6 +145,71 @@ impl ConsoleScheduleSender {
                 issuer: issuer.clone(),
             },
         }
+    }
+
+    /// Whether the Console admits this sender now, as it admits a live
+    /// request by it: an anonymous sender only while the Console requires no
+    /// sign-in; a principal only under the issuer the Console trusts now,
+    /// past the Console's route access (its provider policy and allowlist,
+    /// where sign-in is required), and past its session fence, the schedule's
+    /// definition (`defined_at`, in whole seconds since the epoch) standing
+    /// in for the issue time of the token it was defined with, as a live
+    /// token's `iat` does. `Err` says why the sender is refused.
+    pub(crate) fn admitted_now(
+        &self,
+        decisions: &RuntimeDecisionState,
+        fences: &ConsoleSessionFences,
+        defined_at: u64,
+    ) -> Result<(), String> {
+        let (principal, provider, issuer) = match self {
+            Self::Anonymous if decisions.console.require_app_auth => {
+                return Err(
+                    "the Console requires sign-in now, and an anonymous caller defined this \
+                     schedule"
+                        .to_string(),
+                );
+            }
+            Self::Anonymous => return Ok(()),
+            Self::Human {
+                principal,
+                provider,
+                issuer,
+                ..
+            }
+            | Self::Principal {
+                principal,
+                provider,
+                issuer,
+            } => (principal, provider, issuer),
+        };
+        if fences.not_before(principal).is_some_and(|not_before| {
+            defined_at < crate::runtime::session_fence_first_accepted_iat(not_before)
+        }) {
+            return Err(format!(
+                "the Console sessions of {principal} were revoked after the schedule was defined"
+            ));
+        }
+        let trusted =
+            crate::auth::parse_oidc_discovery_json(&decisions.trusted_oidc.discovery_json)
+                .is_ok_and(|discovery| discovery.issuer == *issuer);
+        if !trusted {
+            return Err(format!(
+                "the Console no longer trusts the issuer {principal} signed in with"
+            ));
+        }
+        let provider =
+            crate::http_console::console_provider_of_name(provider).ok_or_else(|| {
+                format!("the Console does not know the provider {principal} signed in with")
+            })?;
+        crate::decisions::enforce_console_route_access(
+            &decisions.auth,
+            &decisions.console,
+            &crate::ConsoleAccessRequest {
+                provider,
+                email: principal.clone(),
+            },
+        )
+        .map_err(|error| format!("the Console no longer admits {principal}: {error}"))
     }
 }
 
@@ -268,28 +347,51 @@ pub(crate) trait ConsoleScheduleDoor: Send + Sync {
     async fn send(&self, send: &ConsoleScheduledSend, delivery_key: &str) -> Result<(), String>;
 }
 
-type DoorSender = watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>;
+/// The Console's send path for console schedule fires, and until when a
+/// fire waits for one.
+struct DoorState {
+    door: watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>,
+    /// The end of the boot window in which a fire waits for a console router
+    /// build ([`CONSOLE_DOOR_WAIT`] after the slot opened).
+    wait_until: std::time::Instant,
+}
 
 /// The Console's send path for console schedule fires: installed by each
-/// console router build (the router built last is the one fires take), and
-/// held weakly by the console schedules' runnable, so a fire never keeps a
-/// stopped runtime's Console alive.
+/// console router build (the router built last is the one fires take),
+/// cleared when the console projection it sends through is replaced and at
+/// shutdown, and held weakly by the console schedules' runnable, so a fire
+/// never keeps a stopped runtime's Console alive.
 #[derive(Clone)]
-pub struct ConsoleScheduleDoorSlot(Arc<DoorSender>);
+pub struct ConsoleScheduleDoorSlot(Arc<DoorState>);
 
 impl Default for ConsoleScheduleDoorSlot {
     fn default() -> Self {
-        Self(Arc::new(watch::channel(None).0))
+        Self::with_boot_wait(CONSOLE_DOOR_WAIT)
     }
 }
 
 impl ConsoleScheduleDoorSlot {
-    /// Install the Console's send path; it replaces the one before.
-    pub(crate) fn install(&self, door: Arc<dyn ConsoleScheduleDoor>) {
-        self.0.send_replace(Some(door));
+    /// A slot whose fires wait `wait` from now for a console router build.
+    fn with_boot_wait(wait: Duration) -> Self {
+        Self(Arc::new(DoorState {
+            door: watch::channel(None).0,
+            wait_until: std::time::Instant::now() + wait,
+        }))
     }
 
-    fn downgrade(&self) -> Weak<DoorSender> {
+    /// Install the Console's send path; it replaces the one before.
+    pub(crate) fn install(&self, door: Arc<dyn ConsoleScheduleDoor>) {
+        self.0.door.send_replace(Some(door));
+    }
+
+    /// Remove the Console's send path, and what it holds: the console
+    /// projection it sends through was replaced, or the runtime shuts down.
+    /// Fires fail until a console router build installs a send path again.
+    pub(crate) fn clear(&self) {
+        self.0.door.send_replace(None);
+    }
+
+    fn downgrade(&self) -> Weak<DoorState> {
         Arc::downgrade(&self.0)
     }
 }
@@ -297,34 +399,28 @@ impl ConsoleScheduleDoorSlot {
 /// The host runnable of every console schedule: a fire sends the
 /// schedule's message as its sender through the Console's send path.
 struct ConsoleScheduleRunnable {
-    doors: Weak<DoorSender>,
+    doors: Weak<DoorState>,
 }
 
 impl ConsoleScheduleRunnable {
-    /// The Console's send path, waiting for one (bounded) when no console
-    /// router was built yet.
+    /// The Console's send path, waiting for one within the slot's boot
+    /// window when no console router was built yet.
     async fn door(&self) -> Result<Arc<dyn ConsoleScheduleDoor>, String> {
-        let Some(doors) = self.doors.upgrade() else {
-            return Err("the console runtime has stopped".to_string());
+        const STOPPED: &str = "the console runtime has stopped";
+        const NO_DOOR: &str =
+            "this gateway has no Console send path now, so a console schedule cannot be sent";
+        let Some(state) = self.doors.upgrade() else {
+            return Err(STOPPED.to_string());
         };
-        let mut installed = doors.subscribe();
-        drop(doors);
-        let door = match tokio::time::timeout(
-            CONSOLE_DOOR_WAIT,
-            installed.wait_for(Option::is_some),
-        )
-        .await
-        {
-            Ok(Ok(door)) => door.clone(),
-            Ok(Err(_)) => return Err("the console runtime has stopped".to_string()),
-            Err(_) => {
-                return Err(
-                    "this gateway serves no Console, so a console schedule cannot be sent"
-                        .to_string(),
-                );
-            }
-        };
-        door.ok_or_else(|| "this gateway serves no Console".to_string())
+        let deadline = tokio::time::Instant::from_std(state.wait_until);
+        let mut installed = state.door.subscribe();
+        drop(state);
+        let waited = tokio::time::timeout_at(deadline, installed.wait_for(Option::is_some)).await;
+        match waited {
+            Ok(Ok(door)) => door.clone().ok_or_else(|| NO_DOOR.to_string()),
+            Ok(Err(_)) => Err(STOPPED.to_string()),
+            Err(_) => Err(NO_DOOR.to_string()),
+        }
     }
 }
 
@@ -416,7 +512,8 @@ const SCHEDULE_TOOLS_WITH_TARGET: &[&str] = &["meerkat_schedule_create", "meerka
 /// A create or update whose target names the console's runnable is refused,
 /// so no agent sends as a Console caller; every verb that names a console
 /// schedule by its id (get, update, pause, resume, delete, occurrences) is
-/// refused; and `meerkat_schedule_list` leaves console schedules out. Every
+/// refused, and so is one whose schedule cannot be read (it may be a console
+/// schedule); and `meerkat_schedule_list` leaves console schedules out. Every
 /// other call reaches the tools unchanged.
 pub(crate) struct ConsoleScheduleToolGate {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
@@ -444,14 +541,24 @@ impl ConsoleScheduleToolGate {
         if !SCHEDULE_TOOLS_BY_ID.contains(&name) {
             return None;
         }
+        // An id that does not parse is the tools' own refusal.
         let schedule_id = ScheduleId::parse(args.get("schedule_id")?.as_str()?).ok()?;
-        let schedule = self.service.get(&schedule_id).await.ok()?;
-        is_console_schedule(&schedule).then(|| {
-            meerkat_core::ToolError::execution_failed(format!(
-                "{name} refused: schedule {schedule_id} is a console schedule, a Console \
-                 caller's deferred message to an agent; only the Console reads or changes it"
-            ))
-        })
+        match self.service.get(&schedule_id).await {
+            Ok(schedule) => is_console_schedule(&schedule).then(|| {
+                meerkat_core::ToolError::execution_failed(format!(
+                    "{name} refused: schedule {schedule_id} is a console schedule, a Console \
+                     caller's deferred message to an agent; only the Console reads or changes it"
+                ))
+            }),
+            // No schedule has the id: the tools answer it as not found.
+            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => None,
+            // Whether it is a console schedule cannot be read now: refused,
+            // since letting it through could change one.
+            Err(error) => Some(meerkat_core::ToolError::execution_failed(format!(
+                "{name} refused: schedule {schedule_id} cannot be read now ({error}), so it may \
+                 be a console schedule; try again"
+            ))),
+        }
     }
 
     /// `meerkat_schedule_list` without the console schedules, in the
@@ -544,45 +651,69 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
 mod tests {
     use super::*;
     use meerkat::{
-        CreateScheduleRequest, IntervalTriggerSpec, MemoryScheduleStore, ScheduleToolDispatcher,
-        TriggerSpec,
+        CreateScheduleRequest, DisabledScheduleStore, IntervalTriggerSpec, MemoryScheduleStore,
+        ScheduleToolDispatcher, TriggerSpec,
     };
     use meerkat_core::AgentToolDispatcher;
     use meerkat_core::types::ToolCallView;
     use serde_json::json;
     use serde_json::value::RawValue;
 
+    const ISSUER: &str = "https://issuer.example.test";
+
     fn sender() -> ConsoleScheduleSender {
         ConsoleScheduleSender::Human {
             principal: "erin@example.test".to_string(),
-            issuer: "https://issuer.example.test".to_string(),
+            provider: "generic_oidc".to_string(),
+            issuer: ISSUER.to_string(),
             subject: "erin-sub".to_string(),
         }
     }
 
+    fn robot() -> ConsoleScheduleSender {
+        ConsoleScheduleSender::Principal {
+            principal: "svc:robot".to_string(),
+            provider: "service_identity".to_string(),
+            issuer: ISSUER.to_string(),
+        }
+    }
+
     /// A sender is the Console caller as `/console/send` resolves it: its
-    /// send scope and the principal the access policy keys, round-tripped.
+    /// send scope, the principal the access policy keys and, for a verified
+    /// human, its token's provider, round-tripped.
     #[test]
     fn a_sender_keeps_its_callers_send_scope_and_principal() {
         let human = ConsoleSendScope::Human {
-            issuer: "https://issuer.example.test".to_string(),
+            issuer: ISSUER.to_string(),
             subject: "erin-sub".to_string(),
         };
-        let erin = ConsoleScheduleSender::of_caller(&human, Some("erin@example.test")).unwrap();
+        let erin = ConsoleScheduleSender::of_caller(
+            &human,
+            Some("erin@example.test"),
+            Some(&crate::AuthProvider::GenericOidc),
+        )
+        .unwrap();
         assert_eq!(erin, sender());
         assert_eq!(erin.scope(), human);
         assert_eq!(erin.principal(), Some("erin@example.test"));
+        assert_eq!(
+            ConsoleScheduleSender::of_caller(&human, Some("erin@example.test"), None),
+            None,
+            "a human is recorded with its token's provider"
+        );
 
         let service = ConsoleSendScope::Principal {
             principal: "svc:robot".to_string(),
             provider: "service_identity".to_string(),
-            issuer: "https://issuer.example.test".to_string(),
+            issuer: ISSUER.to_string(),
         };
-        let robot = ConsoleScheduleSender::of_caller(&service, Some("svc:robot")).unwrap();
-        assert_eq!(robot.scope(), service);
-        assert_eq!(robot.principal(), Some("svc:robot"));
+        let recorded = ConsoleScheduleSender::of_caller(&service, Some("svc:robot"), None).unwrap();
+        assert_eq!(recorded, robot());
+        assert_eq!(recorded.scope(), service);
+        assert_eq!(recorded.principal(), Some("svc:robot"));
 
-        let open = ConsoleScheduleSender::of_caller(&ConsoleSendScope::Anonymous, None).unwrap();
+        let open =
+            ConsoleScheduleSender::of_caller(&ConsoleSendScope::Anonymous, None, None).unwrap();
         assert_eq!(open, ConsoleScheduleSender::Anonymous);
         assert_eq!(open.scope(), ConsoleSendScope::Anonymous);
         assert_eq!(open.principal(), None);
@@ -592,9 +723,102 @@ mod tests {
         );
 
         assert_eq!(
-            ConsoleScheduleSender::of_caller(&ConsoleSendScope::Unscoped, None),
+            ConsoleScheduleSender::of_caller(&ConsoleSendScope::Unscoped, None, None),
             None
         );
+    }
+
+    /// Console decisions that trust `issuer`, require sign-in as
+    /// `require_app_auth` says, and admit `allowlist` under the generic OIDC
+    /// provider.
+    fn decisions(require_app_auth: bool, issuer: &str, allowlist: &[&str]) -> RuntimeDecisionState {
+        let mut decisions = RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth,
+                ..crate::ConsolePolicy::default()
+            },
+            None,
+        );
+        decisions.trusted_oidc.discovery_json =
+            json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/jwks") }).to_string();
+        decisions.auth = crate::AuthPolicy {
+            default_provider: crate::AuthProvider::GenericOidc,
+            email_allowlist: allowlist.iter().map(|entry| (*entry).to_string()).collect(),
+        };
+        decisions
+    }
+
+    /// A fire's sender is admitted as a live request by it is: an anonymous
+    /// sender only while no sign-in is required; a principal under the
+    /// issuer the Console trusts, through its provider policy and allowlist
+    /// where sign-in is required, and past its session fence, whatever kind
+    /// of principal it is.
+    #[test]
+    fn the_console_admits_a_sender_as_it_admits_a_live_caller() {
+        let fences = ConsoleSessionFences::detached();
+        let defined_at = 1_700_000_000;
+        let open = decisions(false, ISSUER, &[]);
+        let signed_in = decisions(true, ISSUER, &["erin@example.test", "svc:robot"]);
+
+        let anonymous = ConsoleScheduleSender::Anonymous;
+        assert_eq!(anonymous.admitted_now(&open, &fences, defined_at), Ok(()));
+        let refused = anonymous
+            .admitted_now(&signed_in, &fences, defined_at)
+            .unwrap_err();
+        assert!(refused.contains("requires sign-in"), "{refused}");
+
+        for principal in [sender(), robot()] {
+            assert_eq!(principal.admitted_now(&open, &fences, defined_at), Ok(()));
+            assert_eq!(
+                principal.admitted_now(&signed_in, &fences, defined_at),
+                Ok(())
+            );
+            let removed = principal
+                .admitted_now(&decisions(true, ISSUER, &[]), &fences, defined_at)
+                .unwrap_err();
+            assert!(removed.contains("no longer admits"), "{removed}");
+            let elsewhere = principal
+                .admitted_now(
+                    &decisions(
+                        true,
+                        "https://other.example.test",
+                        &["erin@example.test", "svc:robot"],
+                    ),
+                    &fences,
+                    defined_at,
+                )
+                .unwrap_err();
+            assert!(elsewhere.contains("no longer trusts"), "{elsewhere}");
+        }
+        let mut google = signed_in.clone();
+        google.auth.default_provider = crate::AuthProvider::GoogleOAuth;
+        let other_provider = sender()
+            .admitted_now(&google, &fences, defined_at)
+            .unwrap_err();
+        assert!(
+            other_provider.contains("no longer admits"),
+            "{other_provider}"
+        );
+
+        // A revocation after the definition ends the schedule's sends, for a
+        // service identity as for a human; one before it does not.
+        let revoked_at =
+            |seconds: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        for principal in [sender(), robot()] {
+            let state_dir = tempfile::tempdir().unwrap();
+            let fences = ConsoleSessionFences::open_in_state_dir(state_dir.path()).unwrap();
+            fences
+                .revoke_sessions(principal.principal().unwrap(), revoked_at(defined_at - 600))
+                .unwrap();
+            assert_eq!(principal.admitted_now(&open, &fences, defined_at), Ok(()));
+            fences
+                .revoke_sessions(principal.principal().unwrap(), revoked_at(defined_at))
+                .unwrap();
+            let revoked = principal
+                .admitted_now(&open, &fences, defined_at)
+                .unwrap_err();
+            assert!(revoked.contains("revoked"), "{revoked}");
+        }
     }
 
     fn send() -> ConsoleScheduledSend {
@@ -754,6 +978,96 @@ mod tests {
             other => panic!("a stopped runtime refuses the fire: {other:?}"),
         };
         assert!(detail.contains("stopped"), "{detail}");
+    }
+
+    /// Past the slot's boot window a fire with no Console send path fails at
+    /// once, and a cleared send path (its projection replaced, or its
+    /// runtime shutting down) is released and sends nothing.
+    #[tokio::test]
+    async fn a_fire_without_a_console_send_path_fails_at_once() {
+        let doors = ConsoleScheduleDoorSlot::with_boot_wait(Duration::ZERO);
+        let host = with_console_schedule_runnable(None, &doors);
+        let fire = || {
+            host.run_occurrence(invocation(
+                CONSOLE_SCHEDULE_RUNNABLE,
+                Some(serde_json::to_value(send()).unwrap()),
+            ))
+        };
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            fire().await,
+            Err(HostRunnableError::Failed { .. })
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a fire past the boot window does not wait for a Console"
+        );
+
+        let door = Arc::new(RecordingDoor(std::sync::Mutex::new(Vec::new())));
+        doors.install(door.clone());
+        fire().await.unwrap();
+        doors.clear();
+        assert!(matches!(
+            fire().await,
+            Err(HostRunnableError::Failed { .. })
+        ));
+        assert_eq!(
+            door.0.lock().unwrap().len(),
+            1,
+            "a cleared send path sends nothing"
+        );
+        assert_eq!(
+            Arc::strong_count(&door),
+            1,
+            "a cleared send path is released"
+        );
+    }
+
+    /// The gate refuses every verb on a schedule it cannot read, since it may
+    /// be a console schedule: nothing reaches the tools. An id no schedule
+    /// has stays the tools' own answer.
+    #[tokio::test]
+    async fn agent_schedule_tools_refuse_a_schedule_they_cannot_read() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let console = service
+            .create(create_request(send().target().unwrap()))
+            .await
+            .unwrap();
+        let unreadable = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            ScheduleService::new(Arc::new(DisabledScheduleStore)),
+        );
+        let console_id = raw(&json!({ "schedule_id": console.schedule_id.to_string() }));
+        for verb in SCHEDULE_TOOLS_BY_ID {
+            let refused = unreadable
+                .dispatch(call(verb, &console_id))
+                .await
+                .expect_err("a schedule the gate cannot read is refused");
+            assert!(
+                refused.to_string().contains("cannot be read"),
+                "{verb}: {refused}"
+            );
+        }
+        assert_eq!(
+            service.get(&console.schedule_id).await.unwrap().phase,
+            meerkat::SchedulePhase::Active,
+            "the console schedule is untouched"
+        );
+
+        let readable = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+        let missing = raw(&json!({ "schedule_id": ScheduleId::new().to_string() }));
+        let answer = match readable
+            .dispatch(call("meerkat_schedule_pause", &missing))
+            .await
+        {
+            Ok(outcome) => outcome.result.text_content().to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(!answer.contains("cannot be read"), "{answer}");
+        assert!(!answer.contains("console schedule"), "{answer}");
     }
 
     fn call<'a>(name: &'a str, args: &'a RawValue) -> ToolCallView<'a> {

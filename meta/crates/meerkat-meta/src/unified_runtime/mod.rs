@@ -2203,6 +2203,9 @@ impl UnifiedRuntime {
         if let Some(projection) = self.console_projection.take() {
             projection.unregister_runtime("default");
         }
+        // The console schedules' send path holds the replaced projection;
+        // the next console router build installs one over the new store.
+        self.console_schedule_doors.clear();
     }
 
     /// Query structural mob events from the meerkat ledger.

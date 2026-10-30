@@ -226,6 +226,14 @@ owner then executes the held request at most once.
   checked when the decision commits, the requester never decides its own
   request, and the first valid decision wins. A decision can name a reviewer
   instead, whose verdict allows, denies or escalates to the human.
+- **Decided after it was shown.** A human decision event carries the time its
+  trusted ingress observed it (`observed_at_ms`, such as a chat provider's
+  message time), and its evidence records that time. An event observed before
+  the approver was first shown the decision (the earliest presentation,
+  recorded or carried by the event) is refused as
+  `decided_before_presentation`; one observed in the same millisecond is
+  accepted. The decision's machine makes this check; with no presentation at
+  all, the decision stays `presentation_incomplete`.
 - **Execution once.** The owner executes an approved decision under an
   execution permit, issued only before the deadline, and settles it: executed,
   released (the decision stays approved) or permanently refused. A permit

@@ -15293,6 +15293,7 @@ async fn run_agent(
                 effective_workgraph,
             ),
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
+            mob_operator_authority_only: false,
             override_image_generation: if help_run {
                 meerkat_core::ToolCategoryOverride::Disable
             } else {
@@ -15349,6 +15350,7 @@ async fn run_agent(
             mob_tools: mob_tools_factory,
             auth_binding,
             mob_member_binding: None,
+            mob_incarnation: None,
             grant_gated_tools: None,
         };
         build.apply_generated_create_only_mob_operator_access(

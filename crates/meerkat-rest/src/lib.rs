@@ -6026,6 +6026,7 @@ async fn create_session_inner(
         override_workgraph: ToolCategoryOverride::from_override(req.enable_workgraph),
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
         override_mob: ToolCategoryOverride::Inherit,
+        mob_operator_authority_only: false,
         override_image_generation: ToolCategoryOverride::Inherit,
         override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
         schedule_tools: None,
@@ -6041,6 +6042,7 @@ async fn create_session_inner(
         // REST is not a mob runtime. On resume the factory preserves the
         // persisted mob_member_binding from the resumed session metadata.
         mob_member_binding: None,
+        mob_incarnation: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -7326,6 +7328,7 @@ async fn continue_session_inner(
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
+            mob_operator_authority_only: false,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
             schedule_tools: None,
@@ -7339,6 +7342,7 @@ async fn continue_session_inner(
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: auth_binding_override.clone(),
             mob_member_binding: None,
+            mob_incarnation: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

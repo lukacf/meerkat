@@ -1784,7 +1784,18 @@ struct CreateSessionRecord {
     tool_dispatch_admission: bool,
     /// The build's shell environment.
     shell_env: Option<std::collections::HashMap<String, String>>,
+    /// The witness of the mob runtime performing the build, as the build
+    /// carries it to a host's member build hook.
+    mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
+    /// The build's mob operator authority, and whether the build binds it
+    /// authority only, once the member build hook has run.
+    mob_tool_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    mob_operator_authority_only: bool,
 }
+
+/// A host's member build hook: it edits a create request before the session
+/// service builds anything, as a host's session hook does.
+type MemberBuildHook = Arc<dyn Fn(&mut CreateSessionRequest) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeBoundaryAcknowledgement {
@@ -2122,6 +2133,8 @@ struct MockSessionService {
     /// transient store error, with how many are left.
     resume_authority_observe_failures_for: std::sync::Mutex<HashMap<SessionId, u64>>,
     create_requests: RwLock<Vec<CreateSessionRecord>>,
+    /// The host's member build hook, run on each create request first.
+    member_build_hook: std::sync::Mutex<Option<MemberBuildHook>>,
     /// Records whether each create_session had external_tools configured.
     create_with_external_tools: RwLock<Vec<bool>>,
     /// Records the exact host curator carried by each create_session request.
@@ -2449,6 +2462,7 @@ impl MockSessionService {
             resume_authority_absent_remaining: AtomicU64::new(0),
             resume_authority_observe_failures_for: std::sync::Mutex::new(HashMap::new()),
             create_requests: RwLock::new(Vec::new()),
+            member_build_hook: std::sync::Mutex::new(None),
             create_with_external_tools: RwLock::new(Vec::new()),
             create_with_compaction_curators: RwLock::new(Vec::new()),
             mcp_server_names: RwLock::new(Vec::new()),
@@ -3986,6 +4000,19 @@ impl MockSessionService {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
     }
 
+    /// Run `hook` on each create request before anything else, as a host's
+    /// session hook runs before its inner session service.
+    #[cfg_attr(
+        any(not(feature = "runtime-adapter"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    fn set_member_build_hook(&self, hook: MemberBuildHook) {
+        *self
+            .member_build_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
     /// Decide each created session's prepared surface through the gate its
     /// runtime bindings carry, as the real factory does.
     fn decide_tool_surface_at_create(&self) {
@@ -3995,9 +4022,17 @@ impl MockSessionService {
 
     async fn create_session_with_actor_witness_slot(
         &self,
-        req: CreateSessionRequest,
+        mut req: CreateSessionRequest,
         actor_witness_slot: Option<&meerkat_session::LiveSessionActorWitnessSlot>,
     ) -> Result<RunResult, SessionError> {
+        let member_build_hook = self
+            .member_build_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = member_build_hook {
+            hook(&mut req);
+        }
         if self.decide_tool_surface_at_create.load(Ordering::SeqCst)
             && let Some(meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings)) =
                 req.build.as_ref().map(|build| &build.runtime_build_mode)
@@ -4528,6 +4563,15 @@ impl MockSessionService {
                     .as_ref()
                     .is_some_and(|build| build.tool_dispatch_admission.is_some()),
                 shell_env: req.build.as_ref().and_then(|build| build.shell_env.clone()),
+                mob_incarnation: req.build.as_ref().and_then(|build| build.mob_incarnation),
+                mob_tool_authority_context: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.mob_tool_authority_context.clone()),
+                mob_operator_authority_only: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.mob_operator_authority_only),
             });
 
         let mcp_server_names: Vec<String> = req

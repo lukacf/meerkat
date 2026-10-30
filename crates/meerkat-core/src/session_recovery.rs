@@ -604,6 +604,7 @@ pub fn resolve_effective_turn_config(
             .override_mob
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.mob),
+        mob_operator_authority_only: false,
         override_image_generation: overrides
             .override_image_generation
             .map(ToolCategoryOverride::from_effective)
@@ -667,6 +668,7 @@ pub fn resolve_effective_turn_config(
         // Durable mob-member identity is carried forward verbatim at resume so
         // mob ownership routing keeps recognizing the member after restart.
         mob_member_binding: metadata.mob_member_binding.clone(),
+        mob_incarnation: None,
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),

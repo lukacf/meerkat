@@ -804,3 +804,178 @@ async fn a_first_build_does_not_warn() {
         warnings.restore_build
     );
 }
+
+/// The template a creator's host allows it to create identities from.
+const CREATION_TEMPLATE: &str = "creation-template";
+
+/// A host's own tool for a member, standing in for an identity creation
+/// tool: it keeps the session mob operator authority the agent factory binds
+/// to the member's external tools, which its creation commit reads.
+#[derive(Default)]
+struct HostIdentityTools {
+    bound: std::sync::Mutex<Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>>,
+}
+
+const HOST_IDENTITY_TOOL: &str = "host_identity_tool";
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for HostIdentityTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from(vec![Arc::new(ToolDef::new(
+            HOST_IDENTITY_TOOL,
+            "Create an identity from an allowed template.",
+            serde_json::json!({ "type": "object" }),
+        ))])
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+
+    fn bind_session_mob_tool_authority(
+        &self,
+        authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
+    ) {
+        *self.bound.lock().expect("bound authority lock") = authority;
+    }
+}
+
+/// Row (RED): an identity creator whose profile disables mob tools
+/// gets its creation scope authority only. The host's member build hook
+/// mints a creation-only authority with the witness the runtime's build
+/// carries, and sets the build authority only. Built from that request
+/// through the real agent factory, one with a mob tools factory, the
+/// session binds the authority to the host's own tools, and the creation
+/// check over that live authority admits the template. The authority holds
+/// nothing else: no manage or spawn-profile scope, no create or
+/// profile-mutation authority. And no mob tool surface mounts: the runtime
+/// composed none for the profile, the factory never asked its mob tools
+/// factory, and the agent lists no mob operator tool.
+///
+/// RED on the old tree: a build had no authority-only flag (the row does not
+/// compile there). A build with mob tools disabled resolved its authority to
+/// none and bound none to its tools, so the host's tool read no authority
+/// and the creation check refused the creator.
+#[tokio::test]
+async fn a_creation_only_creator_has_the_scope_and_no_mob_tool_surfaces() {
+    use meerkat_runtime::mob_operator_authority::{
+        IdentityCreationScopeRefusal, admit_identity_creation_from_template,
+        identity_creation_only_mob_operator_authority,
+    };
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let creator = AgentIdentity::from(MEMBER);
+    handle
+        .spawn(ProfileName::from("worker"), creator.clone(), None)
+        .await
+        .expect("spawn the creator");
+    let operator_tools = super::super::tools::local_operator_tool_defs()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    let spawn_build = last_member_build(&service, &creator).await;
+    assert!(
+        !spawn_build
+            .external_tool_names
+            .iter()
+            .any(|name| operator_tools.contains(name)),
+        "the runtime composes no mob tools for the profile: {:?}",
+        spawn_build.external_tool_names
+    );
+    assert!(
+        spawn_build.mob_tool_authority_context.is_none()
+            && !spawn_build.mob_operator_authority_only,
+        "the runtime's own build binds no mob operator authority for the profile"
+    );
+    assert_eq!(
+        spawn_build
+            .mob_incarnation
+            .map(meerkat_core::service::LiveMobIncarnation::incarnation),
+        Some(handle.incarnation()),
+        "the spawn build carries the witness of the runtime performing it"
+    );
+
+    let host_tools = Arc::new(HostIdentityTools::default());
+    let config = worker_build_config(
+        &handle,
+        MEMBER,
+        Arc::clone(&host_tools) as Arc<dyn AgentToolDispatcher>,
+    )
+    .await;
+    assert_eq!(config.override_mob, ToolCategoryOverride::Disable);
+    assert!(config.mob_tool_authority_context.is_none());
+    let mut request = crate::build::to_create_session_request(
+        &config,
+        meerkat_core::types::ContentInput::Text(String::new()),
+    );
+    // The host's member build hook: it mints from the build alone.
+    let build = request.build.as_mut().expect("the member's build");
+    let mob_id = build
+        .mob_member_binding
+        .as_ref()
+        .expect("the member's binding")
+        .mob_id
+        .clone();
+    let witness = build
+        .mob_incarnation
+        .expect("the build carries the runtime's witness");
+    build.mob_tool_authority_context = Some(
+        identity_creation_only_mob_operator_authority(mob_id.clone(), witness, [CREATION_TEMPLATE])
+            .expect("mint the creation-only authority"),
+    );
+    build.mob_operator_authority_only = true;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let rebuilt = meerkat::AgentBuildConfig::from_create_session_request(&request, event_tx);
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let mob_tools = Arc::new(CaptureEffectiveAuthority {
+        captured: Arc::clone(&captured),
+    });
+    let (_dir, agent) = build_through_factory(rebuilt, Some(mob_tools)).await;
+
+    let bound = host_tools
+        .bound
+        .lock()
+        .expect("bound authority lock")
+        .clone()
+        .expect("the session binds its authority to the host's tools");
+    let bound = bound.read().expect("bound authority").clone();
+    let incarnation = handle.incarnation();
+    let admit = |template: &str| {
+        admit_identity_creation_from_template(Some(&bound), &mob_id, incarnation, template)
+    };
+    assert_eq!(admit(CREATION_TEMPLATE), Ok(()));
+    assert_eq!(
+        admit("another-template"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+    );
+    assert_eq!(
+        bound.identity_creation_scope(),
+        &BTreeMap::from([(
+            mob_id.clone(),
+            BTreeSet::from([CREATION_TEMPLATE.to_string()])
+        )])
+    );
+    assert!(!bound.can_create_mobs() && !bound.can_mutate_profiles());
+    assert!(!bound.can_manage_mob(&mob_id, incarnation));
+    assert!(bound.managed_mob_scope().is_empty());
+    assert!(bound.spawn_profile_scope().is_empty());
+
+    assert!(
+        captured.lock().expect("capture lock").is_none(),
+        "the factory never asks its mob tools factory for a surface"
+    );
+    let visible = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        visible.iter().any(|name| name == HOST_IDENTITY_TOOL),
+        "the host's tool is listed: {visible:?}"
+    );
+    assert!(
+        !visible.iter().any(|name| operator_tools.contains(name)),
+        "no mob operator tool is listed: {visible:?}"
+    );
+}

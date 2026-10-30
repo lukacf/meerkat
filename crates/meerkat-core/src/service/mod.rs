@@ -1227,6 +1227,19 @@ pub struct SessionBuildOptions {
     /// Per-build override for the factory-level WorkGraph capability.
     pub override_workgraph: ToolCategoryOverride,
     pub override_mob: ToolCategoryOverride,
+    /// Bind this build's mob operator authority without mounting any mob
+    /// operator tool surface ("authority only"). The build's mob tool
+    /// category then resolves to `Disable`, whatever `override_mob` says, so
+    /// the build mounts no mob tools, and a generated
+    /// `mob_tool_authority_context` is still bound to the session's external
+    /// tools, where a host's own tools read it. A host sets it for an
+    /// identity creator whose profile disables mob tools (a mob runtime
+    /// composes a member's own mob tools from its profile), with an
+    /// authority that holds the creation scope and nothing else
+    /// (`meerkat_runtime::mob_operator_authority::identity_creation_only_mob_operator_authority`).
+    /// `false`, the default, binds an authority only to a build with mob
+    /// tools enabled.
+    pub mob_operator_authority_only: bool,
     /// Per-build override for assistant image generation visibility.
     ///
     /// `Inherit` means "visible when the session-owned image-generation
@@ -1264,6 +1277,17 @@ pub struct SessionBuildOptions {
     /// member's session; flows into `AgentBuildConfig.mob_member_binding` and is
     /// persisted onto `SessionMetadata.mob_member_binding`.
     pub mob_member_binding: Option<crate::MobMemberBinding>,
+    /// The witness of the mob runtime performing this member build (a fresh
+    /// spawn, a restore or a wake): the incarnation of the mob the member is
+    /// built in, as that runtime runs it. Set only by the mob runtime, from
+    /// its own handle; `None` for every other build, and for a placed member
+    /// compiled on a host that does not run its mob. Never persisted. Not
+    /// consumed by the standard build pipeline: a host's member build hook
+    /// passes it to the mob operator grants
+    /// (`meerkat_runtime::mob_operator_authority`) to mint the member's scope
+    /// for the mob as it runs, its identity creation scope among them,
+    /// without holding the mob's handle.
+    pub mob_incarnation: Option<LiveMobIncarnation>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -2374,6 +2398,7 @@ impl Default for SessionBuildOptions {
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
+            mob_operator_authority_only: false,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::Inherit,
             schedule_tools: None,
@@ -2386,6 +2411,7 @@ impl Default for SessionBuildOptions {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: None,
+            mob_incarnation: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -2461,6 +2487,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
             .field("override_mob", &self.override_mob)
+            .field(
+                "mob_operator_authority_only",
+                &self.mob_operator_authority_only,
+            )
             .field("schedule_tools", &self.schedule_tools.is_some())
             .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field("workgraph_namespace_grant", &self.workgraph_namespace_grant)
@@ -2512,6 +2542,7 @@ impl std::fmt::Debug for SessionBuildOptions {
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
+            .field("mob_incarnation", &self.mob_incarnation)
             .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()
     }

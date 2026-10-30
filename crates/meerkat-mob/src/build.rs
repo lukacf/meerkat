@@ -156,8 +156,10 @@ pub struct BuildAgentConfigParams<'a> {
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     /// The incarnation of the mob the member is built in, when this process
     /// runs it. The default spawn-profile scope a `tools.mob` profile gets is
-    /// bound to it. `None` (a placed member compiled on its host) grants no
-    /// default scope: that host does not run the mob.
+    /// bound to it, and the build carries it to a host's member build hook
+    /// (`SessionBuildOptions::mob_incarnation`). `None` (a placed member
+    /// compiled on its host) grants no default scope and carries none: that
+    /// host does not run the mob.
     pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Pre-resolved inherited tool filter from spawn tooling.
     ///
@@ -349,6 +351,11 @@ pub async fn build_agent_config(
     }
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;
+    // This runtime's own witness, for a host's member build hook: the hook
+    // mints the member's scope for the mob as it runs (its identity creation
+    // scope among them) in every build, fresh, restore or wake, without
+    // holding the mob's handle.
+    config.mob_incarnation = mob_incarnation;
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;

@@ -3519,47 +3519,209 @@ svg[data-svg="fit"],
 .pane__body .composer { padding: 10px 16px 12px; }
 
 /* === Access panel (ABAC admin) === */
-.access-panel__body { padding-bottom: 12px; }
-.access-panel__form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 0 2px;
-}
-.access-panel__form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--ink-dim);
-}
-.access-panel__form input,
-.access-panel__form select {
-  background: var(--bg-elev-2, var(--bg-elev-1));
-  color: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: inherit;
+/* Built on the panel kit (PanelShell, PanelHeader, PanelTabs, Notice,
+   Button, Chip, ListRow, KeyValueList); these rules lay out its own parts. */
+.access-panel__state { margin-right: 6px; }
+.access-panel__intro {
+  flex: none;
+  margin: 0;
+  max-width: 88ch;
+  padding: 0 var(--_cc-panel-pad-x) 10px;
   font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+.access-panel__notices {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+.access-panel__alert-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+.access-panel__fieldset {
+  min-width: 0;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.access-panel__text {
+  margin: 0;
+  max-width: 72ch;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+.access-panel__text--inset { padding: 0 var(--_cc-panel-pad-x) 8px; }
+.access-panel__text + .access-panel__form { margin-top: 12px; }
+.access-panel__inset { padding: 4px var(--_cc-panel-pad-x) 0; }
+
+/* Forms: labelled fields in a responsive grid, hints under the control. */
+.access-panel__form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 12px 16px;
+  align-items: start;
+  min-width: 0;
+}
+.access-panel__field.cc-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.access-panel__field .cc-input { width: 100%; }
+.access-panel__field .cc-select { display: flex; }
+.access-panel__field .cc-select__control { width: 100%; }
+.access-panel__field--wide { grid-column: 1 / -1; }
+.access-panel__hint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-meta);
 }
 .access-panel__form-actions {
   display: flex;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
 }
-.access-panel__chips {
+.access-panel__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.access-panel__chips .chip {
+.access-panel__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--mono);
+  font-size: 11px;
   cursor: pointer;
-  opacity: 0.55;
+  transition: color var(--motion-hover), border-color var(--motion-hover), background var(--motion-hover);
 }
-.access-panel__chips .chip.is-active {
-  opacity: 1;
-  outline: 1px solid var(--ok);
+.access-panel__action:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+.access-panel__action.is-active {
+  border-color: var(--ink-meta);
+  background: var(--bg-sunken);
+  color: var(--ink);
 }
+.access-panel__action:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.access-panel__action:disabled { opacity: 0.45; cursor: default; }
+.access-panel__action-mark { width: 12px; height: 12px; }
+.access-panel__editor {
+  padding: 18px var(--_cc-panel-pad-x) 14px;
+  border-bottom: 1px solid var(--line);
+}
+.access-panel__editor-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
+}
+.cc-section-head.access-panel__form-head { padding: 16px 0 8px; }
+.access-panel__editor-title + .access-panel__form-head { padding-top: 2px; }
+.access-panel__form-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-meta);
+}
+
+/* Groups: a heading row per group, then its members as rows. */
+.access-panel__group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
+  padding: 16px var(--_cc-panel-pad-x) 6px;
+}
+.access-panel__group-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 14ch;
+  min-width: 0;
+}
+.access-panel__group-name {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.access-panel__group-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Rules: cards titled by what the rule does. */
+.access-panel__toolbar { padding-bottom: 0; }
+.access-panel__rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 12px var(--_cc-panel-pad-x) 0;
+}
+.access-panel__rule {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-1);
+}
+.access-panel__rule--editor { grid-column: 1 / -1; gap: 0; }
+.access-panel__rule-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.access-panel__rule-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.access-panel__rule-id { margin-top: -4px; }
+.access-panel__rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+/* Preview */
+.access-panel__result { margin-top: 12px; }
+.access-panel__verdict { font-weight: 600; }
 
 /* === Memory panel (records, quarantine, dreams) === */
 .memory-panel__body { padding-bottom: 12px; }

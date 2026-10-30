@@ -1887,9 +1887,12 @@ impl MobToolAuthorityContext {
     /// Raw, atomic observation: whether the operator holds a non-empty
     /// identity creation scope for the mob `mob_id` at `incarnation`, the
     /// incarnation of the live mob the caller resolved, never a value
-    /// decoded from input. A host reads it to decide whether a member is
-    /// offered identity creation at all. It is not the creation check: a
-    /// creation commit asks the generated verdict,
+    /// decoded from input.
+    ///
+    /// This is a projection for a host's offer only: a host reads it to
+    /// decide whether a member is offered identity creation at all. It is
+    /// never authority, and no creation may be admitted on it. The commit
+    /// check is the MeerkatMachine verdict, asked through
     /// `meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template`.
     pub fn identity_creation_scope_present(
         &self,

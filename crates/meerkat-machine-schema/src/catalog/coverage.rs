@@ -892,6 +892,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "retiring_entry_is_a_declared_entry",
                             "held_creation_entry_was_never_created",
                             "archived_session_record_is_unseated",
+                            "role_hold_belongs_to_an_entry",
                         ]),
                 ),
                 machine_anchor(

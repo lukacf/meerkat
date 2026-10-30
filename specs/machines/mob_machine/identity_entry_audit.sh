@@ -88,7 +88,8 @@
 #   unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
 #   held_creation_entry_was_never_created,
 #   archived_session_record_is_unseated,
-#   placed_entry_custody_is_hosted_on_first_use), exactly one arm answering
+#   placed_entry_custody_is_hosted_on_first_use,
+#   role_hold_belongs_to_an_entry), exactly one arm answering
 #   every declaration, seal, mark replay and apply opening, a Declared entry
 #   leaving only at the seal's retirement end, the seal, a destroy or a
 #   reset, a candidate composition changing nothing, no wake opening an
@@ -178,8 +179,8 @@ in_part() {
 # run found, so a guard that silently disables arms fails the lane.
 entry_states=12960
 lifecycle_states=12041
-apply_states=1628
-legacy_states=2208
+apply_states=1488
+legacy_states=1952
 roles_states=1224
 held_states=2000
 placed_states=192
@@ -873,13 +874,14 @@ for witness in \
   "apply:Action property:HostAdopted" "apply:Action property:InFlight" \
   "apply:Action property:DestroyEndsEntries" "apply:Action property:ListedAgainUnmarked" \
   "apply:Action property:ResumeRoleHeld" "apply:Action property:ResumeRoleMigrationOwed" \
-  "apply:Action property:SeatKeepsRoleHold" \
+  "apply:Action property:SeatKeepsRoleHold" "apply:Action property:SealEndsRoleHold" \
   "legacy:Action property:AdoptedThenUnlisted" "legacy:Action property:NameHeldByWorker" \
   "legacy:Action property:ResetEndsEntries" "legacy:Action property:UnlistedEndStopped" \
   "legacy:Action property:UnlistedEndRetired" "legacy:Action property:UnlistedReplayEnd" \
   "legacy:Action property:ReplayKeepsUnarchived" "legacy:Action property:HostedReplayKept" \
   "legacy:Action property:StaleMarkIgnored" "legacy:Action property:PreflightAdmitsMembers" \
-  "legacy:Action property:ResetEndsRetiredEntry" \
+  "legacy:Action property:ResetEndsRetiredEntry" "legacy:Action property:ResetEndsRoleHold" \
+  "legacy:Action property:ReplayEndsRoleHold" \
   "roles:Action property:RoleHoldRefusesPeerWake" "roles:Action property:MigrationVerdict" \
   "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
   "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
@@ -1236,6 +1238,12 @@ PY
 drop_guard("DeclareIdentityEntryRefusedHostAdopted", '"RefusedHostAdopted")')
 PY
 
+  # The seal removes a held unseated entry it does not list and keeps the
+  # entry's role hold.
+  mutate apply seal_keeps_role_hold "Invariant role_hold_belongs_to_an_entry" <<'PY'
+keep_var("SealDeclaredRosterSealed", "member_host_preparation_causes")
+PY
+
   # The unlisted end keeps its mark on the stopped copy, on both copies
   # after the runtime retired, and on both replay arms.
   mutate legacy stopped_end_keeps_mark "Invariant retiring_entry_is_a_declared_entry" <<'PY'
@@ -1302,6 +1310,18 @@ PY
   # placed_completion_reset_intent guard dropped).
   mutate legacy preflight_ignores_intent "Invariant AuditResetPreflightAgrees" <<'PY'
 drop_guard("AdmitResetStopped", 'placed_completion_lifecycle_intent = Some("Reset")')
+PY
+
+  # The reset clears the entries and keeps their role holds.
+  mutate legacy reset_keeps_role_hold "Invariant role_hold_belongs_to_an_entry" <<'PY'
+keep_var("ResetToRunning", "member_host_preparation_causes")
+PY
+
+  # The replayed end of an unlisted retirement removes the entry and keeps
+  # its role hold. The destroy ladder's ends have no mutant: no run holds a
+  # role hold through a destroy's member retirements.
+  mutate legacy replay_keeps_role_hold "Invariant role_hold_belongs_to_an_entry" <<'PY'
+keep_var("RecoverRosterMemberRetiredRunning", "member_host_preparation_causes")
 PY
 
   # A wake that ignores a host preparation cause.

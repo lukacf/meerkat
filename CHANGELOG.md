@@ -443,6 +443,9 @@ them.
   `HostPreparationCause::RoleMigrationUndeclared`). An apply that restores
   the role ends the hold, and one that declares the move ends it in the step
   that commits the new role, so a deferred or refused restamp keeps it. A
+  hold ends with its entry, too: at the end of its member's retirement, at
+  the seal that removes the unseated entry, and at the mob's reset or
+  destroy, so no member later seated under the name inherits it. A
   placed or externally bound identity is hosted on its first use (its host's
   placed spawn with entry custody creates it), and an identity whose
   creation the host holds (`DeclaredEntry::with_held_creation`) and that was

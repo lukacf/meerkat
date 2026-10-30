@@ -15,8 +15,11 @@
 \* A seat that would resume a session built under another role needs the
 \* migration from that role declared, and is held (RoleMigrationHeld)
 \* otherwise; a role hold ends only when the member's own role is declared
-\* or a rotation terminal commits another role. The generated ci profile has
-\* no identities, so these arms hold there only vacuously. This module keeps
+\* or a rotation terminal commits another role, and never outlives its
+\* entry (every end of the entry ends it: its member's retirement end, live,
+\* replayed or in a destroy, the seal's removal of an unseated entry and a
+\* reset). The generated ci profile has no identities, so these arms
+\* hold there only vacuously. This module keeps
 \* the generated model unchanged, extends member_residency_audit for its
 \* constants and arm families, and checks seven runs over fixed domains:
 \*
@@ -81,7 +84,8 @@
 \* unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
 \* held_creation_entry_was_never_created, archived_session_record_is_unseated,
 \* placed_entry_custody_is_hosted_on_first_use, entry_custody_ladder_is_open,
-\* destroyed_mob_holds_no_member_lifecycle), and per run:
+\* role_hold_belongs_to_an_entry, destroyed_mob_holds_no_member_lifecycle),
+\* and per run:
 \*   apply and legacy: AuditDeclareExactlyOne and AuditSealExactlyOne
 \*     (invariants, ENABLED form: exactly one arm answers every declaration
 \*     and seal, in every lifecycle phase of the run);
@@ -633,6 +637,28 @@ AuditWitnessPreflightAdmitsMembers == Id2 \in DOMAIN identity_to_runtime /\ Admi
 \* The reset after member 2's retirement ended with its entry kept unseated
 \* and its archived session recorded: the reset ends the entry.
 AuditWitnessResetEndsRetiredEntry == Id2 \in Entries /\ Record(Id2) # None /\ ResetToRunning
+\* A role hold never outlives its entry: a complete seal that does not list
+\* a held unseated entry removes the entry and ends its role hold, and so
+\* does a reset over one.
+AuditWitnessSealEndsRoleHold ==
+    /\ Id1 \in DOMAIN identity_entry_unseated
+    /\ Cause(Id1) = Some("RoleMigrationUndeclared")
+    /\ SealDeclaredRosterSealed({})
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+    /\ CauseNext(Id1) = None
+AuditWitnessResetEndsRoleHold ==
+    /\ Id2 \in DOMAIN identity_entry_unseated
+    /\ Cause(Id2) = Some("RoleMigrationUndeclared")
+    /\ ResetToRunning
+    /\ CauseNext(Id2) = None
+\* The replayed end of an unlisted retirement removes a role-held entry and
+\* ends its role hold.
+AuditWitnessReplayEndsRoleHold ==
+    /\ Id2 \in identity_entry_retiring
+    /\ Cause(Id2) = Some("RoleMigrationUndeclared")
+    /\ A2ReplayEnd
+    /\ Id2 \notin DOMAIN identity_entry_origins'
+    /\ CauseNext(Id2) = None
 
 NotAuditWitnessAdoptedThenUnlisted == [][~AuditWitnessAdoptedThenUnlisted]_vars
 NotAuditWitnessUnlistedEndStopped == [][~AuditWitnessUnlistedEndStopped]_vars
@@ -659,6 +685,9 @@ NotAuditWitnessResetEndsEntries == [][~AuditWitnessResetEndsEntries]_vars
 NotAuditWitnessDestroyEndsEntries == [][~AuditWitnessDestroyEndsEntries]_vars
 NotAuditWitnessPreflightAdmitsMembers == [][~AuditWitnessPreflightAdmitsMembers]_vars
 NotAuditWitnessResetEndsRetiredEntry == [][~AuditWitnessResetEndsRetiredEntry]_vars
+NotAuditWitnessSealEndsRoleHold == [][~AuditWitnessSealEndsRoleHold]_vars
+NotAuditWitnessResetEndsRoleHold == [][~AuditWitnessResetEndsRoleHold]_vars
+NotAuditWitnessReplayEndsRoleHold == [][~AuditWitnessReplayEndsRoleHold]_vars
 
 (***************************************************************************)
 (* The roles run.                                                          *)

@@ -13496,6 +13496,73 @@ mod tests {
             .expect("the declaration emits its verdict")
     }
 
+    /// A role hold belongs to its entry: the seal that removes an unseated
+    /// entry ends its role hold with it, and so does the mob's reset, so a
+    /// member seated later under the name inherits no hold
+    /// (`role_hold_belongs_to_an_entry`).
+    #[test]
+    fn a_role_hold_ends_with_its_entry_at_the_seal_and_the_reset() {
+        let held = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
+            assert_eq!(
+                declare(
+                    authority,
+                    identity,
+                    Declaration {
+                        profile: "lead",
+                        resume_role: Some("test"),
+                        ..Declaration::default()
+                    }
+                ),
+                IdentityEntryVerdict::RoleMigrationHeld,
+                "no migration is declared from the role the session was built under"
+            );
+            assert_eq!(
+                authority
+                    .state()
+                    .member_host_preparation_causes
+                    .get(identity),
+                Some(&HostPreparationCause::RoleMigrationUndeclared)
+            );
+        };
+        let mut authority = MobMachineAuthority::new();
+        let unlisted = AgentIdentity::from("unlisted-held-entry");
+        held(&mut authority, &unlisted);
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&unlisted)
+        );
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&unlisted),
+            "the seal ends the role hold with the entry"
+        );
+
+        let reset = AgentIdentity::from("reset-held-entry");
+        held(&mut authority, &reset);
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
+            .expect("the reset of a mob with no member");
+        assert!(authority.state().identity_entry_origins.is_empty());
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&reset),
+            "the reset ends the role hold with every entry"
+        );
+    }
+
     /// The seal of a complete roster listing `desired`.
     fn seal(
         authority: &mut MobMachineAuthority,

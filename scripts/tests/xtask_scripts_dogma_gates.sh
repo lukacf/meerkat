@@ -381,7 +381,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # reachability witnesses violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its nine runs' floors, a coverage block in which each
-# covered action of every run generated a state, its sixty-nine step
+# covered action of every run generated a state, its seventy-two step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy
@@ -726,6 +726,9 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessStaleMarkIgnored is violated."' \
   'echo "Error: Action property NotAuditWitnessPreflightAdmitsMembers is violated."' \
   'echo "Error: Action property NotAuditWitnessResetEndsRetiredEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessResetEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessApplyBusy is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEntrySeated is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEndHosted is violated."' \
@@ -769,6 +772,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditResetOnEmptyRoster is violated."' \
   'echo "Error: Action property AuditResetPreflightChangesNothing is violated."' \
   'echo "Error: Invariant AuditResetPreflightAgrees is violated."' \
+  'echo "Error: Invariant role_hold_belongs_to_an_entry is violated."' \
   'echo "Error: Invariant AuditRolesDeclareExactlyOne is violated."' \
   'echo "Error: Action property AuditRoleMoveKeepsRoleHold is violated."' \
   'echo "Error: Action property AuditRoleHoldEndsAtNewRole is violated."' \

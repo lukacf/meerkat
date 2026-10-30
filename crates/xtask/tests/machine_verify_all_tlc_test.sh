@@ -706,8 +706,8 @@ fi
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
 # names them); they require every listed arm to fire, a floor of distinct
-# states and their fifty witnesses reached, and --mutants refuses
-# forty-nine seeded defects: one per declared apply invariant and property,
+# states and their fifty-three witnesses reached, and --mutants refuses
+# fifty-two seeded defects: one per declared apply invariant and property,
 # and one per guard of the declared apply that a reachable state needs.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
@@ -920,12 +920,12 @@ run_machine_verify() {
 # together past 10 minutes; the first hosted run measures it;
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, alone, locally with 4 TLC workers
-# (2026-10-30): apply (one whole-space run, 14 witnesses, 14 mutants)
-# 166 s; legacy (two runs, 13 witnesses, 17 mutants) 226 s; roles (two
+# (2026-10-30): apply (one whole-space run, 15 witnesses, 15 mutants)
+# 170 s; legacy (two runs, 15 witnesses, 19 mutants) 244 s; roles (two
 # runs, 13 witnesses, 9 mutants) 186 s; hosted (two runs, 10 witnesses, 9
 # mutants) 116 s. As one part (five runs, 28 witnesses, 17 mutants) the
-# declared apply took 300-305 s; with its seven runs, 50 witnesses and 49
-# mutants it would take about 694 s, past 10 minutes on a hosted runner.
+# declared apply took 300-305 s; with its seven runs, 53 witnesses and 52
+# mutants it would take about 716 s, past 10 minutes on a hosted runner.
 # None of audits-g, audits-i and audits-k through audits-o has been
 # measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,

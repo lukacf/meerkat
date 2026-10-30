@@ -51406,10 +51406,7 @@ function topologyNodeAgent(agents, id) {
   return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
 }
 function topologyTeamKey(experience) {
-  const runtimeId = experience?.runtime_id?.trim();
-  if (runtimeId && runtimeId !== SHARED_CONSOLE_RUNTIME_ID) return runtimeId;
-  const runtimes = experience?.panel_runtimes;
-  return runtimes?.length === 1 ? runtimes[0]?.label?.trim() || void 0 : void 0;
+  return experience?.topology?.live_snapshot?.mob_id?.trim() || void 0;
 }
 function agentChatTarget(target) {
   return target && target.kind === "agent-chat" ? target : null;

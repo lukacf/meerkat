@@ -468,8 +468,9 @@ pub enum InstructionLowering {
     MidConversation,
     /// System rows lower only inside the leading System prefix.
     LeadingPrefixOnly,
-    /// The wire carries no System row; nothing is ever lowered as anything
-    /// else.
+    /// The wire carries no System row an entry can take: none at all, or
+    /// only the one leading row the session's prompt holds. Nothing is ever
+    /// lowered as anything else.
     Unavailable,
 }
 
@@ -478,8 +479,9 @@ impl InstructionLowering {
     /// (`ModelRegistry::profile_for_identity`): a model that lowers ordered
     /// System rows after conversation rows takes an entry anywhere; any other
     /// model, and one without a resolved profile, takes one only inside the
-    /// leading System prefix, which every wire carries as its system
-    /// instructions.
+    /// leading System prefix. A backend whose wire carries only one leading
+    /// System row takes none: resolve a session's lowering with
+    /// `ModelRegistry::instruction_lowering_for_identity`.
     #[must_use]
     pub fn for_resolved_profile(profile: Option<&crate::model_profile::ModelProfile>) -> Self {
         match profile {
@@ -517,7 +519,7 @@ pub enum InstructionDeferReason {
     /// The model lowers System rows only inside the leading System prefix,
     /// and the transcript has conversation rows.
     LeadingPrefixOnly,
-    /// The model's wire carries no System row.
+    /// The model's wire carries no System row an entry can take.
     LoweringUnavailable,
 }
 

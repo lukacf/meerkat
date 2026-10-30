@@ -21,14 +21,15 @@ where
 {
     /// How this agent's model carries an operator-instruction entry: the
     /// lowering its build resolved from the model as its backend serves it,
-    /// else the one its active model profile states.
+    /// else the one its active model profile states, as the binding that
+    /// profile was judged through serves it (a model fallback activates a
+    /// witness judged through the target's binding).
     #[must_use]
     pub fn operator_instruction_lowering(&self) -> InstructionLowering {
         self.operator_instruction_lowering.unwrap_or_else(|| {
-            InstructionLowering::for_resolved_profile(
-                self.active_model_profile
-                    .as_ref()
-                    .map(ModelProfileWitness::profile),
+            self.active_model_profile.as_ref().map_or_else(
+                || InstructionLowering::for_resolved_profile(None),
+                ModelProfileWitness::instruction_lowering,
             )
         })
     }

@@ -1286,8 +1286,8 @@ impl AgentBuilder {
 
     /// How the model this agent runs carries an operator-instruction entry,
     /// as its backend serves it: the factory resolves it from
-    /// `ModelRegistry::profile_for_identity`. Without it the agent derives
-    /// the lowering from its active model profile.
+    /// `ModelRegistry::instruction_lowering_for_identity`. Without it the
+    /// agent derives the lowering from its active model profile.
     pub fn with_operator_instruction_lowering(
         mut self,
         lowering: crate::InstructionLowering,

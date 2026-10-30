@@ -54,6 +54,11 @@ pub struct ModelProfileWitness {
     /// for [`ModelRegistry::profile_witness_for_provider`] (the model row
     /// alone).
     judged_binding: Option<crate::AuthBindingRef>,
+    /// Whether the wire of the backend `judged_binding` names carries more
+    /// than one leading System message
+    /// ([`crate::BackendProfile::admits_additional_leading_system_messages`]);
+    /// the model row alone is the provider's API-key backend, which does.
+    admits_additional_leading_system_messages: bool,
     profile: ModelProfile,
     context_window: Option<u32>,
     max_input_tokens: Option<u32>,
@@ -70,6 +75,10 @@ impl fmt::Debug for ModelProfileWitness {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("judged_binding", &self.judged_binding)
+            .field(
+                "admits_additional_leading_system_messages",
+                &self.admits_additional_leading_system_messages,
+            )
             .field("profile", &self.profile)
             .field("context_window", &self.context_window)
             .field("max_input_tokens", &self.max_input_tokens)
@@ -131,8 +140,33 @@ impl ModelProfileWitness {
         self.matches_identity(identity) && self.judged_binding == identity.auth_binding
     }
 
+    /// How operator-instruction entries lower for this model as the binding
+    /// it was judged through serves it
+    /// ([`ModelRegistry::instruction_lowering_for_identity`]).
+    pub(crate) fn instruction_lowering(&self) -> crate::InstructionLowering {
+        instruction_lowering_as_served(
+            Some(&self.profile),
+            self.admits_additional_leading_system_messages,
+        )
+    }
+
     pub(crate) fn was_minted_by(&self, authority: ModelRegistryAuthority) -> bool {
         self.registry_authority == authority
+    }
+}
+
+/// The operator-instruction lowering of a model with `profile` on a wire
+/// that does or does not carry more than one leading System message. Only
+/// one leading System row (the session's prompt takes it) leaves no
+/// position for an entry; any other wire lowers what the profile carries.
+fn instruction_lowering_as_served(
+    profile: Option<&ModelProfile>,
+    admits_additional_leading_system_messages: bool,
+) -> crate::InstructionLowering {
+    if admits_additional_leading_system_messages {
+        crate::InstructionLowering::for_resolved_profile(profile)
+    } else {
+        crate::InstructionLowering::Unavailable
     }
 }
 
@@ -417,6 +451,34 @@ impl ModelRegistry {
         Some(profile)
     }
 
+    /// How operator-instruction entries lower for `identity` as its backend
+    /// serves it. A backend whose wire carries only one leading System row
+    /// (the session's prompt takes it) lowers none: the lowering is
+    /// unavailable whatever the model row says
+    /// ([`crate::BackendProfile::admits_additional_leading_system_messages`]).
+    /// Any other backend lowers what [`Self::profile_for_identity`] carries:
+    /// anywhere when it carries ordered System messages after conversation
+    /// rows, else only inside the leading System prefix, as does a model
+    /// without a profile. The binding is judged as there: no binding, or the
+    /// synthetic env-var default, is the API-key backend, and a named
+    /// binding that `config` does not resolve has an unknown backend, which
+    /// carries more than one leading System row only when every backend of
+    /// the identity's provider does.
+    pub fn instruction_lowering_for_identity(
+        &self,
+        config: &crate::Config,
+        identity: &crate::SessionLlmIdentity,
+    ) -> crate::InstructionLowering {
+        instruction_lowering_as_served(
+            self.profile_for_identity(config, identity).as_ref(),
+            crate::connection::binding_admits_additional_leading_system_messages(
+                Some(config),
+                identity.provider,
+                identity.auth_binding.as_ref(),
+            ),
+        )
+    }
+
     /// Mint provenance for the exact provider/model profile in this registry.
     ///
     /// Unknown pairs and provider/model mismatches fail closed. The returned
@@ -429,12 +491,13 @@ impl ModelRegistry {
         model_id: &str,
     ) -> Option<ModelProfileWitness> {
         let profile = self.profile_for_provider(provider, model_id)?;
-        self.mint_profile_witness(provider, model_id, None, profile)
+        self.mint_profile_witness(provider, model_id, None, true, profile)
     }
 
     /// Mint provenance for `identity`'s profile as its backend serves it
     /// ([`Self::profile_for_identity`]), recording the binding it was judged
-    /// through.
+    /// through and whether that backend's wire carries more than one
+    /// leading System message.
     ///
     /// A backend can narrow the model row (the ChatGPT backend refuses the
     /// mid-conversation System messages the GPT rows declare), so this is the
@@ -452,6 +515,11 @@ impl ModelRegistry {
             identity.provider,
             &identity.model,
             identity.auth_binding.clone(),
+            crate::connection::binding_admits_additional_leading_system_messages(
+                Some(config),
+                identity.provider,
+                identity.auth_binding.as_ref(),
+            ),
             profile,
         )
     }
@@ -461,6 +529,7 @@ impl ModelRegistry {
         provider: Provider,
         model_id: &str,
         judged_binding: Option<crate::AuthBindingRef>,
+        admits_additional_leading_system_messages: bool,
         profile: ModelProfile,
     ) -> Option<ModelProfileWitness> {
         let entry = self.entry_for_provider(provider, model_id)?;
@@ -469,6 +538,7 @@ impl ModelRegistry {
             provider,
             model: model_id.to_string(),
             judged_binding,
+            admits_additional_leading_system_messages,
             profile,
             context_window: entry.context_window,
             max_input_tokens: entry.max_input_tokens,

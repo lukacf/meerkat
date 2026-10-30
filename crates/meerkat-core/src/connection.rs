@@ -627,6 +627,52 @@ impl BackendProfile {
             _ => true,
         }
     }
+
+    /// Whether requests through this backend can carry more than one System
+    /// message in the leading system prefix, as the provider matrix declares
+    /// it ([`OpenAiBackendKind::admits_additional_leading_system_messages`]).
+    /// A backend of another provider, or a backend kind this version does
+    /// not know, carries them.
+    pub fn admits_additional_leading_system_messages(&self) -> bool {
+        match self.provider {
+            Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
+                .is_none_or(OpenAiBackendKind::admits_additional_leading_system_messages),
+            _ => true,
+        }
+    }
+}
+
+/// Whether the wire of a `provider` model served through `auth_binding`
+/// carries more than one System message in the leading system prefix
+/// ([`BackendProfile::admits_additional_leading_system_messages`]), as far
+/// as `config` resolves that binding to its backend.
+///
+/// No binding, or the synthetic env-var default, is the provider's API-key
+/// backend: a build or a model change names every configured binding it
+/// resolves on the identity. A named binding that `config` does not
+/// resolve, or any named binding without a `config` to resolve it (a live
+/// model hot swap), has an unknown backend: it carries them only when every
+/// backend kind of `provider` does.
+pub(crate) fn binding_admits_additional_leading_system_messages(
+    config: Option<&Config>,
+    provider: Provider,
+    auth_binding: Option<&AuthBindingRef>,
+) -> bool {
+    let Some(auth_binding) = auth_binding else {
+        return true;
+    };
+    if auth_binding.is_env_default() {
+        return true;
+    }
+    match config.map(|config| resolve_explicit_auth_binding_target(config, auth_binding)) {
+        Some(Ok(target)) => target.backend.admits_additional_leading_system_messages(),
+        Some(Err(_)) | None => match provider {
+            Provider::OpenAI => OpenAiBackendKind::ALL
+                .iter()
+                .all(|kind| kind.admits_additional_leading_system_messages()),
+            _ => true,
+        },
+    }
 }
 
 /// Auth profile: how credentials are obtained, refreshed, constrained.

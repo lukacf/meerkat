@@ -755,18 +755,6 @@ svg[data-svg="fit"],
   color: var(--ink);
   overflow-wrap: anywhere;
 }
-.routing__step-note {
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--ink-meta);
-}
-.routing__delivery-sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.routing__delivery-sub .cc-tech-id { flex: 0 1 auto; }
 .routing__delivery-attempts { flex: none; }
 @container cc-panel (max-width: 719px) {
   .routing__body { display: block; overflow-y: auto; }

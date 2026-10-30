@@ -17,8 +17,8 @@ import {
   StatusDot,
   StatusRow,
   TechnicalDetails,
-  TechnicalId,
   agentDisplayName,
+  formatAbsoluteTime,
   humanizeEnum,
   joinMeta,
   plural,
@@ -77,36 +77,55 @@ function countLabel(status: string, count: number): string {
   return `${count} ${humanizeEnum(status).toLowerCase() || "unknown"}`;
 }
 
-/** "Email to Support Triage via console": who receives a route's messages. */
+/** A route's channel, sink and module keys for a tooltip: how it delivers,
+ * in the router's own terms. */
+function routeKeysTitle(route: Pick<Route, "channel" | "sink" | "target_module">): string {
+  return joinMeta(
+    route.channel ? `Channel: ${route.channel}` : null,
+    `Sink: ${route.sink}`,
+    `Module: ${route.target_module}`,
+  );
+}
+
+/** "Delivers to Support Triage": who receives a route's messages, by name.
+ * The recipient's key is the name's tooltip; the channel, sink and module
+ * keys are the caption's. */
 function RouteCaption({ route }: { route: Route }): React.JSX.Element {
   const directory = useAgentDirectory();
-  const channel = humanizeEnum(route.channel) || "Messages";
   const name = agentDisplayName(route.recipient, directory) || route.recipient;
   return (
-    <>
-      {channel} to <span title={route.recipient}>{name}</span>
-      {route.sink ? ` via ${route.sink}` : null}
-    </>
+    <span title={routeKeysTitle(route)}>
+      Delivers to <span title={route.recipient}>{name}</span>
+    </span>
   );
+}
+
+/** Whether a route matches the filter text: by its key, its recipient's
+ * name or key, or its sink and module keys. */
+function routeMatches(route: Route, needle: string, recipientName: string): boolean {
+  const text = needle.trim().toLowerCase();
+  if (!text) return true;
+  return [route.route_key, route.recipient, recipientName, route.sink, route.target_module]
+    .some((value) => value.toLowerCase().includes(text));
+}
+
+/** A delivery's tooltip: when it happened, then its ID. */
+function deliveryTitle(delivery: Pick<Delivery, "delivery_id">, at: number): string {
+  return joinMeta(formatAbsoluteTime(at), `Delivery ${delivery.delivery_id}`);
 }
 
 export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps): React.JSX.Element {
   const routes = data.routes || [];
   const deliveries = data.deliveries || [];
+  const directory = useAgentDirectory();
 
   const [q, setQ] = React.useState("");
   const [sel, setSel] = React.useState<string>(routes[0]?.route_key || "");
 
   const rows = React.useMemo(() => {
     if (!q) return routes;
-    const needle = q.toLowerCase();
-    return routes.filter((r) =>
-      r.route_key.toLowerCase().includes(needle) ||
-      r.recipient.toLowerCase().includes(needle) ||
-      r.sink.toLowerCase().includes(needle) ||
-      r.target_module.toLowerCase().includes(needle),
-    );
-  }, [routes, q]);
+    return routes.filter((r) => routeMatches(r, q, agentDisplayName(r.recipient, directory)));
+  }, [routes, q, directory]);
 
   const active = rows.find((r) => r.route_key === sel) || rows[0];
 
@@ -179,19 +198,13 @@ export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps
             <span className="routing__step-label">Recipient</span>
             <span className="routing__step-value">
               <AgentName id={active.recipient} avatar={18} />
-              {active.sink ? <span className="routing__step-note">via {active.sink}</span> : null}
             </span>
-          </li>
-          <li className="routing__step">
-            <span className="routing__step-label">Module</span>
-            <span className="routing__step-value" title={active.target_module}>{active.target_module}</span>
           </li>
         </ol>
       </PanelSection>
       <PanelSection label="Policy" padded>
         <KeyValueList
           items={[
-            { label: "Channel", value: humanizeEnum(active.channel) },
             { label: "Retries", value: active.retry_max != null ? String(active.retry_max) : "" },
             { label: "Backoff", value: formatBackoff(active.backoff_ms) },
             { label: "Rate limit", value: active.rate_limit_per_minute ? `${active.rate_limit_per_minute} per minute` : "" },
@@ -200,7 +213,15 @@ export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps
         {active.retry_max == null && !active.backoff_ms && !active.rate_limit_per_minute ? (
           <p className="routing__quiet">Default delivery policy.</p>
         ) : null}
-        <TechnicalDetails items={[{ label: "Recipient key", value: active.recipient }]} />
+        {/* The router's own keys for how this route delivers. */}
+        <TechnicalDetails
+          items={[
+            { label: "Recipient key", value: active.recipient },
+            { label: "Channel", value: active.channel },
+            { label: "Sink", value: active.sink },
+            { label: "Module", value: active.target_module },
+          ]}
+        />
       </PanelSection>
       <PanelSection label="Recent deliveries" count={activeDeliveries.length || null}>
         {activeDeliveries.length === 0 ? (
@@ -210,6 +231,10 @@ export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps
             {activeDeliveries.slice(0, ROUTE_DELIVERIES_SHOWN).map((delivery) => {
               const tone = statusTone(delivery.status);
               const attempts = delivery.attempts?.length ?? 0;
+              const at = deliveryTime(delivery);
+              // The delivery ID is on hover: the status and the time carry
+              // it in their tooltips.
+              const hover = deliveryTitle(delivery, at);
               return (
                 <ListRow
                   key={delivery.delivery_id}
@@ -217,16 +242,11 @@ export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps
                   dense
                   lead={<StatusDot tone={tone} />}
                   title={<AgentName id={delivery.recipient} />}
-                  subtitle={
-                    <span className="routing__delivery-sub">
-                      <TechnicalId value={delivery.delivery_id} label="Delivery ID" />
-                      {attempts > 1 ? <span className="routing__delivery-attempts">{plural(attempts, "attempt")}</span> : null}
-                    </span>
-                  }
+                  subtitle={attempts > 1 ? <span className="routing__delivery-attempts">{plural(attempts, "attempt")}</span> : undefined}
                   meta={
                     <>
-                      <Chip tone={tone}>{humanizeEnum(delivery.status) || "Unknown"}</Chip>
-                      <RelativeTime value={deliveryTime(delivery)} />
+                      <Chip tone={tone} title={`Delivery ${delivery.delivery_id}`}>{humanizeEnum(delivery.status) || "Unknown"}</Chip>
+                      <RelativeTime value={at} title={hover} />
                     </>
                   }
                 />
@@ -249,7 +269,7 @@ export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps
               label="Filter routes"
               value={q}
               onChange={(value) => setQ(value)}
-              placeholder="Route, recipient, sink or module"
+              placeholder="Route or recipient"
             />
           ) : null
         }

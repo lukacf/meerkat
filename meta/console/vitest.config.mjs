@@ -115,6 +115,7 @@ export default defineConfig({
       "console/src/lib/schedules-integration.test.tsx",
       "console/src/panels/SchedulesSection.test.tsx",
       "console/src/panels/MemoryPanel.words.test.tsx",
+      "console/src/panels/RoutingPanel.test.tsx",
       "console/src/lib/identity-log.test.ts",
       "console/src/lib/history-paging-notices.test.tsx",
       "packages/console-core/src/dock.test.ts",

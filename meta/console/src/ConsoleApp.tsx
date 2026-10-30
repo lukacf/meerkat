@@ -5648,7 +5648,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "logs")
-      return <LogsPanel frames={activityRef.current} />;
+      return <LogsPanel frames={activityRef.current} agentDirectory={agentDirectory} />;
     if (target.kind === "access")
       return (
         <AccessPanel
@@ -5896,6 +5896,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               }
               emptyText={railConfig?.empty_text}
               watchedIdentities={watchedIdentities}
+              agentDirectory={agentDirectory}
               onPresetChange={setActiveActivityPresetId}
               onSelect={experience?.memory?.can_read === true ? selectRailFrame : undefined}
             />

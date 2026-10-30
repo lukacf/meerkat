@@ -1,11 +1,96 @@
 import React from "react";
 import type { RoutingSectionView } from "@console-core";
+import {
+  AgentName,
+  Button,
+  Chip,
+  EmptyState,
+  KeyValueList,
+  ListRow,
+  LoadingState,
+  PanelHeader,
+  PanelSection,
+  PanelShell,
+  RelativeTime,
+  RowList,
+  SearchField,
+  StatusDot,
+  StatusRow,
+  TechnicalDetails,
+  TechnicalId,
+  agentDisplayName,
+  humanizeEnum,
+  joinMeta,
+  plural,
+  statusTone,
+  useAgentDirectory,
+} from "../../../packages/console-components/src/panel-kit";
+
+type Route = RoutingSectionView["routes"][number];
+type Delivery = RoutingSectionView["deliveries"][number];
 
 interface RoutingPanelProps {
   data: RoutingSectionView;
+  /** True while the first read is in flight; the list shows a skeleton. */
+  loading?: boolean;
+  /** A host that reports refresh errors passes this (null when healthy) and
+   * gets the reserved status row, so an error never moves the list. */
+  error?: string | null;
 }
 
-export function RoutingPanel({ data }: RoutingPanelProps): React.JSX.Element {
+/** Deliveries the panel considers: the most recent ones the history returned. */
+const RECENT_DELIVERIES = 40;
+/** Deliveries listed for the selected route. */
+const ROUTE_DELIVERIES_SHOWN = 8;
+
+/** When a delivery last happened: its final attempt, else its first. */
+function deliveryTime(delivery: Delivery): number {
+  return delivery.final_attempt_ms || delivery.first_attempt_ms || 0;
+}
+
+/** "500 ms" below a second, "2 s", "1 min" above. */
+function formatBackoff(ms: number | undefined): string {
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${Math.round(ms / 100) / 10} s`;
+  return `${Math.round(ms / 60_000)} min`;
+}
+
+/** Status counts for a route's recent deliveries, worst first, as chips. */
+function deliveryCounts(deliveries: Delivery[]): Array<{ status: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const delivery of deliveries) {
+    const status = delivery.status || "unknown";
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const rank = (status: string) => {
+    const tone = statusTone(status);
+    return tone === "crit" ? 0 : tone === "warn" ? 1 : tone === "info" ? 2 : tone === "ok" ? 4 : 3;
+  };
+  return [...counts.entries()]
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => rank(a.status) - rank(b.status) || b.count - a.count);
+}
+
+/** "3 delivered", "1 failed", "2 dead letter". */
+function countLabel(status: string, count: number): string {
+  return `${count} ${humanizeEnum(status).toLowerCase() || "unknown"}`;
+}
+
+/** "Email to Support Triage via console": who receives a route's messages. */
+function RouteCaption({ route }: { route: Route }): React.JSX.Element {
+  const directory = useAgentDirectory();
+  const channel = humanizeEnum(route.channel) || "Messages";
+  const name = agentDisplayName(route.recipient, directory) || route.recipient;
+  return (
+    <>
+      {channel} to <span title={route.recipient}>{name}</span>
+      {route.sink ? ` via ${route.sink}` : null}
+    </>
+  );
+}
+
+export function RoutingPanel({ data, loading = false, error }: RoutingPanelProps): React.JSX.Element {
   const routes = data.routes || [];
   const deliveries = data.deliveries || [];
 
@@ -25,100 +110,155 @@ export function RoutingPanel({ data }: RoutingPanelProps): React.JSX.Element {
 
   const active = rows.find((r) => r.route_key === sel) || rows[0];
 
-  const recentDeliveries = deliveries.slice(0, 40);
-  const trafficForRoute = (routeKey: string) =>
-    deliveries.filter((d) => d.route_id === routeKey).length;
+  const recentDeliveries = React.useMemo(() => deliveries.slice(0, RECENT_DELIVERIES), [deliveries]);
+  const deliveriesByRoute = React.useMemo(() => {
+    const byRoute = new Map<string, Delivery[]>();
+    for (const delivery of recentDeliveries) {
+      const list = byRoute.get(delivery.route_id);
+      if (list) list.push(delivery);
+      else byRoute.set(delivery.route_id, [delivery]);
+    }
+    return byRoute;
+  }, [recentDeliveries]);
+  const activeDeliveries = active ? deliveriesByRoute.get(active.route_key) ?? [] : [];
+
+  const subtitle = q
+    ? joinMeta(`${rows.length} of ${plural(routes.length, "route")}`, plural(recentDeliveries.length, "recent delivery", "recent deliveries"))
+    : joinMeta(plural(routes.length, "route"), plural(recentDeliveries.length, "recent delivery", "recent deliveries"));
+
+  const list = loading && routes.length === 0 ? (
+    <LoadingState label="Loading routes" rows={4} />
+  ) : routes.length === 0 ? (
+    <EmptyState
+      title="No routes configured"
+      body="Routes carry messages from a channel, such as email or a schedule, to an agent. They appear here once a module defines them."
+    />
+  ) : rows.length === 0 ? (
+    <EmptyState
+      kind="filtered"
+      title={`No routes match "${q}"`}
+      action={<Button size="sm" onClick={() => setQ("")}>Clear filter</Button>}
+    />
+  ) : (
+    <RowList>
+      {rows.map((route) => {
+        const routeDeliveries = deliveriesByRoute.get(route.route_key) ?? [];
+        const last = routeDeliveries.reduce((latest, delivery) => Math.max(latest, deliveryTime(delivery)), 0);
+        return (
+          <ListRow
+            key={route.route_key}
+            testId={`routing-route:${route.route_key}`}
+            selected={Boolean(active && route.route_key === active.route_key)}
+            onActivate={() => setSel(route.route_key)}
+            title={route.route_key}
+            titleAttr={route.route_key}
+            subtitle={<RouteCaption route={route} />}
+            meta={
+              <>
+                {deliveryCounts(routeDeliveries).map(({ status, count }) => (
+                  <Chip key={status} tone={statusTone(status)}>{countLabel(status, count)}</Chip>
+                ))}
+                {last ? <RelativeTime value={last} /> : <span className="routing__quiet">No recent deliveries</span>}
+              </>
+            }
+          />
+        );
+      })}
+    </RowList>
+  );
+
+  const detail = active ? (
+    <>
+      <PanelSection label="Flow" padded>
+        <ol className="routing__steps">
+          <li className="routing__step">
+            <span className="routing__step-label">Route</span>
+            <span className="routing__step-value" title={active.route_key}>{active.route_key}</span>
+          </li>
+          <li className="routing__step">
+            <span className="routing__step-label">Recipient</span>
+            <span className="routing__step-value">
+              <AgentName id={active.recipient} avatar={18} />
+              {active.sink ? <span className="routing__step-note">via {active.sink}</span> : null}
+            </span>
+          </li>
+          <li className="routing__step">
+            <span className="routing__step-label">Module</span>
+            <span className="routing__step-value" title={active.target_module}>{active.target_module}</span>
+          </li>
+        </ol>
+      </PanelSection>
+      <PanelSection label="Policy" padded>
+        <KeyValueList
+          items={[
+            { label: "Channel", value: humanizeEnum(active.channel) },
+            { label: "Retries", value: active.retry_max != null ? String(active.retry_max) : "" },
+            { label: "Backoff", value: formatBackoff(active.backoff_ms) },
+            { label: "Rate limit", value: active.rate_limit_per_minute ? `${active.rate_limit_per_minute} per minute` : "" },
+          ]}
+        />
+        {active.retry_max == null && !active.backoff_ms && !active.rate_limit_per_minute ? (
+          <p className="routing__quiet">Default delivery policy.</p>
+        ) : null}
+        <TechnicalDetails items={[{ label: "Recipient key", value: active.recipient }]} />
+      </PanelSection>
+      <PanelSection label="Recent deliveries" count={activeDeliveries.length || null}>
+        {activeDeliveries.length === 0 ? (
+          <EmptyState inline title="No recent deliveries for this route" />
+        ) : (
+          <RowList>
+            {activeDeliveries.slice(0, ROUTE_DELIVERIES_SHOWN).map((delivery) => {
+              const tone = statusTone(delivery.status);
+              const attempts = delivery.attempts?.length ?? 0;
+              return (
+                <ListRow
+                  key={delivery.delivery_id}
+                  testId={`routing-delivery:${delivery.delivery_id}`}
+                  dense
+                  lead={<StatusDot tone={tone} />}
+                  title={<AgentName id={delivery.recipient} />}
+                  subtitle={
+                    <span className="routing__delivery-sub">
+                      <TechnicalId value={delivery.delivery_id} label="Delivery ID" />
+                      {attempts > 1 ? <span className="routing__delivery-attempts">{plural(attempts, "attempt")}</span> : null}
+                    </span>
+                  }
+                  meta={
+                    <>
+                      <Chip tone={tone}>{humanizeEnum(delivery.status) || "Unknown"}</Chip>
+                      <RelativeTime value={deliveryTime(delivery)} />
+                    </>
+                  }
+                />
+              );
+            })}
+          </RowList>
+        )}
+      </PanelSection>
+    </>
+  ) : null;
 
   return (
-    <div className="view routing" data-testid="routing-panel">
-      <div className="view__head">
-        <h2>Routing</h2>
-        <span className="view__sub">{rows.length} routes · {deliveries.length} deliveries (recent)</span>
-        <span className="view__spacer" />
-        <input
-          className="view__search"
-          placeholder="Filter route, recipient, sink…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+    <PanelShell className="routing" testId="routing-panel">
+      <PanelHeader
+        title="Routing"
+        subtitle={subtitle}
+        actions={
+          routes.length > 0 ? (
+            <SearchField
+              label="Filter routes"
+              value={q}
+              onChange={(value) => setQ(value)}
+              placeholder="Route, recipient, sink or module"
+            />
+          ) : null
+        }
+      />
+      {error !== undefined ? <StatusRow error={error} /> : null}
+      <div className={active ? "routing__body" : "routing__body routing__body--list"}>
+        <div className="routing__list">{list}</div>
+        {active ? <aside className="routing__detail" aria-label={`Route ${active.route_key}`}>{detail}</aside> : null}
       </div>
-      <div className="routing__body">
-        <div className="routing__table">
-          <div className="routing__row routing__row--head">
-            <span>Route</span><span>Channel</span><span>Recipient</span><span>Sink</span><span>Module</span><span>24h</span>
-          </div>
-          {rows.map((r) => {
-            const isSel = active && r.route_key === active.route_key;
-            return (
-              <div
-                key={r.route_key}
-                className={`routing__row ${isSel ? "is-selected" : ""}`}
-                onClick={() => setSel(r.route_key)}
-                data-testid={`routing-route:${r.route_key}`}
-              >
-                <span className="routing__intent mono">{r.route_key}</span>
-                <span className="mono dim">{r.channel || "—"}</span>
-                <span className="mono">{r.recipient}</span>
-                <span className="dim">{r.sink}</span>
-                <span className="mono dim">{r.target_module}</span>
-                <span className="mono">{trafficForRoute(r.route_key)}</span>
-              </div>
-            );
-          })}
-          {rows.length === 0 && (
-            <div style={{ padding: 24, color: "var(--ink-dim)", fontFamily: "var(--mono)", fontSize: 12 }}>
-              No routes configured.
-            </div>
-          )}
-        </div>
-        <aside className="routing__flow">
-          {active && (
-            <>
-              <div className="rf__title">Flow</div>
-              <div className="rf__diagram">
-                <div className="rf__node rf__node--intent">
-                  <div className="rf__lbl">Route</div>
-                  <div className="rf__val mono">{active.route_key}</div>
-                </div>
-                <svg className="rf__arrow" viewBox="0 0 40 12">
-                  <path d="M0 6 H 34 M 28 2 L 34 6 L 28 10" stroke="currentColor" fill="none" strokeWidth="1" />
-                </svg>
-                <div className="rf__node rf__node--handler">
-                  <div className="rf__lbl">via {active.sink}</div>
-                  <div className="rf__val mono">{active.recipient}</div>
-                </div>
-                <svg className="rf__arrow rf__arrow--drop" viewBox="0 0 12 40">
-                  <path d="M6 0 V 34 M 2 28 L 6 34 L 10 28" stroke="currentColor" fill="none" strokeWidth="1" />
-                </svg>
-                <div className="rf__node rf__node--gate">
-                  <div className="rf__lbl">Module</div>
-                  <div className="rf__val mono">{active.target_module}</div>
-                </div>
-              </div>
-              <div className="rf__stats">
-                <div><dt>Retry max</dt><dd>{active.retry_max ?? "—"}</dd></div>
-                <div><dt>Backoff</dt><dd>{active.backoff_ms ? `${active.backoff_ms} ms` : "—"}</dd></div>
-                <div><dt>Rate limit</dt><dd>{active.rate_limit_per_minute ? `${active.rate_limit_per_minute}/m` : "—"}</dd></div>
-              </div>
-              <div className="rf__title" style={{ marginTop: 12 }}>Recent deliveries</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-muted)" }}>
-                {recentDeliveries.filter((d) => d.route_id === active.route_key).slice(0, 8).map((d) => (
-                  <div key={d.delivery_id} data-testid={`routing-delivery:${d.delivery_id}`}>
-                    <span style={{ color: d.status === "delivered" ? "var(--ok)" : d.status === "failed" ? "var(--crit)" : "var(--warn)" }}>
-                      {d.status}
-                    </span>{" "}
-                    <span className="dim">· {d.delivery_id.slice(0, 8)}</span>{" "}
-                    <span>→ {d.recipient}</span>
-                  </div>
-                ))}
-                {recentDeliveries.filter((d) => d.route_id === active.route_key).length === 0 && (
-                  <span className="dim">No recent deliveries.</span>
-                )}
-              </div>
-            </>
-          )}
-        </aside>
-      </div>
-    </div>
+    </PanelShell>
   );
 }

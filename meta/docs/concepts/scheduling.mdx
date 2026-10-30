@@ -64,6 +64,22 @@ Python applications register deterministic host runnables with
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
 The callback is delivery for a durable occurrence, not a substitute scheduler.
 
+## Console schedules
+
+The Console keeps an agent's **console schedules** in the same store:
+messages a Console caller defines in the agent's details pane and the Console
+sends to the agent later. Each is a durable schedule whose target is the host
+runnable `meta.console.scheduled_send`, which the gateway reserves: an
+application cannot register a host runnable or callback under that name, an
+agent's schedule tools cannot create a schedule that names it, and those tools
+neither list nor change console schedules. Each fire is a Console send by the
+caller who defined the schedule, judged when it fires: the Console admits that
+caller as it would admit a live request by them, then sends as a live send by
+them is sent. A refused send fails that occurrence, and the schedule keeps its
+later times. See [Schedules](/guides/console#schedules) for
+the Console and [Console schedules](/api/rpc#console-schedules-console) for the
+methods.
+
 ## Rust embedding
 
 Rust embedders can supply a schedule store and attach both schedule tools and

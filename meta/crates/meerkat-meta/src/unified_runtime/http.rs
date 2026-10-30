@@ -410,6 +410,24 @@ impl UnifiedRuntime {
             .console_projection
             .get_or_init(|| self.create_console_projection(visibility_policy.clone()));
         let view = projection.policy_view(visibility_policy.clone());
+        // A console schedule fires as a send through this Console's own send
+        // path (`crate::console_schedules`); the router built last installs
+        // it, and the runtime clears it when this projection is replaced and
+        // at shutdown. Every part is the runtime's own non-owning back-edge:
+        // the mob's observer, never its public owner.
+        self.console_schedule_doors().install(Arc::new(
+            crate::http_console::schedules::ConsoleSendDoor {
+                decisions: decisions.clone(),
+                runtime: self.mob_runtime.clone(),
+                aggregator: view.clone(),
+                access: self.access_controller().cloned(),
+                identity_runtime: self.identity_runtime_ref().cloned(),
+                console_events: self.console_events(),
+                governed_ingress: self.console_governed_ingress.clone(),
+                operator_resolver: self.console_operator_resolver(),
+                session_fences: self.console_session_fences().clone(),
+            },
+        ));
         // The router is returned to the host: it holds the public owners.
         console_json_router_with_runtime_events_and_policy(
             decisions,
@@ -1181,6 +1199,56 @@ model = "gpt-5.5"
         runtime.shutdown().await;
         drop(runtime);
         assert_released(new_weak).await;
+    }
+
+    /// D67: what a console router build leaves in the runtime (the console
+    /// schedules' send path) holds the mob's observer, never a public owner:
+    /// a runtime dropped without `shutdown()` after building a console
+    /// router still has its idle mob close admission for the released last
+    /// owner, and settles.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_runtime_settles_after_building_a_console_router() {
+        let definition = MobDefinition::from_toml(
+            r#"
+[mob]
+id = "console-router-drop"
+[profiles.worker]
+model = "gpt-5.5"
+"#,
+        )
+        .expect("definition");
+        let runtime = UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let decisions = crate::runtime::RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        drop(runtime.build_console_json_router(decisions));
+        let mut closed = runtime.mob_handle().observer().admission_closed();
+        drop(runtime);
+        let reason = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(reason) = *closed.borrow_and_update() {
+                    return Some(reason);
+                }
+                if closed.changed().await.is_err() {
+                    return None;
+                }
+            }
+        })
+        .await
+        .expect("the dropped runtime's idle mob closes its admission");
+        assert_eq!(
+            reason,
+            Some(meerkat_mob::MobAdmissionCloseReason::LastOwnerReleased)
+        );
     }
 
     #[test]

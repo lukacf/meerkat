@@ -1,6 +1,7 @@
 //! HTTP routes for the admin console REST API.
 
 mod mcp_apps;
+pub(crate) mod schedules;
 mod shared_panels;
 pub use mcp_apps::ConsoleToolApplicationIngress;
 
@@ -2026,76 +2027,15 @@ async fn console_send_handler(
             "console send requires a valid auth token",
         );
     };
-    // A candidate launch admits no member input: 409 `candidate_launch`,
-    // the REST form of the RPC surfaces' `-32047` refusal.
-    if state
-        .runtime
-        .as_ref()
-        .is_some_and(|runtime| !runtime.speaks_for_composition())
-    {
-        return console_json_error(
-            StatusCode::CONFLICT,
-            "candidate_launch",
-            "this gateway is a candidate launch and admits no member input; its members' \
-             work belongs to the authoritative launch",
-        );
-    }
-    if let Err(refusal) = console_send_gate(
-        &state.decisions,
-        state.runtime.as_ref(),
-        state.console_aggregator.as_ref(),
-        state.access.as_ref(),
+    let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
+    match Box::pin(send_as_admitted_console_caller(
+        &ConsoleSendPath::of_state(&state),
         auth_context.access_view.as_ref(),
-        request.identity.as_str(),
-    )
+        &governance,
+        request,
+    ))
     .await
     {
-        return refusal.into_response();
-    }
-    // §16 Q1 provisional operator keying: an authenticated principal
-    // addressing this identity IS the active operator for its turns.
-    // Unauthenticated consoles (no subject) note nothing — operator-scope
-    // recall stays inert without a real principal.
-    if let Some(resolver) = state.operator_resolver.as_ref()
-        && let Some(subject) = auth_context
-            .access_view
-            .as_ref()
-            .and_then(|view| view.subject())
-    {
-        resolver.note_interaction(request.identity.as_str(), subject);
-    }
-    let Some(aggregator) = &state.console_aggregator else {
-        return console_json_error(
-            StatusCode::NOT_FOUND,
-            "unavailable",
-            "console aggregator unavailable",
-        );
-    };
-    let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
-    if let Some(identity_runtime) = &state.identity_runtime {
-        return match Box::pin(console_send_governed_with_identity_first_fallback(
-            aggregator,
-            Arc::clone(identity_runtime.runtime()),
-            state.console_events.as_ref(),
-            request,
-            &governance,
-        ))
-        .await
-        {
-            Ok(accepted) => (
-                StatusCode::OK,
-                Json::<Value>(
-                    serde_json::to_value(accepted).unwrap_or_else(|_| json!({ "accepted": true })),
-                ),
-            )
-                .into_response(),
-            Err(err) => console_send_error_response(err),
-        };
-    }
-    if let Err(err) = governance.refuse_ungoverned_delivery(request.identity.as_str()) {
-        return console_send_error_response(err);
-    }
-    match Box::pin(aggregator.send_scoped(request, &governance.scope)).await {
         Ok(accepted) => (
             StatusCode::OK,
             Json::<Value>(
@@ -2103,8 +2043,140 @@ async fn console_send_handler(
             ),
         )
             .into_response(),
-        Err(err) => console_send_error_response(err),
+        // A candidate launch admits no member input: 409 `candidate_launch`,
+        // the REST form of the RPC surfaces' `-32047` refusal.
+        Err(AdmittedConsoleSendError::CandidateLaunch) => console_json_error(
+            StatusCode::CONFLICT,
+            "candidate_launch",
+            CANDIDATE_LAUNCH_SEND_REFUSAL,
+        ),
+        Err(AdmittedConsoleSendError::Gate(refusal)) => refusal.into_response(),
+        Err(AdmittedConsoleSendError::AggregatorUnavailable) => console_json_error(
+            StatusCode::NOT_FOUND,
+            "unavailable",
+            "console aggregator unavailable",
+        ),
+        Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
     }
+}
+
+/// Why a candidate launch refuses a Console send.
+const CANDIDATE_LAUNCH_SEND_REFUSAL: &str = "this gateway is a candidate launch and admits no \
+                                             member input; its members' work belongs to the \
+                                             authoritative launch";
+
+/// What a Console send takes once the Console has admitted its caller: the
+/// Console's own pieces, as its router holds them.
+pub(crate) struct ConsoleSendPath<'a> {
+    pub(crate) decisions: &'a RuntimeDecisionState,
+    pub(crate) runtime: Option<&'a MobRuntime>,
+    pub(crate) aggregator: Option<&'a MetaConsoleAggregator>,
+    pub(crate) access: Option<&'a AccessController>,
+    pub(crate) identity_runtime: Option<&'a Arc<crate::identity_first::IdentityRuntime>>,
+    pub(crate) console_events: Option<&'a ConsoleEventStore>,
+    pub(crate) operator_resolver:
+        Option<&'a Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
+}
+
+impl<'a> ConsoleSendPath<'a> {
+    /// The send path of the Console router `state` serves.
+    fn of_state(state: &'a ConsoleJsonState) -> Self {
+        Self {
+            decisions: &state.decisions,
+            runtime: state.runtime.as_ref(),
+            aggregator: state.console_aggregator.as_ref(),
+            access: state.access.as_ref(),
+            identity_runtime: state
+                .identity_runtime
+                .as_ref()
+                .map(crate::identity_first::PublicIdentityRuntime::runtime),
+            console_events: state.console_events.as_ref(),
+            operator_resolver: state.operator_resolver.as_ref(),
+        }
+    }
+}
+
+/// Why a Console send by an admitted caller was not accepted.
+pub(crate) enum AdmittedConsoleSendError {
+    /// A candidate launch admits no member input.
+    CandidateLaunch,
+    /// The Console's stock send gate refused it.
+    Gate(ConsoleSendGateRefusal),
+    /// The Console serves no aggregator to send through.
+    AggregatorUnavailable,
+    /// The send was refused or failed.
+    Send(ConsoleSendError),
+}
+
+impl AdmittedConsoleSendError {
+    /// The refusal as a caller may read it.
+    pub(crate) fn public_message(&self) -> String {
+        match self {
+            Self::CandidateLaunch => CANDIDATE_LAUNCH_SEND_REFUSAL.to_string(),
+            Self::Gate(refusal) => refusal.message().to_string(),
+            Self::AggregatorUnavailable => "console aggregator unavailable".to_string(),
+            Self::Send(error) => console_send_public_message(error),
+        }
+    }
+}
+
+/// A Console send by a caller the Console has admitted, `access_view` and
+/// `governance` being that caller's: the candidate-launch refusal, the stock
+/// send gate ([`console_send_gate`]), the operator note, then the governed
+/// identity-first send, or the member lane where the Console has no identity
+/// runtime. `/console/send` and console schedule fires
+/// (`crate::console_schedules`) both send through it, so the two never part.
+pub(crate) async fn send_as_admitted_console_caller(
+    path: &ConsoleSendPath<'_>,
+    access_view: Option<&AccessView>,
+    governance: &ConsoleSendGovernance,
+    request: ConsoleSendRequest,
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, AdmittedConsoleSendError> {
+    if path
+        .runtime
+        .is_some_and(|runtime| !runtime.speaks_for_composition())
+    {
+        return Err(AdmittedConsoleSendError::CandidateLaunch);
+    }
+    console_send_gate(
+        path.decisions,
+        path.runtime,
+        path.aggregator,
+        path.access,
+        access_view,
+        request.identity.as_str(),
+    )
+    .await
+    .map_err(AdmittedConsoleSendError::Gate)?;
+    // §16 Q1 provisional operator keying: an authenticated principal
+    // addressing this identity IS the active operator for its turns.
+    // Unauthenticated consoles (no subject) note nothing: operator-scope
+    // recall stays inert without a real principal.
+    if let Some(resolver) = path.operator_resolver
+        && let Some(subject) = access_view.and_then(|view| view.subject())
+    {
+        resolver.note_interaction(request.identity.as_str(), subject);
+    }
+    let Some(aggregator) = path.aggregator else {
+        return Err(AdmittedConsoleSendError::AggregatorUnavailable);
+    };
+    let sent = match path.identity_runtime {
+        Some(identity_runtime) => {
+            Box::pin(console_send_governed_with_identity_first_fallback(
+                aggregator,
+                Arc::clone(identity_runtime),
+                path.console_events,
+                request,
+                governance,
+            ))
+            .await
+        }
+        None => match governance.refuse_ungoverned_delivery(request.identity.as_str()) {
+            Ok(()) => Box::pin(aggregator.send_scoped(request, &governance.scope)).await,
+            Err(error) => Err(error),
+        },
+    };
+    sent.map_err(AdmittedConsoleSendError::Send)
 }
 
 /// `POST /console/send/recover`: the REST twin of `meta/console/recover_send`.
@@ -2769,6 +2841,10 @@ mod console_experience_binding_tests;
 #[cfg(test)]
 #[path = "console_side_chat_tests.rs"]
 mod console_side_chat_tests;
+
+#[cfg(test)]
+#[path = "console_schedule_tests.rs"]
+mod console_schedule_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -3753,6 +3829,11 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/respawn"
             | "meta/reset"
             | "meta/delete_identity"
+            | "meta/schedule/create"
+            | "meta/schedule/update"
+            | "meta/schedule/pause"
+            | "meta/schedule/resume"
+            | "meta/schedule/delete"
             | "meta/agent_memory/remember"
             | "meta/agent_memory/update"
             | "meta/agent_memory/forget"
@@ -4273,6 +4354,16 @@ fn console_rpc_access_requirements(
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
+        // A console schedule is a deferred send to its agent, named by
+        // `identity`: listing them needs what viewing the agent needs, and
+        // every write what sending to it needs. That the schedule is that
+        // agent's is judged in the handler.
+        "meta/schedule/list" => one(ACTION_AGENT_VIEW, identity),
+        "meta/schedule/create"
+        | "meta/schedule/update"
+        | "meta/schedule/pause"
+        | "meta/schedule/resume"
+        | "meta/schedule/delete" => one(ACTION_AGENT_SEND, identity),
         crate::console_voice::VOICE_CONTEXT_STATUS_METHOD
         | crate::console_voice::VOICE_CAPTIONS_METHOD => one(ACTION_AGENT_VIEW, identity),
         crate::console_voice::VOICE_OPEN_METHOD
@@ -6565,13 +6656,25 @@ fn console_caller_auth_context(
 /// The name a principal's send scope records for its provider: the spelling
 /// tokens use, fixed here so a stored dedupe key never depends on how the
 /// provider type serializes.
-fn console_provider_name(provider: &crate::AuthProvider) -> &'static str {
+pub(crate) fn console_provider_name(provider: &crate::AuthProvider) -> &'static str {
     match provider {
         crate::AuthProvider::GoogleOAuth => "google_oauth",
         crate::AuthProvider::GitHubOAuth => "github_oauth",
         crate::AuthProvider::GenericOidc => "generic_oidc",
         crate::AuthProvider::ServiceIdentity => "service_identity",
         crate::AuthProvider::TestProvider => "test_provider",
+    }
+}
+
+/// The provider [`console_provider_name`] names, if it names one.
+pub(crate) fn console_provider_of_name(name: &str) -> Option<crate::AuthProvider> {
+    match name {
+        "google_oauth" => Some(crate::AuthProvider::GoogleOAuth),
+        "github_oauth" => Some(crate::AuthProvider::GitHubOAuth),
+        "generic_oidc" => Some(crate::AuthProvider::GenericOidc),
+        "service_identity" => Some(crate::AuthProvider::ServiceIdentity),
+        "test_provider" => Some(crate::AuthProvider::TestProvider),
+        _ => None,
     }
 }
 
@@ -9086,6 +9189,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     methods.push("meta/fork_member");
                 }
             }
+            // Console schedules (`schedules`): listed where the runtime's
+            // schedule host attached its service; a write is a deferred send
+            // of the caller, offered where the console is writable and a
+            // firing host drains the store.
+            methods.extend(schedules::advertised_methods(runtime, can_mutate));
             if metadata_table.is_some() {
                 methods.extend_from_slice(&["meta/mob_labels/get", "meta/run_labels/get"]);
                 if can_mutate {
@@ -9620,6 +9728,87 @@ async fn handle_console_runtime_rpc_with_visibility(
             Some(crate::rpc::schedule_methods::schedule_tools_result()),
             None,
         ),
+        // Console schedules: deferred console sends to an agent (`schedules`).
+        // The access table judged the agent's grant; the handler judges the
+        // schedule and the agent.
+        "meta/schedule/list" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/create" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/update" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/pause" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/resume" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/delete" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                access_view,
+                governance,
+            )
+            .await
+        })
+        .await,
         // Read-only state-directory diagnosis (registered as a read method:
         // allowed in read-only mode, admin-gated in
         // `console_rpc_access_requirements`).

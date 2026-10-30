@@ -428,6 +428,50 @@ as they were.
 The fork takes the agent's conversation as it is now. Side chats are
 `meta/fork_member` on the console RPC.
 
+### Schedules
+
+An agent's details pane (**Details** in the roster, or **Inspect agent** in
+its conversation's header) lists the agent's **schedules**: messages the
+Console sends to the agent later, as the person who defined them. A viewer
+who may message the agent adds one with **New schedule**: the message, an
+optional name, and when to send it, either once at a date and time,
+repeating every so many minutes, hours or days (the first send one interval
+from now unless you set a start), or daily at a time of day, on the
+weekdays you pick, in a named time zone. Each schedule shows when it sends,
+its next send while it is active and, to a viewer who may message the agent,
+who it sends as, with **Edit**, **Pause** or **Resume**, and **Delete**,
+which asks you to confirm. An edit keeps the timing unless you change it.
+
+- Each send is a Console send by the schedule's sender, judged when it goes
+  out: the Console must still admit the sender as it would admit them then
+  (sign-in where it is required, the allowlist, the trusted issuer, and no
+  sessions revoked since the schedule was defined), and the send needs what
+  a message sent then would need, `agent.send` on the agent under the access
+  policy at that time, a writable console, and an agent that takes console
+  messages. A refused send fails that time only; the schedule keeps its
+  later times.
+- Creating, editing or resuming a schedule makes you its sender. On a
+  console without sign-in the sender is the console's shared account, as it
+  is for a message you send there; once the console requires sign-in, such
+  schedules stop sending until someone signed in edits them.
+- A change that races another change of the same schedule is refused and
+  the list is read again: check the schedule and repeat the change.
+- A schedule repeats at most once a minute.
+- Viewers who may see the agent but not message it see its schedules
+  read-only, and so does everyone on a read-only console or on a gateway
+  that does not offer schedule changes; the pane says why.
+- An agent whose input is governed takes no schedule (a governed send needs
+  its human present, and a scheduled send has none), and an agent that
+  takes no console messages cannot be scheduled.
+- The pane lists the schedules defined in the Console only. The agent's own
+  schedules (its schedule tools) are not listed, and the agent's tools
+  neither see nor change the Console's.
+
+The section appears where the gateway keeps console schedules. A gateway
+that sends none of them (a candidate launch, for one) lists them read-only.
+Schedules are the `meta/schedule/*` methods on the console RPC (see
+[Console schedules](/api/rpc#console-schedules-console)).
+
 ### Local action feedback
 
 When a host supplies a recognized native refusal or audit fact, the Console
@@ -997,6 +1041,11 @@ Primary RPC methods on `/console/rpc`:
   [Side chats](#side-chats)); gated by `agent.spawn` for the side chat and
   `agent.view` and `agent.send` for the agent, and offered where sessions
   persist or the composition did not record whether they do
+- `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
+  `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
+  an agent's console schedules (see [Schedules](#schedules)); the list is
+  gated by `agent.view` and the writes by `agent.send` for the agent, and
+  each send is a Console send by the schedule's sender
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

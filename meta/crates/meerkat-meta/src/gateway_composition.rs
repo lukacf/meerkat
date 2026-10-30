@@ -1676,6 +1676,13 @@ pub async fn spawn_gateway_schedule_host<B: SessionAgentBuilder + 'static>(
         workgraph_service,
         owner_id,
     } = inputs;
+    // The Console's schedule editor (`crate::console_schedules`) lists the
+    // console schedules of this service on every launch, and writes them
+    // while the firing host below drains it.
+    runtime
+        .mob_runtime()
+        .console_schedules()
+        .attach(schedule_service.clone(), firing_host_binding.clone());
     if ScheduleFiringRole::of_runtime(runtime) == ScheduleFiringRole::QuiescedCandidate {
         firing_host_binding.quiesce_for_candidate();
         tracing::info!(
@@ -1709,6 +1716,12 @@ pub async fn spawn_gateway_schedule_host<B: SessionAgentBuilder + 'static>(
         watchdog_config,
     );
     let schedule_service_for_probe = schedule_service.clone();
+    // Console schedules fire through the Console's own send path, as their
+    // sender (`crate::console_schedules`).
+    let runnable_host = crate::console_schedules::with_console_schedule_runnable(
+        runnable_host,
+        runtime.console_schedule_doors(),
+    );
     let schedule_host = crate::schedule_wiring::spawn_schedule_host_with_identity_runtime(
         session_service,
         runtime_adapter,
@@ -1716,7 +1729,7 @@ pub async fn spawn_gateway_schedule_host<B: SessionAgentBuilder + 'static>(
         mob_state,
         runtime.mob_handle(),
         runtime.identity_runtime_ref().cloned(),
-        runnable_host,
+        Some(runnable_host),
         workgraph_service,
         owner_id,
     );

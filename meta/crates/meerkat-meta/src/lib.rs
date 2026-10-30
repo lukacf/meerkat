@@ -28,6 +28,7 @@ pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
 pub mod console_governed_ingress;
+pub(crate) mod console_schedules;
 pub(crate) mod console_spawn;
 pub mod console_voice;
 pub mod contact_directory;

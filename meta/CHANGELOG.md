@@ -67,6 +67,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   activated and had in effect at the fork are activated in the side chat; any
   other stays inactive and the side chat names it.
 
+- The Console offers schedules. An agent's details pane lists the agent's
+  console schedules and lets a viewer who may message the agent create,
+  edit, pause, resume and delete them: a message sent once at a time,
+  repeating every so many minutes, hours or days, or daily at a time of day
+  on chosen weekdays in a named time zone (`meta/schedule/list`, `create`,
+  `update`, `pause`, `resume` and `delete` on `/console/rpc`, kept in the
+  gateway's durable schedule store). The list needs `agent.view` on the
+  agent and every write `agent.send`, under the console send's own gate for
+  the caller, signed in or not; a read-only console and a viewer without
+  `agent.send` see the list read-only, without who each schedule sends as
+  (`sender_hidden`). Each fire is a console send by the caller who last
+  created, edited or resumed the schedule, judged when it
+  fires: the Console admits that caller as it admits a live request by it
+  (sign-in where required, the allowlist and provider policy, the trusted
+  issuer, and Console sessions not revoked since the schedule was defined,
+  for every signed-in principal), then sends through the same post-admission
+  path as `/console/send` (`agent.send` under the access policy then, a
+  writable console, an addressable agent, governance), deduplicated under
+  its occurrence's delivery key; a refused send fails that occurrence and
+  the schedule keeps its later times. An update and a resume write at the
+  revision they read, so a change racing another answers `-32009`
+  `schedule_revision_conflict` and changes nothing; an interval repeats at
+  most once a minute. `meta/capabilities` lists the list where the gateway
+  runs a schedule host and the writes where the console is writable and a
+  firing host sends the schedules. Refusals are typed (`schedule_not_found`,
+  `unknown_identity`, `not_addressable`, `governed_target`,
+  `schedule_host_unavailable`, `schedule_revision_conflict`), and a
+  candidate launch refuses the writes (`-32047`). Agents' schedule tools
+  neither list nor change console schedules (a verb on a schedule they
+  cannot read is refused), and their host runnable name
+  (`meta.console.scheduled_send`) is reserved: SDK callbacks and host
+  runnables may not take it.
+
 - Documentation: GitHub Copilot with a service-account token. From Meerkat
   0.9.8, Copilot routes with `auth_method = "github_copilot_token"` are
   `[realm]` tables in the host config like any other binding, so they work in
@@ -224,6 +257,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `runtime_options.member_auth_binding` is refused at its rebuild under that
   launch (`member_auth_binding_uncarried`), as is every fork seated before
   the launch named the binding. Close it and fork the agent again.
+- A Console schedule cannot send to an agent whose input is governed: the
+  create is refused (`governed_target`), and the fires of a schedule whose
+  agent became governed fail the same way, since a governed send needs its
+  Console human present.
+- A gateway whose Console send dedupe store is in memory forgets a schedule
+  fire's key on restart, so an occurrence redelivered after a crash can send
+  twice. The Console shows no fire history: a failed fire is recorded on its
+  occurrence in the schedule store and in the gateway's log, and a fire whose
+  admission the Console could not observe (a timeout) is recorded failed
+  although the message may have been admitted.
+- Console schedule fires go through the Console router built last, under
+  its decisions and visibility policy. A schedule of a deleted agent stays
+  until it is deleted, and fires into a new agent declared later under the
+  same name while its sender may still send to it.
 
 ## [0.9.6] - 2026-10-27
 

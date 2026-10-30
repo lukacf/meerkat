@@ -2681,10 +2681,8 @@ export function ChatPane({
           />
         </div>
         <div className="composer__footer">
-          <span>To: <b style={{ color: "var(--ink-muted)" }}>{agentLabel}</b></span>
+          <span>To: <b style={{ color: "var(--ink-muted)" }} title={identity}>{agentLabel}</b></span>
           {voiceActive && <span>· text to background agent</span>}
-          <span>·</span>
-          <span className="mono">{identity}</span>
           {agent?.role && (<>
             <span>·</span>
             <span>{agent.role}</span>

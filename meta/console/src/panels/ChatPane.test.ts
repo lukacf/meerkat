@@ -978,6 +978,13 @@ test("compact stock header retains target actions and destination", () => {
   assert.doesNotMatch(html, /class="conv__identity"/);
 });
 
+test("the composer footer names the agent and keeps its identity in the name's tooltip", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: null, agentLabel: "Router main", identity: "router:main", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+  assert.match(footer, /To: <b[^>]*title="router:main"[^>]*>Router main<\/b>/);
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("router:main"), false, "the footer text names the agent, not its identity");
+});
+
 test("stock folds consecutive proven generic completion but keeps unknown visible", () => {
   const makeTool = (id: string, name: string, known: boolean): ConversationTimelineEntry => ({ id, kind: "message", variant: "rich", identity: AGENT, blocks: [{ type: "tool-call", toolCallId: id, name, arguments: "{}", status: known ? "success" : "pending", completionEvidence: { outcome: known ? "success" : "unknown", source: known ? "session-history" : "unknown", toolCallId: id } }] });
   const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: null, agentLabel: "Agent", identity: "agent", entries: [makeTool("one", "read_file", true), makeTool("two", "list_files", true), makeTool("three", "read_file", false)], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true }));

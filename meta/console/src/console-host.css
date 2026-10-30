@@ -3118,7 +3118,23 @@ svg[data-svg="fit"],
 }
 .pane-menu__item:hover { background: var(--bg-elev-2); }
 .pane-menu__item .agent__dot { margin: 0; justify-self: center; }
-.pane-menu__id { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); }
+.pane-menu__name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+/* An identity is demoted detail: muted, smaller monospace, lighter than the
+   name, and middle-truncated so its distinguishing tail stays visible. */
+.pane-menu__id {
+  display: inline-flex;
+  justify-self: end;
+  min-width: 0; max-width: 150px;
+  overflow: hidden; white-space: nowrap;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 400;
+  color: var(--ink-meta);
+}
+.pane-menu__id-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-menu__id-tail { flex: none; white-space: nowrap; }
 .pane-menu__sep { height: 1px; background: var(--line); margin: 4px 0; }
 
 /* Compact overrides when view content lives inside a narrow pane */

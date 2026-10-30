@@ -35,7 +35,9 @@ pub(crate) fn controller_route(
 }
 
 use crate::policy::{LocalPolicyAllowance, LocalPolicyPurpose, LocalWorkPolicy};
-use crate::publication::{LocalAuthorizationPublication, LocalPublicationStamp, PublicationError};
+use crate::publication::{
+    LocalAuthorizationPublication, LocalPublicationStamp, PublicationError, TryReserveRefusal,
+};
 
 pub use crate::clock::{
     HostAuthorizationClock, LocalAuthorizationClock, LocalAuthorizationTime, LocalClockError,
@@ -379,7 +381,10 @@ impl LocalWorkAuthorization {
     /// `binding`, with `further` conjoined, holds inside `prepared` and
     /// requires no more review than `max_tier`, under this work's publication
     /// reservation held through `operation` (never published: every owner
-    /// change on this publication is excluded, and contention refuses).
+    /// change on this publication is excluded). Nothing here waits: another
+    /// reservation holding the writer refuses to rebuild
+    /// ([`reservation_refusal`]), and the caller waits for it, if at all,
+    /// only after this returns.
     fn run_current_within_tier(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -397,7 +402,7 @@ impl LocalWorkAuthorization {
         let _reservation = self
             .publication
             .try_reserve_owner_change()
-            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+            .map_err(reservation_refusal)?;
         let decision = self.current_decision_within(binding, further, &policy)?;
         self.within_prepared(&decision, prepared)?;
         if decision.review_tier > max_tier {
@@ -514,10 +519,16 @@ impl LocalWorkAuthorization {
 }
 
 impl WorkAuthorization for LocalWorkAuthorization {
+    /// A published owner change in progress on this work's publication, or
+    /// else a reservation of its writer held now (an owner change being
+    /// prepared, a held exclusion or another operation's final entry): the
+    /// holder an operation-time step refused to rebuild for. A waiting hint
+    /// only; [`LocalAuthorizationPublication::change_in_progress`] still
+    /// names published changes alone.
     fn owner_change_in_progress(
         &self,
     ) -> Option<meerkat_core::authorization::OwnerChangeInProgress> {
-        self.publication.change_in_progress()
+        self.publication.change_or_reservation_in_progress()
     }
 
     fn run_if_current_within(
@@ -568,10 +579,12 @@ impl WorkAuthorization for LocalWorkAuthorization {
         entered_tier: OperationReviewTier,
     ) -> Result<Box<dyn std::any::Any + Send>, meerkat_core::OperationAuthorizationError> {
         let (intent, further, policy) = self.child_issuance_inputs(further, intent)?;
+        // The same non-waiting reservation as a run: a held writer refuses
+        // to rebuild before anything is decided or appended.
         let mut reservation = self
             .publication
             .try_reserve_owner_change()
-            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+            .map_err(reservation_refusal)?;
         let decision = self.current_decision_within(binding, further, &policy)?;
         // The decision may require no more review than this dispatch entered.
         if decision.review_tier > entered_tier {
@@ -898,6 +911,21 @@ fn publication_refusal(error: PublicationError) -> meerkat_core::OperationAuthor
             OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
         }
         PublicationError::Unavailable => meerkat_core::OperationAuthorizationError::Unavailable,
+    }
+}
+
+/// An operation-time step's refused reservation. Another holder of the
+/// writer is no verdict on the operation and no failure of the owners: the
+/// step refuses to rebuild, without waiting under any lock, and the holder
+/// stays named by [`LocalWorkAuthorization`]'s `owner_change_in_progress`
+/// until its release, so the caller can wait for it and try again. A
+/// poisoned, retired or exhausted publication stays unavailable.
+fn reservation_refusal(refusal: TryReserveRefusal) -> meerkat_core::OperationAuthorizationError {
+    match refusal {
+        TryReserveRefusal::Busy => {
+            OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
+        }
+        TryReserveRefusal::Unavailable => meerkat_core::OperationAuthorizationError::Unavailable,
     }
 }
 

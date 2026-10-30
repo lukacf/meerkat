@@ -158,16 +158,19 @@ When compaction triggers:
     the compaction prompt is sent to the summarizing model (the session's
     active model after any model fallback, or the admitted controller) with no
     tools and `max_summary_tokens` as the response limit. Media and reasoning
-    are projected for summarization. The source may take two bytes per token of
-    the summarizing model's context window left after `max_summary_tokens`,
-    capped by the model's declared input ceiling, less the prompt, and never
-    less than 4 KiB. For a model that declares no window it may take a quarter
-    of `auto_compact_threshold`. A larger source is trimmed (large tool
-    results first, then the other context, user requests last), and every cut
-    text is marked for the summarizer. If even the fully trimmed source does
-    not fit, only the newest user requests that fit are sent, under a note
-    that says how many of them it carries. With a curator, this LLM call is
-    skipped.
+    are projected for summarization: each image or video in a user row or tool
+    result becomes a placeholder such as
+    `[image (image/png) omitted from this summary request]`, while the rows
+    the rewrite keeps carry their media unchanged. The source may take two
+    bytes per token of the summarizing model's context window left after
+    `max_summary_tokens`, capped by the model's declared input ceiling, less
+    the prompt, and never less than 4 KiB. For a model that declares no window
+    it may take a quarter of `auto_compact_threshold`. A larger source is
+    trimmed (large tool results first, then the other context, user requests
+    last), and every cut text is marked for the summarizer. If even the fully
+    trimmed source does not fit, only the newest user requests that fit are
+    sent, under a note that says how many of them it carries. With a curator,
+    this LLM call is skipped.
   </Step>
   <Step title="Handle result">
     **On ordinary failure**: a CompactionFailed event is emitted and the session is not mutated (safe failure).
@@ -240,6 +243,8 @@ The compactor sends this prompt to the LLM:
 > - What remains to be done (clear next steps)
 > - Any critical data, file paths, examples, or references needed to continue
 > - Tool call patterns that worked or failed
+>
+> Images and videos shown as bracketed placeholders have their content omitted from this summary request. Their absence here says nothing about what the agent could see. Do not infer the agent's ability to see them from these placeholders, and do not invent their contents; keep what the surrounding recorded text says about them and any references needed to act on them.
 >
 > Be concise and structured. Prioritize information the next context needs to act, not narrate.
 </Accordion>

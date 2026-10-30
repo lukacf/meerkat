@@ -540,6 +540,13 @@ owner settles the original. A cancelled original is still refused, and the
 controller-grant mutation check no longer counts a pending contributor as
 unreferenced. 0.9.3 and earlier refused such work as malformed or denied.
 
+Native admission, `require_source_original_live` and a retained resume also
+report an owner change that one of their grant-lineage reads meets (the
+original's own mandate, or a named contributor's liveness) as
+`ControllerReadinessFailure::PolicyChanged` (wire kind `policy_changed`), and a
+later attempt may pass. `require_source_original_live` meets one only outside
+an exclusion of owner changes.
+
 The job delivery drain treats a continuation the runtime is not ready to admit
 the same way. `retained_admission_outcome` maps it to
 `ContinuationAdmitError::NotReady(cause)` (the enum is now

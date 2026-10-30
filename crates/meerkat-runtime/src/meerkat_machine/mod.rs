@@ -1380,17 +1380,29 @@ struct UnregisterTeardownCoordinator {
     /// asked for. `BeginUnregisterSession` records it once; from then on the
     /// generated state and the durable progress own it.
     queued_inputs: UnregisterDisposition,
+    /// The disposition the machine recorded for this unregister, which the
+    /// owned worker reads from the generated state and publishes once the
+    /// machine began the unregister; empty until then. Every observer of
+    /// this coordinator holds it.
+    recorded: UnregisterRecordedDisposition,
 }
+
+/// The disposition `BeginUnregisterSession` recorded for one unregister, as
+/// its owned worker publishes it from the generated state: a read of the
+/// machine's record, set at most once.
+type UnregisterRecordedDisposition = Arc<std::sync::OnceLock<UnregisterDisposition>>;
 
 /// Read-only terminal-result observer for one exact runtime unregister
 /// coordinator. The observer carries no mutation authority and cannot start a
 /// retry; it only retains the coordinator's result channel plus the opaque
-/// registration identity used for its atomic admission.
+/// registration identity used for its atomic admission, and the disposition
+/// the machine recorded for that unregister once it is published.
 #[derive(Clone)]
 pub struct RuntimeSessionUnregisterObserver {
     registration: RuntimeSessionRegistrationWitness,
     coordinator_id: uuid::Uuid,
     result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+    recorded: UnregisterRecordedDisposition,
 }
 
 impl RuntimeSessionUnregisterObserver {
@@ -1398,11 +1410,13 @@ impl RuntimeSessionUnregisterObserver {
         registration: RuntimeSessionRegistrationWitness,
         coordinator_id: uuid::Uuid,
         result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+        recorded: UnregisterRecordedDisposition,
     ) -> Self {
         Self {
             registration,
             coordinator_id,
             result_rx,
+            recorded,
         }
     }
 
@@ -1410,6 +1424,26 @@ impl RuntimeSessionUnregisterObserver {
     #[must_use]
     pub fn registration(&self) -> &RuntimeSessionRegistrationWitness {
         &self.registration
+    }
+
+    /// The disposition the machine recorded for the exact unregister this
+    /// observer follows, for the run in flight and the inputs queued behind
+    /// it: what `BeginUnregisterSession` (or the unserved attachment's begin)
+    /// recorded, which can differ from what any caller asked for (a keep is
+    /// recorded as a stop for a registration that served live work, and an
+    /// unserved attachment's unregister records a stop for a requeue). A call
+    /// that joins an unregister already in progress gets that unregister's,
+    /// whatever it passed. `None` until the unregister's owned worker
+    /// published it, right after the machine began the unregister: once
+    /// [`Self::wait_for_result`] returned `Ok`, it is `Some` unless that
+    /// unregister found the registration already gone. Nothing is polled:
+    /// the worker publishes it to every observer of the unregister.
+    #[must_use]
+    pub fn queued_inputs(&self) -> Option<UnregisterQueuedInputs> {
+        self.recorded
+            .get()
+            .copied()
+            .map(UnregisterDisposition::to_queued_inputs)
     }
 
     /// Return the terminal result when published, without waiting or
@@ -1603,6 +1637,18 @@ impl UnregisterDisposition {
 
     pub(crate) fn dsl_disposition(self) -> (dsl::UnregisterQueuedInputsDisposition, u64) {
         (self.queued_inputs, self.requeue_max_age_ms)
+    }
+
+    /// This disposition as an [`UnregisterQueuedInputs`]: a requeue's max
+    /// age is the whole milliseconds it records.
+    pub(crate) fn to_queued_inputs(self) -> UnregisterQueuedInputs {
+        match self.queued_inputs {
+            dsl::UnregisterQueuedInputsDisposition::Stop => UnregisterQueuedInputs::Stop,
+            dsl::UnregisterQueuedInputsDisposition::Requeue => UnregisterQueuedInputs::Requeue {
+                max_age: std::time::Duration::from_millis(self.requeue_max_age_ms),
+            },
+            dsl::UnregisterQueuedInputsDisposition::Keep => UnregisterQueuedInputs::Keep,
+        }
     }
 }
 

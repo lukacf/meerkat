@@ -728,3 +728,374 @@ async fn shell_notify_drain_exited_after_teardown_is_benign() {
          surface as a typed no-op, not an error: got {outcome:?}"
     );
 }
+
+/// A call that joins an unregister already in progress keeps the
+/// disposition that unregister began with, and a host reads the disposition
+/// that applies from the unregister's durable progress on the session
+/// runtime's lifecycle row: a requeue unregister, held open by the run in
+/// flight, still reports its requeue max age (and no keep) after a stop
+/// call joined it.
+#[tokio::test]
+async fn a_joined_unregister_reports_the_disposition_it_began_with() {
+    use meerkat_runtime::store::{MachineLifecycleObservation, RuntimeStore};
+    use meerkat_runtime::{
+        InMemoryRuntimeStore, LogicalRuntimeId, RuntimeSessionUnregisterAdmission,
+        UnregisterQueuedInputs,
+    };
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store) as Arc<dyn RuntimeStore>)
+            .expect("persistent machine"),
+    );
+    let sid = CoreSessionId::new();
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(Notify::new());
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(GatedExecutor {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        )
+        .await
+        .expect("register session with executor");
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&sid, make_prompt("holds the unregister open"))
+        .await
+        .expect("accept input");
+    assert!(outcome.is_accepted());
+    wait_for_flag(&entered, "executor should enter apply").await;
+
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("the session is registered");
+    let began = adapter
+        .observe_unregister_session_registration_with_queued_inputs_if_current(
+            &registration,
+            UnregisterQueuedInputs::Requeue {
+                max_age: Duration::from_secs(90),
+            },
+        )
+        .await
+        .expect("the requeue unregister begins");
+    assert!(
+        matches!(began, RuntimeSessionUnregisterAdmission::Pending(_)),
+        "the run in flight holds the requeue unregister open"
+    );
+    let joined = adapter
+        .observe_unregister_session_registration_with_queued_inputs_if_current(
+            &registration,
+            UnregisterQueuedInputs::Stop,
+        )
+        .await
+        .expect("the stop call joins it");
+    assert!(
+        matches!(joined, RuntimeSessionUnregisterAdmission::Pending(_)),
+        "the stop call joined the unregister in progress"
+    );
+
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
+    let progress = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let MachineLifecycleObservation::Decoded { record, .. } = store
+                .observe_machine_lifecycle(&runtime_id)
+                .await
+                .expect("observe the lifecycle row")
+                && let Some(progress) = record.unregister_progress()
+            {
+                return progress.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the unregister's durable progress is on the lifecycle row");
+    assert_eq!(
+        progress.requeue_max_age_ms(),
+        Some(90_000),
+        "the requeue the unregister began with applies, not the joining stop"
+    );
+    assert!(!progress.keeps_recovered_inputs());
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while adapter.contains_session(&sid).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the unregister completes once the run returns");
+}
+
+/// The caller that starts or joins an unregister reads the disposition the
+/// machine recorded for it from its own answer, without polling: the
+/// unregister's owned worker publishes it to every observer as soon as the
+/// machine began the unregister, and the until-terminal call answers it once
+/// the unregister completed. It is the machine's record, never a request: a
+/// keep on a registration that served live work reports the stop the machine
+/// recorded, and a stop call that joins a requeue in progress reports the
+/// requeue (and the reverse). A registration that is no longer current
+/// reports nothing.
+#[tokio::test]
+async fn the_caller_that_starts_or_joins_an_unregister_reads_the_recorded_disposition() {
+    use meerkat_runtime::{RuntimeSessionUnregisterAdmission, UnregisterQueuedInputs};
+
+    let requeue = UnregisterQueuedInputs::Requeue {
+        max_age: Duration::from_secs(90),
+    };
+
+    // A requeue call that starts the unregister reports the requeue the
+    // machine recorded; afterwards the registration is no longer current.
+    let adapter = MeerkatMachine::ephemeral();
+    let sid = CoreSessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("the session is registered");
+    assert_eq!(
+        adapter
+            .unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+                &registration,
+                requeue,
+            )
+            .await
+            .expect("the requeue unregister completes"),
+        Some(requeue)
+    );
+    assert!(!adapter.contains_session(&sid).await);
+    assert_eq!(
+        adapter
+            .unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+                &registration,
+                UnregisterQueuedInputs::Stop,
+            )
+            .await
+            .expect("a registration that is no longer current answers"),
+        None,
+        "nothing was started or joined"
+    );
+
+    // A keep on a registration that served live work: the machine recorded
+    // a stop, and that is what the call reports.
+    let adapter = MeerkatMachine::ephemeral();
+    let sid = CoreSessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&sid, make_prompt("live work"))
+        .await
+        .expect("accept input");
+    assert!(outcome.is_accepted());
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("the session is registered");
+    assert_eq!(
+        adapter
+            .unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+                &registration,
+                UnregisterQueuedInputs::Keep,
+            )
+            .await
+            .expect("the keep unregister completes"),
+        Some(UnregisterQueuedInputs::Stop),
+        "the stop the machine recorded, not the keep the call asked for"
+    );
+
+    // A call that joins an unregister the run in flight holds open reports
+    // the disposition the machine recorded for the unregister it joined.
+    for (began, joining) in [
+        (requeue, UnregisterQueuedInputs::Stop),
+        (UnregisterQueuedInputs::Stop, requeue),
+    ] {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let sid = CoreSessionId::new();
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(Notify::new());
+        adapter
+            .register_session_with_executor(
+                sid.clone(),
+                Box::new(GatedExecutor {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+            )
+            .await
+            .expect("register session with executor");
+        let (outcome, _completion) = adapter
+            .accept_input_with_completion(&sid, make_prompt("holds the unregister open"))
+            .await
+            .expect("accept input");
+        assert!(outcome.is_accepted());
+        wait_for_flag(&entered, "executor should enter apply").await;
+        let registration = adapter
+            .current_session_registration_witness(&sid)
+            .await
+            .expect("the session is registered");
+
+        let RuntimeSessionUnregisterAdmission::Pending(started) = adapter
+            .observe_unregister_session_registration_with_queued_inputs_if_current(
+                &registration,
+                began,
+            )
+            .await
+            .expect("the unregister begins")
+        else {
+            panic!("the run in flight holds the {began:?} unregister open");
+        };
+        let RuntimeSessionUnregisterAdmission::Pending(mut joined) = adapter
+            .observe_unregister_session_registration_with_queued_inputs_if_current(
+                &registration,
+                joining,
+            )
+            .await
+            .expect("the call joins the unregister in progress")
+        else {
+            panic!("the {joining:?} call joins the {began:?} unregister in progress");
+        };
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), joined.wait_for_result())
+            .await
+            .expect("the unregister completes once the run returns")
+            .expect("the unregister succeeds");
+        assert_eq!(
+            joined.queued_inputs(),
+            Some(began),
+            "a {joining:?} call that joined a {began:?} unregister reports the one recorded"
+        );
+        assert_eq!(
+            started.queued_inputs(),
+            Some(began),
+            "and so does the starter"
+        );
+        assert!(!adapter.contains_session(&sid).await);
+    }
+}
+
+/// An unserved attachment's abort begins its unregister with the keep it
+/// asks for, which the machine records for a registration that served no
+/// live work. A requeue call racing that abort starts or joins the same
+/// unregister and reports the keep the machine recorded, not its requeue:
+/// it waits for the session's mutation gate, which the pending attachment
+/// holds until its abort has begun the unregister.
+#[tokio::test]
+async fn a_requeue_call_on_an_unserved_attachments_unregister_reports_the_recorded_keep() {
+    use meerkat_runtime::{EnsureRuntimeExecutorAttachment, UnregisterQueuedInputs};
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = CoreSessionId::new();
+    let pending = match adapter
+        .ensure_session_with_executor_factory(sid.clone(), |_witness| {
+            Box::new(GatedExecutor {
+                entered: Arc::new(AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
+            })
+        })
+        .await
+        .expect("prepare an exact attachment")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("a fresh session returned an existing attachment {witness:?}")
+        }
+    };
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("the session is registered");
+
+    let mut reporting = Box::pin(
+        adapter.unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+            &registration,
+            UnregisterQueuedInputs::Requeue {
+                max_age: Duration::from_secs(90),
+            },
+        ),
+    );
+    // The call waits for the mutation gate the pending attachment holds.
+    assert!(futures::poll!(reporting.as_mut()).is_pending());
+    let (aborted, reported) = tokio::join!(pending.abort(), reporting);
+    aborted.expect("the unserved attachment aborts");
+    assert_eq!(
+        reported.expect("the requeue call completes"),
+        Some(UnregisterQueuedInputs::Keep),
+        "the keep the machine recorded for the unserved attachment"
+    );
+    assert!(!adapter.contains_session(&sid).await);
+}
+
+/// A host's graceful shutdown asks to requeue a session whose executor
+/// attachment is still pending, on a registration that already served live
+/// work. Its unregister waits for the session's mutation gate, which the
+/// pending attachment holds until its abort begins the unregister with the
+/// keep an unserved attachment asks for; the machine records a stop for a
+/// registration that served live work. The shutdown call then holds the
+/// unregister's coordinator, the attachment's abort joins it, and the
+/// shutdown reports the recorded stop, not its requeue.
+#[tokio::test]
+async fn a_graceful_requeue_on_a_pending_attachment_reports_the_recorded_stop() {
+    use meerkat_runtime::{EnsureRuntimeExecutorAttachment, UnregisterQueuedInputs};
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = CoreSessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&sid, make_prompt("live work"))
+        .await
+        .expect("accept input");
+    assert!(outcome.is_accepted());
+    let pending = match adapter
+        .ensure_session_with_executor_factory(sid.clone(), |_witness| {
+            Box::new(GatedExecutor {
+                entered: Arc::new(AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
+            })
+        })
+        .await
+        .expect("attach an executor")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("the registration had no attachment yet: {witness:?}")
+        }
+    };
+
+    // The graceful shutdown resolves the session's registration by its id.
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("the session is registered");
+    let mut shutdown = Box::pin(
+        adapter.unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+            &registration,
+            UnregisterQueuedInputs::Requeue {
+                max_age: Duration::from_secs(90),
+            },
+        ),
+    );
+    assert!(
+        futures::poll!(shutdown.as_mut()).is_pending(),
+        "the shutdown waits for the pending attachment's mutation gate"
+    );
+    let (aborted, reported) = tokio::join!(pending.abort(), shutdown);
+    aborted.expect("the pending attachment aborts");
+    assert_eq!(
+        reported.expect("the shutdown completes"),
+        Some(UnregisterQueuedInputs::Stop),
+        "the stop the machine recorded, not the requeue the shutdown asked for"
+    );
+    assert!(!adapter.contains_session(&sid).await);
+}

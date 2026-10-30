@@ -493,6 +493,17 @@ impl StockGovernance {
             .and_then(std::sync::Weak::upgrade)
     }
 
+    /// Test support: the latest composition's own grant owner, restored on
+    /// this composition's publication, while the realm's machine still holds
+    /// it, so a test can change the realm's policy live (a grant revoked
+    /// while the realm is open). Compiled for test builds only: this crate's
+    /// test support, or the MCP fixture feature the RPC test battery enables.
+    #[cfg(any(test, feature = "test-support", feature = "test-mcp-oauth-fixtures"))]
+    #[doc(hidden)]
+    pub fn composed_grant_owner_for_test(&self) -> Option<Arc<LocalGrantAuthority>> {
+        self.composed_grants()
+    }
+
     /// The latest composition's grant owner, while the realm's machine
     /// still holds it.
     fn composed_grants(&self) -> Option<Arc<LocalGrantAuthority>> {

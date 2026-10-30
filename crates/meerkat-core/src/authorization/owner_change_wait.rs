@@ -9,6 +9,17 @@
 //! for the change to complete before it rebuilds. Waiting only delays: the
 //! rebuild still requires a coherent observation and every current check, and
 //! no refusal is weakened.
+//!
+//! A governed step of a tool dispatch takes the work owners' exclusion
+//! without waiting. When another actor holds it (an owner change still being
+//! prepared, a held exclusion or another operation's final entry), the
+//! native work owner refuses to rebuild and reports that hold as a change in
+//! progress until it ends, so the step's waiting form waits here too, only
+//! after the step returned and released everything it took. A hold that
+//! ended before the step read it is no ordinary refusal there: the step
+//! pauses one backoff step and rebuilds, as one of its free rebuilds
+//! ([`OwnerChangeChurn::wait_for_refused_step`]). This is shell
+//! synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};
 #[cfg(target_arch = "wasm32")]
@@ -134,6 +145,44 @@ impl OwnerChangeChurn {
         operation: Option<&crate::OperationId>,
     ) -> Option<OwnerChangeWait> {
         work.owner_change_in_progress()?;
+        Some(
+            self.wait_and_report(work, budget_remaining, site, operation, false)
+                .await,
+        )
+    }
+
+    /// After a governed step of a tool dispatch refused to rebuild: as
+    /// [`Self::wait_for_settled_change`], except that a read finding no
+    /// change in progress is no ordinary refusal. The step took the work
+    /// owners' exclusion without waiting, and the hold that refused it
+    /// (often another operation's final entry, shorter than the step's way
+    /// to this read) may already have ended, so the step pauses one backoff
+    /// step and waits for any change in progress after that pause. Either
+    /// way the wait is bounded, traced, reported and counted as every other
+    /// one: a settled wait is one of the operation's
+    /// [`OWNER_CHANGE_FREE_REBUILDS`], and no wait starts past the deadline.
+    pub(crate) async fn wait_for_refused_step(
+        &mut self,
+        work: &dyn WorkAuthorization,
+        budget_remaining: Option<Duration>,
+        site: &'static str,
+        operation: Option<&crate::OperationId>,
+    ) -> OwnerChangeWait {
+        let pause_first = work.owner_change_in_progress().is_none();
+        self.wait_and_report(work, budget_remaining, site, operation, pause_first)
+            .await
+    }
+
+    /// One bounded wait of this operation: its deadline, set at its first
+    /// wait, and its free rebuilds, with the wait traced and reported.
+    async fn wait_and_report(
+        &mut self,
+        work: &dyn WorkAuthorization,
+        budget_remaining: Option<Duration>,
+        site: &'static str,
+        operation: Option<&crate::OperationId>,
+        pause_first: bool,
+    ) -> OwnerChangeWait {
         let wait = if self.free_rebuilds >= OWNER_CHANGE_FREE_REBUILDS {
             OwnerChangeWait::NotSettled {
                 waited: Duration::ZERO,
@@ -145,7 +194,7 @@ impl OwnerChangeChurn {
                 });
                 DeadlineInstant::now() + bound
             });
-            let wait = await_owner_change(work, deadline).await;
+            let wait = await_owner_change(work, deadline, pause_first).await;
             if wait.settled() {
                 self.free_rebuilds += 1;
             }
@@ -155,20 +204,31 @@ impl OwnerChangeChurn {
         if let Some(report) = self.report.as_ref() {
             report.report(wait, operation);
         }
-        Some(wait)
+        wait
     }
 }
 
 /// Wait until no change is in progress on `work`'s publication, or until
 /// `deadline`. A change that began after the one refused keeps the wait
 /// going under the same deadline; only a read with no change in progress
-/// settles it.
+/// settles it. With `pause_first`, the first read follows one backoff step,
+/// and nothing settles once the deadline has passed before that pause.
 async fn await_owner_change(
     work: &dyn WorkAuthorization,
     deadline: DeadlineInstant,
+    pause_first: bool,
 ) -> OwnerChangeWait {
     let start = DeadlineInstant::now();
     let mut backoff = FIRST_BACKOFF;
+    if pause_first {
+        if start >= deadline {
+            return OwnerChangeWait::NotSettled {
+                waited: Duration::ZERO,
+            };
+        }
+        tokio::time::sleep(backoff.min(deadline.saturating_duration_since(start))).await;
+        backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+    }
     loop {
         let now = DeadlineInstant::now();
         if work.owner_change_in_progress().is_none() {

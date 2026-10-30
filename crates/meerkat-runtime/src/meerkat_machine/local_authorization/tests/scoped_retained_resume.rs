@@ -872,3 +872,163 @@ async fn a_revoked_targeted_contributor_lineage_leaves_the_continuation_and_its_
         Ok(AcceptOutcome::Accepted { .. })
     ));
 }
+
+/// The composition's retained-resume check over one held original, called
+/// directly with the evidence of its staged run. With `own_lineage` the
+/// original's own mandate is a single grant lineage; otherwise it keeps the
+/// fixture's host policy and names one held contributor under that
+/// contributor's own grant lineage, so either read is the only lineage the
+/// check resolves.
+struct DirectResume {
+    check: crate::meerkat_machine::ScopedRetainedResume,
+    runtime: LogicalRuntimeId,
+    input: Input,
+    evidence: crate::retained_work::RetainedResumeEvidence,
+    publication: LocalAuthorizationPublication,
+}
+
+impl DirectResume {
+    fn new(own_lineage: bool) -> Self {
+        let (configuration, mut input, _domain, publication) = configuration_with_publication();
+        let grants = configuration.grants;
+        let mut claims = input
+            .header()
+            .authority_association
+            .as_ref()
+            .expect("claims")
+            .candidate()
+            .clone();
+        let root = claims.controller_grant_lineage[0].root_authority.clone();
+        let executor = claims.logical_executor.clone();
+        let issue = |label: &str| {
+            grants
+                .issue_root(
+                    &root,
+                    EvidenceId::new(label).expect("id"),
+                    executor.clone(),
+                    None,
+                    ExecutionRestrictions::unrestricted(),
+                )
+                .expect("independently issued grant")
+        };
+        let custody = Arc::new(Custody::default());
+        if own_lineage {
+            claims.authority_basis = WorkAuthorityBasis::GrantLineage {
+                lineage: vec![issue("own-grant")],
+            };
+        } else {
+            let lineage = vec![issue("contributor-grant")];
+            let mut work = claims.original_work.clone();
+            work.work = EvidenceId::new("contributor-b").expect("work label");
+            custody.0.lock().expect("fixture").insert(
+                work.work.clone(),
+                AuthenticatedOriginal {
+                    original_work: work.clone(),
+                    occurrence_scope: claims.ingress_namespace.occurrence_scope.clone(),
+                    original_authentication: claims.original_authentication.clone(),
+                    root_event: claims.root_event.clone(),
+                    contributing_work: Vec::new(),
+                    target: claims.target.clone(),
+                    authority_basis: WorkAuthorityBasis::GrantLineage { lineage },
+                },
+            );
+            claims.contributing_work = vec![work];
+        }
+        input.header_mut().authority_association =
+            Some(InputAuthorityAssociation::new(claims.clone()).expect("same authorized parties"));
+        custody.hold(&input);
+        let contributors = vec![
+            crate::input_authority::RetainedInputAuthority::from_input(&input)
+                .expect("retained authority")
+                .expect("the original's association"),
+        ];
+        let runtime = LogicalRuntimeId::new("native-test");
+        let identity = crate::retained_work::identity_from(
+            &runtime,
+            meerkat_core::RunId::new(),
+            &contributors,
+            &std::collections::BTreeMap::new(),
+            claims.controller_model.clone(),
+        )
+        .expect("identity");
+        let evidence = crate::retained_work::RetainedResumeEvidence {
+            identity,
+            delivery: crate::retained_work::RetainedResumeDelivery {
+                address: runtime.clone(),
+                delivery_id: crate::delivery_inbox::RuntimeDeliveryId::new("continuation:resume")
+                    .expect("delivery id"),
+                delivery_sequence: 1,
+                submission_digest: "submission".into(),
+            },
+            contributors,
+        };
+        let check = crate::meerkat_machine::ScopedRetainedResume::new(
+            grants,
+            claims.ingress_namespace.ingress,
+            custody,
+            Arc::new(Policy {
+                requester: claims.requester,
+                executor,
+            }),
+            Arc::new(Controllers),
+        );
+        Self {
+            check,
+            runtime,
+            input,
+            evidence,
+            publication,
+        }
+    }
+
+    fn resume(&self) -> Result<(), crate::retained_work::RetainedResumeError> {
+        self.check
+            .check(&self.runtime, &self.input, &self.evidence)
+            .map(|_| ())
+    }
+}
+
+/// The retained-resume check resolves the original's own grant-lineage
+/// mandate and a named contributor's liveness as admission does, with the
+/// same answers: an owner change in progress at either read is a changed
+/// policy (`PolicyChanged`), never an owner that cannot say now, and the
+/// same resume passes once the change completes; a poisoned publication
+/// stays unavailable (`PolicyUnavailable`).
+#[test]
+fn a_resume_lineage_read_during_an_owner_change_is_a_changed_policy() {
+    use crate::retained_work::RetainedResumeError;
+    use meerkat_core::authorization::ControllerReadinessFailure;
+    for (own_lineage, read) in [
+        (true, "the original's own mandate"),
+        (false, "a contributor's liveness"),
+    ] {
+        let fixture = DirectResume::new(own_lineage);
+        assert_eq!(fixture.resume(), Ok(()), "{read}: no change in progress");
+        let change = fixture
+            .publication
+            .begin_owner_change()
+            .expect("an owner change in progress");
+        let during = fixture.resume();
+        drop(change);
+        assert_eq!(
+            during,
+            Err(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyChanged
+            )),
+            "{read}"
+        );
+        assert_eq!(
+            fixture.resume(),
+            Ok(()),
+            "{read}: resumes once the change completes"
+        );
+        fixture.publication.poison();
+        assert_eq!(
+            fixture.resume(),
+            Err(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable
+            )),
+            "{read}: a poisoned publication"
+        );
+    }
+}

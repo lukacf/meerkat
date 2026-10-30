@@ -1538,14 +1538,17 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
         "the work owner refuses a restrictive further original"
     );
     {
+        // Its writer is held, so the step refuses to rebuild at once, with
+        // no verdict on the operation: a later attempt may succeed.
         let _change = publication.begin_owner_change().expect("owner change");
-        assert_eq!(
-            run_within(&["p"]),
-            (
-                Err(meerkat_core::OperationAuthorizationError::Unavailable),
-                false
-            ),
-            "an owner change in progress refuses without waiting"
+        let (result, ran) = run_within(&["p"]);
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+                    if refusal.kind() == meerkat_core::OperationRefusalKind::ReprepareRequired
+            ) && !ran,
+            "an owner change in progress refuses to rebuild without waiting: {result:?}"
         );
     }
 

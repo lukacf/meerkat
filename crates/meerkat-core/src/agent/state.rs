@@ -6768,8 +6768,14 @@ where
         }
         // Before anything of this boundary commits (its notices first): a
         // held approval owner makes the boundary look again with nothing of
-        // it delivered yet.
-        if !self.enrol_moved_run_consent().await {
+        // it delivered yet. Only the boundary's first poll, before a request
+        // of it is prepared, tries again to move the consent left parked for
+        // a resumed run: a repoll while a gate defers calls no owner again.
+        let first_poll = ctx.model_operation.is_none()
+            && self
+                .run_consent_attempts
+                .first_poll_of_boundary(*ctx.model_operation_sequence);
+        if !self.enrol_moved_run_consent(first_poll).await {
             return Ok(CallingLlmStep::Repoll);
         }
         match self.refresh_calling_llm_boundary_notices(ctx).await? {
@@ -7130,12 +7136,16 @@ where
     /// The first step of a boundary, before its notices: a run that resumes
     /// retained work under a consent scope enrols the consent the approval
     /// owner moved into it, at every boundary, since a receipt can commit,
-    /// and move its consent here, after the run opened. Each is still
-    /// attempted at most once in this run, by step 3c. Without a consent
-    /// scope nothing can move into the run, and the owner is not read. A
-    /// held owner yields, as the notice gate does: `false` means the
-    /// boundary must repoll, with nothing of it delivered yet.
-    async fn enrol_moved_run_consent(&mut self) -> bool {
+    /// and move its consent here, after the run opened. A move that an owner
+    /// change in progress or unavailable owners left parked is tried again
+    /// first, without waiting, on the boundary's first poll only
+    /// (`retry_moves`; ADR-001 D9); the run's close settles what never
+    /// moved. Each moved consent is still attempted at most once in this
+    /// run, by step 3c. Without a consent scope nothing can move into the
+    /// run, and the owner is not read. A held owner yields, as the notice
+    /// gate does: `false` means the boundary must repoll, with nothing of it
+    /// delivered yet.
+    async fn enrol_moved_run_consent(&mut self, retry_moves: bool) -> bool {
         // A noncommitting live bridge run executes against a retained
         // snapshot and never spends consent.
         if self.noncommitting_live_bridge_run {
@@ -7147,6 +7157,9 @@ where
         ) && !work.resumed_inputs().is_empty()
             && work.consent_scope().is_some()
         {
+            if retry_moves && let Some(run_id) = self.tool_dispatch_context.run_id() {
+                review.retry_parked_consent_for_run(work, run_id);
+            }
             match review.consent_moved_into_run(work, self.tool_dispatch_context.run_id()) {
                 crate::approval::consent::MovedConsentScan::Moved(moved) => {
                     for approval_id in &moved {
@@ -7236,8 +7249,10 @@ where
                 match self.attempt_decided_consent(ctx, &review, decided).await? {
                     Some(op_refs) => pending_op_refs.extend(op_refs),
                     // Not ready: the rebuilt agent could not resolve its
-                    // retained call yet. The attempt does not count, and the
-                    // run's next boundary attempts it again.
+                    // retained call yet, or the approval owner kept the
+                    // consent without settling its admission or spend now,
+                    // and nothing was spent. The attempt does not count,
+                    // and the run's next boundary attempts it again.
                     None => self.run_consent_attempts.not_attempted(&approval_id),
                 }
             }
@@ -38674,15 +38689,26 @@ mod tests {
             }
 
             /// The work owner: the two restricted actions are R3 and every
-            /// other operation R1. It can withdraw one tool's permission.
+            /// other operation R1. It can withdraw one tool's permission (and
+            /// publishes that change, as a policy owner does), answer its next
+            /// preparation as an owner change in progress, and be unable to
+            /// read review material.
             #[derive(Default)]
             struct Owner {
                 withdrawn: Mutex<std::collections::BTreeSet<&'static str>>,
+                /// The owner's publication, moved by each published change.
+                publication: std::sync::atomic::AtomicU64,
+                reprepare_once: std::sync::atomic::AtomicBool,
+                material_unavailable: std::sync::atomic::AtomicBool,
             }
 
             impl Owner {
+                /// Withdraw `tool`'s permission and publish the change: every
+                /// decision prepared before it is stale, and a fresh decision
+                /// of `tool` refuses it.
                 fn withdraw(&self, tool: &'static str) {
                     self.withdrawn.lock().unwrap().insert(tool);
+                    self.publication.fetch_add(1, Ordering::SeqCst);
                 }
             }
 
@@ -38691,6 +38717,8 @@ mod tests {
             struct Decision {
                 binding: PreparedAuthorizationBinding,
                 owner: Arc<Owner>,
+                /// The owner's publication this decision was prepared under.
+                publication: u64,
             }
 
             impl Decision {
@@ -38714,6 +38742,9 @@ mod tests {
                     crate::authorization::ReviewOperationContextResolution,
                     crate::OperationAuthorizationError,
                 > {
+                    if self.0.material_unavailable.load(Ordering::SeqCst) {
+                        return Err(crate::OperationAuthorizationError::Unavailable);
+                    }
                     Ok(crate::authorization::ReviewOperationContextResolution::NotApplicable)
                 }
 
@@ -38724,9 +38755,15 @@ mod tests {
                     Arc<dyn PreparedOperationAuthorization>,
                     crate::OperationAuthorizationError,
                 > {
+                    if self.0.reprepare_once.swap(false, Ordering::SeqCst) {
+                        return Err(
+                            OperationRefused::new(OperationRefusalKind::ReprepareRequired).into(),
+                        );
+                    }
                     Ok(Arc::new(Decision {
                         binding: binding.clone(),
                         owner: Arc::clone(&self.0),
+                        publication: self.0.publication.load(Ordering::SeqCst),
                     }))
                 }
             }
@@ -38747,6 +38784,11 @@ mod tests {
                     if !self.binding.same_operation(binding) {
                         return Err(
                             OperationRefused::new(OperationRefusalKind::MalformedFacts).into()
+                        );
+                    }
+                    if self.publication != self.owner.publication.load(Ordering::SeqCst) {
+                        return Err(
+                            OperationRefused::new(OperationRefusalKind::ReprepareRequired).into(),
                         );
                     }
                     if self
@@ -39445,10 +39487,12 @@ mod tests {
 
             /// Consent withdrawn between its move and the boundary that would
             /// spend it is never attempted: the work owner withdrew the
-            /// operation's permission, and the approval's read observed it
-            /// before the boundary. No body runs for it and nothing is spent,
-            /// while the other consent moved into the same run is still spent
-            /// once.
+            /// operation's permission and published the change, and the
+            /// approval's read, finding the decision stale, had its owners
+            /// decide it afresh and withdrew it on their refusal before the
+            /// boundary (ADR-001 D9). No body runs for it and nothing is spent,
+            /// while the other consent moved into the same run, decided afresh
+            /// at its attempt, is still spent once.
             #[tokio::test]
             async fn a_moved_consent_withdrawn_before_its_boundary_is_never_attempted() {
                 let model = Arc::new(ScriptedModel::default());
@@ -39473,7 +39517,8 @@ mod tests {
                 receipt(&host.approvals, &withdrawn, &scope, &withdrawn_input);
                 receipt(&host.approvals, &other, &scope, &other_input);
                 // At the run's first boundary, before its consent step, the
-                // owner withdraws one operation and its approval is read.
+                // owner withdraws one operation, publishing the change, and
+                // its approval is read.
                 let withdraw = {
                     let owner = Arc::clone(&owner);
                     let approvals = host.approvals.clone();
@@ -40273,6 +40318,144 @@ mod tests {
                     consent_attempts(&model.requests()[2]).is_empty(),
                     "nothing was attempted"
                 );
+            }
+
+            /// A rebuilt agent whose rebind of the moved consent meets an owner
+            /// change at its resumed run's first boundary (the fresh
+            /// preparation answers that a change is in progress): that attempt
+            /// is not ready, leaves no feedback and enters nothing, and the
+            /// consent is kept. The run's next boundary rebinds it afresh and
+            /// spends it once (ADR-001 D9).
+            #[tokio::test]
+            async fn a_rebuilt_agent_whose_rebind_meets_an_owner_change_spends_later() {
+                let model = Arc::new(ScriptedModel::default());
+                let original = Arc::new(Actions::default());
+                let owner = Arc::new(Owner::default());
+                let mut host = compose_host(ApprovalService::new(), &model, &original).await;
+                let scope = destination(host.agent.session.id());
+                let (origin_run, input) = (RunId::new(), InputId::new());
+                let consent =
+                    approved_and_received(&mut host, &model, &owner, &scope, &origin_run, &input)
+                        .await;
+
+                let rebuilt_tools = Arc::new(Actions::default());
+                let mut rebuilt = agent_over(&host.review, &model, &rebuilt_tools).await;
+                // At the run's first boundary, after the consent moved in, the
+                // next preparation (the rebind's) meets an owner change.
+                let race = {
+                    let model = Arc::clone(&model);
+                    let owner = Arc::clone(&owner);
+                    let armed = std::sync::atomic::AtomicBool::new(false);
+                    move || {
+                        if model.requests.lock().unwrap().len() == 2
+                            && !armed.swap(true, Ordering::SeqCst)
+                        {
+                            owner.reprepare_once.store(true, Ordering::SeqCst);
+                        }
+                    }
+                };
+                rebuilt.__test_set_model_preparation_observer(Some(Arc::new(race)));
+                model.script([Reply::Call {
+                    id: "read-call",
+                    tool: BENIGN,
+                }]);
+                let run = RunId::new();
+                let resumed = [(input, identity(&origin_run))];
+                run_as(
+                    &mut rebuilt,
+                    &run,
+                    run_work(&owner, &model, &scope, &run, &resumed),
+                )
+                .await;
+
+                assert_eq!(
+                    rebuilt_tools.bodies(),
+                    vec![RESTRICTED.to_string()],
+                    "spent once, at the next boundary"
+                );
+                assert!(original.bodies().is_empty());
+                let spent = record(&host.approvals, &consent);
+                assert!(spent.consumed_at.is_some());
+                assert_eq!(spent.withdrawal, None);
+                let requests = model.requests();
+                assert_eq!(requests.len(), 4, "two requests of the resumed run");
+                assert!(
+                    consent_attempts(&requests[2]).is_empty(),
+                    "the attempt that was not ready left no feedback"
+                );
+                let attempts = consent_attempts(&requests[3]);
+                assert_eq!(attempts.len(), 1, "{attempts:?}");
+                assert_eq!(attempts[0]["tool_use_id"], "consent-call");
+            }
+
+            /// A move whose owners cannot read the operation's review material
+            /// when the resumed run opens leaves the consent parked: it never
+            /// moves with the material it held (ADR-001 D9). The run's next
+            /// boundary, once they can read it, moves the consent and spends it
+            /// once; without that boundary's move it would stay parked until
+            /// the run's close withdrew it.
+            #[tokio::test]
+            async fn a_move_its_owners_could_not_read_at_the_open_moves_at_the_next_boundary() {
+                let model = Arc::new(ScriptedModel::default());
+                let tools = Arc::new(Actions::default());
+                let owner = Arc::new(Owner::default());
+                let mut host = compose_host(ApprovalService::new(), &model, &tools).await;
+                let scope = destination(host.agent.session.id());
+                let (origin_run, input) = (RunId::new(), InputId::new());
+                let consent =
+                    approved_and_received(&mut host, &model, &owner, &scope, &origin_run, &input)
+                        .await;
+                owner.material_unavailable.store(true, Ordering::SeqCst);
+                // Readable again at the resumed run's first boundary.
+                let readable = {
+                    let owner = Arc::clone(&owner);
+                    move || owner.material_unavailable.store(false, Ordering::SeqCst)
+                };
+                host.agent
+                    .__test_set_model_preparation_observer(Some(Arc::new(readable)));
+                let run = RunId::new();
+                let resumed = [(input.clone(), identity(&origin_run))];
+                run_as(
+                    &mut host.agent,
+                    &run,
+                    run_work(&owner, &model, &scope, &run, &resumed),
+                )
+                .await;
+
+                assert_eq!(
+                    tools.bodies(),
+                    vec![RESTRICTED.to_string()],
+                    "moved at the boundary and spent once"
+                );
+                let spent = record(&host.approvals, &consent);
+                assert!(spent.consumed_at.is_some(), "the spend is recorded");
+                assert_eq!(spent.withdrawal, None);
+                assert_eq!(
+                    spent.custody,
+                    Some(ApprovalConsentCustody::Transferred {
+                        input_id: input.to_string(),
+                    })
+                );
+                let requests = model.requests();
+                assert_eq!(requests.len(), 3, "one request of the resumed run");
+                let attempts = consent_attempts(&requests[2]);
+                assert_eq!(attempts.len(), 1, "{attempts:?}");
+                assert_eq!(attempts[0]["tool_use_id"], "consent-call");
+                assert_eq!(attempts[0]["resumed_input_id"], input.to_string());
+            }
+
+            /// A boundary tries again to move the consent left parked for its
+            /// resumed run on its first poll only: a repoll of it (the same
+            /// model operation sequence, while a gate defers) calls no owner
+            /// again, and the run's next boundary tries once more.
+            #[test]
+            fn parked_moves_are_retried_on_a_boundarys_first_poll_only() {
+                let mut attempts = crate::agent::RunConsentAttempts::default();
+                assert!(attempts.first_poll_of_boundary(0), "the first boundary");
+                assert!(!attempts.first_poll_of_boundary(0), "a repoll of it");
+                assert!(!attempts.first_poll_of_boundary(0), "another repoll");
+                assert!(attempts.first_poll_of_boundary(1), "the next boundary");
+                assert!(!attempts.first_poll_of_boundary(1), "a repoll of it");
             }
 
             /// A rebuilt agent that has not published the tool again at its

@@ -426,6 +426,24 @@ impl PromptInput {
         }
     }
 
+    /// [`Self::detached_job_completed`] under the handling its producer
+    /// declares instead of `Steer`: the same durable notice record, keyed
+    /// the same way. With `Queue` it joins no running turn: it waits in the
+    /// queue lane for the owner's next turn, where a graceful requeue stop
+    /// keeps it for the next start instead of ending it. For a notice whose
+    /// producer must not lose it to such a stop (a human consent decision's
+    /// notice); a detached job's own completion keeps steering.
+    pub fn detached_job_completed_with_handling(
+        idempotency_key: impl Into<String>,
+        notice: meerkat_core::types::SystemNoticeMessage,
+        handling_mode: HandlingMode,
+    ) -> Self {
+        let mut prompt = Self::detached_job_completed(idempotency_key, notice);
+        // The same turn metadata a continuation under that handling carries.
+        prompt.turn_metadata = Some(crate::runtime_loop::for_continuation(handling_mode));
+        prompt
+    }
+
     /// An original-task continuation admitted to its owner: a durable,
     /// system-originated content input under an exact admission key, with an
     /// explicit input id so a crash between admission and the delivery

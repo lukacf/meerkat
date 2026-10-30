@@ -479,9 +479,15 @@ mod tests {
             .await
             .expect("the live owner's attempt enters");
         live.revoke("call-withdrawn");
-        first
-            .get(&withdrawn)
-            .expect("its next read withdraws the stale candidate");
+        // A read leaves a held decision its own check refuses as it is; the
+        // approval decides it afresh, and the owner's refusal withdraws it.
+        assert!(
+            matches!(
+                live.try_decide(&withdrawn, ApprovalDecision::Approve),
+                Err(meerkat_core::ApprovalError::ConsentUnavailable { .. })
+            ),
+            "the approval finds the revoked call and withdraws its candidate"
+        );
         live.decide(&denied, ApprovalDecision::Deny);
         live.decide(&unspent, ApprovalDecision::Approve);
         assert_eq!(live.entered(), 1);
@@ -830,6 +836,16 @@ mod tests {
 
             /// An authenticated, eligible human decision; it executes nothing.
             pub(super) fn decide(&self, approval_id: &ApprovalId, decision: ApprovalDecision) {
+                self.try_decide(approval_id, decision)
+                    .expect("recorded decision");
+            }
+
+            /// One authenticated decision of `lead-1`, as the owner answers it.
+            pub(super) fn try_decide(
+                &self,
+                approval_id: &ApprovalId,
+                decision: ApprovalDecision,
+            ) -> Result<meerkat_core::ApprovalRecord, meerkat_core::ApprovalError> {
                 let approver = AuthenticatedApprover::new(
                     meerkat_core::PrincipalRef::in_domain(
                         meerkat_core::PrincipalKind::Human,
@@ -840,16 +856,14 @@ mod tests {
                     meerkat_core::ApprovalAssurance::PersonAuthenticated,
                 )
                 .expect("qualified approver");
-                self.approvals
-                    .decide_consent(
-                        approval_id,
-                        AuthenticatedConsentDecision {
-                            approver,
-                            decision,
-                            reason: None,
-                        },
-                    )
-                    .expect("recorded decision");
+                self.approvals.decide_consent(
+                    approval_id,
+                    AuthenticatedConsentDecision {
+                        approver,
+                        decision,
+                        reason: None,
+                    },
+                )
             }
 
             /// One explicit attempt of the retained candidate.

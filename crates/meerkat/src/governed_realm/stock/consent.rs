@@ -18,9 +18,14 @@
 //! - eligibility evidence that stays current only while the composition's
 //!   publication has not moved since the surface's facts were read (the
 //!   surface publishes every retirement, replacement or permission change of
-//!   a login on it) and while the login's own deadline has not passed. The
-//!   approval owner checks it when the decision commits and again before it
-//!   publishes the allowance.
+//!   a login on it) and, until the decision, while the login's own deadline
+//!   has not passed. The approval owner checks it when the decision commits,
+//!   before it publishes the allowance and before a spend. Once an approver
+//!   decided, the route answers only whether they were revoked (their login
+//!   logged out, replaced or retired) or are forbidden since: a natural
+//!   expiry of the login they decided in is no revocation, and the consent
+//!   keeps its own expiry. An owner change in progress, or one published
+//!   during the read, decides nothing either way.
 //!
 //! The route decides who may decide, never what runs: an approved decision
 //! is only recorded and notified, and only a fresh explicit attempt of the
@@ -32,13 +37,14 @@ use meerkat_authorization::publication::{
     LocalAuthorizationPublication, PublishedConsentEligibility,
 };
 use meerkat_core::approval::consent::{
-    AuthenticatedApprover, ConsentEligibility, ConsentIneligible, ConsentNotice,
-    ConsentPresentation, ConsentPresentationCandidate, ConsentRouteUnavailable, HumanConsentRoute,
+    AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
+    ConsentNotice, ConsentPresentation, ConsentPresentationCandidate, ConsentRouteUnavailable,
+    HumanConsentRoute,
 };
 use meerkat_core::authorization::{
     AuthorizationOperation, ToolAuthorizationFacts, ToolAuthorizationTarget,
 };
-use meerkat_core::{ApprovalRecord, StockConsentAssurance};
+use meerkat_core::{ApprovalRecord, ApprovalStatus, StockConsentAssurance};
 
 use super::caller::StockLoginLifetime;
 use super::review::StockReviewRules;
@@ -89,10 +95,23 @@ pub trait StockConsentSurface: Send + Sync {
     ) -> Result<ConsentPresentation, ConsentRouteUnavailable>;
 
     /// The current facts of the exact login (authentication scope) this
-    /// surface authenticated `approver` in: whether that login is current
-    /// (not expired, logged out, replaced or retired) and permitted to decide
-    /// `approval`, and how long it stays current. `None` refuses. Another
-    /// current login of the same person is not this login.
+    /// surface authenticated `approver` in: whether that login stands (it was
+    /// not logged out, replaced or retired) and is permitted to decide
+    /// `approval`, and how long it stays current. `None` refuses: the login
+    /// was logged out, replaced or retired, or is not (or no longer)
+    /// permitted to decide `approval`. Another current login of the same
+    /// person is not this login.
+    ///
+    /// A login that stands but is past its own deadline is still stated,
+    /// with that deadline: the route decides what it means. Before a
+    /// decision, such a login is refused whether or not the surface has
+    /// retired it yet. Once `approver` approved `approval` (its record
+    /// carries that decision), the approval owner asks again only whether
+    /// they were revoked, or are forbidden by policy, since deciding: a
+    /// natural expiry of the login they decided in is no revocation, and
+    /// the consent keeps its own expiry. So a surface keeps answering for a
+    /// login it decided an approval in, through that approval's decision,
+    /// until the login is logged out, replaced or retired.
     ///
     /// It is called inside an observation of the composition's publication,
     /// so it reads the surface's own login owner without I/O, waiting or
@@ -100,8 +119,7 @@ pub trait StockConsentSurface: Send + Sync {
     /// that publication ([`super::StockGovernance::authorization_publication`])
     /// and retires, replaces or re-permits a login only inside
     /// [`LocalAuthorizationPublication::begin_owner_change`], so eligibility
-    /// observed before the change stops being current. A login past its
-    /// deadline is refused whether or not the surface has retired it yet.
+    /// observed before the change stops being current.
     fn approver_login(
         &self,
         approver: &AuthenticatedApprover,
@@ -180,22 +198,53 @@ impl HumanConsentRoute for StockHumanConsentRoute {
         approver: &AuthenticatedApprover,
         approval: &ApprovalRecord,
     ) -> Result<Arc<dyn ConsentEligibility>, ConsentIneligible> {
+        match self.eligibility_answer(approver, approval) {
+            ConsentEligibilityAnswer::Eligible(evidence) => Ok(evidence),
+            _ => Err(ConsentIneligible),
+        }
+    }
+
+    /// Eligibility by the surface's facts of the exact login, observed on
+    /// the composition's publication. Before a decision, the login must be
+    /// current by its own deadline too, and the evidence lapses with it.
+    /// Once `approval` records this approver's own approval, a natural expiry
+    /// of that login refuses nothing: only the surface's refusal (the login
+    /// logged out, replaced or retired, or no longer permitted) does, and the
+    /// evidence stands until the publication moves. No coherent read of the
+    /// publication now (an owner change in progress, or one published during
+    /// the read) is `Unsettled`.
+    fn eligibility_answer(
+        &self,
+        approver: &AuthenticatedApprover,
+        approval: &ApprovalRecord,
+    ) -> ConsentEligibilityAnswer {
         let accepted = approval
             .metadata
             .labels
             .get(STOCK_CONSENT_ASSURANCE_LABEL)
-            .and_then(|name| StockConsentAssurance::from_name(name))
-            .ok_or(ConsentIneligible)?;
-        if !accepted.accepts(approver.assurance()) {
-            return Err(ConsentIneligible);
+            .and_then(|name| StockConsentAssurance::from_name(name));
+        if !accepted.is_some_and(|accepted| accepted.accepts(approver.assurance())) {
+            return ConsentEligibilityAnswer::Refused;
         }
+        let decided = approved_by(approval, approver);
         let mut login = None;
-        let published = PublishedConsentEligibility::observe(&self.publication, || {
+        let answer = PublishedConsentEligibility::observe_answer(&self.publication, || {
             login = self.surface.approver_login(approver, approval);
-            login.is_some_and(StockLoginLifetime::is_current_now)
-        })?;
-        let login = login.ok_or(ConsentIneligible)?;
-        Ok(Arc::new(LoginBoundEligibility { published, login }))
+            login.is_some_and(|login| decided || login.is_current_now())
+        });
+        match (answer, login) {
+            (ConsentEligibilityAnswer::Eligible(published), _) if decided => {
+                ConsentEligibilityAnswer::Eligible(published)
+            }
+            (ConsentEligibilityAnswer::Eligible(published), Some(login)) => {
+                ConsentEligibilityAnswer::Eligible(Arc::new(LoginBoundEligibility {
+                    published,
+                    login,
+                }))
+            }
+            (ConsentEligibilityAnswer::Eligible(_), None) => ConsentEligibilityAnswer::Refused,
+            (answer, _) => answer,
+        }
     }
 
     fn notice(&self, notice: ConsentNotice) {
@@ -257,6 +306,20 @@ fn state_owner_statement(
         }
     }
     presentation
+}
+
+/// Whether `approval` records `approver`'s own approval of it: the approval
+/// owner then asks only whether they were revoked, or are forbidden, since.
+fn approved_by(approval: &ApprovalRecord, approver: &AuthenticatedApprover) -> bool {
+    approval.status == ApprovalStatus::Approved
+        && approval
+            .consent
+            .as_ref()
+            .and_then(|consent| consent.approver.as_ref())
+            .is_some_and(|decided| {
+                decided.principal == *approver.principal()
+                    && decided.assurance == approver.assurance()
+            })
 }
 
 /// Eligibility observed on the composition's publication, for a login with
@@ -457,6 +520,96 @@ mod tests {
             );
             assert_eq!(surface.asked(), 1);
         }
+    }
+
+    /// `approval` as `approver` decided it: approved, with them recorded as
+    /// its approver.
+    fn approved_by_them(
+        approval: &ApprovalRecord,
+        approver: &AuthenticatedApprover,
+    ) -> ApprovalRecord {
+        let mut decided = approval.clone();
+        decided.status = ApprovalStatus::Approved;
+        decided.consent = Some(meerkat_core::ApprovalConsentRecord {
+            approver: Some(meerkat_core::ApprovalConsentApprover {
+                principal: approver.principal().clone(),
+                assurance: approver.assurance(),
+            }),
+            ..Default::default()
+        });
+        decided
+    }
+
+    /// Once an approver decided, the route answers only whether they were
+    /// revoked or are forbidden since: a natural expiry of the login they
+    /// decided in refuses nothing, and the evidence does not lapse with that
+    /// login, while the surface's refusal (the login retired) does refuse,
+    /// and its published retirement makes the evidence stale. Before the
+    /// decision, and for another approver, an expired login is refused. An
+    /// owner change in progress decides nothing either way.
+    #[test]
+    fn a_decision_outlives_its_logins_natural_expiry_but_not_its_revocation() {
+        let publication = LocalAuthorizationPublication::new();
+        let person = approver(ApprovalAssurance::PersonAuthenticated);
+        let pending = approval(Some("person_authenticated"));
+        let decided = approved_by_them(&pending, &person);
+        let expired = Surface::vouching(Some(StockLoginLifetime::ExpiresAt { unix_ms: 1 }));
+        let expired = route(&expired, &publication);
+        assert!(
+            matches!(
+                expired.eligibility_answer(&person, &pending),
+                ConsentEligibilityAnswer::Refused
+            ),
+            "before the decision"
+        );
+        let evidence = match expired.eligibility_answer(&person, &decided) {
+            ConsentEligibilityAnswer::Eligible(evidence) => Some(evidence),
+            _ => None,
+        }
+        .expect("a natural expiry is no revocation");
+        assert_eq!(
+            evidence.check_current(),
+            Ok(()),
+            "not bound to the expired login"
+        );
+        assert!(expired.eligibility(&person, &decided).is_ok());
+        let other = AuthenticatedApprover::new(
+            PrincipalRef::in_domain(
+                PrincipalKind::Human,
+                "bob",
+                TrustDomainId::new("console-idp").expect("domain"),
+            )
+            .expect("qualified"),
+            ApprovalAssurance::PersonAuthenticated,
+        )
+        .expect("approver");
+        assert!(
+            matches!(
+                expired.eligibility_answer(&other, &decided),
+                ConsentEligibilityAnswer::Refused
+            ),
+            "another approver's own expired login"
+        );
+
+        // Revoked: the surface no longer vouches for the login, and it
+        // published the retirement.
+        let retired = Surface::vouching(None);
+        assert!(matches!(
+            route(&retired, &publication).eligibility_answer(&person, &decided),
+            ConsentEligibilityAnswer::Refused
+        ));
+        drop(publication.begin_owner_change().expect("owner change"));
+        assert_eq!(evidence.check_current(), Err(ConsentIneligible));
+
+        // An owner change in progress.
+        let change = publication.begin_owner_change().expect("owner change");
+        for record in [&pending, &decided] {
+            assert!(matches!(
+                expired.eligibility_answer(&person, record),
+                ConsentEligibilityAnswer::Unsettled
+            ));
+        }
+        drop(change);
     }
 
     #[test]

@@ -6769,6 +6769,15 @@ pub struct MachineLifecycleSnapshot {
 /// Durable generated unregister-saga progress needed to resume an interrupted
 /// Draining epoch without reconstructing missing producer outcomes in shell
 /// code.
+///
+/// A host reads it from the session runtime's lifecycle row while its
+/// unregister is in progress ([`RuntimeStore::observe_machine_lifecycle`],
+/// then [`DecodedMachineLifecycleObservation::unregister_progress`]):
+/// [`Self::requeue_max_age_ms`] and [`Self::keeps_recovered_inputs`] name the
+/// disposition that applies, the one the unregister began with. The caller
+/// that started or joined the unregister reads it from its own answer
+/// instead, without polling and also once the unregister completed
+/// ([`crate::RuntimeSessionUnregisterObserver::queued_inputs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineUnregisterProgressSnapshot {
     runtime_loop_drain_pending: bool,
@@ -6812,8 +6821,12 @@ impl MachineUnregisterProgressSnapshot {
         self
     }
 
-    /// The requeue max age the unregister began with, `None` for a stop.
-    pub(crate) fn requeue_max_age_ms(&self) -> Option<u64> {
+    /// The max age, in whole milliseconds, of the queued inputs the
+    /// unregister keeps for the next start: `Some` when the machine recorded
+    /// requeue for it, `None` for a stop or a keep. This is the disposition
+    /// that applies: a call that joined the unregister already in progress
+    /// kept the one it began with, whatever that call passed.
+    pub fn requeue_max_age_ms(&self) -> Option<u64> {
         self.requeue_max_age_ms
     }
 
@@ -6826,8 +6839,11 @@ impl MachineUnregisterProgressSnapshot {
         self
     }
 
-    /// Whether the unregister began with the keep disposition.
-    pub(crate) fn keeps_recovered_inputs(&self) -> bool {
+    /// Whether the machine recorded keep for the unregister: every input its
+    /// registration recovered stays exactly as the store holds it. Like
+    /// [`Self::requeue_max_age_ms`], the disposition that applies, never a
+    /// joining call's.
+    pub fn keeps_recovered_inputs(&self) -> bool {
         self.keeps_recovered_inputs
     }
 

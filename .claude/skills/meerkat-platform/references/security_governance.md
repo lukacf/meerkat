@@ -153,12 +153,17 @@ denial. Since 0.9.4:
   out while waiting ends with the time-budget terminal. Owner changes while a
   session runs therefore no longer turn ordinary calls into refusals.
 - A grant resolution that meets an owner change is a stale read everywhere: a
-  preparation rebuilds once; a prompt's controller admission is refused as not
-  ready (`ControllerReadinessUnavailable`, reason `PolicyChanged`), so
-  resubmit it; a review read refuses as stale (`operation_refused`,
-  `ReprepareRequired`) and a fresh attempt reads again; a configured MCP
-  server's per-agent grant check answers `NotCurrent`. A poisoned publication,
-  failed grant custody and a clock failure still answer unavailable.
+  preparation rebuilds once; a prompt's controller admission, and the
+  admission of a scoped original (its own mandate and each named
+  contributor's liveness), are refused as not ready
+  (`ControllerReadinessUnavailable`, reason `PolicyChanged`), so resubmit the
+  input; a retained resume answers the same and stays retryable, and
+  `require_source_original_live` outside an exclusion of owner changes
+  answers readiness `PolicyChanged`; a review read refuses as stale
+  (`operation_refused`, `ReprepareRequired`) and a fresh attempt reads again;
+  a configured MCP server's per-agent grant check answers `NotCurrent`. A
+  poisoned publication, failed grant custody and a clock failure still answer
+  unavailable.
 - A governed helper's admission fence and a helper child issuance answer
   `Unavailable` (a later attempt may succeed), not `Denied`, when their check
   refuses to rebuild. A denial and malformed facts stay `Denied`.
@@ -450,8 +455,10 @@ of this.
   `resolve_controller_lineage_observed` and `resolve_lineage_ceiling_observed`
   resolve inside the caller's own observation of the grant publication and
   return `LineageResolutionRefusal::Changed` (an owner change published
-  during the resolution: classify it as a stale read) or `Refused`. The
-  standalone `resolve_lineage` still reports a concurrent change as
+  during the resolution: classify it as a stale read) or `Refused`. A caller
+  with no enclosing observation whose answer can say "ask again" uses them
+  too and classifies `Changed` as a change of policy, as native admission
+  does. The standalone `resolve_lineage` still reports a concurrent change as
   `GrantRefusal::Unavailable`.
 - Owner-change waits for custom owners (0.9.4):
   `WorkAuthorization::owner_change_in_progress` (default `None`) reports a

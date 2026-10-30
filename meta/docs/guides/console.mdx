@@ -306,9 +306,50 @@ Operator panels depend on a few host constraints:
 - A page served with `frame-ancestors 'none'`, such as a secret-entry page, cannot be framed and must not be configured as a panel.
 
 Each agent row shows:
-- Agent display name and member ID
-- Status badge (active, running, idle)
-- Pin action; pinned agents persist in local storage after the first user interaction
+- The agent's display name
+- A second line with what the agent is (its role, else its group) and what it
+  is doing in words, or how long ago it was last active, for example
+  `Router · working` or `Router · active 3 min ago`
+- Pin and copy actions on hover: pinned agents move to a Pinned section at the
+  top, and the copy action copies the agent's identity, which the row's tooltip
+  also shows
+
+#### Ordering and grouping the roster
+
+Two controls under the search box set how the roster lists agents:
+
+- **Group**: *Category* lists agents under their categories and subgroups (the
+  `[agent_list]` grouping above); *None* lists every agent in one list. Either
+  way, Pinned stays on top and an agent spawned by another, or a side chat,
+  stays nested under it.
+- **Sort**: *Manual* keeps your own order; *Name* sorts by display name, with
+  numbers in order (`Agent 2` before `Agent 10`); *Last activity* lists the
+  most recently active agents first and agents with no known activity last.
+
+In *Manual*, drag an agent by the grip that appears at its left edge on hover,
+or focus the agent and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>; a screen reader hears each move. An agent moves
+among the agents that share its place: its category and subgroup, or the agent
+it is nested under, and its nested agents move with it. One order serves every
+view: it orders each category, the flat list, and Pinned. Until you move an
+agent, the roster keeps its default order. A new agent appears at the end of
+its place, and a renamed agent keeps its place, since the order is kept by
+identity. Agents do not move while you sort by name or last activity, or while
+a search or an activity filter is on. Categories and subgroups reorder the same
+way: drag a header, or focus it and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>.
+
+Last activity is the newest time the console's frame log recorded the agent
+acting (a live runtime event, a message sent to it or a tool application),
+which `/console/experience` reports as `last_activity_ms`, or a newer event the
+console has since seen. Reading it wakes no agent.
+
+The browser keeps these preferences in local storage, per signed-in user and
+console: the manual order, the Group and Sort choices and the pins follow the
+user and are kept when the `[agent_list]` configuration changes. The order of
+categories and subgroups and which of them are collapsed belong to that
+configuration and start over when it changes. Pins an earlier console kept
+carry over once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 

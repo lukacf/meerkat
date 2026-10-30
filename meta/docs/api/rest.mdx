@@ -87,6 +87,15 @@ Returns experience metadata describing the current runtime state. This is the pr
 
 When a Meerkat mob runtime is configured, the response includes live agent data from the mob. Without a mob runtime, only module-level information is returned. When console UI config is loaded, the response includes `console_config`, the view-level contract consumed by the bundled console.
 
+An agent row in `agent_sidebar.live_snapshot.agents`, and its rows in
+`identity_status` and `health_overview`, can carry `last_activity_ms`: the
+newest time, in milliseconds since the epoch, that the console's frame log
+recorded the agent acting (a live runtime event, a console send or a tool
+application). Frames rebuilt from session history or synthesized by the
+console do not count. The field is advisory: a row without it has no known
+activity, and reading it wakes no agent. A row answered pending (below)
+withholds it.
+
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for
 its registered runtimes: `true` only while every registered runtime's mob is

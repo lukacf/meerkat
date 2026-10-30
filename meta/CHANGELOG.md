@@ -103,16 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   comments of the SDK dispatchers and of the gateway customizer still said
   `customize_build` runs at a restore or a reconcile, and the Rust
   `AgentCustomizer` docs said `after_create` follows every session creation.
-  Since 0.9.6 a restart over members the mob already holds calls
-  `customize_build` for none of them: it runs when an identity is seated,
-  starts a fresh life or moves to a declared new role, and right before each
-  build of its member, the first build after a restart (its first wake)
-  included; `after_create` follows a seat, a create, a fresh life or a role
-  migration, never a wake's build. A new test row pins this for a governed
-  input after a clean restart: no `customize_build` before the input,
-  exactly one at its wake with the context of the member's last build, no
-  `after_create`, and the member's next tool call served by the handler that
-  build registered.
+  Since 0.9.6 `customize_build` runs when an identity is seated, starts a
+  fresh life or moves to a declared new role, and right before each build of
+  its member, the first build after a restart (its first wake) included. At a
+  restart it runs only for the members the start builds (those that owe work
+  or a kickoff, or every member under `member_restore: "eager"`), after they
+  are built and before they run; a restart over idle members the mob already
+  holds calls it for none of them until they are built. `after_create`
+  follows a seat, a create, a fresh life or a role migration, never a wake's
+  build. A new test row pins this for a governed input after a clean
+  restart: no `customize_build` before the input, exactly one at its wake
+  with the context of the member's last build, no `after_create`, and the
+  member's next tool call served by the handler that build registered.
 
 ### Known limitations
 

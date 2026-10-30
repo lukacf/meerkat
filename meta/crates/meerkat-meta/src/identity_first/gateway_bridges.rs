@@ -450,13 +450,15 @@ pub struct GatewayAgentCustomizer {
     /// The host's installed artifacts, from its trusted bootstrap. `None`:
     /// the host selected none, and callback tools stay unassociated.
     installed_artifacts: Option<Arc<crate::tool_artifacts::InstalledArtifacts>>,
-    /// Monotonic counter for minting a per-build tool-handler scope, so the SDK
+    /// Monotonic counter for minting a per-call tool-handler scope, so the SDK
     /// can register external-tool handlers in `customize_build` (parity with the
     /// `build_agent` scope). A fresh scope per call is correct: `customize_build`
-    /// runs again right before each build of the member (a restarted member's
-    /// first wake included, never the restore itself) and the host re-registers
-    /// under the new scope. The counter starts at 1 in each process, so a scope
-    /// id names a call only within the process that minted it.
+    /// runs again at each seat, fresh life and role migration of the identity
+    /// and for each build of its member (a restarted member's first wake
+    /// included, and a member the start builds held once the roster pass
+    /// composes it), and the host re-registers under the new scope. The counter
+    /// starts at 1 in each process, so a scope id names a call only within the
+    /// process that minted it.
     next_scope: AtomicU64,
 }
 

@@ -394,9 +394,10 @@ export class CallbackDispatcher {
       // to them. Guard on scopeId for compat with a gateway not yet sending it.
       if (scopeId && draft.toolHandlers.size > 0) {
         // Release the previous scope for this identity before registering the
-        // new one: customize_build runs again at each build of the member and
-        // the gateway never signals scope release, so this bounds growth to
-        // one live scope per identity (newest wins).
+        // new one: customize_build runs again at each seat, fresh life, role
+        // migration and build of the identity, and the gateway never signals
+        // scope release, so this bounds growth to one live scope per identity
+        // (newest wins).
         const prior = this._customizerScopeByIdentity.get(context.identity);
         if (prior && prior !== scopeId) {
           this.releaseScope(prior);

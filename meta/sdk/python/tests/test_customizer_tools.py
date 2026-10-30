@@ -1,9 +1,13 @@
 """Tests for AgentCustomizer external-tool handler registration.
 
 The identity-first ``AgentCustomizer.customize_build`` callback runs when an
-identity is created and right before each build of its member, including the
-first build after a restart (the member's first wake), never at the restore
-itself (unlike ``build_agent``, whose options are empty on restore). A
+identity is created (seated), starts a fresh life or moves to a declared new
+role, and for each build of its member, the first build after a restart (the
+member's first wake) included (unlike ``build_agent``, whose options are
+empty on restore). At a restart it runs only for the members the start
+builds (those that owe work or a kickoff, or every member under
+``member_restore: "eager"``), after they are built and before they run; a
+restart over idle members calls it for none of them until they are built. A
 customizer can register callable tools via ``draft.register_tool(...)``;
 those handlers ride the SAME (scope_id, tool) map + ``callback/call_tool``
 dispatch that ``build_agent`` uses, and each build registers them again, so

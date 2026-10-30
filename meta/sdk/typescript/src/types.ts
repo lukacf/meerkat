@@ -3050,13 +3050,16 @@ export interface AgentBuildDraft {
    * Register a callable external tool on this build. Parity with
    * {@link SessionBuildOptions.registerTool}, but available inside
    * {@link AgentCustomizer.customizeBuild}, which runs when an identity is
-   * created (seated) or starts a fresh life, and right before each build of
-   * its member, including the first build after a restart (the member's first
-   * wake). It never runs at the restore itself: a restart over members the
-   * mob already holds calls it for none of them until they are built. Each
-   * build registers the tools again, so the member keeps its identity-scoped
-   * tools (MCP, comms, etc.) across rebuilds and restarts. The handler is
-   * dispatched in-process when the agent invokes the tool.
+   * created (seated), starts a fresh life or moves to a declared new role, and
+   * right before each build of its member, including the first build after a
+   * restart (the member's first wake). At a restart it runs only for the
+   * members the start builds (those that owe work or a kickoff, or every
+   * member under `member_restore: "eager"`), after they are built and before
+   * they run; a restart over idle members the mob already holds calls it for
+   * none of them until they are built. Each build registers the tools again,
+   * so the member keeps its identity-scoped tools (MCP, comms, etc.) across
+   * rebuilds and restarts. The handler is dispatched in-process when the agent
+   * invokes the tool.
    *
    * @example
    * ```ts

@@ -548,7 +548,11 @@ export function WorkGraphGraphView({
                   event.stopPropagation();
                   onSelect?.(node.itemId);
                 }}
-                onFocus={() => setFocusedId(node.itemId)}
+                onFocus={() => {
+                  setFocusedId(node.itemId);
+                  // A node reached by keyboard comes into view.
+                  zoom.reveal({ x: node.x, y: node.y, w: node.w, h: node.h });
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();

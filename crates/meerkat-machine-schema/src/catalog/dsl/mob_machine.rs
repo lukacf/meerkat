@@ -4657,7 +4657,10 @@ macro_rules! mob_catalog_machine_dsl {
         // no residency, rotation intent or target, pending host preparation or
         // archive-only retirement, so nothing waits on a rotation or a host
         // carry-out after it, and no identity entry, unseated cause, unlisted
-        // mark, archived session record or entry custody.
+        // mark, archived session record or entry custody. Both destroys
+        // (DestroyMob and the forced DestroyFromAny) leave the same state: no
+        // spawn ladder, startup ladder, member state marker, restore failure
+        // or remote retirement checkpoint either.
         invariant destroyed_mob_holds_no_member_lifecycle {
             self.lifecycle_phase != Phase::Destroyed
             || (self.member_materialization == EmptyMap
@@ -4671,7 +4674,16 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.identity_entry_unseated == EmptyMap
                 && self.identity_entry_retiring == EmptySet
                 && self.identity_entry_archived_sessions == EmptyMap
-                && self.spawn_exec_entry_custody == EmptySet)
+                && self.spawn_exec_entry_custody == EmptySet
+                && self.spawn_exec_phase == EmptyMap
+                && self.member_startup_binding_requested == EmptySet
+                && self.member_startup_runtime_ready == EmptySet
+                && self.member_startup_ready == EmptySet
+                && self.member_state_markers == EmptyMap
+                && self.member_restore_failures == EmptyMap
+                && self.member_restore_failure_codes == EmptyMap
+                && self.remote_runtime_retired_ids == EmptySet
+                && self.remote_supervisor_revoked_ids == EmptySet)
         }
 
         // =====================================================================
@@ -22429,6 +22441,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
                 self.member_prior_peer_endpoints = EmptyMap;
+                // The forced destroy clears every member fact the mob destroy
+                // (DestroyMob) clears, so both destroys leave the same state:
+                // no startup ladder, member state marker, restore failure or
+                // remote retirement checkpoint outlives the members.
+                self.member_startup_binding_requested = EmptySet;
+                self.member_startup_runtime_ready = EmptySet;
+                self.member_startup_ready = EmptySet;
+                self.member_state_markers = EmptyMap;
+                self.member_restore_failures = EmptyMap;
+                self.member_restore_failure_codes = EmptyMap;
+                self.remote_runtime_retired_ids = EmptySet;
+                self.remote_supervisor_revoked_ids = EmptySet;
                 // The destroy drops every member, so every residency
                 // phase, attempt, epoch and obligation goes with them.
                 self.member_materialization = EmptyMap;

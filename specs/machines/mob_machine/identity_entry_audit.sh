@@ -100,9 +100,10 @@
 # terminal that drops the entry, a dormant seat that ignores its ladder's
 # entry custody, a fresh-life respawn admitted for an entry and a
 # topology-preserving archive that takes an entry; in the apply part, one
-# per declared apply invariant and property, and a forced destroy that keeps
-# a spawn ladder whose membership committed (see the mutants below). An
-# anchor this script expects but cannot find fails the run. Each TLC run is
+# per declared apply invariant and property, and two forced destroys, one
+# that keeps a spawn ladder whose membership committed and one that keeps
+# the startup binding request that commit recorded (see the mutants below).
+# An anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.
 set -euo pipefail
@@ -140,11 +141,11 @@ in_part() {
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 entry_states=12960
-lifecycle_states=12039
-apply_states=1936
+lifecycle_states=12024
+apply_states=1928
 legacy_states=102
 roles_states=1224
-held_states=1203
+held_states=1202
 placed_states=136
 
 # Every arm each run must fire. TLC names an arm after the generated
@@ -1054,10 +1055,18 @@ PY
 keep_var("CommitSpawnMembershipFresh", "identity_entry_unseated")
 PY
 
-  # A forced destroy that keeps the spawn ladders' phases: a ladder whose
-  # membership committed outlives the member it named.
-  mutate held destroy_keeps_ladder_phase "Invariant spawn_exec_membership_commit_requires_runtime" <<'PY'
+  # A forced destroy that keeps the spawn ladders' phases: a ladder
+  # outlives the members, its membership committed or not.
+  mutate held destroy_keeps_ladder_phase \
+    "Invariant spawn_exec_membership_commit_requires_runtime|Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
 keep_var("DestroyFromAny", "spawn_exec_phase")
+PY
+
+  # A forced destroy that keeps the startup binding requests, one of the
+  # member facts both destroys clear (the held run's membership commit
+  # records one; no arm of the run records a member state marker).
+  mutate held destroy_keeps_startup_request "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+keep_var("DestroyFromAny", "member_startup_binding_requested")
 PY
 
   # The placed ladder holds the custody of an entry not hosted on its first

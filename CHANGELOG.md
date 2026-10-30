@@ -528,14 +528,17 @@ them.
 ### Fixed
 
 - `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
-  (`DestroyFromAny`) drops every spawn ladder, as the mob destroy
-  (`DestroyMob`) already did. A ladder whose membership committed, its
-  activation still owed, no longer outlives the members the forced destroy
-  drops: the destroyed state broke the machine invariant
-  `spawn_exec_membership_commit_requires_runtime`, which a debug build
-  checks on every step. A late activation or abort of such a ladder takes
-  the destroyed mob's own arm, as before, and a mob created again under the
-  same id starts with no ladder, as before.
+  (`DestroyFromAny`) clears every member fact the mob destroy (`DestroyMob`)
+  clears, so both leave the same state. It now drops every spawn ladder: a
+  ladder whose membership committed, its activation still owed, no longer
+  outlives the members the forced destroy drops, which broke the machine
+  invariant `spawn_exec_membership_commit_requires_runtime` (a debug build
+  checks it on every step). It also drops the members' startup ladders,
+  state markers, restore failures and remote retirement checkpoints, and the
+  invariant `destroyed_mob_holds_no_member_lifecycle` now requires all of
+  these empty in a destroyed mob. A late activation or abort of a ladder
+  takes the destroyed mob's own arm, as before, and a mob created again
+  under the same id starts with none of these facts, as before.
 
 ## [0.9.7] - 2026-10-28
 

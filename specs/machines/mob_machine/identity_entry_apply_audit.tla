@@ -572,13 +572,16 @@ AuditWitnessEverCreatedOwedSeat ==
     /\ Id1 \notin DOMAIN identity_to_runtime
     /\ Id1 \in DOMAIN identity_runtime_generations
     /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE)
-\* The forced destroy ends a ladder whose membership committed: no ladder
+\* The forced destroy ends a ladder whose membership committed, and the
+\* startup binding request its commit recorded: no ladder or request
 \* outlives the members it named.
 AuditWitnessDestroyEndsCommittedLadder ==
     /\ Id2 \in DOMAIN spawn_exec_phase
     /\ spawn_exec_phase[Id2] = "MembershipCommitted"
+    /\ member_startup_binding_requested # {}
     /\ DestroyFromAny
     /\ DOMAIN spawn_exec_phase' = {}
+    /\ member_startup_binding_requested' = {}
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting
 NotAuditWitnessHeldSpawnSeats == [][~AuditWitnessHeldSpawnSeats]_vars

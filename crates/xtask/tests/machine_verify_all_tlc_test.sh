@@ -692,9 +692,10 @@ fi
 # taking only an entry owed its seat, and a ladder opened for an entry's
 # name holding its custody.
 # They require every listed arm to fire, a floor of distinct states and
-# their twenty-nine witnesses reached, and --mutants refuses eighteen seeded
-# defects: one per declared apply invariant and property, and a forced
-# destroy that keeps a spawn ladder whose membership committed.
+# their twenty-nine witnesses reached, and --mutants refuses nineteen seeded
+# defects: one per declared apply invariant and property, and two forced
+# destroys, one that keeps a spawn ladder whose membership committed and one
+# that keeps the startup binding request that commit recorded.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
@@ -891,8 +892,8 @@ run_machine_verify() {
 # push runs 41049255980 and 41005570193 (2026-10-30): together past 10
 # minutes;
 # audits-k = the identity entry audit's declared apply part with --mutants
-# (--part apply), alone: its five whole-space runs, 29 witnesses and 18
-# mutants took 332 s locally with 4 TLC workers. None of audits-g,
+# (--part apply), alone: its five whole-space runs, 29 witnesses and 19
+# mutants took 341 s locally with 4 TLC workers. None of audits-g,
 # audits-i, audits-k and audits-l has been measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the

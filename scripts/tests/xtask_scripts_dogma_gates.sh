@@ -388,7 +388,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # mutants' generated invariants, its rotation, seat, respawn and
 # preserving-archive mutants' action properties, and its declared apply
 # mutants' generated invariants, totality invariants and action properties,
-# and its forced destroy mutant's generated invariant violated.
+# and its forced destroy mutants' generated invariants violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \

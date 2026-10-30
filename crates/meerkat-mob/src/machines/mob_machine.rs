@@ -11186,6 +11186,47 @@ mod tests {
         assert_eq!(authority.state().lifecycle_phase, MobPhase::Destroyed);
     }
 
+    /// The two destroys leave the same state: from one pre-state, the forced
+    /// destroy (`Destroy`) and the mob destroy (`DestroyMob`) clear the same
+    /// member facts, so a live member's startup ladder and state marker
+    /// outlive it in neither.
+    ///
+    /// RED: drop one of the aligned clears from `DestroyFromAny`'s update
+    /// (the startup ladder sets, the member state markers, the restore
+    /// failures or the remote retirement checkpoints): the forced destroy
+    /// keeps that fact, and its state differs from the mob destroy's.
+    #[test]
+    fn the_forced_destroy_leaves_what_the_mob_destroy_leaves() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "destroy-alignment", 41);
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Destroy,
+        );
+        assert!(
+            !authority.state().member_state_markers.is_empty()
+                || !authority
+                    .state()
+                    .member_startup_binding_requested
+                    .is_empty()
+                || !authority.state().member_startup_ready.is_empty(),
+            "the live member holds facts both destroys clear"
+        );
+        let mut forced = authority.fork();
+        MobMachineMutator::apply(&mut forced, MobMachineInput::Destroy)
+            .expect("the forced destroy completes");
+        authority
+            .apply_signal(MobMachineSignal::DestroyMob {
+                session_id: member.session_id.clone(),
+            })
+            .expect("the mob destroy completes");
+        assert_eq!(
+            forced.state(),
+            authority.state(),
+            "both destroys leave the same state"
+        );
+    }
+
     /// A forced destroy that drops in-flight rotation intents follows the
     /// destroy's admission, whose RotationSessionsAbandoned names each
     /// rotation's next session for the shell to archive.

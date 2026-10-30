@@ -801,8 +801,10 @@ struct InstructionDocument {
 
 impl InstructionDocument {
     /// Recover the authority in its three steps: the owner, the target
-    /// generation and the entry-sequence high-water, then the recorded
-    /// target, then the slots in effect (a transcript fact).
+    /// generation and the recorded entry-sequence high-water, then the
+    /// recorded target, then the slots in effect with the generation and the
+    /// sequence of the session's last entry row (transcript facts; the
+    /// authority takes the later high-water).
     fn seed(
         state: Option<&SessionInstructionState>,
         effective: &EffectiveOperatorInstructions,
@@ -830,7 +832,7 @@ impl InstructionDocument {
                 owner,
                 owner_mob,
                 target_generation,
-                recorded_sequence.max(effective.last_entry_sequence()),
+                recorded_sequence,
             )
             .map_err(refused)?;
         authority
@@ -849,6 +851,8 @@ impl InstructionDocument {
                 in_effect.effect,
                 in_effect.digest,
                 in_effect.bytes,
+                effective.last_target_generation(),
+                effective.last_entry_sequence(),
             )
             .map_err(refused)?;
         Ok(Self { authority, key })
@@ -1507,18 +1511,21 @@ impl Session {
         lowering: InstructionLowering,
         run_id: Option<RunId>,
     ) -> Result<RunStartInstructionOutcome, InstructionStateError> {
-        let Some(state) = self.instruction_target_state()? else {
-            // No target was ever recorded: the authority would hold the
-            // session unowned, and an unowned target has nothing pending.
-            return Ok(RunStartInstructionOutcome::NotNeeded);
+        let state = self.instruction_target_state()?;
+        // A session that records no target state holds no entry row of its
+        // own (every entry it mints records the state), so nothing of its own
+        // is in effect: the authority recovers it unowned and decides.
+        let effective = if state.is_some() {
+            self.own_effective_instructions()?
+        } else {
+            EffectiveOperatorInstructions::default()
         };
-        let effective = self.own_effective_instructions()?;
-        let bodies = InstructionBodies::from_sources(Some(&state), &effective);
+        let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
         let transcript_is_system_prefix = self
             .messages()
             .iter()
             .all(|message| matches!(message, Message::System(_)));
-        let mut document = InstructionDocument::seed(Some(&state), &effective)?;
+        let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
         let target = document.target();
         let in_effect = document.effective();
@@ -1572,9 +1579,14 @@ impl Session {
                     crate::types::message_timestamp_now(),
                 )
                 .map_err(InstructionStateError::MalformedHistory)?;
+                // The state the entry leaves is ready before anything is
+                // appended, so the entry and the state change together.
+                let owner = state
+                    .as_ref()
+                    .map_or(InstructionTargetOwner::Unowned, |state| state.owner.clone());
+                let next = document.recorded_state(owner, &bodies)?;
                 self.append_operator_instruction_entry(entry)
                     .map_err(InstructionStateError::MalformedHistory)?;
-                let next = document.recorded_state(state.owner.clone(), &bodies)?;
                 self.store_instruction_target_state(&next)?;
                 Ok(RunStartInstructionOutcome::Applied {
                     entry_sequence,
@@ -1621,13 +1633,14 @@ impl Session {
             .authority
             .authorize_instruction_fold(key, at_run_start, lowering.into())
             .map_err(|error| refused_by_authority(&error))?;
-        let (entry_sequence, source) = effects
+        let (entry_sequence, source, target_generation) = effects
             .iter()
             .find_map(|effect| match effect {
                 document::SessionDocumentEffect::InstructionFoldAuthorized {
                     entry_sequence,
                     source,
-                } => Some((*entry_sequence, *source)),
+                    generation,
+                } => Some((*entry_sequence, *source, *generation)),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -1635,20 +1648,15 @@ impl Session {
                     "the session-document authority emitted no fold verdict".to_string(),
                 )
             })?;
-        let (active, target_generation, run_id) = match source {
-            document::InstructionFoldSource::Target => (
-                target.active_instructions(&bodies)?,
-                document
-                    .authority
-                    .session_instruction_target_generation_for(&document.key)
-                    .unwrap_or_default(),
-                run_id,
-            ),
-            document::InstructionFoldSource::Effective => (
-                in_effect.active_instructions(&bodies)?,
-                effective.last_target_generation(),
-                None,
-            ),
+        // A fold of the target applies it at this run's start and names the
+        // run; a fold of what is in effect applies nothing and names none.
+        let (active, run_id) = match source {
+            document::InstructionFoldSource::Target => {
+                (target.active_instructions(&bodies)?, run_id)
+            }
+            document::InstructionFoldSource::Effective => {
+                (in_effect.active_instructions(&bodies)?, None)
+            }
         };
         let snapshot = mint_operator_instruction_snapshot(
             OperatorInstructionEntryHeader {

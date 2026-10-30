@@ -627,7 +627,8 @@ pub enum TranscriptEditKind {
 // The machine holds each session's operator-instruction facts per slot: the
 // recorded target (revision, effect, digest and body bytes per slot), its
 // owner (and the mob a mob owner is) and generation, the slots in effect
-// (the same per slot), and the entry-sequence high-water. A slot key is the
+// (the same per slot) and the target generation they realize, and the
+// entry-sequence high-water. A slot key is the
 // slot's canonical string; a digest is `sha256:<hex>`, and empty while the
 // slot is Absent; a mob id is empty unless the owner is a mob. The shell
 // recovers the target from its durable projection of this state and the
@@ -767,6 +768,7 @@ machine! {
             session_instruction_effective_effect: Map<SessionId, Map<String, Enum<InstructionEffect>>>,
             session_instruction_effective_digest: Map<SessionId, Map<String, String>>,
             session_instruction_effective_bytes: Map<SessionId, Map<String, u64>>,
+            session_instruction_effective_generation: Map<SessionId, u64>,
             session_instruction_entry_sequence: Map<SessionId, u64>,
         }
 
@@ -798,6 +800,7 @@ machine! {
             session_instruction_effective_effect = EmptyMap,
             session_instruction_effective_digest = EmptyMap,
             session_instruction_effective_bytes = EmptyMap,
+            session_instruction_effective_generation = EmptyMap,
             session_instruction_entry_sequence = EmptyMap,
         }
 
@@ -1289,12 +1292,16 @@ machine! {
                 digest: Map<String, String>,
                 bytes: Map<String, u64>,
             },
+            // `generation` is the target generation the session's last entry
+            // row realized and `last_entry_sequence` that row's sequence.
             RecoverSessionInstructionEffective {
                 session_id: SessionId,
                 revision: Map<String, u64>,
                 effect: Map<String, Enum<InstructionEffect>>,
                 digest: Map<String, String>,
                 bytes: Map<String, u64>,
+                generation: u64,
+                last_entry_sequence: u64,
             },
             // A mob delivers a member's whole snapshot at its generation.
             RecordInstructionTarget {
@@ -1615,7 +1622,8 @@ machine! {
             // Operator-instruction region effects. A recorded verdict names
             // the target generation; a refusal names its typed reason; an
             // authorized entry or fold names the entry sequence the shell
-            // mints, and a fold the set it renders. The shell persists the
+            // mints, and a fold the set it renders and the generation that
+            // set realizes. The shell persists the
             // machine's state after each and decides nothing.
             SessionInstructionStateRecovered,
             InstructionTargetRecorded {
@@ -1640,6 +1648,7 @@ machine! {
             InstructionFoldAuthorized {
                 entry_sequence: u64,
                 source: Enum<InstructionFoldSource>,
+                generation: u64,
             },
         }
 
@@ -1989,6 +1998,8 @@ machine! {
                 == self.session_instruction_effective_digest.keys()
             && self.session_instruction_owner.keys()
                 == self.session_instruction_effective_bytes.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_generation.keys()
             && self.session_instruction_owner.keys()
                 == self.session_instruction_entry_sequence.keys()
             && for_all(session_id in self.session_instruction_owner.keys(),
@@ -5382,6 +5393,7 @@ machine! {
                 self.session_instruction_effective_effect.insert(session_id, EmptyMap);
                 self.session_instruction_effective_digest.insert(session_id, EmptyMap);
                 self.session_instruction_effective_bytes.insert(session_id, EmptyMap);
+                self.session_instruction_effective_generation.insert(session_id, 0);
                 self.session_instruction_entry_sequence.insert(session_id, entry_sequence);
             }
             to Ready
@@ -5418,19 +5430,25 @@ machine! {
             emit SessionInstructionStateRecovered
         }
 
-        // The slots in effect, after the entry-sequence high-water: an
-        // Active slot was put there by an entry.
+        // The slots in effect and the generation they realize, after the
+        // owner: an Active slot was put there by an entry, and the
+        // entry-sequence high-water becomes the later of the recorded one
+        // and the session's last entry row.
         transition RecoverSessionInstructionEffective {
             on input RecoverSessionInstructionEffective {
                 session_id,
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                generation,
+                last_entry_sequence
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && (self.session_instruction_entry_sequence.get_cloned(session_id).get("value") >= 1
+                && self.session_instruction_entry_sequence.contains_key(session_id)
+                && (last_entry_sequence >= 1
+                    || self.session_instruction_entry_sequence.get_cloned(session_id).get("value") >= 1
                     || for_all(slot in effect.keys(),
                         effect.get_cloned(slot).get("value") != InstructionEffect::Active))
                 && instruction_slot_maps_consistent(revision, effect, digest, bytes)
@@ -5441,6 +5459,16 @@ machine! {
                 self.session_instruction_effective_effect.insert(session_id, effect);
                 self.session_instruction_effective_digest.insert(session_id, digest);
                 self.session_instruction_effective_bytes.insert(session_id, bytes);
+                self.session_instruction_effective_generation.insert(session_id, generation);
+                self.session_instruction_entry_sequence.insert(
+                    session_id,
+                    if last_entry_sequence
+                        > self.session_instruction_entry_sequence.get_cloned(session_id).get("value")
+                    {
+                        last_entry_sequence
+                    } else {
+                        self.session_instruction_entry_sequence.get_cloned(session_id).get("value")
+                    });
             }
             to Ready
             emit SessionInstructionStateRecovered
@@ -6048,6 +6076,9 @@ machine! {
                 self.session_instruction_effective_bytes.insert(
                     session_id,
                     self.session_instruction_target_bytes.get_cloned(session_id).get("value"));
+                self.session_instruction_effective_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value"));
                 self.session_instruction_entry_sequence.insert(
                     session_id,
                     self.session_instruction_entry_sequence.get_cloned(session_id).get("value") + 1);
@@ -6178,6 +6209,9 @@ machine! {
                 self.session_instruction_effective_bytes.insert(
                     session_id,
                     self.session_instruction_target_bytes.get_cloned(session_id).get("value"));
+                self.session_instruction_effective_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value"));
                 self.session_instruction_entry_sequence.insert(
                     session_id,
                     self.session_instruction_entry_sequence.get_cloned(session_id).get("value") + 1);
@@ -6185,7 +6219,8 @@ machine! {
             to Ready
             emit InstructionFoldAuthorized {
                 entry_sequence: self.session_instruction_entry_sequence.get_cloned(session_id).get("value"),
-                source: InstructionFoldSource::Target
+                source: InstructionFoldSource::Target,
+                generation: self.session_instruction_effective_generation.get_cloned(session_id).get("value")
             }
         }
 
@@ -6208,7 +6243,8 @@ machine! {
             to Ready
             emit InstructionFoldAuthorized {
                 entry_sequence: self.session_instruction_entry_sequence.get_cloned(session_id).get("value"),
-                source: InstructionFoldSource::Effective
+                source: InstructionFoldSource::Effective,
+                generation: self.session_instruction_effective_generation.get_cloned(session_id).get("value")
             }
         }
     }

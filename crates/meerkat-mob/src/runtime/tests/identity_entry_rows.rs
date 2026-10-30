@@ -712,14 +712,13 @@ async fn entry_settles(mob: &EntryMob, name: &str) -> Option<IdentityEntryOrigin
     }
 }
 
-/// A host respawn of an entry's member and a rotation of a seated entry
-/// keep the entry: the successor's `MemberSpawned` row records it, and the
-/// entry survives a restart.
+/// A host respawn of an entry's member (a same-session successor) and a
+/// rotation of a seated entry keep the entry: the successor's
+/// `MemberSpawned` row records it, and the entry survives a restart.
 ///
-/// RED: drop the respawn's carry of the entry to its successor
-/// (`replacement_spec.entry_custody = snapshot.entry_custody`) or the
-/// rotation row's `identity_entry`: the respawned identity reads as a
-/// worker at once, the rotated one after the restart.
+/// RED: drop the rotation terminal row's `identity_entry`
+/// (`commit_member_rotation`): both identities read as workers after the
+/// restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respawn_and_rotation_keep_an_entry_across_a_restart() {
     let mut mob = EntryMob::new("entry-successors").await;

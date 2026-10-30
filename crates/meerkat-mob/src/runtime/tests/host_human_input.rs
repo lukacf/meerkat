@@ -3485,6 +3485,135 @@ async fn requeue_shutdown_does_not_keep_a_steer_input_queued_behind_the_running_
         .expect("mob shutdown");
 }
 
+/// The queued-input handoff of a same-session successor: a
+/// `respawn_member` of a member whose session commits each round keeps the
+/// eligible input queued behind its running turn for the next incarnation,
+/// and ends every other one typed. The running turn is cancelled; the
+/// queued Queue-mode input's waiter is told it was requeued across the stop;
+/// the queued Steer input ends, terminal, and never runs. The next
+/// incarnation, seated on the same session at the next generation, is woken
+/// by the work the handover left it and runs the requeued input exactly
+/// once, with no restart.
+///
+/// RED: release the kept session with the stop choice
+/// (`UnregisterQueuedInputs::Stop` in `retirement_release_kept_session`), or
+/// quiesce the member with the retirement's admitted-work cancel instead of
+/// the run-start hold: the queued input ends stopped or cancelled and never
+/// runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_session_successor_carries_queued_inputs_or_ends_them_typed() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let (_root, root_path) = stop_root();
+    let client = ScriptedClient::new(true);
+    let host = open_stop_host(&root_path, &client, Some("same-session-handoff")).await;
+    let (identity, session_id, entry) = spawn_stop_member(&host).await;
+
+    client.block();
+    let requests_before = client.requests().len();
+    let running = start_stop_input(
+        &host,
+        &entry,
+        WorkSpec::new(HUMAN, WorkOrigin::External),
+        HandlingMode::Queue,
+        &delivery("handoff-running"),
+    )
+    .await
+    .expect("running human admission");
+    client.wait_for_requests(requests_before + 1).await;
+    let key = delivery("handoff-queued");
+    let queued = start_stop_input(
+        &host,
+        &entry,
+        WorkSpec::new(QUEUED_HUMAN, WorkOrigin::External),
+        HandlingMode::Queue,
+        &key,
+    )
+    .await
+    .expect("queued human admission");
+    let input_id = admitted_input_id(&host.runtime_store, &session_id, &key).await;
+    let steer_key = delivery("handoff-steer");
+    let steer = start_stop_input(
+        &host,
+        &entry,
+        WorkSpec::new(QUEUED_SECOND, WorkOrigin::External),
+        HandlingMode::Steer,
+        &steer_key,
+    )
+    .await
+    .expect("steer human admission");
+    let steer_id = admitted_input_id(&host.runtime_store, &session_id, &steer_key).await;
+
+    let receipt = tokio::time::timeout(
+        WAIT,
+        host.handle
+            .respawn_member(identity.clone(), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned on its own session");
+    let running_answer = stop_answer(running, &session_id).await;
+    let queued_answer = stop_answer(queued, &session_id).await;
+    let _ = stop_answer(steer, &session_id).await;
+    let steer_phase = stop_row(&host.runtime_store, &session_id, &steer_key, &steer_id)
+        .await
+        .stored
+        .seed
+        .phase;
+    client.release();
+
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let phase = stop_row(&host.runtime_store, &session_id, &key, &input_id)
+            .await
+            .stored
+            .seed
+            .phase;
+        if phase == InputLifecycleState::Consumed {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the requeued input never ran on the next incarnation: {phase:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let successor = host
+        .handle
+        .get_member(&identity)
+        .await
+        .expect("roster read")
+        .expect("the member stays seated");
+    assert_eq!(
+        (
+            receipt.identity.clone(),
+            successor.generation,
+            host.handle.resolve_bridge_session_id(&identity).await,
+            running_answer,
+            queued_answer,
+            steer_phase,
+            requests_carrying(&client.requests(), QUEUED_HUMAN),
+            requests_carrying(&client.requests(), QUEUED_SECOND),
+        ),
+        (
+            identity.clone(),
+            crate::ids::Generation::new(entry.generation.get() + 1),
+            Some(session_id.clone()),
+            StopAnswer::Cancelled,
+            StopAnswer::RequeuedAcrossStop(input_id.clone()),
+            InputLifecycleState::Abandoned,
+            1,
+            0,
+        ),
+        "the successor keeps the session, runs the requeued input once, and the steer \
+         input ends without running"
+    );
+    tokio::time::timeout(WAIT, host.handle.shutdown())
+        .await
+        .expect("mob shutdown finishes")
+        .expect("mob shutdown");
+}
+
 /// Requeue keeps no input bound to an objective. A member's kickoff is one
 /// (its input carries the kickoff objective), and the mob records the
 /// kickoff's outcome in the stopping process, so a kept kickoff would run

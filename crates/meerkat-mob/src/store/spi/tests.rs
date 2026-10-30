@@ -971,9 +971,10 @@ async fn the_identity_write_fence_declares_the_hosts_longest_commit() {
 /// Every field the stored event codec keeps beyond the public event
 /// contract survives a reopen of the host store's mob storage: a member's
 /// bridge ref, placed spawn, identity intent digest, peer endpoint and direct
-/// fence; a recovered binding's session and endpoint; a retirement's endpoint
-/// and topology mark; an abandoned respawn's runtime and fence. A restarted
-/// mob rebuilds its roster and topology from them.
+/// fence; a recovered binding's session and endpoint; a retirement's endpoint,
+/// topology mark and the rotation it carries out; an abandoned respawn's
+/// runtime and fence. A restarted mob rebuilds its roster and topology from
+/// them.
 #[tokio::test]
 async fn a_reopen_keeps_every_replay_only_event_field() {
     use crate::event::{MemberSessionBindingRecoveredEvent, MemberSpawnedEvent};
@@ -1038,6 +1039,26 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             session_id: Some(session),
             retiring_peer_endpoint: Some(endpoint),
             preserve_machine_topology: true,
+            rotation: Some(Box::new(crate::runtime::MemberRotationRecord {
+                target: crate::runtime::RotationTarget::FreshSession,
+                session_id: SessionId::new(),
+                peer_endpoint: None,
+                successor: crate::runtime::RotationSuccessor {
+                    generation: Generation::new(generation.get() + 1),
+                    profile: ProfileName::from("worker"),
+                    runtime_mode: crate::MobRuntimeMode::TurnDriven,
+                    labels: std::collections::BTreeMap::new(),
+                    continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
+                    effective_profile_override: None,
+                    effective_model_override: None,
+                    definition_wiring: crate::DefinitionWiring::Applies,
+                    kickoff_prompt: Some("start over".into()),
+                    objective_id: None,
+                    seat_build_inputs: None,
+                    spawned_by: None,
+                    resume_from_role: None,
+                },
+            })),
         },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,

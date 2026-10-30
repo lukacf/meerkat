@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [df3f8a653117](https://github.com/lukacf/meerkat-meta/commit/df3f8a653117414a9399a69e0567413ce0dd3aaf) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -325,6 +325,10 @@ does not say whether the mob runs; a stopped mob's dot is red.
 ### Approvals
 
 Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+**Needs you** also counts host-provided attention items when the console configuration
+names `[[attention.sources]]`. The inbox lists them after the approvals, as cards with one
+**Open** link to the host's page, which owns the decision. A source that cannot be read is
+named and hides nothing else (see [host-provided attention items](/mobkit/reference/configuration#host-provided-attention-items)).
 Expand **Complete request details** before deciding. Stale or unavailable approval
 data does not mean there are no pending requests; use **Refresh approvals** to
 reload it. Read-only consoles cannot submit decisions.
@@ -363,7 +367,7 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 **Split panels** — click the split controls (← → ↑ ↓, visible on hover) to divide a panel. This lets you chat with multiple agents side-by-side.
 
 **Composer** at the bottom of each panel:
-- Textarea with "Message {agent}..." placeholder
+- Textarea with `Message {agent}...` placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
 

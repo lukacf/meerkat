@@ -572,6 +572,21 @@ them.
   admitted and pending in the cold successor, and a resubmission with the
   same idempotency key is deduplicated against it.
 
+- `meerkat-runtime`: the threads of the crate's two process-wide Tokio
+  runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
+  16 MiB again when `RKAT_WORKER_STACK_BYTES` is unset, or `RUST_MIN_STACK`
+  when that asks for more. Since 0.8.39 they took the 8 MiB host worker
+  budget. The cleanup runtime polls the turns of runtime-backed mob members,
+  with the tools an embedding host gives them and whatever those spawn, so a
+  host whose own workers run 16 MiB ran that work on half that stack, and
+  the process aborted with a stack overflow on a `meerkat-machine-cleanup`
+  thread once the work needed more than 8 MiB. `RKAT_WORKER_STACK_BYTES`
+  still sets their stack exactly, below 16 MiB included, and an invalid value
+  is refused as before, its message now naming the default these threads
+  take once it is unset. The host binaries' own workers and main future keep
+  the 8 MiB budget. The added size is virtual address space; pages are
+  committed only when touched.
+
 ### Upgrade notes
 
 - Size the worker stacks of the runtime your mobs and RPC session runtimes

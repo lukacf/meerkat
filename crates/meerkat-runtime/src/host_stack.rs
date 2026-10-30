@@ -31,12 +31,17 @@
 //! The two runtimes this crate keeps for the whole process, the machine
 //! cleanup runtime and the runtime-loop serving runtime, run session and mob
 //! work in every process that uses the runtime, a host binary or an
-//! embedding. They follow the same knobs: `RKAT_WORKER_STACK_BYTES` sets
-//! their thread stack exactly, and without it they take the budget, or
+//! embedding. That work includes what an embedding host composes: the
+//! cleanup runtime polls the turns of runtime-backed mob members, with the
+//! host's tools and whatever those spawn. So their threads must not have
+//! less stack than the host's own workers, and they get twice the budget,
+//! 16 MiB. They follow the same knobs: `RKAT_WORKER_STACK_BYTES` sets their
+//! thread stack exactly, and without it they take the 16 MiB, or
 //! `RUST_MIN_STACK` when that asks for more. Their threads have an explicit
 //! size, and std applies `RUST_MIN_STACK` only to threads without one, so
-//! this is how an embedding whose debug build needs deeper stacks than the
-//! budget raises them: with the variable it already sets for its own threads.
+//! this is how an embedding whose workers or debug build need more than
+//! 16 MiB raises them: with the variable it already sets for its own
+//! threads.
 //!
 //! Worker count. The runtime starts one worker per available CPU
 //! (`std::thread::available_parallelism`: cpusets and cgroup CPU quotas
@@ -66,6 +71,15 @@ pub const HOST_WORKER_THREADS_ENV: &str = "RKAT_WORKER_THREADS";
 
 /// The variable std reads for the stack of every thread it sizes itself.
 const RUST_MIN_STACK_ENV: &str = "RUST_MIN_STACK";
+
+/// Stack of each thread of the two runtimes this crate keeps for the whole
+/// process (machine cleanup and runtime-loop serving) when
+/// [`HOST_WORKER_STACK_ENV`] is unset, twice [`HOST_WORKER_STACK_BUDGET`];
+/// `RUST_MIN_STACK` raises it and never lowers it. The cleanup runtime polls
+/// the turns of runtime-backed mob members, with the tools an embedding host
+/// gives them, so these threads must not have less stack than the host's own
+/// workers.
+const PROCESS_RUNTIME_STACK_BUDGET: usize = 16 * 1024 * 1024;
 
 /// Tokio's own worker-count variable, read after [`HOST_WORKER_THREADS_ENV`].
 const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
@@ -239,7 +253,7 @@ impl HostStackBudget {
             .iter()
             .find_map(|name| lookup(name).map(|raw| (*name, raw)))
         {
-            budget.bytes = parse_stack_override(name, raw)?;
+            budget.bytes = parse_stack_override(name, raw, HOST_WORKER_STACK_BUDGET)?;
             budget.overridden_by = Some(name.to_string());
         }
         budget.worker_threads = resolve_worker_threads(&lookup)?;
@@ -382,15 +396,16 @@ fn env_lookup(name: &str) -> Option<String> {
 }
 
 /// A stack override's byte count: at least [`HOST_WORKER_STACK_FLOOR`], or
-/// refused rather than guessed at.
-fn parse_stack_override(name: &str, raw: String) -> Result<usize, HostStackError> {
+/// refused rather than guessed at, naming the `default` the threads take
+/// once it is unset.
+fn parse_stack_override(name: &str, raw: String, default: usize) -> Result<usize, HostStackError> {
     match raw.trim().parse::<usize>() {
         Ok(bytes) if bytes >= HOST_WORKER_STACK_FLOOR => Ok(bytes),
         _ => Err(HostStackError::InvalidOverride {
             name: name.to_string(),
             raw,
             floor: HOST_WORKER_STACK_FLOOR,
-            default: HOST_WORKER_STACK_BUDGET,
+            default,
         }),
     }
 }
@@ -399,26 +414,28 @@ fn parse_stack_override(name: &str, raw: String) -> Result<usize, HostStackError
 /// whole process: the machine cleanup runtime and the runtime-loop serving
 /// runtime. [`HOST_WORKER_STACK_ENV`] sets it exactly, validated as
 /// [`HostStackBudget::from_env`] validates it. Without it the threads take
-/// [`HOST_WORKER_STACK_BUDGET`], or `RUST_MIN_STACK` when that asks for more:
-/// std applies that variable only to the threads it sizes itself, and these
-/// threads have an explicit size.
+/// [`PROCESS_RUNTIME_STACK_BUDGET`], or `RUST_MIN_STACK` when that asks for
+/// more: std applies that variable only to the threads it sizes itself, and
+/// these threads have an explicit size.
 pub(crate) fn process_runtime_stack_bytes() -> Result<usize, HostStackError> {
     process_runtime_stack_bytes_from(env_lookup)
 }
 
 /// [`process_runtime_stack_bytes`] with an injected environment, for tests.
 /// `RUST_MIN_STACK` is read as std reads it: a value that is not a byte count
-/// is ignored, and it never lowers the budget.
+/// is ignored, and it never lowers the default. A refused override names
+/// that default.
 fn process_runtime_stack_bytes_from(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<usize, HostStackError> {
-    if let Some(raw) = lookup(HOST_WORKER_STACK_ENV) {
-        return parse_stack_override(HOST_WORKER_STACK_ENV, raw);
-    }
     let min_stack = lookup(RUST_MIN_STACK_ENV)
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(0);
-    Ok(HOST_WORKER_STACK_BUDGET.max(min_stack))
+    let default = PROCESS_RUNTIME_STACK_BUDGET.max(min_stack);
+    match lookup(HOST_WORKER_STACK_ENV) {
+        Some(raw) => parse_stack_override(HOST_WORKER_STACK_ENV, raw, default),
+        None => Ok(default),
+    }
 }
 
 /// [`HOST_WORKER_THREADS_ENV`], then `TOKIO_WORKER_THREADS`: the first one
@@ -660,16 +677,20 @@ mod tests {
     #[test]
     fn process_runtimes_take_the_override_exactly_else_the_budget_raised_to_rust_min_stack() {
         const MIB: usize = 1024 * 1024;
-        let cases: [(&[(&str, &str)], usize); 7] = [
-            // Nothing set: the documented default.
-            (&[], HOST_WORKER_STACK_BUDGET),
-            // RUST_MIN_STACK raises the default and never lowers it.
+        let cases: [(&[(&str, &str)], usize); 9] = [
+            // Nothing set: 16 MiB, twice the host worker budget, so these
+            // threads do not have less stack than an embedding host's own
+            // 16 MiB workers.
+            (&[], 16 * MIB),
+            // RUST_MIN_STACK raises the default and never lowers it, the
+            // 8 MiB a test environment gives its own threads included.
             (&[("RUST_MIN_STACK", "33554432")], 32 * MIB),
-            (&[("RUST_MIN_STACK", "2097152")], HOST_WORKER_STACK_BUDGET),
+            (&[("RUST_MIN_STACK", "8388608")], 16 * MIB),
+            (&[("RUST_MIN_STACK", "2097152")], 16 * MIB),
             // A RUST_MIN_STACK that std ignores is ignored here too.
-            (&[("RUST_MIN_STACK", "32MiB")], HOST_WORKER_STACK_BUDGET),
-            // The override is exact, below RUST_MIN_STACK included, so a
-            // diagnosis can sweep under a test environment's floor.
+            (&[("RUST_MIN_STACK", "32MiB")], 16 * MIB),
+            // The override is exact, below the default and RUST_MIN_STACK
+            // included, so a diagnosis can sweep under them.
             (
                 &[
                     (HOST_WORKER_STACK_ENV, " 1048576 "),
@@ -677,6 +698,7 @@ mod tests {
                 ],
                 MIB,
             ),
+            (&[(HOST_WORKER_STACK_ENV, "8388608")], 8 * MIB),
             (&[(HOST_WORKER_STACK_ENV, "67108864")], 64 * MIB),
             // Worker counts are a host runtime's concern, not these runtimes'.
             (
@@ -684,7 +706,7 @@ mod tests {
                     ("TOKIO_WORKER_THREADS", "0"),
                     (HOST_WORKER_THREADS_ENV, "two"),
                 ],
-                HOST_WORKER_STACK_BUDGET,
+                16 * MIB,
             ),
         ];
         for (pairs, bytes) in cases {
@@ -696,19 +718,27 @@ mod tests {
         }
 
         // The override is validated as a host validates it, whatever
-        // RUST_MIN_STACK says.
+        // RUST_MIN_STACK says, and the refusal names the default these
+        // threads take once it is unset.
         for raw in ["65535", "8MiB", ""] {
-            match process_runtime_stack_bytes_from(env(&[
-                (HOST_WORKER_STACK_ENV, raw),
-                ("RUST_MIN_STACK", "33554432"),
-            ])) {
-                Err(HostStackError::InvalidOverride {
-                    name, raw: seen, ..
-                }) => {
-                    assert_eq!(name, HOST_WORKER_STACK_ENV);
-                    assert_eq!(seen, raw);
+            for (min_stack, default) in [("2097152", 16 * MIB), ("33554432", 32 * MIB)] {
+                match process_runtime_stack_bytes_from(env(&[
+                    (HOST_WORKER_STACK_ENV, raw),
+                    ("RUST_MIN_STACK", min_stack),
+                ])) {
+                    Err(HostStackError::InvalidOverride {
+                        name,
+                        raw: seen,
+                        floor,
+                        default: named,
+                    }) => {
+                        assert_eq!(name, HOST_WORKER_STACK_ENV);
+                        assert_eq!(seen, raw);
+                        assert_eq!(floor, HOST_WORKER_STACK_FLOOR);
+                        assert_eq!(named, default, "RUST_MIN_STACK={min_stack}");
+                    }
+                    other => panic!("expected InvalidOverride for {raw:?}, got {other:?}"),
                 }
-                other => panic!("expected InvalidOverride for {raw:?}, got {other:?}"),
             }
         }
     }

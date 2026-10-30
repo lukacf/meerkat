@@ -591,6 +591,20 @@ impl SessionBridge for ObservedBridge {
         self.inner.last_member_binding(identity).await
     }
 
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        self.inner.member_lifecycle_journal_head().await
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        self.inner.member_lifecycle_journal_page(after, limit).await
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,

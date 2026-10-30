@@ -1,5 +1,6 @@
 import React from "react";
 import { describeFailure } from "../lib/failure-summary";
+import { turnSender, turnSenderWords } from "../lib/turn-origin";
 import { stripPeerTransportScaffold } from "../lib/adapters";
 import type { ConsoleFrame } from "../types";
 import {
@@ -143,13 +144,17 @@ export function describeTodayFrame(frame: ConsoleFrame): TodayLine {
         tone: "info",
         kind: "Turn",
       };
-    case "user_input":
+    case "user_input": {
+      // The typed origin names the sender: you, another operator, a
+      // scheduled run, a connector.
+      const words = turnSenderWords(turnSender(data));
       return {
-        segments: ["You asked ", who],
+        segments: words.after ? [words.before, who, words.after] : [words.before, who],
         snippet: snippetOf(textOf(data.content ?? data.input ?? data.prompt ?? data.text)),
         tone: "info",
         kind: "Turn",
       };
+    }
     case "interaction_failed":
     case "run_failed":
       return { segments: [who, "'s turn failed"], snippet: snippetOf(describeFailure(data, "")), tone: "crit", kind: "Problem" };

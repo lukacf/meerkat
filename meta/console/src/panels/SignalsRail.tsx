@@ -4,6 +4,7 @@ import { describeFailure } from "../lib/failure-summary";
 import { memberKickoffNotice, memberKickoffPhaseLabel, type MemberKickoffNotice } from "@console-core";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../types";
 import { countRender } from "../lib/render-counts";
+import { turnSenderLine } from "../lib/turn-origin";
 // Pure kit helpers only: this rail's node test bundle cannot resolve React
 // from the kit package, so it uses the kit's CSS classes in its own markup.
 import {
@@ -250,7 +251,11 @@ function severityOf(frame: ConsoleFrame): Severity {
   return "info";
 }
 
-function signalFromFrame(frame: ConsoleFrame, displayName: NameResolver): Signal | null {
+function signalFromFrame(
+  frame: ConsoleFrame,
+  displayName: NameResolver,
+  turnLabels?: ReadonlyMap<string, string>,
+): Signal | null {
   const data = recordOf(frame.data);
   const severity = severityOf(frame);
   const base = {
@@ -282,10 +287,19 @@ function signalFromFrame(frame: ConsoleFrame, displayName: NameResolver): Signal
       );
       if (!request) return null;
       if (isScaffoldRequest(request)) return null;
+      // Name the real sender from the typed origin. A runtime's
+      // interaction_started carries none: it takes the label of its turn's
+      // user_input when there is one, so the two still collapse into one
+      // signal, and otherwise says the agent started a turn.
+      const hasOrigin = Boolean(textFromValue(data.origin_kind) || textFromValue(data.origin));
+      const name = displayName(base.agent);
+      const label = frame.event === "user_input" || hasOrigin
+        ? turnSenderLine(data, name)
+        : turnLabels?.get(frame.interactionId || "") ?? `${name} started a turn`;
       return {
         ...base,
         id: `user:${frame.id || frame.interactionId || frame.timestampMs || request}`,
-        label: `You asked ${displayName(base.agent)}`,
+        label,
         detail: truncate(request),
       };
     }
@@ -514,8 +528,15 @@ export function buildSignalGroupsForTest(frames: ConsoleFrame[], directory: Agen
   const seen = new Set<string>();
   const seenSemantic = new Set<string>();
   const next: Signal[] = [];
-  for (const frame of frames.slice(0, 260)) {
-    const signal = signalFromFrame(frame, displayName);
+  const window = frames.slice(0, 260);
+  // Each turn's sender line, from its user_input frame.
+  const turnLabels = new Map<string, string>();
+  for (const frame of window) {
+    if (frame.event !== "user_input" || !frame.interactionId) continue;
+    turnLabels.set(frame.interactionId, turnSenderLine(recordOf(frame.data), displayName(agentFor(frame))));
+  }
+  for (const frame of window) {
+    const signal = signalFromFrame(frame, displayName, turnLabels);
     if (!signal) continue;
     if (seen.has(signal.id)) continue;
     seen.add(signal.id);

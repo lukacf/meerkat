@@ -90,6 +90,7 @@ export default defineConfig({
       "console/src/panels/OperatorPanel.test.tsx",
       "console/src/panels/RosterPanel.test.tsx",
       "console/src/panels/AgentDetailsPanel.test.tsx",
+      "console/src/panels/TimelinePanel.test.tsx",
       "console/src/lib/operator-panel-integration.test.tsx",
       "packages/console-components/src/conversation/conversation-message-group.test.tsx",
       "packages/console-components/src/conversation/context-selection.test.tsx",

@@ -31,6 +31,7 @@ import {
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
 import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
+import { rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -3989,6 +3990,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // The saved attempt lives in this namespace even if the scope or the
     // console lifetime ends before the request settles.
     const attemptNamespace = persistentSendScopeRef.current;
+    // Panels say "You asked" only for sends this console made.
+    const idempotencyKey = envelope?.idempotency_key ?? createIdempotencyKey();
+    rememberOwnSend(idempotencyKey);
     const optimisticTopologyFrameId = `optimistic-topology:${identity}:${Date.now()}`;
     commitLiveFrames([{
       id: optimisticTopologyFrameId,
@@ -3998,6 +4002,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       timestampMs: Date.now(),
       data: {
         origin: `console:${panelId}`,
+        idempotency_key: idempotencyKey,
         handling_mode: handlingMode,
       },
     }, ...liveFramesRef.current].slice(0, 300));
@@ -4013,7 +4018,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         {
           content: envelope?.content ?? text,
           origin: envelope?.origin ?? `console:${panelId}`,
-          idempotencyKey: envelope?.idempotency_key ?? createIdempotencyKey(),
+          idempotencyKey,
           handlingMode: envelope?.handling_mode ?? handlingMode,
           attachments,
         },

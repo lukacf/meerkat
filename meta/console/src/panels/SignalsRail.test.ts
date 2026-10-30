@@ -4,6 +4,7 @@ import { buildSignalGroupsForTest, signalNameResolver } from "./SignalsRail";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 import { MEERKAT_1608_KICKOFF_NOTICES } from "../lib/fixtures/meerkat-1608-kickoff-notices";
+import { rememberOwnSend } from "../lib/turn-origin";
 
 test("signals rail deduplicates live and history copies of the same visible reply", () => {
   const frames: ConsoleFrame[] = [
@@ -321,4 +322,29 @@ test("signals rail names console events System and resolves aliases", () => {
   assert.equal(name("_system"), "System");
   assert.equal(name(""), "System");
   assert.equal(signalNameResolver()("agent:nightly-monitor"), "Nightly Monitor");
+});
+
+test("signals rail names who sent a turn: a scheduled run, a connector, another operator or you", () => {
+  rememberOwnSend("send-key-mine");
+  const now = Date.now();
+  const turn = (id: string, ago: number, data: Record<string, unknown>): ConsoleFrame => ({
+    id,
+    event: "user_input",
+    identity: "identity:nightly-monitor",
+    interactionId: `turn-${id}`,
+    timestampMs: now - ago,
+    data,
+  });
+  const frames: ConsoleFrame[] = [
+    turn("scheduled", 0, { content: "Run the nightly check.", origin: "console:schedule", origin_kind: "scheduler", idempotency_key: "k-1" }),
+    turn("connector", 1_000, { content: "A customer wrote about the export.", origin: "mail-bridge", origin_kind: "connector", idempotency_key: "k-2" }),
+    turn("other", 2_000, { content: "Check the backlog.", origin: "console:pane-1", origin_kind: "operator", idempotency_key: "k-3" }),
+    turn("mine", 3_000, { content: "Summarize the night.", origin: "console:pane-2", origin_kind: "operator", idempotency_key: "send-key-mine" }),
+  ];
+  const titles = buildSignalGroupsForTest(frames).map((group) => group.title);
+  assert.ok(titles.includes("Scheduled run for Nightly Monitor"), JSON.stringify(titles));
+  assert.ok(titles.includes("A connector sent Nightly Monitor a message"), JSON.stringify(titles));
+  assert.ok(titles.includes("An operator asked Nightly Monitor"), JSON.stringify(titles));
+  assert.ok(titles.includes("You asked Nightly Monitor"), JSON.stringify(titles));
+  assert.equal(titles.filter((title) => title.startsWith("You asked")).length, 1, JSON.stringify(titles));
 });

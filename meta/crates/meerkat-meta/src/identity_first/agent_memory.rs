@@ -648,6 +648,25 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
+    /// [`Self::distill_before_rotation`], answering whether the run ended
+    /// within the distiller's pre-rotation bound, or the bound it did not
+    /// end within. Without a distiller there is nothing to wait for.
+    pub(crate) async fn distill_before_rotation_within_bound(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        cause: crate::memory::distiller::DistillCause,
+    ) -> Result<(), std::time::Duration> {
+        match self.distiller.as_ref() {
+            Some(distiller) => {
+                distiller
+                    .distill_before_rotation_within_bound(identity.as_str(), session_key, cause)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Ask 2 GC: after distilling a permanently-orphaned session, reclaim its
     /// meerkat semantic-memory rows (respawn/reset mint a fresh id; delete
     /// discards it — the old scope is dead weight that every future build in

@@ -32,13 +32,17 @@ use super::UnifiedRuntime;
 /// The `/healthz` answer: `ok` as plain text, the liveness probe's answer,
 /// and a JSON summary on request. The summary's `status` is `degraded` while
 /// Core holds restored members broken (`broken_members` names each, with
-/// Core's reason), as it is when the host's detached job projection says so,
-/// and `unreadable` when that projection says so. Only the JSON summary
-/// reads the broken members.
+/// Core's reason), while the identity runtime's lifecycle projection is off
+/// or keeps failing (`lifecycle_projection` says which, and why), as it is
+/// when the host's detached job projection says so, and `unreadable` when
+/// that projection says so. `lifecycle_projection` also names the journal
+/// events whose side effects a stopped predecessor still owes, while they
+/// drain. Only the JSON summary reads the broken members.
 async fn healthz_response(
     headers: HeaderMap,
     job_health_projection: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
     broken_members: impl std::future::Future<Output = Vec<(meerkat_mob::AgentIdentity, String)>>,
+    lifecycle_projection: Option<crate::identity_first::LifecycleProjectionStatus>,
 ) -> axum::response::Response {
     let wants_json = headers
         .get(header::ACCEPT)
@@ -83,6 +87,15 @@ async fn healthz_response(
             public_projection["status"] = serde_json::json!("degraded");
         }
         public_projection["broken_members"] = broken_members_json(&broken_members);
+    }
+    if let Some(lifecycle_projection) =
+        lifecycle_projection.filter(|status| status.degraded() || status.owed_events > 0)
+    {
+        if lifecycle_projection.degraded() && public_projection["status"] != "unreadable" {
+            public_projection["status"] = serde_json::json!("degraded");
+        }
+        public_projection["lifecycle_projection"] =
+            serde_json::to_value(&lifecycle_projection).unwrap_or(serde_json::Value::Null);
     }
     Json(public_projection).into_response()
 }
@@ -591,18 +604,32 @@ impl UnifiedRuntime {
         let structural_sse_visibility_policy = visibility_policy.clone();
         let job_health_projection = Arc::clone(&self.job_health_projection);
         let health_runtime = self.mob_runtime().clone();
+        // Late-bound: a gateway installs its identity runtime after the
+        // router is built.
+        let health_identity_runtime = Arc::clone(&self.implicit_delegate_identity_runtime);
         Router::new()
             .route(
                 "/healthz",
                 get(move |headers: HeaderMap| {
                     let job_health_projection = Arc::clone(&job_health_projection);
                     let health_runtime = health_runtime.clone();
+                    let lifecycle_projection = health_identity_runtime
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .map(|identities| identities.lifecycle_projection_status());
                     async move {
                         let broken_members = async move {
                             crate::mob_handle_runtime::broken_members_of(&health_runtime.handle())
                                 .await
                         };
-                        healthz_response(headers, job_health_projection, broken_members).await
+                        healthz_response(
+                            headers,
+                            job_health_projection,
+                            broken_members,
+                            lifecycle_projection,
+                        )
+                        .await
                     }
                 }),
             )
@@ -1344,6 +1371,7 @@ model = "gpt-5.5"
             HeaderMap::new(),
             Arc::clone(&projection),
             std::future::ready(Vec::new()),
+            None,
         )
         .await;
         assert_eq!(text.status(), axum::http::StatusCode::OK);
@@ -1356,7 +1384,8 @@ model = "gpt-5.5"
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().expect("accept"));
-        let json = healthz_response(headers, projection, std::future::ready(Vec::new())).await;
+        let json =
+            healthz_response(headers, projection, std::future::ready(Vec::new()), None).await;
         let body = axum::body::to_bytes(json.into_body(), usize::MAX)
             .await
             .expect("json body");
@@ -1380,7 +1409,7 @@ model = "gpt-5.5"
         )];
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().expect("accept"));
-        let json = healthz_response(headers, projection, std::future::ready(broken)).await;
+        let json = healthz_response(headers, projection, std::future::ready(broken), None).await;
         let body = axum::body::to_bytes(json.into_body(), usize::MAX)
             .await
             .expect("json body");
@@ -1404,10 +1433,15 @@ model = "gpt-5.5"
         )];
         // The plain-text answer never reads the broken members.
         let read = std::sync::atomic::AtomicBool::new(false);
-        let text = healthz_response(HeaderMap::new(), Arc::clone(&projection), async {
-            read.store(true, std::sync::atomic::Ordering::SeqCst);
-            broken.clone()
-        })
+        let text = healthz_response(
+            HeaderMap::new(),
+            Arc::clone(&projection),
+            async {
+                read.store(true, std::sync::atomic::Ordering::SeqCst);
+                broken.clone()
+            },
+            None,
+        )
         .await;
         assert_eq!(text.status(), axum::http::StatusCode::OK);
         assert!(
@@ -1417,7 +1451,7 @@ model = "gpt-5.5"
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().expect("accept"));
-        let json = healthz_response(headers, projection, std::future::ready(broken)).await;
+        let json = healthz_response(headers, projection, std::future::ready(broken), None).await;
         let body = axum::body::to_bytes(json.into_body(), usize::MAX)
             .await
             .expect("json body");
@@ -1431,6 +1465,55 @@ model = "gpt-5.5"
             }]),
             "{body}"
         );
+    }
+
+    /// The JSON summary reads degraded while the identity runtime's lifecycle
+    /// projection is off, and says why; a predecessor's backlog still
+    /// draining is named without degrading it; a running projection with
+    /// nothing owed adds nothing.
+    #[tokio::test]
+    async fn healthz_reads_degraded_while_the_lifecycle_projection_is_off() {
+        use crate::identity_first::{LifecycleProjectionState, LifecycleProjectionStatus};
+        let json_headers = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, "application/json".parse().expect("accept"));
+            headers
+        };
+        let summary = |status: Option<LifecycleProjectionStatus>| {
+            let headers = json_headers();
+            async move {
+                let projection = Arc::new(std::sync::RwLock::new(None));
+                let json =
+                    healthz_response(headers, projection, std::future::ready(Vec::new()), status)
+                        .await;
+                let body = axum::body::to_bytes(json.into_body(), usize::MAX)
+                    .await
+                    .expect("json body");
+                serde_json::from_slice::<serde_json::Value>(&body).expect("json")
+            }
+        };
+        let mut off = LifecycleProjectionStatus::new(LifecycleProjectionState::Off);
+        off.detail = Some("the session bridge cannot read the journal".to_string());
+        let body = summary(Some(off)).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(body["lifecycle_projection"]["state"], "off", "{body}");
+        assert_eq!(
+            body["lifecycle_projection"]["detail"],
+            "the session bridge cannot read the journal"
+        );
+
+        let mut draining = LifecycleProjectionStatus::new(LifecycleProjectionState::Running);
+        draining.owed_events = 40;
+        let body = summary(Some(draining)).await;
+        assert_eq!(body["status"], "ok", "{body}");
+        assert_eq!(body["lifecycle_projection"]["owed_events"], 40, "{body}");
+
+        let body = summary(Some(LifecycleProjectionStatus::new(
+            LifecycleProjectionState::Running,
+        )))
+        .await;
+        assert_eq!(body["status"], "ok", "{body}");
+        assert!(body.get("lifecycle_projection").is_none(), "{body}");
     }
 
     /// An identity-first runtime over the in-memory test client with one

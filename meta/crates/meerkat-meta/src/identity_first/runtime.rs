@@ -1082,9 +1082,11 @@ pub enum IdentityRuntimeError {
         detail: String,
     },
     /// The identity's history could not be read from Core, or its resume
-    /// failed on a transient fault. Nothing was spawned, and a
-    /// read fault is never taken as "no history": the next wake retries.
-    /// JSON-RPC `IDENTITY_HISTORY_UNAVAILABLE_CODE`.
+    /// failed on a transient fault, or the records Meta keeps of its
+    /// lifecycle steps (what a step owes, the lifecycle projection's cursor)
+    /// could not be read or written. Nothing was spawned or asked of Core,
+    /// and a read fault is never taken as "no history": the next wake or
+    /// step retries. JSON-RPC `IDENTITY_HISTORY_UNAVAILABLE_CODE`.
     IdentityHistoryUnavailable {
         identity: AgentIdentity,
         detail: String,
@@ -3062,6 +3064,9 @@ impl IdentityFirstRuntimeContext {
                  the pass's steps prepares it again"
             );
         }
+        // An unlisting the roster undid before Core carried it out owes
+        // nothing.
+        self.runtime.take_back_relisted_unlistings(roster).await;
         if let Err(message) = self.bootstrap_mode.validate() {
             let error = IdentityRuntimeError::Internal(message);
             self.runtime
@@ -4064,6 +4069,22 @@ pub(crate) fn binding_carries_identity_marker(
             if continuity_key == identity.as_str()
                 || continuity_key == binding.identity().as_str()
     )
+}
+
+/// The error hook's report that the host's retirement hook failed for
+/// `member` with `error` (it answered an error, or never answered): the
+/// retirement stands.
+fn retired_member_release_failed(
+    member: &super::types::RetiredIdentityMember,
+    error: String,
+) -> crate::unified_runtime::types::ErrorEvent {
+    crate::unified_runtime::types::ErrorEvent::RetiredMemberReleaseFailed {
+        identity: member.identity.to_string(),
+        agent_runtime_id: member.agent_runtime_id.to_string(),
+        session_id: member.session_id.as_ref().map(ToString::to_string),
+        cause: member.cause.as_str().to_string(),
+        error,
+    }
 }
 
 /// Whether an identity-first spawn made `binding`'s member for `identity`:
@@ -5834,11 +5855,11 @@ impl IdentityRuntime {
         }
     }
 
-    /// Hand each retired incarnation to the host's retirement hook, in
-    /// order: a release's verb does, and the lifecycle projection does for
-    /// an incarnation Core's journal ended. Callers hold no Meta lock here
-    /// (no identity lifecycle lock, no bootstrap controller), so the hook may
-    /// call back into this runtime. A hook error leaves the retirement
+    /// Hand each released incarnation to the host's retirement hook, in
+    /// order: a release's verb does (the lifecycle projection hands over an
+    /// incarnation Core's journal ended, bounded). Callers hold no Meta lock
+    /// here (no identity lifecycle lock, no bootstrap controller), so the
+    /// hook may call back into this runtime. A hook error leaves the release
     /// standing: it is reported to the error hook and not retried.
     pub(crate) async fn release_retired_members(
         &self,
@@ -5851,20 +5872,8 @@ impl IdentityRuntime {
             return;
         };
         for member in retired {
-            let identity = member.identity.to_string();
-            let agent_runtime_id = member.agent_runtime_id.to_string();
-            let session_id = member.session_id.as_ref().map(ToString::to_string);
-            let cause = member.cause.as_str().to_string();
-            if let Err(error) = observer(member).await {
-                self.emit_error(
-                    crate::unified_runtime::types::ErrorEvent::RetiredMemberReleaseFailed {
-                        identity,
-                        agent_runtime_id,
-                        session_id,
-                        cause,
-                        error,
-                    },
-                );
+            if let Err(error) = observer(member.clone()).await {
+                self.emit_error(retired_member_release_failed(&member, error));
             }
         }
     }
@@ -7890,6 +7899,9 @@ impl IdentityRuntime {
         topology_provider: Option<Arc<dyn TopologyProvider>>,
         customizer: Option<Arc<dyn AgentCustomizer>>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
+        // No identity context serves the runtime: the restore binds its
+        // lifecycle projection, so the side effects of its steps run.
+        self.adopt_lifecycle_projection(customizer.clone());
         let runtime = Arc::clone(self);
         self.run_tracked_foreground(async move {
             super::orchestrator::restore_flow(
@@ -9438,7 +9450,14 @@ impl IdentityRuntime {
             .create_session_held(identity, spec, &draft, pass)
             .await
         {
-            Ok(binding) => binding,
+            Ok(binding) => {
+                if let Some(session_id) = binding.session_id.as_ref() {
+                    self.bind_lifecycle_build(identity, session_id);
+                } else {
+                    self.forget_lifecycle_build(identity);
+                }
+                binding
+            }
             Err(error) => {
                 self.forget_lifecycle_build(identity);
                 return Err(match deterministic_build_rejection_reason(&error) {
@@ -14449,8 +14468,13 @@ impl IdentityRuntime {
             .core_last_binding(identity)
             .await?
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Reset)
-            .await?;
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Reset,
+            previous.clone(),
+        )
+        .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14480,13 +14504,20 @@ impl IdentityRuntime {
                 );
                 // An incarnation Core had already retired is not retired by
                 // the rotation, so no journal fact carries its distillation:
-                // it runs here, detached and best-effort.
+                // it runs beside the projection, bounded by the distiller,
+                // and a graceful shutdown joins it with the projection.
                 if !previous.is_live() {
-                    injector.spawn_rotation_distillation(
-                        identity,
-                        &session_key,
-                        crate::memory::distiller::DistillCause::Reset,
-                    );
+                    let injector = injector.clone();
+                    let identity = identity.clone();
+                    self.spawn_lifecycle_side_task(async move {
+                        injector
+                            .distill_before_rotation(
+                                &identity,
+                                &session_key,
+                                crate::memory::distiller::DistillCause::Reset,
+                            )
+                            .await;
+                    });
                 }
             }
         }
@@ -14564,6 +14595,7 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
         life: FreshLife,
+        previous: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         // An identity a held pass did not publish owes its host a fresh held
@@ -14610,10 +14642,16 @@ impl IdentityRuntime {
                 ),
             })?
             .remove(identity);
-        // The live incarnation the rotation retires; `None` when Core holds
-        // none, and its rotation seats the identity fresh.
+        // The live incarnation the rotation retires, as the verb read it;
+        // `None` when Core holds none the identity spawned, and its rotation
+        // seats the identity fresh.
         let retiring = self
-            .prepare_lifecycle_retirement(identity, life.effect_verb(), Some(life.cause()))
+            .prepare_lifecycle_retirement_of(
+                identity,
+                previous,
+                life.effect_verb(),
+                Some(life.cause()),
+            )
             .await?;
         let from_generation = retiring
             .as_ref()
@@ -14638,6 +14676,7 @@ impl IdentityRuntime {
                     .await);
             }
         };
+        self.bind_lifecycle_build(identity, &session_id);
         self.clear_rotation_intent(identity).await;
         self.settle_lifecycle_retirement(retiring).await;
         // Core's rotation ends the identity's wiring with its incarnation:
@@ -14858,8 +14897,15 @@ impl IdentityRuntime {
         }
 
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete)
-            .await?;
+        // The rotation's record reads the liveness the delete read: what the
+        // projection owes and what runs here below agree.
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Delete,
+            Some(previous.clone()),
+        )
+        .await?;
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never

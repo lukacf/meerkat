@@ -247,12 +247,24 @@ impl IdentityRuntime {
         };
         // The lifecycle projection's cursor is read before the step asks
         // Core for anything, so each seat and rotation it journals is
-        // projected. A failed read is tried again before the next step.
+        // projected. While no cursor can be read or started, the step is
+        // refused, retryable, with nothing asked of Core: a seat Core
+        // committed before the cursor would lie behind it, and its
+        // `after_create` would never be told.
         if let Err(error) = self.prepare_lifecycle_projection().await {
-            tracing::warn!(
-                %error,
-                "the lifecycle projection could not be prepared before the seat step"
-            );
+            for spec in specs {
+                outcomes.insert(
+                    spec.identity.clone(),
+                    Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: spec.identity.clone(),
+                        detail: format!(
+                            "nothing was asked of Core: the lifecycle projection's cursor could \
+                             not be read or started ({error})"
+                        ),
+                    }),
+                );
+            }
+            return outcomes;
         }
         // The manifest is read first: an unreadable one refuses every
         // identity of the step, since which of them it covers is unknown.
@@ -414,18 +426,14 @@ impl IdentityRuntime {
                     if planned.rotation {
                         self.clear_rotation_intent(&identity).await;
                     }
-                    if outcome.already_seated {
-                        // No seat: nothing to tell of the build.
-                        self.forget_lifecycle_build(&identity);
-                    } else if locks == SeatLocks::Take {
-                        // A caller that holds the identity's lifecycle lock
-                        // settles the views itself, once, with its own step.
+                    // A caller that holds the identity's lifecycle lock
+                    // settles the views itself, once, with its own step.
+                    if !outcome.already_seated && locks == SeatLocks::Take {
                         self.settle_successful_wake(&identity).await;
                     }
                     outcomes.insert(identity, Ok(outcome));
                 }
                 Err(error) => {
-                    self.forget_lifecycle_build(&identity);
                     self.record_wake_refusal(&identity, &error).await;
                     outcomes.insert(identity, Err(error));
                 }
@@ -1086,6 +1094,21 @@ impl IdentityRuntime {
             let result = self.commit_other(bridge, &planned, &draft).await;
             answered.push((planned, draft, result));
         }
+        // What each build made is the one its seat's `after_create` reports:
+        // bound to the session Core seated, before the step releases the
+        // identities' lifecycle locks, which the projection takes before it
+        // reads it. A step that seated nothing forgets it.
+        for (planned, _draft, result) in &answered {
+            let identity = &planned.spec.identity;
+            match result {
+                Ok(SeatOutcome {
+                    already_seated: false,
+                    session_id: Some(session_id),
+                    ..
+                }) => self.bind_lifecycle_build(identity, session_id),
+                _ => self.forget_lifecycle_build(identity),
+            }
+        }
         drop(guards);
         answered
     }
@@ -1316,11 +1339,20 @@ impl IdentityRuntime {
                         .map_err(|error| release_error(identity, Some(session), error))?;
                 }
                 // The rotation retires the identity's live incarnation and
-                // seats the next one on a fresh session: a reset's side
-                // effects, recorded before Core is asked. A rotation a crash
+                // seats the next one on a fresh session, recorded before
+                // Core is asked as what it is: a first-boot `Fresh` row's,
+                // a reset; a role move's, a role move. A rotation a crash
                 // interrupted is the verb's that recorded its own.
                 let retiring = match &planned.plan {
                     SeatPlan::Rotate { from_row: false } => None,
+                    SeatPlan::RotateRole { .. } => {
+                        self.prepare_lifecycle_retirement(
+                            identity,
+                            crate::runtime::LifecycleEffectVerb::RoleMove,
+                            Some(super::super::types::RetiredIdentityCause::RoleMove),
+                        )
+                        .await?
+                    }
                     _ => {
                         self.prepare_lifecycle_retirement(
                             identity,

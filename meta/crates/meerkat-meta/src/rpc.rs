@@ -2460,6 +2460,12 @@ async fn handle_unified_rpc_json_inner(
                 result["identity_bootstrap"] =
                     serde_json::to_value(ctx.runtime.identity_bootstrap_status())
                         .unwrap_or(Value::Null);
+                // Whether the side effects of the identities' lifecycle steps
+                // run: off, with why, when the session bridge cannot read
+                // Core's journal; the events a predecessor still owes.
+                result["lifecycle_projection"] =
+                    serde_json::to_value(ctx.runtime.lifecycle_projection_status())
+                        .unwrap_or(Value::Null);
             }
             result["member_restore"] =
                 crate::mob_handle_runtime::member_restore_report(&runtime.mob_handle());

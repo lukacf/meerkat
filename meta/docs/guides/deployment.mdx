@@ -265,6 +265,31 @@ init says so. A resumed launch (same fingerprint) reports the `http_base_url`
 and `http_public_base_url` the live runtime was started with, which are by
 construction the ones you declared.
 
+## Lifecycle side effects across a restart
+
+The side effects of an identity's lifecycle steps (the customizer's
+`after_create` for a seat, the host's retirement hook for an incarnation Core
+ended, the distillation of a retired session and an unlisted or deleted
+identity's exit interview) run from Core's member lifecycle journal, through a
+cursor the gateway keeps in its metadata store, beside what each step owes
+and the side effects that failed. Whether they survive a restart depends on
+that store:
+
+- `rpc_gateway` over a state directory, or a host store realm, keeps the
+  metadata store durable: a gateway killed between a step and its side
+  effects runs them at its next start, and a graceful shutdown that ran out
+  of its share of the drain window leaves the rest for the next start.
+- `meta_gateway` keeps its metadata in memory (its storage census reports
+  the `metadata` slot `declared_ephemeral`), so its side effects are run at
+  least once within the process only: a kill loses those still owed, and the
+  next start projects from the journal's head.
+
+What a stopped gateway still owed when the next one starts runs in the
+background after init answers; `meta/status` (`lifecycle_projection.owed_events`)
+counts the journal events left. A session bridge that cannot read Core's
+journal turns the side effects off: the gateway reports
+`lifecycle_projection_off` once, and its status and health read degraded.
+
 ## Repairing a refused durable session
 
 A member whose committed WholeBlob document fails meerkat's audited-endpoint

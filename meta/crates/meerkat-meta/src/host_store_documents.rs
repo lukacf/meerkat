@@ -43,9 +43,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
-    IdentityRotationIntent, IdentityToolRecord, LifecycleEffectIntent, LifecycleProjectionCursor,
-    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore,
-    decode_identity_record, encode_identity_record,
+    IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
+    LifecycleProjectionCursor, MemberIdleRetireOverrideRecord, MetadataStoreError,
+    PersistentMetadataStore, decode_identity_record, encode_identity_record,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -74,6 +74,7 @@ const TOOLS_PREFIX: &str = "tools/";
 const ROTATION_PREFIX: &str = "rotation/";
 const LIFECYCLE_PREFIX: &str = "lifecycle/";
 const EFFECT_PREFIX: &str = "effect/";
+const FAILURE_PREFIX: &str = "failure/";
 
 /// The format version of the cursor and idle opt-in documents.
 const ENTRY_VERSION: u32 = 1;
@@ -123,6 +124,29 @@ fn lifecycle_effect_key(mob_id: &str, identity: &str, generation: u64) -> String
         "{EFFECT_PREFIX}{}:{mob_id}{generation}/{identity}",
         mob_id.len()
     )
+}
+
+/// The prefix of every lifecycle effect intent of `mob_id`.
+fn lifecycle_effect_prefix(mob_id: &str) -> String {
+    format!("{EFFECT_PREFIX}{}:{mob_id}", mob_id.len())
+}
+
+/// A lifecycle effect failure, injective over (mob id, generation, effect,
+/// identity) as [`lifecycle_effect_key`] is: the generation, a number, and
+/// the effect's wire name each end at a `/`.
+fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
+    format!(
+        "{}{}/{}/{}",
+        lifecycle_failure_prefix(&failure.mob_id),
+        failure.generation,
+        failure.effect.as_str(),
+        failure.identity
+    )
+}
+
+/// The prefix of every lifecycle effect failure of `mob_id`.
+fn lifecycle_failure_prefix(mob_id: &str) -> String {
+    format!("{FAILURE_PREFIX}{}:{mob_id}", mob_id.len())
 }
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -918,5 +942,61 @@ impl PersistentMetadataStore for SpiMetadataStore {
             .write(&lifecycle_effect_key(mob_id, identity, generation), None)
             .await
             .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectIntent>, MetadataStoreError> {
+        let mut intents = Vec::new();
+        for key in self
+            .documents
+            .keys_with_prefix(&lifecycle_effect_prefix(mob_id))
+        {
+            let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+                continue;
+            };
+            let intent: LifecycleEffectIntent = decode_identity_record(&bytes)?;
+            // The prefix carries the mob id's length, so it names exactly
+            // this mob's records.
+            if intent.mob_id == mob_id {
+                intents.push(intent);
+            }
+        }
+        Ok(intents)
+    }
+
+    /// Written through: a failure is recorded before the projection's cursor
+    /// moves past the event that owed it.
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &LifecycleEffectFailure,
+    ) -> Result<(), MetadataStoreError> {
+        let document = encode_identity_record(failure)?.into_bytes();
+        self.documents
+            .write(&lifecycle_failure_key(failure), Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let mut failures = Vec::new();
+        for key in self
+            .documents
+            .keys_with_prefix(&lifecycle_failure_prefix(mob_id))
+        {
+            let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+                continue;
+            };
+            let failure: LifecycleEffectFailure = decode_identity_record(&bytes)?;
+            if failure.mob_id == mob_id {
+                failures.push(failure);
+            }
+        }
+        failures.sort_by_key(|failure| failure.recorded_at_ms);
+        Ok(failures)
     }
 }

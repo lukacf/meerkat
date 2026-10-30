@@ -977,8 +977,11 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,
   session_id, context)`, when you define one, is then called with the
-  session the identity is bound to, at least once: a gateway stopped
-  before the call makes it at its next start;
+  session the identity is bound to, unless that incarnation has ended by
+  then. It is attempted at least once: a gateway stopped before the call
+  makes it at its next start, over a durable metadata store. Each call has
+  30 seconds to answer and is made at most three times; one that failed is
+  reported as `lifecycle_effect_failed` and not made again;
 - once per build of a member, right before it: when work reaches a member
   that is not materialized (a send, a dispatch, a peer message, a kickoff),
   and at start for the members that must be live then. No `after_create`

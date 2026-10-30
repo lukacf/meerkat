@@ -2306,6 +2306,8 @@ class ErrorCategory(str, Enum):
     IDENTITY_MATERIALIZATION_FAILURE = "identity_materialization_failure"
     MOB_STOP_PROCEEDED_WITHOUT_INTERRUPT = "mob_stop_proceeded_without_interrupt"
     RETIRED_MEMBER_RELEASE_FAILED = "retired_member_release_failed"
+    LIFECYCLE_EFFECT_FAILED = "lifecycle_effect_failed"
+    LIFECYCLE_PROJECTION_OFF = "lifecycle_projection_off"
     MOB_ANNOUNCEMENT_ESCALATED = "mob_announcement_escalated"
     MOB_ANNOUNCEMENT_ESCALATION_RESOLVED = "mob_announcement_escalation_resolved"
 
@@ -2423,6 +2425,17 @@ class ErrorEvent:
                 f"{identity} ({runtime_id}) was retired ({cause}), and the host's "
                 f"release failed: {error}"
             )
+        elif category == ErrorCategory.LIFECYCLE_EFFECT_FAILED:
+            identity = context.get("identity", "")
+            runtime_id = context.get("agent_runtime_id", "")
+            effect = context.get("effect", "")
+            attempts = context.get("attempts", 0)
+            message = (
+                f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
+                f"attempts, and is not run again: {error}"
+            )
+        elif category == ErrorCategory.LIFECYCLE_PROJECTION_OFF:
+            message = str(context.get("detail", ""))
         elif category == ErrorCategory.MOB_ANNOUNCEMENT_ESCALATED:
             escalation = context.get("escalation")
             escalation = escalation if isinstance(escalation, dict) else {}

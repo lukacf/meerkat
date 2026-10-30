@@ -1445,6 +1445,37 @@ class TestErrorEvent:
         assert r.context["session_id"] == "s-1"
         assert r.is_resolution is False
 
+    def test_lifecycle_effect_failed_names_the_side_effect_and_its_attempts(self):
+        r = ErrorEvent.from_dict(
+            {
+                "category": "lifecycle_effect_failed",
+                "identity": "keeper",
+                "agent_runtime_id": "rt:keeper:2",
+                "session_id": "s-1",
+                "effect": "exit_interview",
+                "attempts": 3,
+                "error": "the queue refused the write",
+            }
+        )
+        assert r.category == ErrorCategory.LIFECYCLE_EFFECT_FAILED
+        assert r.message == (
+            "the exit_interview of keeper (rt:keeper:2) failed after 3 attempts, "
+            "and is not run again: the queue refused the write"
+        )
+        assert r.context["effect"] == "exit_interview"
+        assert r.is_resolution is False
+
+    def test_lifecycle_projection_off_carries_its_detail(self):
+        r = ErrorEvent.from_dict(
+            {
+                "category": "lifecycle_projection_off",
+                "detail": "the session bridge cannot read the journal",
+            }
+        )
+        assert r.category == ErrorCategory.LIFECYCLE_PROJECTION_OFF
+        assert r.message == "the session bridge cannot read the journal"
+        assert r.is_resolution is False
+
     def test_only_recoveries_and_resolved_escalations_are_resolutions(self):
         resolutions = {ErrorCategory.ACTOR_LOOP_RECOVERED, ErrorCategory.MOB_ANNOUNCEMENT_ESCALATION_RESOLVED}
         for category in ErrorCategory:
@@ -1518,6 +1549,8 @@ class TestErrorEvent:
             "IDENTITY_MATERIALIZATION_FAILURE": "identity_materialization_failure",
             "MOB_STOP_PROCEEDED_WITHOUT_INTERRUPT": "mob_stop_proceeded_without_interrupt",
             "RETIRED_MEMBER_RELEASE_FAILED": "retired_member_release_failed",
+            "LIFECYCLE_EFFECT_FAILED": "lifecycle_effect_failed",
+            "LIFECYCLE_PROJECTION_OFF": "lifecycle_projection_off",
             "MOB_ANNOUNCEMENT_ESCALATED": "mob_announcement_escalated",
             "MOB_ANNOUNCEMENT_ESCALATION_RESOLVED": "mob_announcement_escalation_resolved",
         }

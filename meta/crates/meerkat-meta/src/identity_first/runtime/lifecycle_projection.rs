@@ -8,31 +8,49 @@
 //!
 //! | Journal fact | Side effects |
 //! |---|---|
-//! | the seat of an identity's member | the customizer's `after_create`, with the session the seat binds |
+//! | the seat of an identity's member, while Core still binds that incarnation | the customizer's `after_create`, with the session the seat binds |
 //! | a retirement the roster's unlisting asked for | the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
-//! | a reset's retirement (online, a first-boot `Fresh` row's, a role move onto a fresh session) | the distillation of the retired session behind its reset boundary, the retirement hook (`reset`) |
+//! | a reset's retirement (online, or a first-boot `Fresh` row's) | the distillation of the retired session behind its reset boundary, the retirement hook (`reset`) |
 //! | a delete's retirement | the drop of the retired session's semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
-//! | a rotation onto a fresh session no Meta verb asked for (a host's own) | as a reset's |
+//! | a role move's retirement onto a fresh session, or a rotation no Meta verb asked for that moved the role | the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
+//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own) | the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
 //! | any other retirement: a reload's, a respawn's, Core's own | none |
 //!
 //! A release (`retire`, a scoped retire, a reprofile) is no journaled step:
 //! its retirement hook stays the verb's own, called before the verb answers.
+//! A seat whose incarnation has ended by the time the projection reaches it
+//! is told nothing: its retirement's side effects stand for it.
 //!
-//! # At least once
+//! # At least once, and bounded
 //!
 //! The projection reads the journal page by page from a cursor kept in
 //! Meta's metadata store ([`crate::runtime::LifecycleProjectionCursor`]) and
 //! advances the cursor only once the side effects of the facts it covers
-//! ran. A process stopped in between, by a kill or a crash, runs them again
-//! at its next start, so no side effect a step owes is lost. Each one
-//! tolerates the repeat: the exit interview is keyed by the time its step
-//! was asked, so a repeat queues nothing more; a repeated distillation reads
-//! the session again, and the memory store keeps one copy of what it already
-//! holds; the retirement hook and `after_create` may hear of the same
-//! incarnation again after a restart, and a host keys what it does by the
-//! incarnation (`agent_runtime_id`, generation) or the session. Within one
-//! process a page that failed part way runs again without repeating the
-//! effects that ran.
+//! were attempted. A process stopped in between, by a kill or a crash,
+//! attempts them again at its next start, so no side effect a step owes is
+//! lost; the cursor lives in whichever metadata store the runtime was
+//! given, so with a store that keeps nothing across a restart (an in-memory
+//! one) that holds within the process only. Each side effect tolerates the
+//! repeat: the exit interview is keyed by the time its step was asked, so a
+//! repeat queues nothing more in a store that keys it so; a repeated
+//! distillation reads the session again; the retirement hook and
+//! `after_create` may hear of the same incarnation again after a restart,
+//! and a host keys what it does by the incarnation (`agent_runtime_id`,
+//! generation) or the session. Within one process a page that failed part
+//! way runs again without repeating the side effects that ran.
+//!
+//! Each side effect is bounded: an attempt of the retirement hook or of
+//! `after_create` that has not answered within its deadline, or an exit
+//! interview write that failed or did not land within it, is attempted
+//! again, at most [`EFFECT_ATTEMPTS`] times in all; a distillation is
+//! attempted once, within the distiller's own pre-rotation bound. An answer
+//! the host gives (an error of the hook or of `after_create`) is final. A
+//! side effect that failed is recorded durably
+//! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
+//! hook (`retired_member_release_failed` for the retirement hook,
+//! `lifecycle_effect_failed` for the others), and the projection moves on:
+//! one side effect that never answers, or a write that always fails, holds
+//! back no other.
 //!
 //! # What the journal does not say
 //!
@@ -40,48 +58,71 @@
 //! reset and a delete are the same rotation to Core, and the roster's
 //! unlisting the same retirement as any other. Each Meta verb records that
 //! ([`crate::runtime::LifecycleEffectIntent`]) before it asks Core for the
-//! step, keyed by the incarnation the step ends, and the projection reads
-//! the record when it reaches the step's retirement; once the cursor past it
-//! is recorded, the record goes. A step Core refused before any of it
-//! started takes its record back.
+//! step, keyed by the incarnation the step ends, for an incarnation the
+//! identity spawned only, and the projection reads the record when it
+//! reaches the step's retirement; once the cursor past it is recorded, the
+//! record goes. A step Core refused before any of it started takes its
+//! record back and puts back the one it replaced. A roster pass that lists
+//! an identity again takes back an unlisting Core never carried out. Which
+//! retirement owes what is decided in one place ([`intent_cause`],
+//! [`rotation_cause`]): once Core's journal says why it retired each
+//! incarnation, and on which session, those facts come first there, and
+//! only a reset's and a delete's records remain.
 //!
 //! What a step knows that no durable record keeps (the exact registration
 //! the retiring incarnation held, read before Core was asked; the build
-//! draft an `after_create` reports) is kept in this process for the
-//! projection to add when it reaches the step. After a restart the
-//! retirement hook names no registration, and `after_create` reports a
-//! context derived from the identity's roster spec (or from Core's binding),
-//! with no system prompt.
+//! draft an `after_create` reports) is kept in this process, and the
+//! projection takes it under the identity's lifecycle lock, which the step
+//! holds until it answers. After a restart the retirement hook names no
+//! registration, and `after_create` reports a context derived from the
+//! identity's roster spec (or from Core's binding), with no system prompt.
+//!
+//! # A predecessor's backlog
+//!
+//! The side effects of the events a stopped process left behind its cursor
+//! when this one starts run in the background, in a lane of their own, and
+//! their count stands in the projection's status until they ran: an
+//! identity bootstrap waits only for the steps this process takes.
 //!
 //! # Scale
 //!
 //! The projection reads one page at a time, at most [`PAGE_LIMIT`] journal
-//! events, with at most one read of Core's member history per page that has
-//! a seat or a rotation in it, and runs the side effects of different
-//! identities at most [`EFFECT_CONCURRENCY`] at once (one identity's in
-//! journal order). It reads nothing per member and wakes no member: an idle
-//! journal costs one empty page read per sweep.
+//! events, with one read of Core's binding per identity a page seats and one
+//! read of Core's member history per page that holds a rotation no Meta verb
+//! asked for, and runs the side effects of different identities at most
+//! [`EFFECT_CONCURRENCY`] at once in each lane (one identity's in journal
+//! order). It reads nothing per member and wakes no member: an idle journal
+//! costs one empty page read per sweep.
 //!
 //! # Start and stop
 //!
 //! The identity context that serves the runtime binds the projection
-//! ([`IdentityRuntime::bind_lifecycle_projection`]). It starts at the end of
-//! the context's first roster pass, or at the first step a Meta verb asks
-//! Core for after the binding. Each such step kicks it, and a sweep every
-//! [`SWEEP_INTERVAL`] reads the steps nothing kicked (Core's own, a host's).
-//! The cursor is read, or started at the journal's head when there is none,
-//! before the first step Meta asks Core for in this process, so every step
-//! Meta asks for is projected. A unified runtime's identity bootstrap waits
-//! for the projection to reach the journal's head before it answers, so the
-//! side effects of the bootstrap's own steps, and those a stopped process
-//! still owed, run before the bootstrap answers. A shutdown lets it reach the
-//! head within the runtime's event drain window, then stops it; what it did
-//! not reach runs at the next start.
+//! ([`IdentityRuntime::bind_lifecycle_projection`]); a runtime that no
+//! context serves is bound by the public view an embedder hands the RPC
+//! handler, or by its restore, and records nothing for steps while no one
+//! binds it. It starts at the end of the context's first roster pass, or at
+//! the first step a Meta verb asks Core for after the binding. Each such
+//! step kicks it, and a sweep every [`SWEEP_INTERVAL`] reads the steps
+//! nothing kicked (Core's own, a host's). The cursor is read, or started at
+//! the journal's head when there is none, before the first step Meta asks
+//! Core for in this process, so every step Meta asks for is projected; a
+//! seat step is refused, retryable, while it cannot be. A unified runtime's
+//! identity bootstrap waits for the projection to reach the journal's head
+//! before it answers, so the side effects of the bootstrap's own steps run
+//! before it answers. A shutdown lets it reach the head within its share of
+//! the runtime's event drain window, then stops it; what it did not reach
+//! runs at the next start.
 //!
 //! Nothing is projected on a candidate launch, whose verbs change no stored
-//! member, or over a session bridge without Core's journal.
+//! member, or for a runtime without a session bridge. A session bridge that
+//! cannot read what the projection reads (Core's member lifecycle journal,
+//! or an identity's binding) turns it off: that is reported once on the
+//! error hook (`lifecycle_projection_off`), and the runtime's status and
+//! health read it off.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -95,13 +136,18 @@ use super::super::bridge::{
 };
 use super::super::contracts::AgentCustomizer;
 use super::super::types::{
-    AgentIdentity, AgentRuntimeId, RetiredIdentityCause, RetiredIdentityMember,
+    AgentIdentity, AgentRuntimeId, DurableAgentSpec, LifecycleProjectionState,
+    LifecycleProjectionStatus, RetiredIdentityCause, RetiredIdentityMember,
 };
 use super::records::unix_ms_now;
 use super::{IdentityRuntime, IdentityRuntimeError, binding_spawned_for_identity};
 use crate::memory::distiller::DistillCause;
 use crate::mob_handle_runtime::SessionCreatedContext;
-use crate::runtime::{LifecycleEffectIntent, LifecycleEffectVerb, LifecycleProjectionCursor};
+use crate::runtime::{
+    LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
+    LifecycleIntentKey, LifecycleProjectionBacklog, LifecycleProjectionCursor,
+};
+use crate::unified_runtime::types::ErrorEvent;
 
 /// The most journal events one page reads: Core's own bound.
 const PAGE_LIMIT: usize = meerkat_mob::IDENTITY_ENTRY_PAGE_MAX;
@@ -112,35 +158,138 @@ const EFFECT_CONCURRENCY: usize = 16;
 /// How often the projection reads the journal when nothing kicked it.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long one attempt of a side effect may run: a retirement hook or an
+/// `after_create` that has not answered by then, or an exit interview write
+/// that has not landed, failed that attempt.
+const EFFECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How many times a side effect is attempted before its failure is recorded
+/// and the projection moves on.
+const EFFECT_ATTEMPTS: u32 = 3;
+
+/// The pause between two attempts of one side effect.
+const EFFECT_RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// How many runs in a row may fail before the projection reads as stalled.
+const STALLED_AFTER_FAILED_RUNS: u32 = 3;
+
+/// The most intents of an earlier mob incarnation one start removes.
+const STALE_INTENT_SWEEP: usize = 1024;
+
 fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The bounds of each side effect: a deadline per attempt, the attempts,
+/// and the pause between two of them.
+#[derive(Debug, Clone, Copy)]
+struct EffectLimits {
+    deadline: Duration,
+    attempts: u32,
+    pause: Duration,
+}
+
+impl Default for EffectLimits {
+    fn default() -> Self {
+        Self {
+            deadline: EFFECT_DEADLINE,
+            attempts: EFFECT_ATTEMPTS,
+            pause: EFFECT_RETRY_PAUSE,
+        }
+    }
+}
+
+/// What a bounded side effect came to: its answer, or what its last attempt
+/// failed with, and how many attempts were made.
+struct Bounded<T> {
+    attempts: u32,
+    outcome: Result<T, String>,
+}
+
+/// Run `attempt` until it answers, at most `limits.attempts` times, each
+/// attempt bounded by `limits.deadline`. An attempt that answers `Err`
+/// failed, as one that did not answer in time did; a side effect whose
+/// answer stands whatever it is answers `Ok` with it.
+async fn bounded<T, F, Fut>(limits: EffectLimits, mut attempt: F) -> Bounded<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let allowed = limits.attempts.max(1);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let failure = match tokio::time::timeout(limits.deadline, attempt()).await {
+            Ok(Ok(answer)) => {
+                return Bounded {
+                    attempts,
+                    outcome: Ok(answer),
+                };
+            }
+            Ok(Err(error)) => error,
+            Err(_) => format!(
+                "timed out: no answer within {} ms",
+                limits.deadline.as_millis()
+            ),
+        };
+        if attempts >= allowed {
+            return Bounded {
+                attempts,
+                outcome: Err(failure),
+            };
+        }
+        tokio::time::sleep(limits.pause).await;
+    }
+}
+
 /// The identity runtime's lifecycle projection: where it stands in Core's
-/// journal, its task, and what this process knows of the steps it asked Core
-/// for that no durable record keeps.
+/// journal, its tasks, and what this process knows of the steps it asked
+/// Core for that no durable record keeps.
 pub(super) struct LifecycleProjection {
     phase: StdMutex<Phase>,
     /// Serializes the preparations.
     preparing: Mutex<()>,
-    /// The cursor, held by the one run in progress.
-    run: Mutex<RunState>,
-    /// The runtime the task runs for, bound by the identity context that
-    /// serves it.
+    /// The live lane: the journal after where this process started. Held by
+    /// the one run of the lane in progress.
+    live: Mutex<Lane>,
+    /// The backlog lane: what a stopped predecessor still owed. Held by the
+    /// one run of the lane in progress.
+    backlog: Mutex<Lane>,
+    /// What the store holds, as both lanes left it.
+    record: StdMutex<Record>,
+    /// Serializes the writes of [`Self::record`], so the last one written
+    /// is the latest.
+    writing: Mutex<()>,
+    /// The runtime the tasks run for.
     owner: StdMutex<Option<Owner>>,
-    /// Wakes the task.
+    /// Wakes the live task.
     kick: Arc<Notify>,
-    /// Set once the runtime shuts down: the task finishes the run it is in,
-    /// or runs once more, and ends; no task starts after it.
+    /// Set once the runtime shuts down: the live task finishes the run it is
+    /// in, or runs once more, and ends; the backlog task stops at its next
+    /// page; no task starts after it.
     stopping: watch::Sender<bool>,
-    task: StdMutex<Option<JoinHandle<()>>>,
+    live_task: StdMutex<Option<JoinHandle<()>>>,
+    backlog_task: StdMutex<Option<JoinHandle<()>>>,
+    /// Side effects a verb runs beside the projection, which no journal fact
+    /// carries (the distillation of a reset's incarnation Core had already
+    /// retired); a shutdown joins them with the tasks.
+    side_tasks: StdMutex<Vec<JoinHandle<()>>>,
     /// The incarnation a step this process asked Core for is about to end,
     /// as the retirement hook reads it, by identity: its registration was
     /// read before Core was asked.
     retiring: StdMutex<BTreeMap<AgentIdentity, RetiredIdentityMember>>,
-    /// What the build of the latest seat-like step of an identity made, by
-    /// identity, for the `after_create` of the seat it asks Core for.
-    created: StdMutex<BTreeMap<AgentIdentity, SessionCreatedContext>>,
+    /// What the build of a seat-like step made, by identity, until Core
+    /// answers the step with its session.
+    building: StdMutex<BTreeMap<AgentIdentity, SessionCreatedContext>>,
+    /// What the build of a seat-like step made, by identity and the session
+    /// Core bound, for the `after_create` of that seat.
+    built: StdMutex<BTreeMap<(AgentIdentity, SessionId), SessionCreatedContext>>,
+    limits: StdMutex<EffectLimits>,
+    /// How many runs in a row failed, and what the last one failed on.
+    failed_runs: StdMutex<(u32, Option<String>)>,
+    /// Whether a step was refused its record for want of a binding, said
+    /// once.
+    unbound_said: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -150,31 +299,59 @@ enum Phase {
     /// The cursor is read, over the journal of the mob incarnation
     /// `incarnation`.
     Ready { incarnation: String },
-    /// Nothing is projected: a candidate launch, or a bridge without Core's
-    /// journal.
-    Disabled,
+    /// Nothing to project: a candidate launch, or no session bridge.
+    Inactive,
+    /// The session bridge cannot read what the projection reads.
+    Off { detail: String },
 }
 
 #[derive(Clone)]
 struct Owner {
     runtime: Weak<IdentityRuntime>,
-    /// The customizer the identity context carries: the one its roster
-    /// passes build with.
+    /// The customizer the binding carries: an identity context's, the one
+    /// its roster passes build with.
     customizer: Option<Arc<dyn AgentCustomizer>>,
+    /// An identity context bound it; another binding never replaces one.
+    by_context: bool,
 }
 
+/// One lane's progress.
 #[derive(Default)]
-struct RunState {
+struct Lane {
     /// The cursor of the last journal event whose side effects ran.
     cursor: u64,
-    /// The cursor the store holds.
-    persisted: u64,
+    /// The last event the lane reads; `None` reads on to the head.
+    until: Option<u64>,
     /// Facts past `cursor` whose side effects ran in this process: a page
     /// that failed after them runs again without them.
     done: BTreeSet<u64>,
-    /// The intents (identity, generation) of the retirements up to `cursor`,
-    /// removed once the store holds a cursor past them.
-    consumed: Vec<(String, u64)>,
+}
+
+/// The projection's record, as the store holds it.
+#[derive(Clone, Default)]
+struct Record {
+    cursor: u64,
+    backlog: Vec<LifecycleProjectionBacklog>,
+    uncleared: BTreeSet<LifecycleIntentKey>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaneKind {
+    Live,
+    Backlog,
+}
+
+/// Why a page could not be applied.
+enum PageError {
+    /// The bridge cannot do this read at all: the projection is off.
+    Unreadable(&'static str),
+    Failed(String),
+}
+
+impl From<String> for PageError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
 }
 
 impl LifecycleProjection {
@@ -182,13 +359,22 @@ impl LifecycleProjection {
         Self {
             phase: StdMutex::new(Phase::Unprepared),
             preparing: Mutex::new(()),
-            run: Mutex::new(RunState::default()),
+            live: Mutex::new(Lane::default()),
+            backlog: Mutex::new(Lane::default()),
+            record: StdMutex::new(Record::default()),
+            writing: Mutex::new(()),
             owner: StdMutex::new(None),
             kick: Arc::new(Notify::new()),
             stopping: watch::channel(false).0,
-            task: StdMutex::new(None),
+            live_task: StdMutex::new(None),
+            backlog_task: StdMutex::new(None),
+            side_tasks: StdMutex::new(Vec::new()),
             retiring: StdMutex::new(BTreeMap::new()),
-            created: StdMutex::new(BTreeMap::new()),
+            building: StdMutex::new(BTreeMap::new()),
+            built: StdMutex::new(BTreeMap::new()),
+            limits: StdMutex::new(EffectLimits::default()),
+            failed_runs: StdMutex::new((0, None)),
+            unbound_said: AtomicBool::new(false),
         }
     }
 
@@ -198,6 +384,17 @@ impl LifecycleProjection {
 
     fn set_phase(&self, phase: Phase) {
         *lock(&self.phase) = phase;
+    }
+
+    fn limits(&self) -> EffectLimits {
+        *lock(&self.limits)
+    }
+
+    fn lane(&self, kind: LaneKind) -> &Mutex<Lane> {
+        match kind {
+            LaneKind::Live => &self.live,
+            LaneKind::Backlog => &self.backlog,
+        }
     }
 
     fn stash_retiring(&self, member: RetiredIdentityMember) {
@@ -231,8 +428,29 @@ impl LifecycleProjection {
         None
     }
 
-    fn take_created(&self, identity: &AgentIdentity) -> Option<SessionCreatedContext> {
-        lock(&self.created).remove(identity)
+    fn take_built(
+        &self,
+        identity: &AgentIdentity,
+        session: &SessionId,
+    ) -> Option<SessionCreatedContext> {
+        lock(&self.built).remove(&(identity.clone(), session.clone()))
+    }
+
+    fn owed_events(&self) -> u64 {
+        lock(&self.record)
+            .backlog
+            .iter()
+            .map(LifecycleProjectionBacklog::events)
+            .sum()
+    }
+
+    /// Count a run's outcome toward the stall the status reports.
+    fn note_run(&self, outcome: &Result<(), String>) {
+        let mut failed = lock(&self.failed_runs);
+        match outcome {
+            Ok(()) => *failed = (0, None),
+            Err(error) => *failed = (failed.0.saturating_add(1), Some(error.clone())),
+        }
     }
 }
 
@@ -241,8 +459,9 @@ impl LifecycleProjection {
 pub(super) struct PreparedRetirement {
     identity: AgentIdentity,
     generation: u64,
-    /// The step's intent was recorded.
-    recorded: bool,
+    /// The step's intent was recorded, in place of `Some` intent an earlier
+    /// step recorded for the same incarnation.
+    recorded: Option<Option<LifecycleEffectIntent>>,
     /// The incarnation as the retirement hook reads it, when a hook is
     /// installed.
     retiring: Option<RetiredIdentityMember>,
@@ -255,12 +474,33 @@ impl PreparedRetirement {
     }
 }
 
+/// Where a side effect was owed: the mob incarnation whose journal owed
+/// it, and the event that did.
+#[derive(Clone, Copy)]
+struct Owed<'a> {
+    incarnation: &'a str,
+    cursor: u64,
+}
+
+/// A side effect that failed, before it is recorded.
+struct FailedEffect<'a> {
+    identity: &'a AgentIdentity,
+    member: &'a meerkat_mob::AgentIdentity,
+    generation: u64,
+    session: Option<&'a SessionId>,
+    effect: LifecycleEffectKind,
+    attempts: u32,
+    error: String,
+}
+
 /// One side effect a journal fact owes an identity.
 enum Effect {
-    /// The customizer's `after_create` for the seat of the incarnation Core
-    /// bound to `session`; `role` and `labels` are Core's binding's, for a
-    /// context derived without the build's own.
+    /// The customizer's `after_create` for the seat of the incarnation
+    /// `generation` Core bound to `session`; `role` and `labels` are Core's
+    /// binding's, for a context derived without the build's own.
     Told {
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
         session: SessionId,
         role: meerkat_mob::ProfileName,
         labels: BTreeMap<String, String>,
@@ -274,10 +514,111 @@ struct Retirement {
     generation: u64,
     role: meerkat_mob::ProfileName,
     session: Option<SessionId>,
-    /// `Unlisted`, `Reset` or `Delete`.
     cause: RetiredIdentityCause,
     /// When its step was asked: the key of the exit interview it queues.
     asked_at_ms: Option<u64>,
+}
+
+/// The memory side effects a retirement owes beside its hook, by its cause.
+#[derive(Default)]
+struct RetirementMemory {
+    /// Mark the retired session's reset boundary: what is distilled of it
+    /// lands quarantined, pending the steward's review.
+    reset_boundary: bool,
+    /// Bind the retired generation to its session for the distiller's
+    /// evidence.
+    generation_mark: bool,
+    /// Distill the retired session, with this cause.
+    distill: Option<DistillCause>,
+    /// Drop the retired session's semantic-memory scope: the identity never
+    /// resumes it.
+    drop_scope: bool,
+    /// Queue the identity's exit interview, with this cause.
+    exit_interview: Option<&'static str>,
+}
+
+impl RetirementMemory {
+    fn of(cause: RetiredIdentityCause) -> Self {
+        match cause {
+            RetiredIdentityCause::Unlisted => Self {
+                distill: Some(DistillCause::Retire),
+                exit_interview: Some("retire"),
+                ..Self::default()
+            },
+            // The marks come first: no distillate over the retired session
+            // lands before its reset boundary.
+            RetiredIdentityCause::Reset => Self {
+                reset_boundary: true,
+                generation_mark: true,
+                distill: Some(DistillCause::Reset),
+                ..Self::default()
+            },
+            // The identity goes on, on a fresh session: what the session it
+            // left holds is distilled as a retirement's, with no reset
+            // boundary, since nobody asked for a clean slate.
+            RetiredIdentityCause::RoleMove | RetiredIdentityCause::Rotated => Self {
+                generation_mark: true,
+                distill: Some(DistillCause::Retire),
+                ..Self::default()
+            },
+            // The delete distilled the session before Core was asked.
+            RetiredIdentityCause::Delete => Self {
+                drop_scope: true,
+                exit_interview: Some("delete"),
+                ..Self::default()
+            },
+            // Releases are not journaled.
+            RetiredIdentityCause::Retire | RetiredIdentityCause::Scoped => Self::default(),
+        }
+    }
+}
+
+/// What Core's member history says a rotation no Meta verb asked for did.
+struct RotationFacts {
+    /// The successor runs on another session than the incarnation it
+    /// replaced.
+    fresh_session: bool,
+    /// The successor runs under another role.
+    role_moved: bool,
+}
+
+impl RotationFacts {
+    fn of(retired: &meerkat_mob::MemberBinding, seated: &meerkat_mob::MemberBinding) -> Self {
+        Self {
+            fresh_session: retired.session_id().is_some()
+                && seated.session_id().is_some()
+                && retired.session_id() != seated.session_id(),
+            role_moved: retired.role() != seated.role(),
+        }
+    }
+}
+
+/// The cause a retirement a Meta verb recorded its intent for ends its
+/// incarnation with: the verb's. A replacement on the same session owes
+/// nothing.
+fn intent_cause(verb: LifecycleEffectVerb) -> Option<RetiredIdentityCause> {
+    match verb {
+        LifecycleEffectVerb::Unlisted => Some(RetiredIdentityCause::Unlisted),
+        LifecycleEffectVerb::Reset => Some(RetiredIdentityCause::Reset),
+        LifecycleEffectVerb::Delete => Some(RetiredIdentityCause::Delete),
+        LifecycleEffectVerb::RoleMove => Some(RetiredIdentityCause::RoleMove),
+        LifecycleEffectVerb::Reload => None,
+    }
+}
+
+/// The cause of a retirement no Meta verb recorded an intent for, which
+/// Core journaled with its successor's seat: a role move when the successor
+/// runs under another role, a rotation when it runs on a fresh session
+/// under the same one. A replacement on the same session owes nothing.
+fn rotation_cause(rotation: &RotationFacts) -> Option<RetiredIdentityCause> {
+    if !rotation.fresh_session {
+        return None;
+    }
+    Some(if rotation.role_moved {
+        RetiredIdentityCause::RoleMove
+    } else {
+        RetiredIdentityCause::Rotated
+    })
 }
 
 /// A fact whose side effects wait for Core's member history: a seat, or a
@@ -300,15 +641,28 @@ enum Pending {
 }
 
 /// The facts of `page`, read after `after`, the projection runs now, and the
-/// cursor it stands at once they ran. Core journals a rotation's retirement
-/// and its successor's seat in one append, at consecutive cursors: a
-/// retirement that ends a page which may have stopped at its limit waits for
-/// the next read, which starts right before it, so it is read with the event
-/// that follows it.
+/// cursor it stands at once they ran. A lane that ends at `until` takes no
+/// fact past it. Core journals a rotation's retirement and its successor's
+/// seat in one append, at consecutive cursors: a retirement that ends a page
+/// which may have stopped at its limit waits for the next read, which
+/// starts right before it, so it is read with the event that follows it.
+/// The end of a range is never between the two: it was read as the head of
+/// the journal, after a whole append.
 fn processable(
     page: &MemberLifecycleJournalPage,
     after: u64,
+    until: Option<u64>,
 ) -> (&[MemberLifecycleFactRecord], u64) {
+    if let Some(until) = until {
+        let within = page
+            .records
+            .iter()
+            .take_while(|record| record.cursor <= until)
+            .count();
+        if page.next >= until {
+            return (&page.records[..within], until);
+        }
+    }
     if let Some((last, rest)) = page.records.split_last()
         && matches!(last.fact, MemberLifecycleFact::Retired { .. })
         && last.cursor == page.next
@@ -350,10 +704,25 @@ fn rotation_successor(
     }
 }
 
+/// The runtime id the retirement hook names for `member`'s incarnation
+/// `generation`.
+fn incarnation_runtime_id(
+    member: &meerkat_mob::AgentIdentity,
+    generation: u64,
+) -> Option<AgentRuntimeId> {
+    AgentRuntimeId::parse(&crate::member_comms_id::public_runtime_alias(
+        &meerkat_mob::ids::AgentRuntimeId::new(
+            member.clone(),
+            meerkat_mob::Generation::new(generation),
+        ),
+    ))
+    .ok()
+}
+
 impl IdentityRuntime {
     /// Bind the lifecycle projection to this runtime, with the customizer the
     /// identity context that serves it carries: the context's construction
-    /// does. The projection runs its task for a bound runtime only.
+    /// does. The projection runs its tasks for a bound runtime only.
     pub(crate) fn bind_lifecycle_projection(
         self: &Arc<Self>,
         customizer: Option<Arc<dyn AgentCustomizer>>,
@@ -361,14 +730,78 @@ impl IdentityRuntime {
         *lock(&self.lifecycle_projection.owner) = Some(Owner {
             runtime: Arc::downgrade(self),
             customizer,
+            by_context: true,
         });
     }
 
+    /// Bind the lifecycle projection to this runtime when no identity
+    /// context did: the public view an embedder hands the RPC handler, and a
+    /// restore without an identity context, do, so such a runtime runs the
+    /// side effects of its steps. `customizer` is the one its restore builds
+    /// with; without one, `after_create` goes to the runtime's own.
+    pub(crate) fn adopt_lifecycle_projection(
+        self: &Arc<Self>,
+        customizer: Option<Arc<dyn AgentCustomizer>>,
+    ) {
+        let mut owner = lock(&self.lifecycle_projection.owner);
+        if let Some(bound) = owner.as_mut() {
+            if !bound.by_context && customizer.is_some() {
+                bound.customizer = customizer;
+            }
+            return;
+        }
+        *owner = Some(Owner {
+            runtime: Arc::downgrade(self),
+            customizer,
+            by_context: false,
+        });
+    }
+
+    /// Where the lifecycle projection stands: running, stalled, off and why,
+    /// and how many journal events a stopped predecessor's side effects are
+    /// still owed for.
+    pub fn lifecycle_projection_status(&self) -> LifecycleProjectionStatus {
+        let projection = &self.lifecycle_projection;
+        let mut status = match projection.phase() {
+            Phase::Unprepared => LifecycleProjectionStatus::new(LifecycleProjectionState::Pending),
+            Phase::Ready { .. } => {
+                let (failed, last) = lock(&projection.failed_runs).clone();
+                if failed >= STALLED_AFTER_FAILED_RUNS {
+                    let mut status =
+                        LifecycleProjectionStatus::new(LifecycleProjectionState::Stalled);
+                    status.detail = last;
+                    status
+                } else {
+                    LifecycleProjectionStatus::new(LifecycleProjectionState::Running)
+                }
+            }
+            Phase::Inactive => LifecycleProjectionStatus::new(LifecycleProjectionState::Inactive),
+            Phase::Off { detail } => {
+                let mut status = LifecycleProjectionStatus::new(LifecycleProjectionState::Off);
+                status.detail = Some(detail);
+                status
+            }
+        };
+        status.owed_events = projection.owed_events();
+        status
+    }
+
+    /// The lifecycle side effects the projection recorded as failed, oldest
+    /// first.
+    pub async fn lifecycle_effect_failures(
+        &self,
+    ) -> Result<Vec<LifecycleEffectFailure>, crate::runtime::MetadataStoreError> {
+        let (store, mob_id) = self.identity_record_store();
+        store.lifecycle_effect_failures(&mob_id).await
+    }
+
     /// Read the projection's cursor, or start it at the journal's head when
-    /// the store holds none for the mob's current incarnation. Called before
-    /// every step Meta asks Core for, so every such step is projected; cheap
-    /// once prepared. A candidate launch and a bridge without Core's journal
-    /// turn the projection off.
+    /// the store holds none for the mob's current incarnation; the events a
+    /// stopped predecessor left behind its cursor become the backlog. Called
+    /// before every step Meta asks Core for, so every such step is
+    /// projected; cheap once prepared. A candidate launch and a runtime
+    /// without a session bridge project nothing; a bridge that cannot read
+    /// Core's journal turns the projection off.
     pub(super) async fn prepare_lifecycle_projection(&self) -> Result<(), String> {
         let projection = &self.lifecycle_projection;
         if !matches!(projection.phase(), Phase::Unprepared) {
@@ -379,22 +812,19 @@ impl IdentityRuntime {
             return Ok(());
         }
         if self.is_candidate_launch() {
-            projection.set_phase(Phase::Disabled);
+            projection.set_phase(Phase::Inactive);
             return Ok(());
         }
         let Some(bridge) = self.bridge.as_ref() else {
-            projection.set_phase(Phase::Disabled);
+            projection.set_phase(Phase::Inactive);
             return Ok(());
         };
         let head = match bridge.member_lifecycle_journal_head().await {
             Ok(head) => head,
             Err(BridgeError::Unsupported { .. }) => {
-                tracing::debug!(
-                    runtime_instance_id = %self.runtime_instance_id,
-                    "the session bridge reads no member lifecycle journal: no lifecycle side \
-                     effect is projected"
+                self.turn_lifecycle_projection_off(
+                    "read the head of Core's member lifecycle journal",
                 );
-                projection.set_phase(Phase::Disabled);
                 return Ok(());
             }
             Err(error) => {
@@ -403,45 +833,98 @@ impl IdentityRuntime {
                 ));
             }
         };
+        // A bridge that reads the head may still read no page.
+        match bridge.member_lifecycle_journal_page(head.cursor, 1).await {
+            Ok(_) => {}
+            Err(BridgeError::Unsupported { .. }) => {
+                self.turn_lifecycle_projection_off(
+                    "read the pages of Core's member lifecycle journal",
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "reading Core's member lifecycle journal after its head: {error}"
+                ));
+            }
+        }
         let (store, mob_id) = self.identity_record_store();
         let stored = store
             .lifecycle_projection_cursor(&mob_id)
             .await
             .map_err(|error| format!("reading the lifecycle projection's cursor: {error}"))?;
-        let cursor = match stored {
-            Some(stored) if stored.incarnation == head.incarnation => stored.cursor,
-            // No cursor yet (a new mob, or one an earlier release ran, which
-            // owed its side effects in its own process), or one of an
-            // earlier incarnation of the mob, whose journal is gone: the
-            // projection starts at the journal's head.
-            _ => {
-                store
-                    .set_lifecycle_projection_cursor(&LifecycleProjectionCursor {
-                        mob_id,
-                        incarnation: head.incarnation.clone(),
-                        cursor: head.cursor,
-                        recorded_at_ms: unix_ms_now(),
-                    })
-                    .await
-                    .map_err(|error| {
-                        format!("recording the lifecycle projection's first cursor: {error}")
-                    })?;
-                head.cursor
-            }
+        // With no cursor yet (a new mob, or one an earlier release ran, which
+        // owed its side effects in its own process), or one of an earlier
+        // incarnation of the mob, whose journal is gone, the projection
+        // starts at the journal's head.
+        let mut record = Record {
+            cursor: head.cursor,
+            ..Record::default()
         };
-        *projection.run.lock().await = RunState {
-            cursor,
-            persisted: cursor,
-            ..RunState::default()
+        if let Some(stored) = stored
+            && stored.incarnation == head.incarnation
+        {
+            record.uncleared = stored.uncleared.into_iter().collect();
+            if stored.cursor > head.cursor {
+                // A mob store older than the cursor: what the cursor names
+                // past the head is gone.
+                tracing::warn!(
+                    runtime_instance_id = %self.runtime_instance_id,
+                    stored = stored.cursor,
+                    head = head.cursor,
+                    "the lifecycle projection's cursor is past the head of Core's journal; the \
+                     projection starts at the head"
+                );
+            } else {
+                record.backlog = stored.backlog;
+                if stored.cursor < head.cursor {
+                    // What a stopped predecessor still owed: it runs in the
+                    // background.
+                    record
+                        .backlog
+                        .push(LifecycleProjectionBacklog::new(stored.cursor, head.cursor));
+                }
+            }
+        }
+        *lock(&projection.record) = record;
+        self.write_lifecycle_record(&head.incarnation).await?;
+        *projection.live.lock().await = Lane {
+            cursor: head.cursor,
+            ..Lane::default()
         };
         projection.set_phase(Phase::Ready {
-            incarnation: head.incarnation,
+            incarnation: head.incarnation.clone(),
         });
+        self.clear_uncleared_lifecycle_intents().await;
+        self.sweep_stale_lifecycle_intents(&head.incarnation).await;
         Ok(())
     }
 
-    /// Start the projection's task: for a bound, prepared runtime that is
-    /// not shutting down, once.
+    /// The projection is off: the session bridge cannot `read`. Reported
+    /// once.
+    fn turn_lifecycle_projection_off(&self, read: &str) {
+        let detail = format!(
+            "the session bridge cannot {read}, so no lifecycle side effect runs: no customizer \
+             after_create, no retirement hook, no distillation or exit interview of a retired \
+             incarnation. Implement SessionBridge::member_lifecycle_journal_head and \
+             member_lifecycle_journal_page, and the binding reads, or forward them to Meta's \
+             MobSessionBridge"
+        );
+        {
+            let mut phase = lock(&self.lifecycle_projection.phase);
+            if matches!(*phase, Phase::Off { .. }) {
+                return;
+            }
+            *phase = Phase::Off {
+                detail: detail.clone(),
+            };
+        }
+        self.emit_error(ErrorEvent::LifecycleProjectionOff { detail });
+    }
+
+    /// Start the projection's tasks: the live one for a bound, prepared
+    /// runtime that is not shutting down, once; the backlog one while a
+    /// predecessor's side effects are owed.
     pub(crate) fn start_lifecycle_projection(&self) {
         let projection = &self.lifecycle_projection;
         if *projection.stopping.borrow() || !matches!(projection.phase(), Phase::Ready { .. }) {
@@ -450,11 +933,42 @@ impl IdentityRuntime {
         let Some(owner) = lock(&projection.owner).clone() else {
             return;
         };
-        let mut task = lock(&projection.task);
-        if task.is_some() {
+        {
+            let mut task = lock(&projection.live_task);
+            if task.is_none() {
+                let kick = Arc::clone(&projection.kick);
+                let mut stopping = projection.stopping.subscribe();
+                let runtime = owner.runtime.clone();
+                *task = Some(tokio::spawn(async move {
+                    loop {
+                        let Some(identities) = runtime.upgrade() else {
+                            return;
+                        };
+                        identities.run_logged_lifecycle_lane(LaneKind::Live).await;
+                        drop(identities);
+                        if *stopping.borrow() {
+                            return;
+                        }
+                        tokio::select! {
+                            () = kick.notified() => {}
+                            () = tokio::time::sleep(SWEEP_INTERVAL) => {}
+                            changed = stopping.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+        }
+        if projection.owed_events() == 0 {
             return;
         }
-        let kick = Arc::clone(&projection.kick);
+        let mut task = lock(&projection.backlog_task);
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
         let mut stopping = projection.stopping.subscribe();
         let runtime = owner.runtime;
         *task = Some(tokio::spawn(async move {
@@ -462,20 +976,16 @@ impl IdentityRuntime {
                 let Some(identities) = runtime.upgrade() else {
                     return;
                 };
-                if let Err(error) = identities.run_lifecycle_projection_to_head().await {
-                    tracing::warn!(
-                        runtime_instance_id = %identities.runtime_instance_id,
-                        %error,
-                        "the lifecycle projection stopped short of the journal's head; it \
-                         reads from where it stopped at its next sweep"
-                    );
-                }
+                let drained = identities
+                    .run_logged_lifecycle_lane(LaneKind::Backlog)
+                    .await
+                    && identities.lifecycle_projection.owed_events() == 0;
+                let off = !matches!(identities.lifecycle_projection.phase(), Phase::Ready { .. });
                 drop(identities);
-                if *stopping.borrow() {
+                if drained || off || *stopping.borrow() {
                     return;
                 }
                 tokio::select! {
-                    () = kick.notified() => {}
                     () = tokio::time::sleep(SWEEP_INTERVAL) => {}
                     changed = stopping.changed() => {
                         if changed.is_err() {
@@ -494,11 +1004,13 @@ impl IdentityRuntime {
         self.start_lifecycle_projection();
     }
 
-    /// Run the side effects of every lifecycle step Core journaled so far,
-    /// here: the projection reaches the journal's head before this answers,
-    /// or stops at a failure, which is logged and read again at its next
-    /// sweep. Never call it from a retirement hook or a customizer's
-    /// `after_create`: it would wait for the side effect that is running it.
+    /// Run the side effects of every lifecycle step Core journaled since this
+    /// process started, here: the live lane reaches the journal's head
+    /// before this answers, or stops at a failure, which is logged and read
+    /// again at its next sweep. What a stopped predecessor still owed runs
+    /// in the background. Never call it from a retirement hook or a
+    /// customizer's `after_create`: it would wait for the side effect that
+    /// is running it.
     pub(crate) async fn settle_lifecycle_projection(&self) {
         if let Err(error) = self.prepare_lifecycle_projection().await {
             tracing::warn!(
@@ -508,55 +1020,87 @@ impl IdentityRuntime {
             );
             return;
         }
-        if let Err(error) = self.run_lifecycle_projection_to_head().await {
-            tracing::warn!(
-                runtime_instance_id = %self.runtime_instance_id,
-                %error,
-                "the lifecycle projection stopped short of the journal's head; it reads from \
-                 where it stopped at its next sweep"
-            );
-        }
+        self.run_logged_lifecycle_lane(LaneKind::Live).await;
+        self.start_lifecycle_projection();
     }
 
-    /// Stop the projection at a shutdown: its task reaches the journal's head
-    /// once more and ends, by `deadline` at the latest. What it does not
-    /// reach runs at the next start, from the cursor the store holds.
+    /// Stop the projection at a shutdown: its live task reaches the journal's
+    /// head once more and ends, the backlog task ends at its next page, and
+    /// the side tasks end, by `deadline` at the latest. What they did not
+    /// reach runs at the next start, from the record the store holds.
     pub(crate) async fn stop_lifecycle_projection(&self, deadline: tokio::time::Instant) {
         let projection = &self.lifecycle_projection;
         projection.stopping.send_replace(true);
         projection.kick.notify_one();
-        let task = lock(&projection.task).take();
-        let Some(mut task) = task else {
-            return;
-        };
-        if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+        let mut tasks = Vec::new();
+        tasks.extend(lock(&projection.live_task).take());
+        tasks.extend(lock(&projection.backlog_task).take());
+        tasks.extend(std::mem::take(&mut *lock(&projection.side_tasks)));
+        let mut unfinished = 0_usize;
+        for mut task in tasks {
+            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+                unfinished += 1;
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        if unfinished > 0 {
             tracing::warn!(
                 runtime_instance_id = %self.runtime_instance_id,
-                "the lifecycle projection did not reach the journal's head within the shutdown's \
+                unfinished,
+                "the lifecycle projection did not finish within its share of the shutdown's \
                  window; what it did not reach runs at the next start"
             );
-            task.abort();
-            let _ = task.await;
         }
+    }
+
+    /// Run `side_effect` beside the projection, joined by a shutdown with the
+    /// projection's tasks: a side effect a verb owes that no journal fact
+    /// carries.
+    pub(super) fn spawn_lifecycle_side_task(
+        &self,
+        side_effect: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let projection = &self.lifecycle_projection;
+        let mut tasks = lock(&projection.side_tasks);
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::spawn(side_effect));
     }
 
     /// Before Core is asked for a step that ends `identity`'s live
     /// incarnation (`verb`): record what the step owes, keyed by that
     /// incarnation, and keep the incarnation as the retirement hook reads it
     /// (`cause`; `None` for a step that owes no hook). `None` when Core holds
-    /// no live member, so the step retires nothing. Refused typed, with
-    /// nothing asked of Core, when the record cannot be written; a reload's
-    /// record, which owes nothing, is best-effort.
+    /// no live member the identity spawned, so the step ends nothing the
+    /// identity owns. Refused typed, with nothing asked of Core, when the
+    /// record cannot be written.
     pub(super) async fn prepare_lifecycle_retirement(
         &self,
         identity: &AgentIdentity,
         verb: LifecycleEffectVerb,
         cause: Option<RetiredIdentityCause>,
     ) -> Result<Option<PreparedRetirement>, IdentityRuntimeError> {
-        let Some(binding) = self
-            .core_last_binding(identity)
-            .await?
+        let binding = self.core_last_binding(identity).await?;
+        self.prepare_lifecycle_retirement_of(identity, binding, verb, cause)
+            .await
+    }
+
+    /// [`Self::prepare_lifecycle_retirement`] of `binding`, the identity's
+    /// last binding the step itself read, so the step and its record read
+    /// Core's liveness once.
+    pub(super) async fn prepare_lifecycle_retirement_of(
+        &self,
+        identity: &AgentIdentity,
+        binding: Option<meerkat_mob::MemberBinding>,
+        verb: LifecycleEffectVerb,
+        cause: Option<RetiredIdentityCause>,
+    ) -> Result<Option<PreparedRetirement>, IdentityRuntimeError> {
+        // A member a host made directly on the mob under the identity's
+        // member id is not the identity's: its end owes the identity
+        // nothing.
+        let Some(binding) = binding
             .filter(meerkat_mob::MemberBinding::is_live)
+            .filter(|binding| binding_spawned_for_identity(binding, identity))
         else {
             return Ok(None);
         };
@@ -566,34 +1110,16 @@ impl IdentityRuntime {
             Some(cause) => self.retiring_member(identity, &binding, cause).await,
             None => None,
         };
-        let recorded = match self
-            .record_lifecycle_effect_intent(identity, generation, verb, session_id.clone())
+        let recorded = self
+            .record_lifecycle_effect_intent(identity, generation, verb, session_id)
             .await
-        {
-            Ok(recorded) => recorded,
-            // A replacement on the same session owes no side effect, and an
-            // unrecorded retirement owes none either.
-            Err(detail) if verb == LifecycleEffectVerb::Reload => {
-                tracing::warn!(
-                    %identity,
-                    generation,
-                    %detail,
-                    "the replacement's lifecycle effect intent could not be recorded; it owes \
-                     no side effect, so it goes on"
-                );
-                false
-            }
-            Err(detail) => {
-                return Err(IdentityRuntimeError::IdentityWakeRetryable {
-                    identity: identity.clone(),
-                    session_id,
-                    detail: format!(
-                        "nothing was asked of Core: the side effects the step owes could not be \
-                         recorded ({detail})"
-                    ),
-                });
-            }
-        };
+            .map_err(|detail| IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: format!(
+                    "nothing was asked of Core: the side effects the step owes could not be \
+                     recorded ({detail})"
+                ),
+            })?;
         if let Some(member) = retiring.clone() {
             self.lifecycle_projection.stash_retiring(member);
         }
@@ -624,7 +1150,8 @@ impl IdentityRuntime {
     }
 
     /// Core refused the step `prepared` prepared before any of it started:
-    /// its record and what this process kept of it go.
+    /// its record goes, the one an earlier step recorded for the same
+    /// incarnation is put back, and what this process kept of it goes.
     pub(super) async fn abandon_lifecycle_retirement(&self, prepared: Option<PreparedRetirement>) {
         let Some(prepared) = prepared else {
             return;
@@ -632,20 +1159,29 @@ impl IdentityRuntime {
         let _ = self
             .lifecycle_projection
             .take_retiring(&prepared.identity, prepared.generation);
-        if !prepared.recorded {
+        let Some(earlier) = prepared.recorded else {
             return;
-        }
+        };
         let (store, mob_id) = self.identity_record_store();
-        if let Err(error) = store
-            .clear_lifecycle_effect_intent(&mob_id, prepared.identity.as_str(), prepared.generation)
-            .await
-        {
+        let restored = match earlier {
+            Some(earlier) => store.set_lifecycle_effect_intent(&earlier).await,
+            None => {
+                store
+                    .clear_lifecycle_effect_intent(
+                        &mob_id,
+                        prepared.identity.as_str(),
+                        prepared.generation,
+                    )
+                    .await
+            }
+        };
+        if let Err(error) = restored {
             tracing::warn!(
                 identity = %prepared.identity,
                 generation = prepared.generation,
                 %error,
-                "the lifecycle effect intent of a step Core refused could not be removed; the \
-                 next step that ends the same incarnation records its own in its place"
+                "the lifecycle effect intent of a step Core refused could not be taken back; \
+                 the next step that ends the same incarnation records its own in its place"
             );
         }
     }
@@ -658,147 +1194,364 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         context: SessionCreatedContext,
     ) {
-        lock(&self.lifecycle_projection.created).insert(identity.clone(), context);
+        lock(&self.lifecycle_projection.building).insert(identity.clone(), context);
+    }
+
+    /// Core answered the step [`Self::note_lifecycle_build`] kept a build for
+    /// with a seat on `session`: the build is the one that seat's
+    /// `after_create` reports. Called before the step releases the
+    /// identity's lifecycle lock.
+    pub(super) fn bind_lifecycle_build(&self, identity: &AgentIdentity, session: &SessionId) {
+        let projection = &self.lifecycle_projection;
+        if let Some(context) = lock(&projection.building).remove(identity) {
+            lock(&projection.built).insert((identity.clone(), session.clone()), context);
+        }
     }
 
     /// The step [`Self::note_lifecycle_build`] kept a build for seated
     /// nothing.
     pub(super) fn forget_lifecycle_build(&self, identity: &AgentIdentity) {
-        lock(&self.lifecycle_projection.created).remove(identity);
+        lock(&self.lifecycle_projection.building).remove(identity);
+    }
+
+    /// A roster pass lists `roster`: an unlisting whose retirement Core never
+    /// carried out (Core still holds the incarnation it named live) is taken
+    /// back, so a later retirement of that incarnation that no Meta verb
+    /// asked for owes nothing.
+    pub(super) async fn take_back_relisted_unlistings(&self, roster: &[DurableAgentSpec]) {
+        let Phase::Ready { incarnation } = self.lifecycle_projection.phase() else {
+            return;
+        };
+        let (store, mob_id) = self.identity_record_store();
+        let intents = match store.lifecycle_effect_intents(&mob_id).await {
+            Ok(intents) => intents,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the lifecycle effect intents could not be listed; an unlisting the roster \
+                     undid is taken back by a later pass"
+                );
+                return;
+            }
+        };
+        let listed = roster
+            .iter()
+            .map(|spec| &spec.identity)
+            .collect::<BTreeSet<_>>();
+        for intent in intents.into_iter().filter(|intent| {
+            intent.verb == LifecycleEffectVerb::Unlisted && intent.incarnation == incarnation
+        }) {
+            let Ok(identity) = AgentIdentity::parse(&intent.identity) else {
+                continue;
+            };
+            if !listed.contains(&identity) {
+                continue;
+            }
+            let live = match self.core_last_binding(&identity).await {
+                Ok(binding) => binding.filter(meerkat_mob::MemberBinding::is_live),
+                Err(error) => {
+                    tracing::warn!(%identity, %error, "Core's binding of a relisted identity did not read");
+                    continue;
+                }
+            };
+            if live.is_some_and(|binding| binding.generation().get() == intent.generation)
+                && let Err(error) = store
+                    .clear_lifecycle_effect_intent(&mob_id, &intent.identity, intent.generation)
+                    .await
+            {
+                tracing::warn!(
+                    %identity,
+                    generation = intent.generation,
+                    %error,
+                    "the unlisting of a relisted identity could not be taken back"
+                );
+            }
+        }
     }
 
     /// Record what the step that ends `identity`'s incarnation `generation`
-    /// owes (`verb`), durably, before Core is asked for it. `Ok(false)` when
-    /// nothing is projected, so nothing is recorded.
+    /// owes (`verb`), durably, before Core is asked for it, with the intent
+    /// it replaces. `Ok(None)` when nothing is projected, or nothing would
+    /// consume the record (no identity context or public view bound the
+    /// projection), so nothing is recorded.
     async fn record_lifecycle_effect_intent(
         &self,
         identity: &AgentIdentity,
         generation: u64,
         verb: LifecycleEffectVerb,
         session_id: Option<SessionId>,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<Option<LifecycleEffectIntent>>, String> {
         self.prepare_lifecycle_projection().await?;
         let Phase::Ready { incarnation } = self.lifecycle_projection.phase() else {
-            return Ok(false);
+            return Ok(None);
         };
+        if lock(&self.lifecycle_projection.owner).is_none() {
+            if !self
+                .lifecycle_projection
+                .unbound_said
+                .swap(true, Ordering::SeqCst)
+            {
+                tracing::warn!(
+                    runtime_instance_id = %self.runtime_instance_id,
+                    "no identity context or public view serves this identity runtime: the \
+                     lifecycle side effects of its steps are not recorded or run"
+                );
+            }
+            return Ok(None);
+        }
         let (store, mob_id) = self.identity_record_store();
+        let earlier = store
+            .lifecycle_effect_intent(&mob_id, identity.as_str(), generation)
+            .await
+            .map_err(|error| {
+                format!("reading the incarnation's lifecycle effect intent: {error}")
+            })?;
         store
-            .set_lifecycle_effect_intent(&LifecycleEffectIntent {
+            .set_lifecycle_effect_intent(&LifecycleEffectIntent::new(
                 mob_id,
                 incarnation,
-                identity: identity.as_str().to_string(),
+                identity.as_str(),
                 generation,
                 verb,
                 session_id,
-                recorded_at_ms: unix_ms_now(),
-            })
+                unix_ms_now(),
+            ))
             .await
             .map_err(|error| format!("recording the step's lifecycle effect intent: {error}"))?;
-        Ok(true)
+        Ok(Some(earlier))
     }
 
-    /// Read the journal from the cursor to its head, running each page's side
-    /// effects and then recording the cursor past it. Runs are serialized:
-    /// the task's and a settle's.
-    async fn run_lifecycle_projection_to_head(&self) -> Result<(), String> {
-        let Phase::Ready { incarnation } = self.lifecycle_projection.phase() else {
+    /// Run `kind`'s lane, logging what stopped it short and counting it
+    /// toward the stall the status reports: whether it reached its end.
+    async fn run_logged_lifecycle_lane(&self, kind: LaneKind) -> bool {
+        let outcome = self.run_lifecycle_lane(kind).await;
+        if kind == LaneKind::Live {
+            self.lifecycle_projection.note_run(&outcome);
+        }
+        match outcome {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    runtime_instance_id = %self.runtime_instance_id,
+                    %error,
+                    "the lifecycle projection stopped short; it reads from where it stopped at \
+                     its next sweep"
+                );
+                false
+            }
+        }
+    }
+
+    /// Read the journal for `kind`'s lane from its cursor to its end (the
+    /// head, for the live lane; the owed ranges, for the backlog lane),
+    /// running each page's side effects and then recording where the lane
+    /// stands. A lane's runs are serialized.
+    async fn run_lifecycle_lane(&self, kind: LaneKind) -> Result<(), String> {
+        let projection = &self.lifecycle_projection;
+        let Phase::Ready { incarnation } = projection.phase() else {
             return Ok(());
         };
         let Some(bridge) = self.bridge.clone() else {
             return Ok(());
         };
-        let mut run = self.lifecycle_projection.run.lock().await;
-        let result = loop {
-            let after = run.cursor;
+        let mut lane = projection.lane(kind).lock().await;
+        // The live lane moved past pages with no fact since its last write.
+        let mut unwritten = false;
+        loop {
+            if kind == LaneKind::Backlog {
+                if *projection.stopping.borrow() {
+                    return Ok(());
+                }
+                // The first owed range is the one the lane reads.
+                let Some(range) = lock(&projection.record).backlog.first().copied() else {
+                    return Ok(());
+                };
+                if lane.until != Some(range.until) || lane.cursor < range.after {
+                    *lane = Lane {
+                        cursor: range.after,
+                        until: Some(range.until),
+                        ..Lane::default()
+                    };
+                }
+            }
+            let after = lane.cursor;
             let page = match bridge
                 .member_lifecycle_journal_page(after, PAGE_LIMIT)
                 .await
             {
                 Ok(page) => page,
+                Err(BridgeError::Unsupported { .. }) => {
+                    self.turn_lifecycle_projection_off(
+                        "read the pages of Core's member lifecycle journal",
+                    );
+                    return Ok(());
+                }
                 Err(error) => {
-                    break Err(format!(
+                    return Err(format!(
                         "reading Core's member lifecycle journal after {after}: {error}"
                     ));
                 }
             };
-            if page.next <= after {
-                break Ok(());
-            }
-            let (records, upto) = processable(&page, after);
+            let (records, upto) = if page.next > after {
+                processable(&page, after, lane.until)
+            } else if let Some(until) = lane.until {
+                // An owed range past what the journal holds: nothing of it
+                // is left to read.
+                tracing::warn!(
+                    after,
+                    until,
+                    "an owed range of the lifecycle projection lies past Core's journal"
+                );
+                (&page.records[..0], until)
+            } else {
+                // The live lane is at the journal's head.
+                if unwritten {
+                    self.write_lifecycle_record(&incarnation).await?;
+                }
+                return Ok(());
+            };
             let consumed = match self
-                .apply_lifecycle_page(&incarnation, records, &mut run.done)
+                .apply_lifecycle_page(&incarnation, records, &mut lane.done)
                 .await
             {
                 Ok(consumed) => consumed,
-                Err(error) => break Err(error),
+                Err(PageError::Unreadable(read)) => {
+                    self.turn_lifecycle_projection_off(read);
+                    return Ok(());
+                }
+                Err(PageError::Failed(error)) => return Err(error),
             };
-            run.cursor = upto;
-            run.done.retain(|cursor| *cursor > upto);
-            run.consumed.extend(consumed);
-            if !records.is_empty()
-                && let Err(error) = self.persist_lifecycle_cursor(&incarnation, &mut run).await
+            lane.cursor = upto;
+            lane.done.retain(|cursor| *cursor > upto);
             {
-                break Err(error);
+                let mut record = lock(&projection.record);
+                match kind {
+                    LaneKind::Live => record.cursor = upto,
+                    LaneKind::Backlog => {
+                        let finished = lane.until.is_some_and(|until| upto >= until);
+                        if finished {
+                            if !record.backlog.is_empty() {
+                                record.backlog.remove(0);
+                            }
+                        } else if let Some(first) = record.backlog.first_mut() {
+                            first.after = upto;
+                        }
+                    }
+                }
+                record.uncleared.extend(consumed);
             }
-        };
-        // A run that moved past pages with no fact keeps that too.
-        if run.persisted != run.cursor
-            && let Err(error) = self.persist_lifecycle_cursor(&incarnation, &mut run).await
-        {
-            return result.and(Err(error));
+            if kind == LaneKind::Live && records.is_empty() {
+                // A page with no fact moved the cursor only: it is written
+                // with the next page that has one, or when the lane reaches
+                // the head.
+                unwritten = true;
+                continue;
+            }
+            unwritten = false;
+            self.write_lifecycle_record(&incarnation).await?;
+            self.clear_uncleared_lifecycle_intents().await;
         }
-        result
     }
 
-    /// Record the run's cursor, then remove the intents of the retirements
-    /// the recorded cursor covers.
-    async fn persist_lifecycle_cursor(
-        &self,
-        incarnation: &str,
-        run: &mut RunState,
-    ) -> Result<(), String> {
+    /// Write the projection's record as both lanes left it.
+    async fn write_lifecycle_record(&self, incarnation: &str) -> Result<(), String> {
+        let projection = &self.lifecycle_projection;
+        let _writing = projection.writing.lock().await;
+        let snapshot = lock(&projection.record).clone();
         let (store, mob_id) = self.identity_record_store();
+        let mut cursor =
+            LifecycleProjectionCursor::new(mob_id, incarnation, snapshot.cursor, unix_ms_now());
+        cursor.backlog = snapshot.backlog;
+        cursor.uncleared = snapshot.uncleared.into_iter().collect();
         store
-            .set_lifecycle_projection_cursor(&LifecycleProjectionCursor {
-                mob_id: mob_id.clone(),
-                incarnation: incarnation.to_string(),
-                cursor: run.cursor,
-                recorded_at_ms: unix_ms_now(),
-            })
+            .set_lifecycle_projection_cursor(&cursor)
             .await
-            .map_err(|error| format!("recording the lifecycle projection's cursor: {error}"))?;
-        run.persisted = run.cursor;
-        for (identity, generation) in std::mem::take(&mut run.consumed) {
+            .map_err(|error| format!("recording the lifecycle projection's cursor: {error}"))
+    }
+
+    /// Remove the intents of the retirements whose side effects ran, which
+    /// the recorded cursor covers; one that cannot be removed now is tried
+    /// again after the next write, and at the next start.
+    async fn clear_uncleared_lifecycle_intents(&self) {
+        let keys = lock(&self.lifecycle_projection.record)
+            .uncleared
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return;
+        }
+        let (store, mob_id) = self.identity_record_store();
+        for key in keys {
+            match store
+                .clear_lifecycle_effect_intent(&mob_id, &key.identity, key.generation)
+                .await
+            {
+                Ok(()) => {
+                    lock(&self.lifecycle_projection.record)
+                        .uncleared
+                        .remove(&key);
+                }
+                Err(error) => tracing::warn!(
+                    identity = %key.identity,
+                    generation = key.generation,
+                    %error,
+                    "the lifecycle effect intent of a step whose side effects ran could not be \
+                     removed; it is tried again"
+                ),
+            }
+        }
+    }
+
+    /// Remove the intents an earlier incarnation of the mob left, at most
+    /// [`STALE_INTENT_SWEEP`]: no journal this runtime reads names their
+    /// steps.
+    async fn sweep_stale_lifecycle_intents(&self, incarnation: &str) {
+        let (store, mob_id) = self.identity_record_store();
+        let intents = match store.lifecycle_effect_intents(&mob_id).await {
+            Ok(intents) => intents,
+            Err(error) => {
+                tracing::warn!(%error, "the lifecycle effect intents could not be listed for the sweep");
+                return;
+            }
+        };
+        for intent in intents
+            .into_iter()
+            .filter(|intent| intent.incarnation != incarnation)
+            .take(STALE_INTENT_SWEEP)
+        {
             if let Err(error) = store
-                .clear_lifecycle_effect_intent(&mob_id, &identity, generation)
+                .clear_lifecycle_effect_intent(&mob_id, &intent.identity, intent.generation)
                 .await
             {
                 tracing::warn!(
-                    %identity,
-                    generation,
+                    identity = %intent.identity,
+                    generation = intent.generation,
                     %error,
-                    "the lifecycle effect intent of a step whose side effects ran could not be \
-                     removed; it names an incarnation that ended, which no later step ends again"
+                    "a lifecycle effect intent of an earlier incarnation of the mob could not be \
+                     removed"
                 );
             }
         }
-        Ok(())
     }
 
     /// Run the side effects of `records`, skipping those `done` names and
     /// adding those that run to it. Answers the intents the page's
     /// retirements consumed, for removal once the cursor past them is
-    /// recorded. A failure fails the page, which runs again.
+    /// recorded. A side effect that fails is recorded and reported, and the
+    /// page goes on; a read the page depends on that fails fails the page,
+    /// which runs again.
     async fn apply_lifecycle_page(
         &self,
         incarnation: &str,
         records: &[MemberLifecycleFactRecord],
         done: &mut BTreeSet<u64>,
-    ) -> Result<Vec<(String, u64)>, String> {
+    ) -> Result<Vec<LifecycleIntentKey>, PageError> {
         let customizer = self.after_create_customizer().await;
         let mut effects: Vec<(u64, AgentIdentity, Effect)> = Vec::new();
         let mut pending: Vec<Pending> = Vec::new();
         let mut consumed = Vec::new();
+        let (store, mob_id) = self.identity_record_store();
         for (index, record) in records.iter().enumerate() {
             match &record.fact {
                 MemberLifecycleFact::Seated { member, generation } => {
@@ -824,7 +1577,6 @@ impl IdentityRuntime {
                     let Some(identity) = meta_identity(member) else {
                         continue;
                     };
-                    let (store, mob_id) = self.identity_record_store();
                     let intent = store
                         .lifecycle_effect_intent(&mob_id, identity.as_str(), *generation)
                         .await
@@ -834,20 +1586,15 @@ impl IdentityRuntime {
                                  generation {generation}: {error}"
                             )
                         })?;
-                    if intent.is_some() {
-                        consumed.push((identity.as_str().to_string(), *generation));
+                    if let Some(intent) = intent.as_ref() {
+                        consumed.push(intent.key());
                     }
                     // An intent of an earlier incarnation of the mob names
                     // another journal's step.
                     match intent.filter(|intent| intent.incarnation == incarnation) {
                         Some(intent) => {
-                            let cause = match intent.verb {
-                                LifecycleEffectVerb::Unlisted => RetiredIdentityCause::Unlisted,
-                                LifecycleEffectVerb::Reset => RetiredIdentityCause::Reset,
-                                LifecycleEffectVerb::Delete => RetiredIdentityCause::Delete,
-                                // A replacement on the same session owes
-                                // nothing.
-                                LifecycleEffectVerb::Reload => continue,
+                            let Some(cause) = intent_cause(intent.verb) else {
+                                continue;
                             };
                             effects.push((
                                 record.cursor,
@@ -865,9 +1612,8 @@ impl IdentityRuntime {
                         None => {
                             // A retirement no Meta verb asked for owes
                             // nothing, unless Core journaled it with its
-                            // successor's seat: a rotation, which owes a
-                            // reset's side effects when it moved the
-                            // identity onto a fresh session.
+                            // successor's seat: a rotation, read from Core's
+                            // member history.
                             if let Some(successor) =
                                 rotation_successor(records, index, member, *generation)
                             {
@@ -905,8 +1651,12 @@ impl IdentityRuntime {
             async move {
                 let mut ran = Vec::with_capacity(effects.len());
                 for (cursor, effect) in effects {
+                    let owed = Owed {
+                        incarnation,
+                        cursor,
+                    };
                     if let Err(error) = self
-                        .run_lifecycle_effect(&identity, effect, customizer.as_ref())
+                        .run_lifecycle_effect(&identity, effect, customizer.as_ref(), owed)
                         .await
                     {
                         return (ran, Err(error));
@@ -927,50 +1677,87 @@ impl IdentityRuntime {
             }
         }
         match failure {
-            Some(error) => Err(error),
+            Some(error) => Err(PageError::Failed(error)),
             None => Ok(consumed),
         }
     }
 
-    /// The side effects of the seats and the unrecorded rotations of a page,
-    /// from one read of Core's member history.
+    /// The side effects of the seats and the unrecorded rotations of a page:
+    /// one read of Core's binding per seated identity, and one read of
+    /// Core's member history for the rotations.
     async fn resolve_pending_lifecycle_facts(
         &self,
         pending: Vec<Pending>,
         effects: &mut Vec<(u64, AgentIdentity, Effect)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PageError> {
         let Some(bridge) = self.bridge.as_ref() else {
             return Ok(());
         };
-        let history = bridge
-            .member_binding_history()
-            .await
-            .map_err(|error| format!("reading Core's member history: {error}"))?;
-        let members = pending
-            .iter()
-            .map(|pending| match pending {
-                Pending::Seat { member, .. } | Pending::Rotation { member, .. } => member.clone(),
-            })
-            .collect::<BTreeSet<_>>();
-        // Each binding of the page's members by generation: the latest of
-        // each session (a session a later incarnation resumed names that
+        // Each seated identity's binding as Core holds it now.
+        let mut current: BTreeMap<AgentIdentity, Option<meerkat_mob::MemberBinding>> =
+            BTreeMap::new();
+        for pending in &pending {
+            let Pending::Seat { identity, .. } = pending else {
+                continue;
+            };
+            if current.contains_key(identity) {
+                continue;
+            }
+            match bridge.last_member_binding(identity).await {
+                Ok(binding) => {
+                    current.insert(identity.clone(), binding);
+                }
+                Err(BridgeError::Unsupported { .. }) => {
+                    return Err(PageError::Unreadable(
+                        "read an identity's binding in Core's member history",
+                    ));
+                }
+                Err(error) => {
+                    return Err(PageError::Failed(format!(
+                        "reading Core's binding of {identity}: {error}"
+                    )));
+                }
+            }
+        }
+        // The bindings of the rotations' members by generation: the latest
+        // of each session (a session a later incarnation resumed names that
         // one), and each member's latest.
         let mut bindings = BTreeMap::new();
-        for binding in history
-            .session_bindings_since_reset()
-            .filter(|binding| members.contains(binding.identity()))
-        {
-            bindings.insert(
-                (binding.identity().clone(), binding.generation().get()),
-                binding.clone(),
-            );
-        }
-        for member in &members {
-            if let Some(binding) = history.last_binding(member) {
+        let rotated = pending
+            .iter()
+            .filter_map(|pending| match pending {
+                Pending::Rotation { member, .. } => Some(member.clone()),
+                Pending::Seat { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if !rotated.is_empty() {
+            let history = match bridge.member_binding_history().await {
+                Ok(history) => history,
+                Err(BridgeError::Unsupported { .. }) => {
+                    return Err(PageError::Unreadable("read Core's member history"));
+                }
+                Err(error) => {
+                    return Err(PageError::Failed(format!(
+                        "reading Core's member history: {error}"
+                    )));
+                }
+            };
+            for binding in history
+                .session_bindings_since_reset()
+                .filter(|binding| rotated.contains(binding.identity()))
+            {
                 bindings.insert(
-                    (member.clone(), binding.generation().get()),
+                    (binding.identity().clone(), binding.generation().get()),
                     binding.clone(),
                 );
+            }
+            for member in &rotated {
+                if let Some(binding) = history.last_binding(member) {
+                    bindings.insert(
+                        (member.clone(), binding.generation().get()),
+                        binding.clone(),
+                    );
+                }
             }
         }
         for pending in pending {
@@ -981,12 +1768,18 @@ impl IdentityRuntime {
                     member,
                     generation,
                 } => {
-                    // A seat no identity-first step made is a worker's, and an
-                    // incarnation a later one replaced on its session is
-                    // told no more: its successor's seat is.
-                    let Some(binding) = bindings
-                        .get(&(member, generation))
-                        .filter(|binding| binding_spawned_for_identity(binding, &identity))
+                    // Only the incarnation Core still binds is told: one
+                    // that ended since (retired, or replaced on its
+                    // session) is not, and its retirement's side effects
+                    // stand for it. A seat no identity-first step made is a
+                    // worker's.
+                    let Some(binding) =
+                        current.get(&identity).cloned().flatten().filter(|binding| {
+                            binding.is_live()
+                                && binding.identity() == &member
+                                && binding.generation().get() == generation
+                                && binding_spawned_for_identity(binding, &identity)
+                        })
                     else {
                         continue;
                     };
@@ -998,6 +1791,8 @@ impl IdentityRuntime {
                         cursor,
                         identity,
                         Effect::Told {
+                            member,
+                            generation,
                             session,
                             role: binding.role().clone(),
                             labels: binding.labels().clone(),
@@ -1017,15 +1812,13 @@ impl IdentityRuntime {
                     let (Some(retired), Some(seated)) = (retired, seated) else {
                         continue;
                     };
-                    // A successor on the same session (a replacement) owes
-                    // nothing, and a member no identity-first step made is a
-                    // worker's.
-                    let fresh = retired.session_id().is_some()
-                        && seated.session_id().is_some()
-                        && retired.session_id() != seated.session_id();
-                    if !fresh || !binding_spawned_for_identity(retired, &identity) {
+                    // A member no identity-first step made is a worker's.
+                    if !binding_spawned_for_identity(retired, &identity) {
                         continue;
                     }
+                    let Some(cause) = rotation_cause(&RotationFacts::of(retired, seated)) else {
+                        continue;
+                    };
                     effects.push((
                         cursor,
                         identity,
@@ -1034,7 +1827,7 @@ impl IdentityRuntime {
                             generation,
                             role,
                             session: retired.session_id().cloned(),
-                            cause: RetiredIdentityCause::Reset,
+                            cause,
                             asked_at_ms: None,
                         }),
                     ));
@@ -1044,8 +1837,8 @@ impl IdentityRuntime {
         Ok(())
     }
 
-    /// The customizer `after_create` goes to: the identity context's, the
-    /// one its roster passes build with, else the runtime's own.
+    /// The customizer `after_create` goes to: the one the projection's
+    /// binding carries, else the runtime's own.
     async fn after_create_customizer(&self) -> Option<Arc<dyn AgentCustomizer>> {
         let bound = lock(&self.lifecycle_projection.owner)
             .as_ref()
@@ -1056,18 +1849,19 @@ impl IdentityRuntime {
         }
     }
 
-    /// Run one side effect. Only the exit interview's write fails the page:
-    /// a distillation is best-effort and bounded, and an error of the
-    /// retirement hook or of `after_create` is reported and stands, as an
-    /// earlier call's would.
+    /// Run one side effect, bounded. Only a failure to record a failed side
+    /// effect fails the page.
     async fn run_lifecycle_effect(
         &self,
         identity: &AgentIdentity,
         effect: Effect,
         customizer: Option<&Arc<dyn AgentCustomizer>>,
+        owed: Owed<'_>,
     ) -> Result<(), String> {
         match effect {
             Effect::Told {
+                member,
+                generation,
                 session,
                 role,
                 labels,
@@ -1075,22 +1869,50 @@ impl IdentityRuntime {
                 let Some(customizer) = customizer else {
                     return Ok(());
                 };
-                let context = match self.lifecycle_projection.take_created(identity) {
+                // What the step that made the seat kept of its build, taken
+                // once the step answered: it holds the identity's lifecycle
+                // lock until then.
+                let built = {
+                    let step = self.lifecycle_lock_for(identity).await;
+                    let _answered = step.lock().await;
+                    self.lifecycle_projection.take_built(identity, &session)
+                };
+                let context = match built {
                     Some(context) => context,
                     None => self.derived_created_context(identity, &role, labels).await,
                 };
-                if let Err(error) = customizer.after_create(identity, &session, &context).await {
-                    tracing::warn!(
-                        %identity,
-                        session_id = %session,
-                        %error,
-                        "the agent customizer's after_create failed; the build stands"
-                    );
-                }
+                let limits = self.lifecycle_projection.limits();
+                let customizer: &dyn AgentCustomizer = &**customizer;
+                let (session_ref, context_ref) = (&session, &context);
+                let told = bounded(limits, move || async move {
+                    Ok::<_, String>(
+                        customizer
+                            .after_create(identity, session_ref, context_ref)
+                            .await,
+                    )
+                })
+                .await;
+                let error = match told.outcome {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(error)) => format!("after_create answered an error: {error}"),
+                    Err(error) => format!("after_create {error}"),
+                };
+                let failed = FailedEffect {
+                    identity,
+                    member: &member,
+                    generation,
+                    session: Some(&session),
+                    effect: LifecycleEffectKind::AfterCreate,
+                    attempts: told.attempts,
+                    error,
+                };
+                self.record_lifecycle_effect_failure(owed, &failed).await?;
+                self.report_lifecycle_effect_failure(&failed);
                 Ok(())
             }
             Effect::Retirement(retirement) => {
-                self.run_lifecycle_retirement(identity, retirement).await
+                self.run_lifecycle_retirement(identity, retirement, owed)
+                    .await
             }
         }
     }
@@ -1100,79 +1922,77 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
         retirement: Retirement,
+        owed: Owed<'_>,
     ) -> Result<(), String> {
+        let limits = self.lifecycle_projection.limits();
         let memory = self.agent_memory.read().await.clone();
         let session_key = retirement.session.as_ref().map(ToString::to_string);
         let asked_at_ms = retirement.asked_at_ms.unwrap_or_else(unix_ms_now);
+        let owes = RetirementMemory::of(retirement.cause);
         if let Some(memory) = memory.as_ref() {
-            match retirement.cause {
-                RetiredIdentityCause::Unlisted => {
-                    if let Some(session_key) = session_key.as_deref() {
-                        memory
-                            .distill_before_rotation(identity, session_key, DistillCause::Retire)
-                            .await;
-                    }
-                    memory
-                        .record_identity_retired_at(
-                            identity,
-                            session_key.as_deref(),
-                            "retire",
-                            asked_at_ms,
-                        )
+            if let Some(session_key) = session_key.as_deref() {
+                if owes.reset_boundary {
+                    memory.note_reset_boundary(session_key);
+                }
+                if owes.generation_mark {
+                    memory.note_session_generation(identity, session_key, retirement.generation);
+                }
+                if let Some(cause) = owes.distill
+                    && let Err(bound) = memory
+                        .distill_before_rotation_within_bound(identity, session_key, cause)
                         .await
-                        .map_err(|error| {
-                            format!("queueing the exit interview of {identity}: {error}")
-                        })?;
+                {
+                    let failed = FailedEffect {
+                        identity,
+                        member: &retirement.member,
+                        generation: retirement.generation,
+                        session: retirement.session.as_ref(),
+                        effect: LifecycleEffectKind::Distillation,
+                        attempts: 1,
+                        error: format!(
+                            "timed out: the distillation did not finish within {} ms",
+                            bound.as_millis()
+                        ),
+                    };
+                    self.record_lifecycle_effect_failure(owed, &failed).await?;
+                    self.report_lifecycle_effect_failure(&failed);
                 }
-                RetiredIdentityCause::Reset => {
-                    if let Some(session_key) = session_key.as_deref() {
-                        // The marks come first: no distillate over the
-                        // retired session lands before its reset boundary.
-                        memory.note_reset_boundary(session_key);
-                        memory.note_session_generation(
-                            identity,
-                            session_key,
-                            retirement.generation,
-                        );
-                        memory
-                            .distill_before_rotation(identity, session_key, DistillCause::Reset)
-                            .await;
-                    }
-                }
-                RetiredIdentityCause::Delete => {
-                    // The delete distilled the session before Core was asked;
-                    // the identity never resumes it, so its semantic-memory
-                    // scope is dead weight.
-                    if let Some(session_key) = session_key.as_deref() {
-                        memory
-                            .drop_orphaned_session_scope(session_key, DistillCause::Delete)
-                            .await;
-                    }
+                if owes.drop_scope {
                     memory
-                        .record_identity_retired_at(
-                            identity,
-                            session_key.as_deref(),
-                            "delete",
-                            asked_at_ms,
-                        )
-                        .await
-                        .map_err(|error| {
-                            format!("queueing the exit interview of {identity}: {error}")
-                        })?;
+                        .drop_orphaned_session_scope(session_key, DistillCause::Delete)
+                        .await;
                 }
-                // Releases are not journaled.
-                RetiredIdentityCause::Retire | RetiredIdentityCause::Scoped => {}
+            }
+            if let Some(harvest) = owes.exit_interview {
+                let key = session_key.as_deref();
+                let queued = bounded(limits, move || async move {
+                    memory
+                        .record_identity_retired_at(identity, key, harvest, asked_at_ms)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+                if let Err(error) = queued.outcome {
+                    let failed = FailedEffect {
+                        identity,
+                        member: &retirement.member,
+                        generation: retirement.generation,
+                        session: retirement.session.as_ref(),
+                        effect: LifecycleEffectKind::ExitInterview,
+                        attempts: queued.attempts,
+                        error,
+                    };
+                    self.record_lifecycle_effect_failure(owed, &failed).await?;
+                    self.report_lifecycle_effect_failure(&failed);
+                }
             }
         }
-        if self.retired_member_observer().is_none() {
+        let Some(observer) = self.retired_member_observer() else {
             return Ok(());
-        }
-        let Ok(agent_runtime_id) = AgentRuntimeId::parse(
-            &crate::member_comms_id::public_runtime_alias(&meerkat_mob::ids::AgentRuntimeId::new(
-                retirement.member.clone(),
-                meerkat_mob::Generation::new(retirement.generation),
-            )),
-        ) else {
+        };
+        let Some(agent_runtime_id) =
+            incarnation_runtime_id(&retirement.member, retirement.generation)
+        else {
             tracing::warn!(
                 %identity,
                 member = %retirement.member,
@@ -1181,22 +2001,107 @@ impl IdentityRuntime {
             );
             return Ok(());
         };
-        let registration = self
-            .lifecycle_projection
-            .take_retiring(identity, retirement.generation)
-            .and_then(|kept| kept.registration);
-        self.release_retired_members(vec![RetiredIdentityMember {
+        // What the step that ended the incarnation kept for the hook, taken
+        // once the step answered: it holds the identity's lifecycle lock
+        // until then.
+        let registration = {
+            let step = self.lifecycle_lock_for(identity).await;
+            let _answered = step.lock().await;
+            self.lifecycle_projection
+                .take_retiring(identity, retirement.generation)
+                .and_then(|kept| kept.registration)
+        };
+        let member = RetiredIdentityMember {
             identity: identity.clone(),
             member: retirement.member.as_str().to_string(),
-            role: retirement.role,
+            role: retirement.role.clone(),
             agent_runtime_id,
             generation: retirement.generation,
-            session_id: retirement.session,
+            session_id: retirement.session.clone(),
             registration,
             cause: retirement.cause,
-        }])
+        };
+        let (observer, retired) = (&observer, &member);
+        let hooked = bounded(limits, move || {
+            let call = observer(retired.clone());
+            async move { Ok::<_, String>(call.await) }
+        })
         .await;
+        let error = match hooked.outcome {
+            Ok(Ok(())) => return Ok(()),
+            // The host's answer stands: not tried again.
+            Ok(Err(error)) => error,
+            Err(error) => format!("the retirement hook {error}, {} attempts", hooked.attempts),
+        };
+        let failed = FailedEffect {
+            identity,
+            member: &retirement.member,
+            generation: retirement.generation,
+            session: retirement.session.as_ref(),
+            effect: LifecycleEffectKind::RetirementHook,
+            attempts: hooked.attempts,
+            error: error.clone(),
+        };
+        self.record_lifecycle_effect_failure(owed, &failed).await?;
+        self.emit_error(super::retired_member_release_failed(&member, error));
         Ok(())
+    }
+
+    /// Record `failed`, owed by the journal event `owed` names, durably,
+    /// before the cursor moves past that event. An error leaves it
+    /// unrecorded: the page that owes it runs again.
+    async fn record_lifecycle_effect_failure(
+        &self,
+        owed: Owed<'_>,
+        failed: &FailedEffect<'_>,
+    ) -> Result<(), String> {
+        tracing::warn!(
+            identity = %failed.identity,
+            generation = failed.generation,
+            effect = failed.effect.as_str(),
+            attempts = failed.attempts,
+            error = %failed.error,
+            "a lifecycle side effect failed; it is recorded, and the projection goes on"
+        );
+        let (store, mob_id) = self.identity_record_store();
+        store
+            .record_lifecycle_effect_failure(
+                &LifecycleEffectFailure::new(
+                    mob_id,
+                    owed.incarnation,
+                    owed.cursor,
+                    failed.identity.as_str(),
+                    failed.generation,
+                    failed.effect,
+                    failed.attempts,
+                    failed.error.clone(),
+                    unix_ms_now(),
+                )
+                .with_session(failed.session.cloned()),
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "recording the failure of the {} of {}: {error}",
+                    failed.effect.as_str(),
+                    failed.identity
+                )
+            })
+    }
+
+    /// Report `failed` on the error hook (`lifecycle_effect_failed`).
+    fn report_lifecycle_effect_failure(&self, failed: &FailedEffect<'_>) {
+        self.emit_error(ErrorEvent::LifecycleEffectFailed {
+            identity: failed.identity.to_string(),
+            agent_runtime_id: incarnation_runtime_id(failed.member, failed.generation).map_or_else(
+                || format!("{}:{}", failed.member, failed.generation),
+                |runtime_id| runtime_id.to_string(),
+            ),
+            session_id: failed.session.map(ToString::to_string),
+            effect: failed.effect.as_str().to_string(),
+            attempts: failed.attempts,
+            error: failed.error.clone(),
+        });
     }
 
     /// What a seat's `after_create` reports when this process did not build
@@ -1228,11 +2133,15 @@ impl IdentityRuntime {
 
 #[cfg(test)]
 impl IdentityRuntime {
-    /// The bounds a row asks for each lifecycle side effect: `deadline` per
-    /// attempt, at most `attempts` attempts. No side effect is bounded yet,
-    /// so they are not kept.
+    /// Bound each attempt of a lifecycle side effect by `deadline`, and try
+    /// one at most `attempts` times: rows that wait for a bound use short
+    /// ones.
     pub(crate) fn set_lifecycle_effect_limits(&self, deadline: Duration, attempts: u32) {
-        let _ = (deadline, attempts);
+        *lock(&self.lifecycle_projection.limits) = EffectLimits {
+            deadline,
+            attempts,
+            pause: Duration::from_millis(10),
+        };
     }
 }
 
@@ -1241,24 +2150,21 @@ mod tests {
     use super::*;
 
     fn retired(cursor: u64) -> MemberLifecycleFactRecord {
-        MemberLifecycleFactRecord {
+        MemberLifecycleFactRecord::new(
             cursor,
-            fact: MemberLifecycleFact::Retired {
-                member: meerkat_mob::AgentIdentity::from("alpha"),
-                generation: 1,
-                role: meerkat_mob::ProfileName::from("lead"),
-            },
-        }
+            MemberLifecycleFact::retired(
+                meerkat_mob::AgentIdentity::from("alpha"),
+                1,
+                meerkat_mob::ProfileName::from("lead"),
+            ),
+        )
     }
 
     fn seated(cursor: u64, generation: u64) -> MemberLifecycleFactRecord {
-        MemberLifecycleFactRecord {
+        MemberLifecycleFactRecord::new(
             cursor,
-            fact: MemberLifecycleFact::Seated {
-                member: meerkat_mob::AgentIdentity::from("alpha"),
-                generation,
-            },
-        }
+            MemberLifecycleFact::seated(meerkat_mob::AgentIdentity::from("alpha"), generation),
+        )
     }
 
     /// A retirement that ends a page which read as many events as it could
@@ -1266,11 +2172,11 @@ mod tests {
     /// its successor may follow in the same append.
     #[test]
     fn a_retirement_ending_a_full_page_waits_for_the_next_read() {
-        let page = MemberLifecycleJournalPage {
-            records: vec![seated(3, 0), retired(PAGE_LIMIT as u64)],
-            next: PAGE_LIMIT as u64,
-        };
-        let (records, upto) = processable(&page, 0);
+        let page = MemberLifecycleJournalPage::new(
+            vec![seated(3, 0), retired(PAGE_LIMIT as u64)],
+            PAGE_LIMIT as u64,
+        );
+        let (records, upto) = processable(&page, 0, None);
         assert_eq!(records, &page.records[..1]);
         assert_eq!(upto, PAGE_LIMIT as u64 - 1);
     }
@@ -1280,13 +2186,28 @@ mod tests {
     /// and runs now.
     #[test]
     fn a_retirement_ending_the_journal_runs_now() {
-        let page = MemberLifecycleJournalPage {
-            records: vec![seated(3, 0), retired(9)],
-            next: 9,
-        };
-        let (records, upto) = processable(&page, 0);
+        let page = MemberLifecycleJournalPage::new(vec![seated(3, 0), retired(9)], 9);
+        let (records, upto) = processable(&page, 0, None);
         assert_eq!(records, page.records.as_slice());
         assert_eq!(upto, 9);
+    }
+
+    /// An owed range takes no fact past its end, and a page that read past
+    /// the end covers the range, a retirement at its end included: the end
+    /// was read as the head of the journal, after a whole append.
+    #[test]
+    fn an_owed_range_ends_where_it_ends() {
+        let page = MemberLifecycleJournalPage::new(
+            vec![seated(3, 0), retired(5), seated(6, 2), retired(8)],
+            8,
+        );
+        let (records, upto) = processable(&page, 0, Some(5));
+        assert_eq!(records, &page.records[..2]);
+        assert_eq!(upto, 5);
+        let short = MemberLifecycleJournalPage::new(vec![seated(3, 0)], 3);
+        let (records, upto) = processable(&short, 0, Some(5));
+        assert_eq!(records, short.records.as_slice());
+        assert_eq!(upto, 3, "a page short of the range's end reads on");
     }
 
     /// A retirement is a rotation's only when its successor's seat is the
@@ -1302,5 +2223,90 @@ mod tests {
         assert_eq!(rotation_successor(&older, 0, &member, 1), None);
         let last = [retired(4)];
         assert_eq!(rotation_successor(&last, 0, &member, 1), None);
+    }
+
+    /// A rotation no Meta verb asked for says what it did: under another
+    /// role, a role move; on a fresh session under the same role, a
+    /// rotation; on the same session, nothing owed. A verb's intent names
+    /// its own cause, and a replacement's none.
+    #[test]
+    fn each_retirement_is_named_for_what_happened() {
+        let moved = RotationFacts {
+            fresh_session: true,
+            role_moved: true,
+        };
+        assert_eq!(rotation_cause(&moved), Some(RetiredIdentityCause::RoleMove));
+        let rotated = RotationFacts {
+            fresh_session: true,
+            role_moved: false,
+        };
+        assert_eq!(
+            rotation_cause(&rotated),
+            Some(RetiredIdentityCause::Rotated)
+        );
+        let replaced = RotationFacts {
+            fresh_session: false,
+            role_moved: true,
+        };
+        assert_eq!(rotation_cause(&replaced), None);
+        assert_eq!(
+            intent_cause(LifecycleEffectVerb::RoleMove),
+            Some(RetiredIdentityCause::RoleMove)
+        );
+        assert_eq!(
+            intent_cause(LifecycleEffectVerb::Reset),
+            Some(RetiredIdentityCause::Reset)
+        );
+        assert_eq!(intent_cause(LifecycleEffectVerb::Reload), None);
+        assert!(RetirementMemory::of(RetiredIdentityCause::Reset).reset_boundary);
+        assert!(!RetirementMemory::of(RetiredIdentityCause::RoleMove).reset_boundary);
+        assert!(!RetirementMemory::of(RetiredIdentityCause::Rotated).reset_boundary);
+    }
+
+    /// A bounded side effect that never answers is attempted as often as
+    /// its bound allows, and fails timed out; one that answers is attempted
+    /// once; a failing write is attempted again, and stops at its first
+    /// success.
+    #[tokio::test]
+    async fn a_bounded_side_effect_stops_at_its_attempts() {
+        let limits = EffectLimits {
+            deadline: Duration::from_millis(20),
+            attempts: 3,
+            pause: Duration::from_millis(1),
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let calls = &calls;
+        let never = bounded(limits, move || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<Result<(), String>>().await
+        })
+        .await;
+        assert_eq!(never.attempts, 3);
+        assert!(
+            never
+                .outcome
+                .as_ref()
+                .is_err_and(|error| error.starts_with("timed out")),
+            "{:?}",
+            never.outcome
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let answered = bounded(limits, || async { Ok::<_, String>(Err::<(), _>("no")) }).await;
+        assert_eq!(answered.attempts, 1, "an answer stands");
+        assert!(matches!(answered.outcome, Ok(Err("no"))));
+
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let tries = &tries;
+        let written = bounded(limits, move || async move {
+            if tries.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err("busy".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert_eq!(written.attempts, 2);
+        assert!(written.outcome.is_ok());
     }
 }

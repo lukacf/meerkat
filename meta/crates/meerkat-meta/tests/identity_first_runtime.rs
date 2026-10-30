@@ -316,14 +316,13 @@ impl CoreMembers {
     }
 
     fn journal_seat(&self, identity: &AgentIdentity, generation: u64) {
-        self.facts.lock().unwrap().push(
-            meerkat_meta::identity_first::MemberLifecycleFact::Seated {
-                member: meerkat_meta::member_comms_id::roster_member_id_for_identity(
-                    identity.as_str(),
-                ),
+        self.facts
+            .lock()
+            .unwrap()
+            .push(meerkat_meta::identity_first::MemberLifecycleFact::seated(
+                meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str()),
                 generation,
-            },
-        );
+            ));
     }
 
     fn journal_head(
@@ -334,10 +333,12 @@ impl CoreMembers {
                 operation: "member_lifecycle_journal_head",
             });
         }
-        Ok(meerkat_meta::identity_first::MemberLifecycleJournalHead {
-            incarnation: "counting-bridge".to_string(),
-            cursor: self.facts.lock().unwrap().len() as u64,
-        })
+        Ok(
+            meerkat_meta::identity_first::MemberLifecycleJournalHead::new(
+                "counting-bridge",
+                self.facts.lock().unwrap().len() as u64,
+            ),
+        )
     }
 
     fn journal_page(
@@ -356,17 +357,17 @@ impl CoreMembers {
             .unwrap()
             .iter()
             .enumerate()
-            .map(
-                |(index, fact)| meerkat_meta::identity_first::MemberLifecycleFactRecord {
-                    cursor: index as u64 + 1,
-                    fact: fact.clone(),
-                },
-            )
+            .map(|(index, fact)| {
+                meerkat_meta::identity_first::MemberLifecycleFactRecord::new(
+                    index as u64 + 1,
+                    fact.clone(),
+                )
+            })
             .filter(|record| record.cursor > after)
             .take(limit.max(1))
             .collect::<Vec<_>>();
         let next = records.last().map_or(after, |record| record.cursor);
-        Ok(meerkat_meta::identity_first::MemberLifecycleJournalPage { records, next })
+        Ok(meerkat_meta::identity_first::MemberLifecycleJournalPage::new(records, next))
     }
 
     /// Core holds `identity`'s member live at `generation` on `session`
@@ -468,13 +469,13 @@ impl CoreMembers {
             if member.runtime_id == *runtime_id && member.live {
                 member.live = false;
                 self.facts.lock().unwrap().push(
-                    meerkat_meta::identity_first::MemberLifecycleFact::Retired {
-                        member: meerkat_meta::member_comms_id::roster_member_id_for_identity(
+                    meerkat_meta::identity_first::MemberLifecycleFact::retired(
+                        meerkat_meta::member_comms_id::roster_member_id_for_identity(
                             identity.as_str(),
                         ),
-                        generation: member.generation,
-                        role: member.profile.clone(),
-                    },
+                        member.generation,
+                        member.profile.clone(),
+                    ),
                 );
             }
         }

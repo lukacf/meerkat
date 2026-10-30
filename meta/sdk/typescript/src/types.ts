@@ -2472,6 +2472,8 @@ export const ErrorCategory = {
   IDENTITY_MATERIALIZATION_FAILURE: "identity_materialization_failure",
   MOB_STOP_PROCEEDED_WITHOUT_INTERRUPT: "mob_stop_proceeded_without_interrupt",
   RETIRED_MEMBER_RELEASE_FAILED: "retired_member_release_failed",
+  LIFECYCLE_EFFECT_FAILED: "lifecycle_effect_failed",
+  LIFECYCLE_PROJECTION_OFF: "lifecycle_projection_off",
   MOB_ANNOUNCEMENT_ESCALATED: "mob_announcement_escalated",
   MOB_ANNOUNCEMENT_ESCALATION_RESOLVED: "mob_announcement_escalation_resolved",
 } as const;
@@ -2610,6 +2612,19 @@ export function parseErrorEvent(raw: unknown): ErrorEvent {
         `release failed: ${error}`;
       break;
     }
+    case ErrorCategory.LIFECYCLE_EFFECT_FAILED: {
+      const identity = String(context.identity ?? "");
+      const runtimeId = String(context.agent_runtime_id ?? "");
+      const effect = String(context.effect ?? "");
+      const attempts = Number(context.attempts ?? 0);
+      message =
+        `the ${effect} of ${identity} (${runtimeId}) failed after ${attempts} ` +
+        `attempts, and is not run again: ${error}`;
+      break;
+    }
+    case ErrorCategory.LIFECYCLE_PROJECTION_OFF:
+      message = String(context.detail ?? "");
+      break;
     case ErrorCategory.MOB_ANNOUNCEMENT_ESCALATED: {
       const escalation = asRecord(context.escalation);
       message =

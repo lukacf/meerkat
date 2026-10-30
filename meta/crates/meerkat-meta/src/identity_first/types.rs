@@ -1797,15 +1797,19 @@ impl IdentityLifecycleState {
 
 /// Why a durable identity's member was retired or released, as a gateway
 /// host's retirement hook reads it
-/// (`GatewayHostComposition::identity_member_retired`).
+/// (`GatewayHostComposition::identity_member_retired`). The vocabulary may
+/// grow: a host's match keeps a wildcard arm, and a wildcard arm must not
+/// read an unknown cause as "the identity is gone": only
+/// [`Self::Unlisted`] ends the identity's place in the roster.
 ///
 /// Every cause ends the member's registration. [`Self::Unlisted`] ends the
-/// incarnation and the identity's place in the roster. [`Self::Reset`] and
-/// [`Self::Delete`] end the incarnation, and the identity stays in the
-/// roster, its next incarnation seated on a fresh session. [`Self::Retire`]
-/// and [`Self::Scoped`] release the member, and the identity stays
-/// registered and active on the same session at the same generation, so its
-/// next delivery materializes it again.
+/// incarnation and the identity's place in the roster. [`Self::Reset`],
+/// [`Self::Delete`], [`Self::RoleMove`] and [`Self::Rotated`] end the
+/// incarnation, and the identity stays in the roster, its next incarnation
+/// seated on a fresh session. [`Self::Retire`] and [`Self::Scoped`] release
+/// the member, and the identity stays registered and active on the same
+/// session at the same generation, so its next delivery materializes it
+/// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RetiredIdentityCause {
@@ -1818,19 +1822,27 @@ pub enum RetiredIdentityCause {
     /// A retire at a captured delivery scope that named the live member:
     /// the member is released.
     Scoped,
-    /// Core rotated the identity onto a fresh session and its incarnation
-    /// ended: a reset (online, or an offline `identity-reset` whose
-    /// first-boot row the next start carried out), a role move whose session
-    /// had nothing to carry over, or a rotation a host asked Core for.
+    /// A reset rotated the identity onto a fresh session and its incarnation
+    /// ended: an online reset, or an offline `identity-reset` whose
+    /// first-boot row the next start carried out.
     Reset,
     /// A `delete_identity` rotated the identity onto a fresh session and its
     /// incarnation ended, with the identity's memory continuity.
     Delete,
+    /// The roster moved the identity to another role, and Core rotated it
+    /// onto a fresh session under that role: its session had nothing to
+    /// carry over (it lives in memory only, or no wake created it). Also a
+    /// rotation onto a fresh session under another role that no Meta verb
+    /// asked for.
+    RoleMove,
+    /// Core rotated the identity onto a fresh session under the same role,
+    /// in a step no Meta verb asked for (a host's own rotation).
+    Rotated,
 }
 
 impl RetiredIdentityCause {
-    /// The cause's wire name: `unlisted`, `retire`, `scoped`, `reset` or
-    /// `delete`.
+    /// The cause's wire name: `unlisted`, `retire`, `scoped`, `reset`,
+    /// `delete`, `role_move` or `rotated`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unlisted => "unlisted",
@@ -1838,16 +1850,83 @@ impl RetiredIdentityCause {
             Self::Scoped => "scoped",
             Self::Reset => "reset",
             Self::Delete => "delete",
+            Self::RoleMove => "role_move",
+            Self::Rotated => "rotated",
         }
     }
+}
+
+/// Where an identity runtime's lifecycle projection stands: the side effects
+/// of the lifecycle steps Core journals (the customizer's `after_create`, the
+/// retirement hook, a retired session's distillation and exit interview).
+/// Read through `IdentityRuntime::lifecycle_projection_status`; `meta/status`
+/// carries it as `lifecycle_projection`, and the JSON health summary
+/// (`/healthz`) reads degraded while it is [`Self::degraded`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LifecycleProjectionStatus {
+    pub state: LifecycleProjectionState,
+    /// The journal events whose side effects a stopped predecessor still
+    /// owed when this runtime started and that have not run yet: they run
+    /// in the background.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub owed_events: u64,
+    /// Why the projection is off, or what its runs keep failing on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl LifecycleProjectionStatus {
+    pub fn new(state: LifecycleProjectionState) -> Self {
+        Self {
+            state,
+            owed_events: 0,
+            detail: None,
+        }
+    }
+
+    /// Whether the projection is off, or keeps failing: lifecycle side
+    /// effects do not run.
+    pub fn degraded(&self) -> bool {
+        matches!(
+            self.state,
+            LifecycleProjectionState::Off | LifecycleProjectionState::Stalled
+        )
+    }
+}
+
+/// The state of an identity runtime's lifecycle projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LifecycleProjectionState {
+    /// Not started: no roster pass or lifecycle step read its cursor yet, or
+    /// the last read failed (the next step reads it again).
+    Pending,
+    /// Projecting Core's member lifecycle journal.
+    Running,
+    /// Projecting, but its last runs failed: the side effects of later steps
+    /// wait until a run gets through.
+    Stalled,
+    /// Nothing to project: a candidate launch, which changes no stored
+    /// member, or a runtime without a session bridge.
+    Inactive,
+    /// Off: the session bridge cannot read Core's member lifecycle journal,
+    /// or an identity's binding, so no lifecycle side effect runs.
+    Off,
 }
 
 /// A durable identity's member that was retired or released: the binding
 /// its incarnation ran under. A release is handed to a gateway host's
 /// retirement hook once, after Core's release returned; an incarnation Core
-/// ended (`Unlisted`, `Reset`, `Delete`) at least once, after Core journaled
-/// its end, from the lifecycle projection, which a restart before its
-/// cursor moved past the end repeats.
+/// ended (every other cause) at least once, after Core journaled its end,
+/// from the lifecycle projection, which a restart before its cursor moved
+/// past the end repeats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetiredIdentityMember {

@@ -1184,6 +1184,24 @@ comms = true
             ) -> Result<(), MetadataStoreError> {
                 Ok(())
             }
+            async fn lifecycle_effect_intents(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Vec<crate::LifecycleEffectIntent>, MetadataStoreError> {
+                Ok(Vec::new())
+            }
+            async fn record_lifecycle_effect_failure(
+                &self,
+                _failure: &crate::LifecycleEffectFailure,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn lifecycle_effect_failures(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Vec<crate::LifecycleEffectFailure>, MetadataStoreError> {
+                Ok(Vec::new())
+            }
         }
 
         let early = SessionId::new();

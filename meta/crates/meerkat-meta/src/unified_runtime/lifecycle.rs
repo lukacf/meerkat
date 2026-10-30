@@ -31,6 +31,14 @@ pub const CHILD_MOB_STAND_DOWN_BUDGET: Duration = Duration::from_secs(10);
 /// removes the phase from the report.
 pub const RETIRED_SUPERVISOR_JOIN_BUDGET: Duration = Duration::from_secs(2);
 
+/// The identity runtime's lifecycle projection's share of the shutdown's
+/// event drain window: half of it. The post-stop drain, which gives a turn
+/// the shutdown interrupted its terminal console frame, and the metadata
+/// settle keep the rest, however slow a lifecycle side effect is.
+fn lifecycle_projection_share(drain_window: Duration) -> Duration {
+    drain_window / 2
+}
+
 use meerkat_mob::SpawnMemberSpec;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -363,12 +371,16 @@ impl UnifiedRuntime {
         // window, before the mob stops: it runs the side effects of the
         // lifecycle steps Core journaled (the retirement hook, the
         // distillation of a retired session, the exit interview,
-        // `after_create`), then stops. What it does not reach in the window
-        // runs at the next start, from its durable cursor.
+        // `after_create`), then stops. It takes its share of the window
+        // only: the post-stop drain and the metadata settle below keep the
+        // rest, however slow a side effect is. What it does not reach in its
+        // share runs at the next start, from its durable cursor.
+        let lifecycle_projection_deadline = tokio::time::Instant::from_std(drain_start)
+            + lifecycle_projection_share(self.drain_timeout);
         let lifecycle_projection_stop = async {
             if let Some(identity_runtime) = identity_runtime.as_ref() {
                 identity_runtime
-                    .stop_lifecycle_projection(drain_deadline)
+                    .stop_lifecycle_projection(lifecycle_projection_deadline)
                     .await;
             }
         };

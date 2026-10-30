@@ -16,26 +16,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
 
-- `PersistentMetadataStore` has five new required methods, with no default:
+- `PersistentMetadataStore` has eight new required methods, with no default:
   `lifecycle_projection_cursor`, `set_lifecycle_projection_cursor`,
-  `lifecycle_effect_intent`, `set_lifecycle_effect_intent` and
-  `clear_lifecycle_effect_intent`. A host's own store
-  (`UnifiedRuntimeBuilder::persistent_metadata`) must keep both record kinds
-  durably: the cursor says which lifecycle side effects of the identities
-  ran, and the intents carry what a reset, a delete or the roster's
+  `lifecycle_effect_intent`, `set_lifecycle_effect_intent`,
+  `clear_lifecycle_effect_intent`, `lifecycle_effect_intents`,
+  `record_lifecycle_effect_failure` and `lifecycle_effect_failures`. A host's
+  own store (`UnifiedRuntimeBuilder::persistent_metadata`) must keep the
+  three record kinds durably: the cursor says which lifecycle side effects of
+  the identities were attempted and which a stopped process still owed, the
+  intents carry what a reset, a delete, a role move or the roster's
   unlisting owes across a restart that came between the step and its side
-  effects (see Changed); a store that lost them would let a restart skip
-  side effects a stopped process still owed. The record types
-  `LifecycleProjectionCursor`, `LifecycleEffectIntent` and
-  `LifecycleEffectVerb` are exported at the crate root.
+  effects, and the failures record the side effects that failed (see
+  Changed); a store that lost them would let a restart skip side effects a
+  stopped process still owed. The record types `LifecycleProjectionCursor`,
+  `LifecycleProjectionBacklog`, `LifecycleIntentKey`, `LifecycleEffectIntent`,
+  `LifecycleEffectVerb`, `LifecycleEffectFailure` and `LifecycleEffectKind`
+  are exported at the crate root; each is `#[non_exhaustive]`, built with its
+  `new` constructor, so the record can grow without another break.
 
 - An identity runtime over a host's own `SessionBridge` that keeps the
-  defaults of the new member lifecycle journal reads (see Added) runs no
+  defaults of the new member lifecycle journal reads (see Added), or answers
+  the head but not the pages, or cannot read an identity's binding, runs no
   lifecycle side effect of a step Core journals: no retirement hook for an
   incarnation Core ended, no distillation of a reset's outgoing session, no
   exit interview of an unlisted or deleted identity, and no `after_create`
-  for a seat. `MobSessionBridge`, and the `PublicSessionBridge` that wraps
-  it, answer both reads.
+  for a seat. It is never silent: the runtime reports it once on the error
+  hook (`lifecycle_projection_off`), and `meta/status` and the JSON
+  `/healthz` summary read it off, degraded. `MobSessionBridge`, and the
+  `PublicSessionBridge` that wraps it, answer both reads; a bridge that wraps
+  another forwards both, as it forwards the binding reads.
+
+- Each lifecycle side effect of an identity is bounded: a gateway host's
+  retirement hook (`GatewayHostComposition::identity_member_retired`) for an
+  incarnation Core ended, and a customizer's `after_create`, that have not
+  answered within 30 seconds are called again, at most three times in all,
+  and then reported and not called again for that incarnation (see Changed).
+  A hook or `after_create` that legitimately takes longer hands its work off
+  and answers.
+
+### Upgrade
+
+- The lifecycle side effects of identities (the customizer's `after_create`,
+  the host's retirement hook, the distillation of a retired session, the exit
+  interview of an unlisted or deleted identity) keep their cursor, what each
+  step owes and the side effects that failed in the runtime's metadata store.
+  Whether they survive a restart depends on that store: `rpc_gateway` over a
+  state directory or a host store realm keeps it durable; `meta_gateway`
+  keeps its metadata in memory, so its side effects are attempted at least
+  once within the process only, and a kill loses those still owed.
+
+- The first start after the upgrade begins the projection at the head of
+  Core's journal: side effects a process of the earlier release still owed
+  when it stopped are not run. That release owed them in memory only, and
+  lost them with the process.
+
+- A host's own `SessionBridge` must answer `member_lifecycle_journal_head`
+  and `member_lifecycle_journal_page` (and Core's binding reads), or forward
+  them, for any lifecycle side effect to run. One that does not is reported
+  once at start as the error event `lifecycle_projection_off`, logged at
+  ERROR, and `meta/status` (`lifecycle_projection.state`) and the JSON
+  `/healthz` summary read `off`, degraded.
+
+- A host's retirement hook or `after_create` that has not answered within 30
+  seconds is called again, at most three times in all, then reported
+  (`retired_member_release_failed` with an error saying it timed out, or
+  `lifecycle_effect_failed`) and not called again for that incarnation.
+
+- `RetiredIdentityCause` gained `Reset`, `Delete`, `RoleMove` and `Rotated`:
+  each ends an incarnation while the identity stays in the roster. A hook
+  whose wildcard arm read every cause other than `Retire` and `Scoped` as
+  "the identity is gone" would drop the identity's state at each reset,
+  delete, role move or rotation; match `Unlisted` for that.
+
+- `StewardStore::record_pending_harvest_at` defaults to
+  `record_pending_harvest`, which keys the queue row by the store's own clock:
+  a custom steward store that keeps the default queues a retired identity's
+  exit interview again each time its retirement's side effects run again
+  after a restart. Implement it keyed by `retired_at_ms` to queue it once, as
+  `SqliteAgentMemoryStore` does.
 
 ### Added
 
@@ -154,10 +212,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bridge's mob (the mob's incarnation and latest cursor, and a page of
   `MobHandle::member_lifecycle_events`), store reads that wake no member, for
   the identity runtime's lifecycle projection (see Changed). Both default to
-  `Unsupported`; `MobSessionBridge` answers them. The page types
-  `MemberLifecycleJournalHead`, `MemberLifecycleJournalPage`,
+  `Unsupported`; `MobSessionBridge` answers them, and answers `Unsupported`
+  for a mob handle whose principal may not subscribe to the mob's events. The
+  page types `MemberLifecycleJournalHead`, `MemberLifecycleJournalPage`,
   `MemberLifecycleFactRecord` and `MemberLifecycleFact` are exported from
-  `identity_first`.
+  `identity_first`; each is `#[non_exhaustive]` (each fact variant too), built
+  with its constructor (`MemberLifecycleJournalHead::new`,
+  `MemberLifecycleFact::seated`, `retired`, `mob_reset`, and so on), so the
+  facts can say more of their step without another break.
+
+- The error events `lifecycle_effect_failed` (`identity`,
+  `agent_runtime_id`, `session_id`, `effect`, `attempts`, `error`), for a
+  lifecycle side effect (`after_create`, an exit interview's write, a
+  distillation) that failed every attempt it was allowed, and
+  `lifecycle_projection_off` (`detail`), once, for an identity runtime whose
+  session bridge cannot read what its lifecycle projection reads. Both log
+  at ERROR by default, and neither is a resolution. The Python and
+  TypeScript SDKs add `ErrorCategory.LIFECYCLE_EFFECT_FAILED` and
+  `ErrorCategory.LIFECYCLE_PROJECTION_OFF`, with their messages.
+
+- `IdentityRuntime::lifecycle_projection_status` answers a
+  `LifecycleProjectionStatus`: its `state` (`pending`, `running`, `stalled`,
+  `inactive` or `off`), the journal events a stopped predecessor's side
+  effects are still owed for (`owed_events`), and why it is off or stalled
+  (`detail`). `meta/status` carries it as `lifecycle_projection`, and the JSON
+  `/healthz` summary reads `degraded` while it is off or stalled and names it,
+  and names the owed events while they drain.
+  `IdentityRuntime::lifecycle_effect_failures` reads the side effects
+  recorded as failed.
+
+- `RetiredIdentityCause::RoleMove` (`role_move`), for an incarnation a role
+  move rotated onto a fresh session, and `RetiredIdentityCause::Rotated`
+  (`rotated`), for a rotation onto a fresh session no Meta verb asked for.
+  `LifecycleEffectVerb::RoleMove` records a role move's step.
 
 - `StewardStore::record_pending_harvest_at` queues an exit interview keyed by
   the time its retirement was asked, so a repeat of the same retirement
@@ -203,42 +290,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   builds use.
 
 - The side effects of an identity's lifecycle steps run from Core's member
-  lifecycle journal, at least once, through a cursor the identity runtime
-  keeps in Meta's metadata store: the host's retirement hook
+  lifecycle journal, attempted at least once, through a cursor the identity
+  runtime keeps in Meta's metadata store: the host's retirement hook
   (`GatewayHostComposition::identity_member_retired`) for an incarnation Core
-  ended, the distillation of the session a reset retires, the exit interview
-  of an identity the roster no longer lists or a delete ends, and the
-  customizer's `after_create` for each seat. Before, each was owed in the
-  process that took the step (a task, the roster pass's own list, a ledger
-  only a graceful shutdown drained), so a kill between the step and its side
-  effect lost it, and the next start found the step done. Now a process
-  stopped in between runs it at its next start, and a repeat changes nothing
-  the stopped process completed: the exit interview is queued once, and a
-  repeated distillation keeps one copy of what it holds. Each Meta verb
-  records what its step owes before it asks Core (Core's journal does not
-  say whether a rotation was a reset or a delete), and a unified runtime's
-  identity bootstrap answers once the side effects of its own steps, and
-  those a stopped process still owed, ran. Nothing is projected on a
-  candidate launch, whose verbs change no stored member. In particular:
-  - the retirement hook is also called for the incarnation a reset or a
-    delete ends, with the new causes `RetiredIdentityCause::Reset` and
-    `RetiredIdentityCause::Delete` (a first-boot `Fresh` row's and a role
-    move's rotation onto a fresh session are a reset's). For an incarnation
-    Core ended, the hook is called after the step answered, also when a
-    later step of the same roster pass fails, and a restart before the call
-    makes it at the next start, naming no registration, so a host keys what
-    it does by the incarnation (`agent_runtime_id`). A release (`retire`, a
-    scoped retire) still calls it once, before the release answers;
+  ended, the distillation of the session a reset, a role move or a rotation
+  retires, the exit interview of an identity the roster no longer lists or a
+  delete ends, and the customizer's `after_create` for each seat. Before,
+  each was owed in the process that took the step (a task, the roster pass's
+  own list, a ledger only a graceful shutdown drained), so a kill between the
+  step and its side effect lost it, and the next start found the step done.
+  Now a process stopped in between runs it at its next start, when the
+  metadata store is durable (see Upgrade), and a repeat changes nothing the
+  stopped process completed: the exit interview is queued once (in a store
+  that keys it by its step), and a repeated distillation reads the session
+  again. Each Meta verb records what its step owes before it asks Core (Core's
+  journal does not say whether a rotation was a reset, a delete or a role
+  move), for an incarnation the identity spawned only: a reset over a member
+  a host made under the identity's member id records nothing for it. Nothing
+  is projected on a candidate launch, whose verbs change no stored member. In
+  particular:
+  - the retirement hook is also called for the incarnation a reset, a
+    delete, a role move or a rotation ends, with the new causes
+    `RetiredIdentityCause::Reset` (also a first-boot `Fresh` row's),
+    `Delete`, `RoleMove` and `Rotated` (see Added). A role move's or a
+    rotation's session is distilled as a retirement's, with no reset
+    boundary. For an incarnation Core ended, the hook is called once the step
+    answered, also when a later step of the same roster pass fails, and a
+    restart before the call makes it at the next start, naming no
+    registration, so a host keys what it does by the incarnation
+    (`agent_runtime_id`). A release (`retire`, a scoped retire) still calls
+    it once, before the release answers;
   - `after_create` is called once Core's journal records the seat, with no
-    lock of the identity held, as before; a call a restart moved to the next
-    start reports the identity's roster labels and no system prompt, since
-    the build that made the seat ended with the stopped process;
+    lock of the identity held, as before, and only while Core still binds
+    that incarnation: a seat whose incarnation ended before the call is told
+    nothing, its retirement standing for it. A call a restart moved to the
+    next start reports the identity's roster labels and no system prompt,
+    since the build that made the seat ended with the stopped process;
+  - each side effect is bounded. A hook or `after_create` call that has not
+    answered within 30 seconds, or an exit interview write that failed, is
+    attempted again, at most three times in all; an answer the host gives is
+    final, and a distillation is attempted once, within the distiller's
+    pre-rotation bound. A side effect that failed is recorded
+    (`IdentityRuntime::lifecycle_effect_failures`) and reported on the error
+    hook (`retired_member_release_failed` for the hook,
+    `lifecycle_effect_failed` for the others), and the projection goes on:
+    one that never answers, or a write that always fails, holds back no
+    other. Hooks and `after_create` calls for different identities run up to
+    16 at once, in no order across identities;
   - a first-boot `Fresh` row (`meta_gateway identity-reset`) of a live member
     distills the old session, as the online reset does;
+  - a unified runtime's identity bootstrap answers once the side effects of
+    its own steps ran, normally; what a stopped predecessor still owed runs
+    in the background after the bootstrap answered, and
+    `meta/status` (`lifecycle_projection.owed_events`) counts it until it
+    ran;
+  - a seat step is refused, retryable, with nothing asked of Core, while the
+    projection's cursor can be neither read nor started, so no seat is ever
+    committed behind it. A step whose record cannot be written (a reload's
+    and a respawn's too) is refused the same way, as
+    `IdentityHistoryUnavailable`;
+  - a roster pass that lists an identity again takes back an unlisting Core
+    never carried out, and a step Core refused before any of it started puts
+    back what an earlier step recorded for the same incarnation;
+  - an identity runtime that no identity context serves is bound by the
+    public view an embedder hands the RPC handler, or by its restore, and so
+    runs the side effects of its steps; one that nothing binds records
+    nothing for them;
   - a graceful shutdown lets the projection reach the journal's head within
-    the runtime's event drain window, and what it does not reach runs at the
-    next start. The shutdown no longer joins `after_create` calls or drains
-    reset distillations of its own.
+    half of the runtime's event drain window; the post-stop drain and the
+    metadata settle keep the rest, and what the projection does not reach
+    runs at the next start. The distillation of a reset's incarnation Core
+    had already retired is joined by the shutdown the same way. The shutdown
+    no longer joins `after_create` calls or drains reset distillations of its
+    own.
 
 ### Fixed
 
@@ -348,6 +472,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its decisions and visibility policy. A schedule of a deleted agent stays
   until it is deleted, and fires into a new agent declared later under the
   same name while its sender may still send to it.
+- The lifecycle projection decides some facts of an identity's lifecycle
+  that Core's member lifecycle journal does not carry yet; each moves to
+  Core's journal once it says so:
+  - whether Core's rotation started at all, read from the bridge's error
+    when Core refused or failed it (a step that may have started keeps what
+    it recorded);
+  - whether an identity spawned a member, read from the durable-identity
+    marker or the identity label on Core's binding;
+  - which retirement and seat form one rotation, read from their positions
+    in the journal (a retirement followed at the next cursor by the same
+    member's seat at a later generation);
+  - whether a seat's incarnation is still current, read from Core's latest
+    binding of the identity;
+  - why Core rotated an identity no Meta verb asked it to rotate (`rotated`
+    or `role_move`, read from Core's member history); Core's legacy member
+    resets owe nothing.
 
 ## [0.9.6] - 2026-10-27
 

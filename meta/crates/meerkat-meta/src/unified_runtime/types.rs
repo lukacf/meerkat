@@ -789,9 +789,17 @@ impl From<meerkat_core::event::CompactionPreservedHistoryFit> for CompactionPres
 ///   for failed
 /// - `MobStopProceededWithoutInterrupt` — `lifecycle.rs` teardown gave up
 ///   waiting for runtime-attach readiness and continued without interrupting
-/// - `RetiredMemberReleaseFailed` - `identity_first/runtime.rs`: a gateway
-///   host's retirement hook (`GatewayHostComposition::identity_member_retired`)
-///   answered an error for a retired incarnation; the retirement stands
+/// - `RetiredMemberReleaseFailed` - `identity_first/runtime.rs` and its
+///   lifecycle projection: a gateway host's retirement hook
+///   (`GatewayHostComposition::identity_member_retired`) answered an error
+///   for a retired incarnation, or, for an incarnation Core ended, timed out
+///   attempt after attempt; the retirement stands
+/// - `LifecycleEffectFailed` - `identity_first/runtime/lifecycle_projection.rs`:
+///   a lifecycle side effect other than the retirement hook (`after_create`,
+///   an exit interview's write, a distillation) failed every attempt it was
+///   allowed; it is recorded and not run again
+/// - `LifecycleProjectionOff` - the same projection, once: the session
+///   bridge cannot read what it reads, so no lifecycle side effect runs
 /// - `MobAnnouncementEscalated` - the mob announcement owner's escalation
 ///   pass raised an escalation, or notified it again while it stays open
 /// - `MobAnnouncementEscalationResolved` - the same pass resolved it; the
@@ -926,8 +934,13 @@ pub enum ErrorEvent {
     ///
     /// The retirement itself stands: Core retired the incarnation, and the
     /// retire's caller saw its own outcome. Only the host's release of what
-    /// it keeps for that incarnation failed, and Meta does not retry it.
-    /// `cause` is `unlisted`, `retire`, `scoped`, `reset` or `delete`.
+    /// it keeps for that incarnation failed, and Meta does not call the hook
+    /// for it again. A hook that answered an error is not retried; for an
+    /// incarnation Core ended, a hook that did not answer within its
+    /// deadline is called again, a bounded number of times, and then
+    /// reported here, its `error` saying it timed out. `cause` is
+    /// `unlisted`, `retire`, `scoped`, `reset`, `delete`, `role_move` or
+    /// `rotated`.
     RetiredMemberReleaseFailed {
         identity: String,
         agent_runtime_id: String,
@@ -935,6 +948,33 @@ pub enum ErrorEvent {
         session_id: Option<String>,
         cause: String,
         error: String,
+    },
+    /// A lifecycle side effect Core's journal owed an identity's
+    /// incarnation failed: `effect` (`after_create`, `exit_interview` or
+    /// `distillation`) answered an error, or did not answer or land within
+    /// its deadline on each of its `attempts`. The identity runtime recorded
+    /// the failure durably and went on; the side effect is not run again,
+    /// and no later one waited for it. A retirement hook's failure is a
+    /// [`Self::RetiredMemberReleaseFailed`].
+    LifecycleEffectFailed {
+        identity: String,
+        /// The incarnation the side effect was owed for.
+        agent_runtime_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        effect: String,
+        attempts: u32,
+        error: String,
+    },
+    /// The identity runtime's lifecycle projection is off: the session
+    /// bridge cannot read Core's member lifecycle journal, or an identity's
+    /// binding, so no lifecycle side effect of a step Core journals runs (no
+    /// `after_create`, no retirement hook, no distillation or exit interview
+    /// of a retired incarnation). Reported once, when the projection finds
+    /// it out; the runtime's status and health say so for as long as it
+    /// lasts. `detail` says which read failed and what to implement.
+    LifecycleProjectionOff {
+        detail: String,
     },
     /// A mob announcement escalation was raised, or notified again while it
     /// stays open: `escalation` is the durable record, `event` "raised" or
@@ -1093,6 +1133,27 @@ impl Display for ErrorEvent {
                     "retired_member_release_failed: {identity} ({agent_runtime_id}{session}) \
                      was retired ({cause}), and the host's release failed: {error}"
                 )
+            }
+            Self::LifecycleEffectFailed {
+                identity,
+                agent_runtime_id,
+                session_id,
+                effect,
+                attempts,
+                error,
+            } => {
+                let session = match session_id {
+                    Some(session_id) => format!(" on session {session_id}"),
+                    None => String::new(),
+                };
+                write!(
+                    f,
+                    "lifecycle_effect_failed: the {effect} of {identity} ({agent_runtime_id}\
+                     {session}) failed after {attempts} attempts, and is not run again: {error}"
+                )
+            }
+            Self::LifecycleProjectionOff { detail } => {
+                write!(f, "lifecycle_projection_off: {detail}")
             }
             Self::MobAnnouncementEscalated {
                 escalation,

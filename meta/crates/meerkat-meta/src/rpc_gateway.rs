@@ -15679,11 +15679,13 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// What ended depends on [`crate::identity_first::RetiredIdentityCause`].
     /// `Unlisted` ends the incarnation and the identity's place in the
     /// roster, so state the host keeps for the identity itself may go.
-    /// `Reset` and `Delete` end the incarnation (a reset's or a delete's
-    /// rotation onto a fresh session, a first-boot `Fresh` row's): the
+    /// `Reset`, `Delete`, `RoleMove` and `Rotated` end the incarnation (a
+    /// reset's or a delete's rotation onto a fresh session, a first-boot
+    /// `Fresh` row's, a role move's, a rotation no Meta verb asked for): the
     /// identity stays in the roster on its fresh session, so state the host
     /// keeps for the incarnation may go and state it keeps for the identity
-    /// stays. `Retire` and `Scoped` release the member: they end its
+    /// stays. The vocabulary may grow: an unknown cause never means the
+    /// identity is gone. `Retire` and `Scoped` release the member: they end its
     /// registration, not the incarnation. The identity stays registered and
     /// active on the same session at the same generation, and its next
     /// delivery materializes it again under a new registration, which the
@@ -15698,11 +15700,16 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// Called with no Meta lock held (no identity lifecycle lock, no
     /// bootstrap controller), so it may call back into the runtime. A release
     /// calls it once, after Core's release answered, before the verb
-    /// answers. An incarnation Core ends (`Unlisted`, `Reset`, `Delete`)
-    /// reaches it from Core's journal, after the step that ended it, at least
-    /// once: a gateway stopped before the call makes it at its next start,
-    /// naming no registration, and one stopped during the call may make it
-    /// again, so key what it does by the incarnation (`agent_runtime_id`).
+    /// answers. An incarnation Core ends (every other cause) reaches it from
+    /// Core's journal, once the step that ended it answered, at least once: a
+    /// gateway stopped before the call makes it at its next start, over a
+    /// durable metadata store, naming no registration, and one stopped
+    /// during the call may make it again, so key what it does by the
+    /// incarnation (`agent_runtime_id`). Calls for different identities run
+    /// concurrently, up to 16 at once, in no order across identities. Such a
+    /// call that has not answered within 30 seconds is made again, at most
+    /// three times in all, then reported as `retired_member_release_failed`
+    /// (timed out) and not made again; no other call waits for it.
     /// The gateway installs it right after [`Self::bind_identity_runtime`],
     /// so the identity bootstrap's own retirements of members the roster no
     /// longer lists reach it too, before the init settles. Never called for a

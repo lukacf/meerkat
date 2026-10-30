@@ -2776,30 +2776,42 @@ async fn identity_tool_records_and_rotations_round_trip_through_the_realm_docume
     );
 }
 
-/// The lifecycle projection's cursor and a lifecycle effect intent, as Meta
-/// keeps them in a host store realm's documents, round trip: another host
-/// reads both from the realm, intents are per generation, and a cleared
+/// The lifecycle projection's cursor, a lifecycle effect intent and a
+/// lifecycle effect failure, as Meta keeps them in a host store realm's
+/// documents, round trip: another host reads them from the realm, lists the
+/// mob's intents and failures, intents are per generation, and a cleared
 /// intent is gone there.
 #[tokio::test(flavor = "multi_thread")]
 async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
-    use crate::runtime::{LifecycleEffectIntent, LifecycleEffectVerb, LifecycleProjectionCursor};
+    use crate::runtime::{
+        LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
+        LifecycleProjectionBacklog, LifecycleProjectionCursor,
+    };
     let fixture = Fixture::new();
     let mob_id = unique_mob_id("lifecycle-records");
-    let cursor = LifecycleProjectionCursor {
-        mob_id: mob_id.clone(),
-        incarnation: "incarnation-1".to_string(),
-        cursor: 41,
-        recorded_at_ms: 1_700_000_000_000,
-    };
-    let intent = LifecycleEffectIntent {
-        mob_id: mob_id.clone(),
-        incarnation: "incarnation-1".to_string(),
-        identity: ALICE.to_string(),
-        generation: 3,
-        verb: LifecycleEffectVerb::Delete,
-        session_id: Some(SessionId::new()),
-        recorded_at_ms: 1_700_000_000_000,
-    };
+    let mut cursor =
+        LifecycleProjectionCursor::new(mob_id.clone(), "incarnation-1", 41, 1_700_000_000_000);
+    cursor.backlog = vec![LifecycleProjectionBacklog::new(30, 38)];
+    let intent = LifecycleEffectIntent::new(
+        mob_id.clone(),
+        "incarnation-1",
+        ALICE,
+        3,
+        LifecycleEffectVerb::Delete,
+        Some(SessionId::new()),
+        1_700_000_000_000,
+    );
+    let failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::ExitInterview,
+        3,
+        "the queue refused the write",
+        1_700_000_000_001,
+    );
     {
         let provider = fixture.open(&fixture.process()).await.expect("open");
         let store = SpiMetadataStore::new(provider.realm.documents().clone());
@@ -2818,6 +2830,10 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .set_lifecycle_effect_intent(&intent)
             .await
             .expect("record the intent");
+        store
+            .record_lifecycle_effect_failure(&failure)
+            .await
+            .expect("record the failure");
     }
 
     fixture.lapse();
@@ -2838,7 +2854,21 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .lifecycle_effect_intent(&mob_id, ALICE, 3)
             .await
             .expect("read the intent"),
-        Some(intent)
+        Some(intent.clone())
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intents(&mob_id)
+            .await
+            .expect("list the intents"),
+        vec![intent]
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id)
+            .await
+            .expect("list the failures"),
+        vec![failure]
     );
     assert_eq!(
         store

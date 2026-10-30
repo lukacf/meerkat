@@ -350,12 +350,14 @@ pub struct IdentityRotationIntent {
 /// Where an identity runtime's lifecycle projection stands in its mob's
 /// journal: every lifecycle side effect of the journal's events up to
 /// `cursor` ran (the host's retirement hook, the distillation of a retired
-/// session, the exit interview, `after_create`). Written only after the
-/// effects of the events it covers ran, so a process that stops between the
-/// two runs them again at its next start. Kept in the same placements as
-/// [`IdentityToolRecord`] (key `lifecycle_projection/cursor`; host store
-/// document `lifecycle/...`).
+/// session, the exit interview, `after_create`), except those of the events
+/// `backlog` names, which a process stopped before their side effects ran
+/// still owes. Written only after the side effects of the events it covers
+/// ran, so a process that stops between the two runs them again at its next
+/// start. Kept in the same placements as [`IdentityToolRecord`] (key
+/// `lifecycle_projection/cursor`; host store document `lifecycle/...`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct LifecycleProjectionCursor {
     pub mob_id: String,
     /// The incarnation of the mob whose journal the cursor reads. A mob
@@ -363,10 +365,78 @@ pub struct LifecycleProjectionCursor {
     /// whose cursors start again, so a cursor of another incarnation names
     /// nothing in it.
     pub incarnation: String,
-    /// The journal cursor of the last event whose side effects ran.
+    /// The journal cursor of the last event whose side effects ran, apart
+    /// from those `backlog` still owes.
     pub cursor: u64,
+    /// The ranges of events before `cursor` whose side effects a stopped
+    /// process still owed when this process started, in journal order: they
+    /// run in the background, and each range goes once they ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backlog: Vec<LifecycleProjectionBacklog>,
+    /// The intents of the retirements whose side effects ran, which may not
+    /// be removed yet: the next start removes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncleared: Vec<LifecycleIntentKey>,
     /// When the cursor was written, in Unix milliseconds.
     pub recorded_at_ms: u64,
+}
+
+impl LifecycleProjectionCursor {
+    /// A cursor at `cursor` of `mob_id`'s journal in the mob incarnation
+    /// `incarnation`, with nothing owed before it.
+    pub fn new(
+        mob_id: impl Into<String>,
+        incarnation: impl Into<String>,
+        cursor: u64,
+        recorded_at_ms: u64,
+    ) -> Self {
+        Self {
+            mob_id: mob_id.into(),
+            incarnation: incarnation.into(),
+            cursor,
+            backlog: Vec::new(),
+            uncleared: Vec::new(),
+            recorded_at_ms,
+        }
+    }
+}
+
+/// The events of a mob's journal after `after`, up to `until`, whose
+/// lifecycle side effects a stopped process still owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct LifecycleProjectionBacklog {
+    pub after: u64,
+    pub until: u64,
+}
+
+impl LifecycleProjectionBacklog {
+    pub fn new(after: u64, until: u64) -> Self {
+        Self { after, until }
+    }
+
+    /// How many journal events the range still covers.
+    pub fn events(&self) -> u64 {
+        self.until.saturating_sub(self.after)
+    }
+}
+
+/// The key of a lifecycle effect intent: the identity and the generation of
+/// the incarnation its step ends.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct LifecycleIntentKey {
+    pub identity: String,
+    pub generation: u64,
+}
+
+impl LifecycleIntentKey {
+    pub fn new(identity: impl Into<String>, generation: u64) -> Self {
+        Self {
+            identity: identity.into(),
+            generation,
+        }
+    }
 }
 
 /// What one lifecycle step a Meta verb asks Core for owes beyond what Core's
@@ -385,6 +455,10 @@ pub enum LifecycleEffectVerb {
     /// A delete: Core rotates the identity onto a fresh session, and the
     /// identity's memory continuity ends with the session it leaves.
     Delete,
+    /// A role move: Core rotates the identity onto a fresh session under the
+    /// role the roster now names, since its session has nothing to carry
+    /// over (it lives in memory only, or no wake created it).
+    RoleMove,
     /// A replacement on the identity's own session (a reload, a respawn, a
     /// compaction owner's rebuild): Core retires the member and the identity
     /// is seated again on the same session. It owes no side effect.
@@ -399,6 +473,7 @@ pub enum LifecycleEffectVerb {
 /// `lifecycle_intent/<generation>/<identity>`; host store document
 /// `effect/...`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct LifecycleEffectIntent {
     pub mob_id: String,
     /// The incarnation of the mob the step runs in (see
@@ -413,6 +488,134 @@ pub struct LifecycleEffectIntent {
     /// When the step was asked, in Unix milliseconds. The exit interview the
     /// step queues is keyed by it, so a replay of the step queues it once.
     pub recorded_at_ms: u64,
+}
+
+impl LifecycleEffectIntent {
+    /// The intent of `verb` for `identity`'s incarnation `generation` (on
+    /// `session_id`) in `mob_id`'s incarnation `incarnation`.
+    pub fn new(
+        mob_id: impl Into<String>,
+        incarnation: impl Into<String>,
+        identity: impl Into<String>,
+        generation: u64,
+        verb: LifecycleEffectVerb,
+        session_id: Option<meerkat_core::types::SessionId>,
+        recorded_at_ms: u64,
+    ) -> Self {
+        Self {
+            mob_id: mob_id.into(),
+            incarnation: incarnation.into(),
+            identity: identity.into(),
+            generation,
+            verb,
+            session_id,
+            recorded_at_ms,
+        }
+    }
+
+    /// The intent's key.
+    pub fn key(&self) -> LifecycleIntentKey {
+        LifecycleIntentKey::new(self.identity.clone(), self.generation)
+    }
+}
+
+/// A lifecycle side effect the identity runtime's projection could not run.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LifecycleEffectKind {
+    /// The customizer's `after_create` for a seat.
+    AfterCreate,
+    /// The host's retirement hook for an incarnation Core ended.
+    RetirementHook,
+    /// The queueing of a retired identity's exit interview.
+    ExitInterview,
+    /// The distillation of a retired session.
+    Distillation,
+}
+
+impl LifecycleEffectKind {
+    /// The side effect's wire name: `after_create`, `retirement_hook`,
+    /// `exit_interview` or `distillation`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AfterCreate => "after_create",
+            Self::RetirementHook => "retirement_hook",
+            Self::ExitInterview => "exit_interview",
+            Self::Distillation => "distillation",
+        }
+    }
+}
+
+/// A lifecycle side effect Core's journal owed an identity that failed: its
+/// every attempt missed its deadline or failed, or the host answered it with
+/// an error. The projection recorded it before its cursor moved past the
+/// event that owed it, and reported it on the error hook; the side effect
+/// is not run again. Kept in the same placements as [`IdentityToolRecord`]
+/// (key `lifecycle_failure/<generation>/<effect>/<identity>`; host store
+/// document `failure/...`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct LifecycleEffectFailure {
+    pub mob_id: String,
+    /// The incarnation of the mob whose journal owed the side effect.
+    pub incarnation: String,
+    /// The cursor of the journal event that owed it.
+    pub cursor: u64,
+    pub identity: String,
+    /// The generation of the incarnation it was owed for.
+    pub generation: u64,
+    pub effect: LifecycleEffectKind,
+    /// The incarnation's session, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<meerkat_core::types::SessionId>,
+    /// How many attempts were made.
+    pub attempts: u32,
+    /// What the last attempt failed with.
+    pub error: String,
+    /// When the failure was recorded, in Unix milliseconds.
+    pub recorded_at_ms: u64,
+}
+
+impl LifecycleEffectFailure {
+    /// The failure of `effect`, owed by the event at `cursor` of `mob_id`'s
+    /// journal in the incarnation `incarnation` to `identity`'s incarnation
+    /// `generation`, after `attempts` attempts, the last failing with
+    /// `error`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mob_id: impl Into<String>,
+        incarnation: impl Into<String>,
+        cursor: u64,
+        identity: impl Into<String>,
+        generation: u64,
+        effect: LifecycleEffectKind,
+        attempts: u32,
+        error: impl Into<String>,
+        recorded_at_ms: u64,
+    ) -> Self {
+        Self {
+            mob_id: mob_id.into(),
+            incarnation: incarnation.into(),
+            cursor,
+            identity: identity.into(),
+            generation,
+            effect,
+            session_id: None,
+            attempts,
+            error: error.into(),
+            recorded_at_ms,
+        }
+    }
+
+    /// The failure, naming the incarnation's session.
+    #[must_use]
+    pub fn with_session(mut self, session_id: Option<meerkat_core::types::SessionId>) -> Self {
+        self.session_id = session_id;
+        self
+    }
 }
 
 /// The stored form of an identity record: the record and its format
@@ -466,10 +669,24 @@ const LIFECYCLE_CURSOR_KEY: &str = "lifecycle_projection/cursor";
 /// Key prefix of the lifecycle effect intents in the `meta_metadata` table.
 const LIFECYCLE_INTENT_KEY_PREFIX: &str = "lifecycle_intent/";
 
+/// Key prefix of the lifecycle effect failures in the `meta_metadata` table.
+const LIFECYCLE_FAILURE_KEY_PREFIX: &str = "lifecycle_failure/";
+
 /// The key of the lifecycle effect intent of `identity`'s `generation`: the
 /// generation first, so the key is unambiguous whatever the identity holds.
 fn lifecycle_intent_key(identity: &str, generation: u64) -> String {
     format!("{LIFECYCLE_INTENT_KEY_PREFIX}{generation}/{identity}")
+}
+
+/// The key of `failure`: its generation and effect first, both free of `/`,
+/// so the key is unambiguous whatever the identity holds.
+fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
+    format!(
+        "{LIFECYCLE_FAILURE_KEY_PREFIX}{}/{}/{}",
+        failure.generation,
+        failure.effect.as_str(),
+        failure.identity
+    )
 }
 
 /// Persistent storage for meta runtime metadata that must survive a
@@ -618,6 +835,30 @@ pub trait PersistentMetadataStore: Send + Sync {
         generation: u64,
     ) -> Result<(), MetadataStoreError>;
 
+    /// Every lifecycle effect intent recorded for `mob_id`, in no promised
+    /// order: what the start of a projection sweeps, and what a roster pass
+    /// reads to take back an unlisting the roster undid.
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectIntent>, MetadataStoreError>;
+
+    /// Record (or replace) the failure of one lifecycle side effect, durably,
+    /// before the projection's cursor moves past the event that owed it.
+    ///
+    /// Required: a side effect the projection gives up on is recorded, so
+    /// no failure is lost with the cursor that moved past it.
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &LifecycleEffectFailure,
+    ) -> Result<(), MetadataStoreError>;
+
+    /// The lifecycle effect failures recorded for `mob_id`, oldest first.
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError>;
+
     /// Wait until the writes this store runs off its callers' tasks (such as
     /// coalesced cursor writes) have landed. Shutdown calls it once the last
     /// writer stopped, under its own bound. The default runs no write off
@@ -641,6 +882,7 @@ pub struct InMemoryMetadataStore {
     identity_rotation_intents: RwLock<BTreeMap<(String, String), IdentityRotationIntent>>,
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
     lifecycle_intents: RwLock<BTreeMap<(String, String, u64), LifecycleEffectIntent>>,
+    lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
 }
 
 impl InMemoryMetadataStore {
@@ -828,6 +1070,47 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
             generation,
         ));
         Ok(())
+    }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectIntent>, MetadataStoreError> {
+        Ok(self
+            .lifecycle_intents
+            .read()
+            .await
+            .values()
+            .filter(|intent| intent.mob_id == mob_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &LifecycleEffectFailure,
+    ) -> Result<(), MetadataStoreError> {
+        self.lifecycle_failures.write().await.insert(
+            (failure.mob_id.clone(), lifecycle_failure_key(failure)),
+            failure.clone(),
+        );
+        Ok(())
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let mut failures = self
+            .lifecycle_failures
+            .read()
+            .await
+            .values()
+            .filter(|failure| failure.mob_id == mob_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        failures.sort_by_key(|failure| failure.recorded_at_ms);
+        Ok(failures)
     }
 }
 
@@ -1297,9 +1580,68 @@ impl PersistentMetadataStore for SqliteMetadataStore {
         .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
         Ok(())
     }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectIntent>, MetadataStoreError> {
+        self.identity_record_rows(mob_id, LIFECYCLE_INTENT_KEY_PREFIX)?
+            .iter()
+            .map(|value| decode_identity_record(value.as_bytes()))
+            .collect()
+    }
+
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &LifecycleEffectFailure,
+    ) -> Result<(), MetadataStoreError> {
+        let value = encode_identity_record(failure)?;
+        self.upsert_identity_record_row(&failure.mob_id, &lifecycle_failure_key(failure), &value)
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let mut failures = self
+            .identity_record_rows(mob_id, LIFECYCLE_FAILURE_KEY_PREFIX)?
+            .iter()
+            .map(|value| decode_identity_record::<LifecycleEffectFailure>(value.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        failures.sort_by_key(|failure| failure.recorded_at_ms);
+        Ok(failures)
+    }
 }
 
 impl SqliteMetadataStore {
+    /// The values of the `meta_metadata` rows of `mob_id` whose key starts
+    /// with `prefix`, in key order.
+    fn identity_record_rows(
+        &self,
+        mob_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>, MetadataStoreError> {
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        // A prefix compare, not LIKE: identities may carry `_` and `%`.
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT value FROM meta_metadata \
+                 WHERE mob_id = ?1 AND substr(key, 1, ?2) = ?3 ORDER BY key",
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("prepare: {err}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![mob_id, prefix.len(), prefix], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(row.map_err(|err| MetadataStoreError::Io(format!("row: {err}")))?);
+        }
+        Ok(values)
+    }
+
     /// The value of the `meta_metadata` row `key` of `mob_id`, if any.
     fn identity_record_row(
         &self,
@@ -1627,15 +1969,15 @@ mod tests {
         generation: u64,
         verb: LifecycleEffectVerb,
     ) -> LifecycleEffectIntent {
-        LifecycleEffectIntent {
-            mob_id: mob_id.to_string(),
-            incarnation: "incarnation-1".to_string(),
-            identity: identity.to_string(),
+        LifecycleEffectIntent::new(
+            mob_id,
+            "incarnation-1",
+            identity,
             generation,
             verb,
-            session_id: Some(meerkat_core::types::SessionId::new()),
-            recorded_at_ms: 1_700_000_000_000 + generation,
-        }
+            Some(meerkat_core::types::SessionId::new()),
+            1_700_000_000_000 + generation,
+        )
     }
 
     /// The lifecycle projection's records are per mob, survive a reopen of
@@ -1649,12 +1991,10 @@ mod tests {
         let sqlite = SqliteMetadataStore::open(&path).unwrap();
         let memory = InMemoryMetadataStore::new();
         let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
-        let cursor = LifecycleProjectionCursor {
-            mob_id: "mob-a".to_string(),
-            incarnation: "incarnation-1".to_string(),
-            cursor: 41,
-            recorded_at_ms: 1_700_000_000_000,
-        };
+        let mut cursor =
+            LifecycleProjectionCursor::new("mob-a", "incarnation-1", 41, 1_700_000_000_000);
+        cursor.backlog = vec![LifecycleProjectionBacklog::new(7, 12)];
+        cursor.uncleared = vec![LifecycleIntentKey::new("personal:alice", 2)];
         let unlisted = effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Unlisted);
         let deleted = effect_intent("mob-a", "personal:alice", 4, LifecycleEffectVerb::Delete);
         let lookalike = effect_intent("mob-a", "3/personal:alice", 0, LifecycleEffectVerb::Reset);
@@ -1745,6 +2085,93 @@ mod tests {
                 .await
                 .unwrap(),
             Some(deleted)
+        );
+    }
+
+    /// A mob's lifecycle effect intents list with the mob's own only, and
+    /// the failures the projection records list oldest first, per mob,
+    /// keyed by generation, effect and identity, and survive a reopen.
+    #[tokio::test]
+    async fn lifecycle_intents_list_and_failures_round_trip_per_mob() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.sqlite");
+        let sqlite = SqliteMetadataStore::open(&path).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        let hook = LifecycleEffectFailure::new(
+            "mob-a",
+            "incarnation-1",
+            12,
+            "personal:alice",
+            3,
+            LifecycleEffectKind::RetirementHook,
+            3,
+            "timed out",
+            1_700_000_000_001,
+        )
+        .with_session(Some(meerkat_core::types::SessionId::new()));
+        let interview = LifecycleEffectFailure::new(
+            "mob-a",
+            "incarnation-1",
+            12,
+            "personal:alice",
+            3,
+            LifecycleEffectKind::ExitInterview,
+            3,
+            "the queue refused the write",
+            1_700_000_000_000,
+        );
+        for store in stores {
+            for intent in [
+                effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Unlisted),
+                effect_intent("mob-a", "personal:bob", 1, LifecycleEffectVerb::RoleMove),
+                effect_intent("mob-b", "personal:alice", 3, LifecycleEffectVerb::Reset),
+            ] {
+                store.set_lifecycle_effect_intent(&intent).await.unwrap();
+            }
+            let mut listed = store
+                .lifecycle_effect_intents("mob-a")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|intent| (intent.identity, intent.generation, intent.verb))
+                .collect::<Vec<_>>();
+            listed.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            assert_eq!(
+                listed,
+                vec![
+                    (
+                        "personal:alice".to_string(),
+                        3,
+                        LifecycleEffectVerb::Unlisted
+                    ),
+                    ("personal:bob".to_string(), 1, LifecycleEffectVerb::RoleMove),
+                ]
+            );
+            store.record_lifecycle_effect_failure(&hook).await.unwrap();
+            store
+                .record_lifecycle_effect_failure(&interview)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.lifecycle_effect_failures("mob-a").await.unwrap(),
+                vec![interview.clone(), hook.clone()],
+                "one record per effect, oldest first"
+            );
+            assert!(
+                store
+                    .lifecycle_effect_failures("mob-b")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        drop(sqlite);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.lifecycle_effect_failures("mob-a").await.unwrap(),
+            vec![interview, hook],
+            "the failures survive a reopen"
         );
     }
 

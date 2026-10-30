@@ -569,39 +569,90 @@ svg[data-svg="fit"],
 .console-panel__grid dt { color: var(--ink-muted); font-family: var(--disp); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .console-panel__grid dd { margin: 0; }
 
+/* ── Agent details (Inspect) ────────────────────────────────── */
+.agent-details__repair { padding: 10px var(--_cc-panel-pad-x) 0; }
+.agent-details__repair p { margin: 0 0 8px; }
+.agent-details__command {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-elev-1);
+  min-width: 0;
+}
+.agent-details__command code {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn {
+  flex: none; width: 22px; height: 22px;
+  background: transparent; box-shadow: none; border-radius: var(--r-sm);
+  color: var(--ink-meta);
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn:hover { background: var(--bg-elev-2); color: var(--ink); }
+.agent-details__peer {
+  display: inline-flex; align-items: center; max-width: 100%;
+  height: 24px; padding: 0 8px 0 3px;
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  font-size: 12px;
+}
+.agent-details__preview {
+  margin: 0; padding: 10px 12px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-sunken);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 240px; overflow-y: auto;
+}
+.agent-details__tech { padding: 4px var(--_cc-panel-pad-x) 0; }
+
 /* Console schedules in an agent's details pane. */
 .console-schedules {
   display: flex; flex-direction: column; gap: 10px;
-  margin-top: 20px; padding-top: 16px;
+  margin-top: 20px; padding: 0 var(--_cc-panel-pad-x);
   border-top: 1px solid var(--line);
 }
-.console-schedules h4 { margin: 0; font-family: var(--disp); font-size: 13px; }
+.console-schedules__head { padding-left: 0; padding-right: 0; }
 .console-schedules__note,
-.console-schedules__empty,
 .console-schedules__hint { margin: 0; font-size: 12px; color: var(--ink-muted); }
-.console-schedules__error { margin: 0; font-size: 12px; color: var(--danger); }
-.console-schedules__item { display: flex; flex-direction: column; gap: 4px; }
-.console-schedules__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.console-schedules__phase { font-family: var(--disp); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-muted); }
-.console-schedules__item[data-phase="paused"] .console-schedules__phase { color: var(--danger); }
-.console-schedules__content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.console-schedules__meta { margin: 0; font-size: 11.5px; color: var(--ink-muted); }
-.console-schedules__item .console-panel__actions { margin-top: 4px; }
+.console-schedules .cc-panel-empty--inline { padding-left: 0; padding-right: 0; }
+.console-schedules__list {
+  list-style: none; margin: 0; padding: 0;
+  border-top: 1px solid var(--line);
+}
+.console-schedules__item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.console-schedules__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.console-schedules__row strong {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; font-weight: 500; color: var(--ink);
+}
+.console-schedules__content { margin: 0; font-size: 12.5px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-schedules__meta { margin: 0; font-size: 11.5px; color: var(--ink-meta); }
+.console-schedules__actions { margin-top: 4px; }
 .console-schedules__form {
   display: flex; flex-direction: column; gap: 10px;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: var(--bg-elev-2);
+  background: var(--bg-sunken);
 }
-.console-schedules__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-muted); }
+.console-schedules__field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-meta); }
 .console-schedules__field input,
 .console-schedules__field select,
 .console-schedules__field textarea {
-  font: inherit; font-size: 12.5px; color: var(--ink);
+  font: inherit; font-family: var(--sans); font-size: 12.5px; color: var(--ink);
   background: var(--bg); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 5px 8px;
+  min-height: 28px;
 }
+.console-schedules__field input:focus-visible,
+.console-schedules__field select:focus-visible,
+.console-schedules__field textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .console-schedules__field textarea { resize: vertical; }
 .console-schedules__inline { display: flex; flex-wrap: wrap; gap: 10px; }
 .console-schedules__days {

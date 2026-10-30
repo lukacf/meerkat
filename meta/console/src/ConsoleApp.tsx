@@ -200,6 +200,8 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
+import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
+import { HealthPanel } from "./panels/HealthPanel";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import {
   WorkGraphPanel,
@@ -5460,90 +5462,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.runtime_capabilities?.can_retire_members === true &&
       restartOffered(agent);
     return (
-      <div
-        className="console-panel"
-        data-testid={`inspect-panel:${target.identity}`}
+      <AgentDetailsPanel
+        identity={target.identity}
+        inspect={inspect}
+        agent={agent}
+        stateLabel={inspect ? identityStateLabel(inspect) : null}
+        actions={{
+          respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
+          reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
+          retire: canRetire ? { label: configuredActionLabels.retire, onClick: () => void onLifecycleAction(target.identity, "meta/retire") } : undefined,
+        }}
       >
-        <div className="console-panel__header">
-          <h3>{target.identity}</h3>
-          <div className="console-panel__actions">
-            {canRespawn ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:respawn`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/respawn")
-                }
-              >
-                {configuredActionLabels.respawn}
-              </button>
-            ) : null}
-            {canReset ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:reset`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/reset")
-                }
-              >
-                {configuredActionLabels.reset}
-              </button>
-            ) : null}
-            {canRetire ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:retire`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/retire")
-                }
-              >
-                {configuredActionLabels.retire}
-              </button>
-            ) : null}
-          </div>
-        </div>
-        {!inspect ? (
-          <p>Loading identity details…</p>
-        ) : (
-          <dl className="console-panel__grid">
-            <dt>State</dt>
-            <dd data-testid={`inspect-state:${target.identity}`}>
-              {identityStateLabel(inspect)}
-            </dd>
-            {inspect.session_repair ? (
-              <>
-                <dt>Repair</dt>
-                <dd data-testid={`inspect-session-repair:${target.identity}`}>
-                  <p>
-                    The durable session is intact but refused until it is
-                    repaired. Run the diagnose command, then the repair
-                    command, then reload the member (meta/reload_member).
-                  </p>
-                  <code data-testid="inspect-session-repair-diagnose">
-                    {inspect.session_repair.diagnose_command}
-                  </code>
-                  <code data-testid="inspect-session-repair-apply">
-                    {inspect.session_repair.apply_command}
-                  </code>
-                </dd>
-              </>
-            ) : null}
-            <dt>Role</dt>
-            <dd>{inspect.role || "n/a"}</dd>
-            <dt>Addressability</dt>
-            <dd>{inspect.addressability}</dd>
-            <dt>Generation</dt>
-            <dd>{inspect.continuity?.generation ?? "n/a"}</dd>
-            <dt>Session</dt>
-            <dd>{inspect.continuity?.session_id || "n/a"}</dd>
-            <dt>Runtime</dt>
-            <dd>{inspect.continuity?.agent_runtime_id || "n/a"}</dd>
-            <dt>Peers</dt>
-            <dd>{inspect.topology_peers?.join(", ") || "none"}</dd>
-            <dt>Output Preview</dt>
-            <dd>{inspect.output_preview || "n/a"}</dd>
-          </dl>
-        )}
         {scheduleOffer.list ? (
           <SchedulesSection
             key={target.identity}
@@ -5558,22 +5487,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             run={(command, params) => runScheduleCommand(target.identity, command, params)}
           />
         ) : null}
-      </div>
+      </AgentDetailsPanel>
     );
   }
 
   function renderHealthPanel(identities: IdentityStatusRow[]) {
     return (
-      <div className="console-panel" data-testid="health-panel">
-        <ul className="console-panel__list">
-          {identities.map((r) => (
-            <li data-testid={`health-identity:${r.identity}`} key={r.identity}>
-              <strong>{r.display_name || r.identity}</strong> · {identityStateLabel(r)} ·{" "}
-              {r.addressability}
-            </li>
-          ))}
-        </ul>
-      </div>
+      <HealthPanel
+        identities={identities}
+        stateLabel={identityStateLabel}
+        onOpen={(identity) => {
+          const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
+          if (agent) handleShowRosterDetails(agent);
+        }}
+      />
     );
   }
 

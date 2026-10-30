@@ -7,8 +7,9 @@
 //! with the mob's existing steps: a Dormant seat (on the entry's archived
 //! session when it has one), a same-session restamp
 //! ([`super::MobHandle::respawn_member`]), a rotation
-//! ([`super::MobHandle::rotate_member`]) or a release that holds an
-//! undeclared role move. A complete roster is then sealed
+//! ([`super::MobHandle::rotate_member`]) or the hold of an undeclared role
+//! move (its wakes refused, a Live member's run starts held until it is
+//! released when idle). A complete roster is then sealed
 //! (`SealDeclaredRoster`): every Declared entry it does not list is unlisted,
 //! and its member is retired, the end of the retirement ending the entry.
 //!
@@ -201,7 +202,9 @@ pub enum DeclaredEntryOutcome {
         history_unavailable: Option<HistoryUnavailable>,
     },
     /// The identity's member keeps its seat: nothing was written. A change
-    /// of descriptive facets alone answers this.
+    /// of descriptive facets alone answers this, and so does a change of
+    /// placement alone (placement is read only for an identity no member
+    /// holds).
     Kept,
     /// The member was restamped with its declared runtime mode on its own
     /// session, at `generation`.
@@ -463,13 +466,18 @@ impl super::MobHandle {
     /// Each identity's answer is typed and its own
     /// ([`DeclaredEntryOutcome`]): one identity's refusal or failure never
     /// fails the pass. The call fails as a whole only for what no identity
-    /// could be answered without: a mob that is not running, or the identity
-    /// store's intent rows that cannot be read now (retryable).
+    /// could be answered without: a mob that is not running, the identity
+    /// store's intent rows that cannot be read now (retryable), or another
+    /// apply of the mob that is running (retryable, see below).
     ///
     /// - A seated entry whose role and runtime mode match its declaration
     ///   keeps its seat, and nothing is written: its descriptive facets
     ///   (display name, labels, context, instructions) and build inputs are
-    ///   the host's, and its build applies the host's current ones.
+    ///   the host's, and the apply stores none of them. The member's next
+    ///   build applies the host's current ones only through the host's build
+    ///   preparer or spawn customizer; the build inputs a seat recorded stay
+    ///   as it recorded them. A change of placement alone keeps the seat too:
+    ///   placement is read only for an identity no member holds.
     /// - An identity no member holds is seated Dormant: on the session its
     ///   member was last bound to when the identity entry's retirement
     ///   archived it (it comes back as the same identity, history kept, at
@@ -482,6 +490,14 @@ impl super::MobHandle {
     ///   migration the roster declares from that role, so the session's next
     ///   build moves it; with no such migration declared the identity is
     ///   held ([`DeclaredEntryOutcome::RoleMigrationHeld`]) and not seated.
+    ///   An archived session the store holds intact whose runtime refuses
+    ///   revival is answered [`DeclaredEntryOutcome::Failed`]
+    ///   ([`MobError::SessionUnavailableForResume`]) on every apply, since a
+    ///   fresh session would lose its history: the host's `Fresh` first-boot
+    ///   request starts the identity's fresh life instead. A worker spawned
+    ///   under the name of an unlisted identity ends that identity's archived
+    ///   session record, so listed again later it is seated fresh, with no
+    ///   notice.
     /// - A placed or externally bound identity no member holds is hosted on
     ///   its first use, and one whose creation the host holds and that was
     ///   never created awaits its held creation: neither is seated.
@@ -514,10 +530,18 @@ impl super::MobHandle {
     /// unseated, and a later complete apply removes it.
     ///
     /// The apply decides and seats in chunks of [`DECLARED_APPLY_CHUNK`]
-    /// identities, each one MobMachine step. Between a restart and the first
-    /// apply after it, MobMachine knows only the entries its journal rows
-    /// record (seated ones): an unseated entry, a role hold and a held
-    /// creation are declared again by that apply.
+    /// identities, each one MobMachine step. Applies of one mob run one at a
+    /// time: a call while another apply of the mob runs is refused
+    /// [`MobError::LifecycleOperationPending`], retryable, and writes
+    /// nothing.
+    ///
+    /// Between a restart and the first apply after it, MobMachine knows only
+    /// the entries its journal rows record: the seated ones, and those whose
+    /// member a retirement other than the seal's ended (unseated, with the
+    /// session the retirement archived). An entry no member ever held and a
+    /// role hold are declared again by that apply; until then, a member whose
+    /// role the host moved while the process was down is not held, and a
+    /// peer delivery can wake it under its previous role.
     pub async fn apply_declared_roster(
         &self,
         roster: DeclaredRoster,

@@ -82,22 +82,36 @@ change.
   history stays on its archived session. Core reads no label and no journal
   row to find that session.
 - **Apply the roster after every start.** Between a start and the first
-  apply after it, Core knows only the entries its journal records (the seated
-  ones): an unseated entry, a role hold and a held creation are not recorded,
-  and the first apply declares them again.
+  apply after it, Core knows only the entries its journal records: the seated
+  ones, and those whose member a retirement other than an unlisting ended.
+  An entry no member ever held, a role hold and a held creation are not
+  recorded, and the first apply declares them again. Until then, a member
+  whose role the host moved while the process was down is not held, and a
+  peer delivery can wake it under its previous role.
+- **Consume a first-boot request only once it is carried out.** The answer
+  names the requests the apply carried out
+  (`DeclaredRosterOutcome::first_boot_requests_carried_out`). Keep every
+  other request for the next apply: a deferred, refused or failed answer did
+  not carry it out.
+- **One apply at a time.** An apply called while another apply of the same
+  mob runs is refused `MobError::LifecycleOperationPending`, retryable, and
+  writes nothing.
 
 **Do:** apply the host's complete roster once after every start, before the
-host wakes or seats its identities; unlist an identity to remove it.
+host wakes or seats its identities; consume exactly the first-boot requests
+the answer names; unlist an identity to remove it.
 
 ### Downgrading to 0.9.8
 
 0.9.8 reads the rows the declared apply writes as plain member rows: its
 seats are member spawn rows, and its unlisted retirements plain retirements.
 0.9.8 ignores the fields it does not know on them: an entry, the cause on a
-retirement's start row, and the history notice on a seat's row. A retirement
-the apply's seal started and a crash interrupted finishes under 0.9.8 as a
-plain retirement. Entries the apply holds unseated, role holds and held
-creations live in memory only, so 0.9.8 sees none of them.
+retirement's start row, whether a retirement archived the member's session
+on its end row, and the history notice on a seat's row. A retirement the
+apply's seal started and a crash interrupted finishes under 0.9.8 as a plain
+retirement. Entries the apply holds unseated, role holds (with the run-start
+holds they place) and held creations live in memory only, so 0.9.8 sees none
+of them.
 
 ## Upgrading to 0.9.7
 

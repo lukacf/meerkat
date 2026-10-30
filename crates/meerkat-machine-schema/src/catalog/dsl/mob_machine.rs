@@ -26291,9 +26291,9 @@ macro_rules! mob_catalog_machine_dsl {
         // The host carried out an identity's first-boot request without a
         // seat (the identity is already seated on that session). Total: an
         // identity with no first-boot preparation owed is a no-op. A role
-        // hold (RoleMigrationUndeclared) ends only at the declared apply that
-        // declares the move or restores the role, never at the host's seat
-        // step.
+        // hold (RoleMigrationUndeclared) never ends here: it ends at the
+        // declared apply that restores the role, or in the step that commits
+        // the declared one.
         transition ResolveMemberHostPreparation {
             per_phase [Running, Stopped, Completed]
             on input ResolveMemberHostPreparation { agent_identity }
@@ -26576,7 +26576,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
                 // The host's rotation carries out a first-boot preparation; a
-                // role hold ends only at the declared apply.
+                // role hold ends above, only when this step commits another
+                // role.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -26777,7 +26778,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
                 // The host's rotation carries out a first-boot preparation; a
-                // role hold ends only at the declared apply.
+                // role hold ends above, only when this step commits another
+                // role.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -27418,7 +27420,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
                 // The host's rotation carries out a first-boot preparation; a
-                // role hold ends only at the declared apply.
+                // role hold ends above, only when this step commits another
+                // role.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -27630,7 +27633,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
                 // The host's rotation carries out a first-boot preparation; a
-                // role hold ends only at the declared apply.
+                // role hold ends above, only when this step commits another
+                // role.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }

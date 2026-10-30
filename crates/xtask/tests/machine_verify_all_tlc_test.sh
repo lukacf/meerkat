@@ -716,20 +716,22 @@ if run_part audits-h; then
 fi
 
 # The SessionDocumentMachine operator-instruction region: a hand-written
-# audit composes the generated arms with a model of the shell that observes
-# its typed target and effective sets (one session, two slots, revisions
-# 1..2, every run start, all lowerings, folds at and after a run's first
-# request, mob records, session writes and owner rebinds) within the ci.cfg
-# step bound. It checks that the effective set changes only at a FreshRun
-# start or a run-start fold, that an application reaches the target with one
-# entry per run start, that an applied revoke holds, that a mid-run fold
-# keeps the effective set, that a session write never lowers a revision,
-# that a leading-prefix-only model applies only on a leading System prefix,
-# and that the machine's counts mirror the shell; it first checks that the
-# generated model defines every arm it drives, and requires its three
-# witnesses reached. --mutants refuses five seeded defects, each by the
-# invariant it targets. Not yet measured on a hosted runner; it joins this
-# shard as the lightest one measured locally.
+# audit drives the generated arms as the shell does (one session, two
+# slots, revisions 1..2, a small and a budget-sized body, two mobs, every
+# run start, all lowerings, folds at and after a run's first request,
+# session writes, mob records, rebinds and releases) within the ci.cfg step
+# bound, and checks the machine's own per-slot state: the slots in effect
+# change only at a FreshRun start or a run-start fold, an application
+# reaches the target with one entry per run start, an applied revoke holds,
+# a mid-run fold keeps what is in effect, a session write never lowers a
+# revision, a leading-prefix-only model applies only on a leading System
+# prefix, an unowned target applies nothing, a mob-owned target changes
+# owner only by its own mob's release, a rebind starts from what is in
+# effect, and the target stays within the active budget. It first checks
+# that the generated model defines every arm it drives, and requires its
+# four witnesses reached. --mutants refuses seven seeded defects, each by
+# the invariant it targets. Not yet measured on a hosted runner; it joins
+# this shard as the lightest one measured locally.
 instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
 if [[ ! -x "${instruction_boundary_audit}" ]]; then
   echo "error: instruction boundary audit runner is missing from workspace runfiles: ${instruction_boundary_audit}" >&2

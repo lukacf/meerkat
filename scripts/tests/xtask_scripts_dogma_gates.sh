@@ -402,7 +402,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_hold_audit.sh requires its nine witnesses violated, and
 # with --mutants each seeded defect's property or the generated
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
-# instruction_boundary_audit.sh (session_document) requires its three
+# instruction_boundary_audit.sh (session_document) requires its four
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 printf '%s\n' \
@@ -544,7 +544,9 @@ printf '%s\n' \
   'echo "Error: Invariant AuditMidRunFoldKeepsEffective is violated."' \
   'echo "Error: Invariant AuditSessionWriteNeverLowersRevision is violated."' \
   'echo "Error: Invariant AuditPrefixOnlyAppliesInLeadingPrefix is violated."' \
-  'echo "Error: Invariant AuditMachineMirrorsShell is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReboundAfterRelease is violated."' \
+  'echo "Error: Invariant AuditMobTargetBoundUntilReleased is violated."' \
+  'echo "Error: Invariant AuditTargetWithinBudget is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

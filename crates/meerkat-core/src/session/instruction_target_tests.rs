@@ -1,8 +1,9 @@
-//! S3 rows for the core mirror of the SessionDocumentMachine instruction
-//! region: the recorded target state (`session_instruction_state_v1`), the
-//! session-owned write, the mob record, the owner rebind and the run-start
-//! application. Every decision is the machine's; these rows pin what the
-//! shell mirrors from each verdict.
+//! Rows for the session seam of the SessionDocumentMachine
+//! operator-instruction region: the recorded target state
+//! (`session_instruction_state_v1`), the session-owned write, the mob
+//! record, the owner rebind and release, and the run-start application.
+//! Every decision is the machine's; these rows pin what the session records
+//! from each verdict.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::SESSION_INSTRUCTION_STATE_KEY;
@@ -12,10 +13,11 @@ use super::instruction_activation::{
 };
 use super::instruction_target::{
     InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
-    InstructionRecordReceipt, InstructionRunStart, InstructionSetErrorCode, InstructionStateError,
-    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
-    InstructionWriteDisposition, InstructionWriteError, RunStartInstructionOutcome,
-    SessionInstructionChange, SessionInstructionWrite,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRunStart,
+    InstructionSetErrorCode, InstructionStateError, InstructionTargetOwner,
+    InstructionTargetRecord, InstructionTargetRecordSlot, InstructionWriteDisposition,
+    InstructionWriteError, RunStartInstructionOutcome, SessionInstructionChange,
+    SessionInstructionWrite,
 };
 use super::operator_instructions::{
     InstructionChange, InstructionEffect, InstructionEntryIdentity, InstructionRevision,
@@ -89,8 +91,16 @@ fn code(error: &InstructionWriteError) -> InstructionSetErrorCode {
 }
 
 fn record(generation: u64, slots: Vec<(&str, u64, Option<&str>)>) -> InstructionTargetRecord {
+    mob_record("mob-1", generation, slots)
+}
+
+fn mob_record(
+    mob_id: &str,
+    generation: u64,
+    slots: Vec<(&str, u64, Option<&str>)>,
+) -> InstructionTargetRecord {
     InstructionTargetRecord {
-        mob_id: "mob-1".to_string(),
+        mob_id: mob_id.to_string(),
         agent_identity: "worker".to_string(),
         generation,
         slots: slots
@@ -105,10 +115,24 @@ fn record(generation: u64, slots: Vec<(&str, u64, Option<&str>)>) -> Instruction
 }
 
 fn mob_owner() -> InstructionTargetOwner {
+    owner_mob("mob-1")
+}
+
+fn owner_mob(mob_id: &str) -> InstructionTargetOwner {
     InstructionTargetOwner::Mob {
-        mob_id: "mob-1".to_string(),
+        mob_id: mob_id.to_string(),
         agent_identity: "worker".to_string(),
     }
+}
+
+fn fresh_run(session: &mut Session) -> RunStartInstructionOutcome {
+    session
+        .apply_run_start_instructions(
+            InstructionRunStart::FreshRun,
+            InstructionLowering::MidConversation,
+            None,
+        )
+        .unwrap()
 }
 
 #[test]
@@ -744,4 +768,204 @@ fn one_session_never_mixes_activations_and_operator_instructions_on_a_slot() {
         refused.code(),
         InstructionActivationErrorCode::InvalidRequest
     );
+}
+
+#[test]
+fn a_record_from_another_mob_is_refused_until_its_owner_releases_the_target() {
+    let mut session = conversed_session();
+    session
+        .record_instruction_target(mob_record("mob-a", 2, vec![("tone", 1, Some("Be brief."))]))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let document = session.to_persisted_bytes().unwrap();
+
+    // Another mob's snapshot, whatever its generation, and its release are
+    // refused and change nothing.
+    for generation in [1, 2, 9] {
+        let refused = session
+            .record_instruction_target(mob_record(
+                "mob-b",
+                generation,
+                vec![("tone", 7, Some("Be verbose."))],
+            ))
+            .unwrap_err();
+        assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByOtherMob);
+    }
+    let refused = session.release_instruction_target("mob-b").unwrap_err();
+    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByOtherMob);
+    assert_eq!(session.to_persisted_bytes().unwrap(), document);
+
+    // The owning mob releases: the target empties and is unowned, what is in
+    // effect stays, and nothing is pending.
+    assert_eq!(
+        session.release_instruction_target("mob-a").unwrap(),
+        InstructionReleaseDisposition::Released
+    );
+    let state = session.instruction_target_state().unwrap().unwrap();
+    assert_eq!(state.owner(), &InstructionTargetOwner::Unowned);
+    assert_eq!(state.target_generation(), 0);
+    assert!(state.slots().is_empty());
+    assert_eq!(state.entry_sequence(), 1);
+    let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
+    assert_eq!(effective.active_count(), 1, "a release applies nothing");
+    assert_eq!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::NotNeeded
+    );
+    let released = session.to_persisted_bytes().unwrap();
+    assert_eq!(
+        session.release_instruction_target("mob-a").unwrap(),
+        InstructionReleaseDisposition::AlreadyUnowned
+    );
+    assert_eq!(
+        session.to_persisted_bytes().unwrap(),
+        released,
+        "a repeated release writes nothing"
+    );
+
+    // Only now may another mob bind; its snapshot replaces the target, so
+    // the next run start revokes what the released mob put in effect.
+    let receipt = session
+        .record_instruction_target(mob_record(
+            "mob-b",
+            1,
+            vec![("style", 1, Some("Use short sentences."))],
+        ))
+        .unwrap();
+    assert_eq!(
+        receipt,
+        InstructionRecordReceipt {
+            disposition: InstructionRecordDisposition::Recorded,
+            target_generation: 1,
+        }
+    );
+    let state = session.instruction_target_state().unwrap().unwrap();
+    assert_eq!(state.owner(), &owner_mob("mob-b"));
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
+    assert_eq!(effective.active_count(), 1);
+    assert!(effective.slot(&slot("style")).is_some());
+    assert!(matches!(
+        effective.slot(&slot("tone")),
+        Some(tone) if tone.effect() == InstructionEffect::Absent
+    ));
+}
+
+#[test]
+fn only_the_owning_mob_releases_a_target() {
+    let mut session = conversed_session();
+    assert_eq!(
+        session.release_instruction_target("mob-a").unwrap(),
+        InstructionReleaseDisposition::AlreadyUnowned
+    );
+    assert_eq!(
+        session.instruction_target_state().unwrap(),
+        None,
+        "a release of nothing records nothing"
+    );
+    session
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    let document = session.to_persisted_bytes().unwrap();
+    let refused = session.release_instruction_target("mob-a").unwrap_err();
+    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedBySession);
+    assert_eq!(session.to_persisted_bytes().unwrap(), document);
+}
+
+#[test]
+fn a_rebind_never_takes_a_mob_owned_target() {
+    let mut session = conversed_session();
+    session
+        .record_instruction_target(mob_record("mob-a", 1, vec![("tone", 1, Some("Be brief."))]))
+        .unwrap();
+    let document = session.to_persisted_bytes().unwrap();
+    for owner in [
+        InstructionTargetOwner::Session,
+        owner_mob("mob-b"),
+        owner_mob("mob-a"),
+        InstructionTargetOwner::Unowned,
+    ] {
+        let refused = session.rebind_instruction_owner(owner).unwrap_err();
+        assert_eq!(code(&refused), InstructionSetErrorCode::InvalidRequest);
+    }
+    assert_eq!(session.to_persisted_bytes().unwrap(), document);
+
+    // After the owning mob releases it, a host adopts the session standalone.
+    session.release_instruction_target("mob-a").unwrap();
+    session
+        .rebind_instruction_owner(InstructionTargetOwner::Session)
+        .unwrap();
+    let state = session.instruction_target_state().unwrap().unwrap();
+    assert_eq!(state.owner(), &InstructionTargetOwner::Session);
+}
+
+#[test]
+fn a_snapshot_never_names_a_slot_activations_manage_even_as_absent() {
+    let mut session = conversed_session();
+    session
+        .activate_instruction(activation("tone", "Answer formally."))
+        .unwrap();
+    let refused = session
+        .record_instruction_target(record(1, vec![("tone", 1, None)]))
+        .unwrap_err();
+    assert_eq!(
+        code(&refused),
+        InstructionSetErrorCode::SlotManagedByActivation
+    );
+    assert_eq!(session.instruction_target_state().unwrap(), None);
+}
+
+#[test]
+fn the_active_budget_counts_the_target_as_the_write_leaves_it() {
+    let quarter = "x".repeat(256 * 1024);
+    let mut session = fresh_session();
+    for key in ["a", "b", "c", "d"] {
+        session
+            .set_session_instruction(activate(key, 1, &quarter))
+            .unwrap();
+    }
+    let document = session.to_persisted_bytes().unwrap();
+    let refused = session
+        .set_session_instruction(activate("e", 1, "x"))
+        .unwrap_err();
+    assert_eq!(
+        code(&refused),
+        InstructionSetErrorCode::ActiveSetBudgetExceeded
+    );
+    assert_eq!(
+        session.to_persisted_bytes().unwrap(),
+        document,
+        "a refusal records nothing"
+    );
+    // A replacement counts only the new body.
+    let replacement = "y".repeat(256 * 1024);
+    session
+        .set_session_instruction(activate("a", 2, &replacement))
+        .unwrap();
+
+    // A mob snapshot over the budget is refused as a whole.
+    let mut member = fresh_session();
+    let refused = member
+        .record_instruction_target(record(
+            1,
+            vec![
+                ("a", 1, Some(quarter.as_str())),
+                ("b", 1, Some(quarter.as_str())),
+                ("c", 1, Some(quarter.as_str())),
+                ("d", 1, Some(quarter.as_str())),
+                ("e", 1, Some("x")),
+            ],
+        ))
+        .unwrap_err();
+    assert_eq!(
+        code(&refused),
+        InstructionSetErrorCode::ActiveSetBudgetExceeded
+    );
+    assert_eq!(member.instruction_target_state().unwrap(), None);
 }

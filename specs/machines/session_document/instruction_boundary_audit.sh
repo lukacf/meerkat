@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # TLC audit of the operator-instruction region of the generated
-# SessionDocumentMachine, composed with a model of the shell that observes
-# its typed target and effective sets: the effective set changes only at a
-# FreshRun start or a run-start fold, an application reaches the target and
-# coalesces every earlier write into one entry, an applied revoke holds until
-# a later write, a mid-run fold and a rebind leave the effective set alone, a
-# session write never lowers a revision, a leading-prefix-only model applies
-# only on a leading System prefix, and the machine's counts mirror the shell.
+# SessionDocumentMachine, driven as the shell drives it and checked on the
+# machine's own per-slot state: the slots in effect change only at a FreshRun
+# start or a run-start fold, an application reaches the target and coalesces
+# every earlier write into one entry, an applied revoke holds until a later
+# write, a mid-run fold, a write, a record, a rebind and a release leave the
+# slots in effect alone, a session write never lowers a revision, a
+# leading-prefix-only model applies only on a leading System prefix, an
+# unowned target applies nothing, a mob-owned target changes owner only when
+# its own mob releases it, a rebind starts from what is in effect, and the
+# target stays within the active budget.
 #
 # usage: instruction_boundary_audit.sh [--mutants] [extra tlc args...]
 #
@@ -17,13 +20,17 @@
 # arm or field fails the run instead of a vacuous pass. It then checks the
 # invariants (safety), and reruns with the reachability witnesses' negations
 # as extra invariants under -continue, requiring TLC to report each of them
-# violated. With --mutants it seeds five defects into a copy of the generated
-# model and requires TLC to refuse each with the invariant it targets:
+# violated. With --mutants it seeds seven defects into a copy of the
+# generated model and requires TLC to refuse each with the invariant it
+# targets:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
 #   - apply a mid-run fold from the target (the run-start guard dropped);
 #   - accept a stale session write (the higher-revision guard dropped);
 #   - skip the leading-prefix check (any lowering but Unavailable applies);
-#   - let a rebind clear the target (its slot count set to zero).
+#   - accept another mob's record (the owning-mob guard dropped);
+#   - let a rebind take a mob-owned target (the rebind guard dropped);
+#   - record a session write over the active budget (its budget guard
+#     dropped).
 # An anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
@@ -44,19 +51,26 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 MODEL="${spec_dir}/model.tla" python3 - <<'PY'
 import os, re
 text = open(os.environ["MODEL"]).read()
-recover = "session_id, owner, target_generation, target_slot_count, effective_active_count, entry_sequence"
-record = "session_id, generation, slot_count"
-write = "session_id, revision, effect, slot_present, current_revision, current_matches"
-rebind = "session_id, owner"
-resolve = "session_id, run_start, lowering, transcript_is_system_prefix, pending_change_count, target_active_count"
-fold = "session_id, at_run_start, lowering, target_active_count"
+recover = "session_id, owner, owner_mob, target_generation, entry_sequence"
+recover_slots = "session_id, revision, effect, digest, bytes"
+record = "session_id, mob_id, generation, revision, effect, digest, bytes"
+write = "session_id, slot, revision, effect, digest, body_bytes"
+rebind = "session_id, owner, mob_id"
+release = "session_id, mob_id"
+resolve = "session_id, run_start, lowering, transcript_is_system_prefix"
+fold = "session_id, at_run_start, lowering"
 arms = {
     "RecoverSessionInstructionState": recover,
+    "RecoverSessionInstructionTarget": recover_slots,
+    "RecoverSessionInstructionEffective": recover_slots,
     "RecordInstructionTargetAdvance": record,
+    "RecordInstructionTargetActiveBudgetExceeded": record,
     "RecordInstructionTargetAlreadyRecorded": record,
     "RecordInstructionTargetOwnedBySession": record,
+    "RecordInstructionTargetOwnedByOtherMob": record,
     "SetSessionInstructionNew": write,
     "SetSessionInstructionAdvance": write,
+    "SetSessionInstructionActiveBudgetExceeded": write,
     "SetSessionInstructionDuplicate": write,
     "SetSessionInstructionStale": write,
     "SetSessionInstructionConflict": write,
@@ -64,6 +78,10 @@ arms = {
     "SetSessionInstructionSlotLimitExceeded": write,
     "SetSessionInstructionUnknownSlot": write,
     "RebindInstructionOwner": rebind,
+    "ReleaseInstructionTarget": release,
+    "ReleaseInstructionTargetAlreadyUnowned": release,
+    "ReleaseInstructionTargetOwnedByOtherMob": release,
+    "ReleaseInstructionTargetOwnedBySession": release,
     "ResolveRunStartInstructionsApply": resolve,
     "ResolveRunStartInstructionsNoChange": resolve,
     "ResolveRunStartInstructionsDeferredLeadingPrefix": resolve,
@@ -74,7 +92,12 @@ arms = {
 for arm, params in arms.items():
     heads = re.findall(r"(?m)^" + arm + r"\(([^)]*)\) ==$", text)
     assert heads == [params], f"expected {arm}({params}) in model.tla, found {heads}"
-for name in ("InstructionRunStartValues", "InstructionLoweringValues"):
+for name in (
+    "InstructionRunStartValues",
+    "InstructionLoweringValues",
+    "instruction_change_pending(",
+    "session_document_instruction_active_bytes(",
+):
     assert name in text, f"model.tla declares no {name}"
 print("premise holds: the generated model defines every instruction arm the audit drives")
 PY
@@ -99,9 +122,12 @@ audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
   AuditMidRunFoldKeepsEffective
   AuditSessionWriteNeverLowersRevision
   AuditPrefixOnlyAppliesInLeadingPrefix
-  AuditMachineMirrorsShell"
+  AuditUnownedAppliesNothing
+  AuditMobTargetBoundUntilReleased
+  AuditRebindStartsFromWhatIsInEffect
+  AuditTargetWithinBudget"
 
-witnesses="NotAuditWitnessApplied NotAuditWitnessRevokeApplied NotAuditWitnessMobOwnedEffective"
+witnesses="NotAuditWitnessApplied NotAuditWitnessRevokeApplied NotAuditWitnessMobOwnedEffective NotAuditWitnessReboundAfterRelease"
 
 # usage: write_cfg <file> <extra invariant lines>
 write_cfg() {
@@ -216,13 +242,19 @@ PY
     AuthorizeInstructionFoldAtRunStart 'at_run_start = TRUE' \
     '    /\ TRUE'
   mutate stale_session_write_accepted AuditSessionWriteNeverLowersRevision \
-    SetSessionInstructionAdvance 'revision > current_revision' \
+    SetSessionInstructionAdvance '(revision > ' \
     '    /\ TRUE'
   mutate leading_prefix_check_skipped AuditPrefixOnlyAppliesInLeadingPrefix \
     ResolveRunStartInstructionsApply 'instruction_entry_lowers(' \
     '    /\ (lowering # "Unavailable")'
-  mutate rebind_clears_target AuditMachineMirrorsShell \
-    RebindInstructionOwner "session_instruction_target_slot_count' =" \
-    "    /\\ session_instruction_target_slot_count' = MapSet(session_instruction_target_slot_count, session_id, 0)"
+  mutate foreign_mob_record_accepted AuditMobTargetBoundUntilReleased \
+    RecordInstructionTargetAdvance '= mob_id)' \
+    '    /\ TRUE'
+  mutate rebind_takes_a_mob_target AuditMobTargetBoundUntilReleased \
+    RebindInstructionOwner 'Cardinality(DOMAIN' \
+    '    /\ TRUE'
+  mutate budget_exceeded_write_accepted AuditTargetWithinBudget \
+    SetSessionInstructionNew '1048576 >= ' \
+    '    /\ TRUE'
 fi
 echo "instruction boundary audit passed"

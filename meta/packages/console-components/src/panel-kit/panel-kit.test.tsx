@@ -250,6 +250,25 @@ describe("TechnicalDetails", () => {
     expect(details.querySelectorAll("dd")[1]?.textContent).toBe("7");
   });
 
+  it("keys repeated labels apart, so React keeps every row", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(
+      <TechnicalDetails
+        testId="details"
+        items={[
+          { label: "Attention binding ID", value: "binding-1" },
+          { label: "Session ID", value: "session-1" },
+          { label: "Attention binding ID", value: "binding-2" },
+          { label: "Session ID", value: "session-2" },
+        ]}
+      />,
+    );
+    const duplicateKeyWarnings = errors.mock.calls.filter((call) => /same key/.test(String(call[0])));
+    errors.mockRestore();
+    expect(duplicateKeyWarnings.length).toBe(0);
+    expect(view.getByTestId("details").querySelectorAll("dd").length).toBe(4);
+  });
+
   it("renders nothing when every value is empty", () => {
     const view = render(<div data-testid="host"><TechnicalDetails items={[{ label: "Session", value: null }]} /></div>);
     expect(view.getByTestId("host").childElementCount).toBe(0);

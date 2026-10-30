@@ -33,7 +33,7 @@ export function KeyValueList({
       {rows.map((row, index) => (
         <div
           className="cc-kv__row"
-          key={row.key ?? (typeof row.label === "string" ? row.label : index)}
+          key={row.key ?? (typeof row.label === "string" ? `${row.label}:${index}` : index)}
           data-testid={row.testId}
         >
           <dt>{row.label}</dt>

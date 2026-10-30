@@ -44,8 +44,9 @@ export function TechnicalDetails({
       <summary className="cc-tech__summary">{summary}</summary>
       <div className="cc-tech__body">
         <KeyValueList
-          items={rows.map((row) => ({
-            key: row.label,
+          items={rows.map((row, index) => ({
+            // Labels repeat (one "Session ID" per binding): key by position too.
+            key: `${row.label}:${index}`,
             label: row.label,
             testId: row.testId,
             value:

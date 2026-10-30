@@ -66,7 +66,7 @@ name: CI
 #                     a warning (the critical path,
 #                     slowest lane and queue are reported on every run that
 #                     was not cancelled, failed runs included); schema-4
-#                     exact-tree attestation on main
+#                     exact-tree attestation on pushes to main and release/**
 #
 # Push only (no wall-clock budget; a PR names them in deferred_to_push):
 #   closure-tests   - the deterministic workspace test lanes
@@ -144,15 +144,18 @@ name: CI
 # only the full graph, for the pre-tag check on a release branch.
 
 on:
-  # Pushes run on main (the attestation boundary) and on release
-  # integration branches. Pull requests into a release branch unit-test only
+  # Pushes run on main and on release integration branches, the
+  # attestation boundaries. Pull requests into a release branch unit-test only
   # the crates they change, so a merge there must run the push-only lanes
   # (main-unit over the whole workspace, wasm-check, sdk-host) or
   # reverse-dependency suites first run at the final merge to main: #1541
   # broke two facade tests that no release-branch run executed. A merge
   # commit is never a PR head, so no head runs twice; every other branch
-  # still gets CI only through its pull request. Attestation stays
-  # main-only (its steps check refs/heads/main).
+  # still gets CI only through its pull request. A successful push to main
+  # or to a release/** branch writes the exact-tree attestation (its steps
+  # check the ref): a maintenance release is tagged on release/<version>
+  # without reaching main, and release.yml accepts only the attestation of
+  # main or of the release branch of the tag's own version.
   push:
     branches:
       - main
@@ -3626,12 +3629,16 @@ jobs:
               sys.exit(1)
           PY
 
+      # The exact-tree attestation of a push to main or to a release/**
+      # branch; it records the ref, and release.yml's require_ci_green accepts
+      # it only from main or from the release branch of the tag's version (a
+      # maintenance release). Pull-request and dispatch runs write none.
       - name: Checkout attested source tree
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Build exact-tree CI attestation
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         id: attestation
         shell: bash
         # CLIPPY_RESULT, CLOSURE_TESTS_RESULT and MAIN_UNIT_PACKED_RESULT come
@@ -3790,7 +3797,7 @@ jobs:
           echo "path=${destination}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload exact-tree CI attestation
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: meerkat-ci-attestation-${{ github.sha }}-${{ github.run_attempt }}

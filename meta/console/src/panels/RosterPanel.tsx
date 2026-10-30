@@ -123,6 +123,8 @@ function roleWords(agent: ConsoleAgent): string {
 function lastChange(agent: ConsoleAgent): { words: string; at: number | null } {
   const progress = agent.progress;
   const at = progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
+  // A stalled agent is stuck, not working: name only when it last moved.
+  if (progress?.health === "wedged") return { words: at ? "Last progress" : "", at };
   switch (progress?.last_progress_event) {
     case "execution_advanced":
       return { words: "Made progress", at };

@@ -149,6 +149,18 @@ describe("RosterPanel", () => {
     expect(onSelect.mock.calls.at(-1)?.[0]?.member_id).toBe("identity:analyst");
   });
 
+  it("never says a stalled agent is working", () => {
+    const stalled = agent({ ...writer, progress: { ...writer.progress!, last_progress_event: "became_busy" } });
+    const { view } = renderRoster([stalled]);
+    const row = view.getByTestId("roster-row:identity:writer");
+    if (!view.queryByTestId("roster-detail:identity:writer")) fireEvent.click(row);
+    const detail = view.getByTestId("roster-detail:identity:writer");
+    expect(/working/i.test(row.textContent || "")).toBe(false);
+    expect(/working/i.test(detail.textContent || "")).toBe(false);
+    expect(detail.textContent?.includes("Stalled")).toBe(true);
+    expect(detail.textContent?.includes("Last progress")).toBe(true);
+  });
+
   it("offers chat first and groups lifecycle actions, Retire as danger", () => {
     const { view, onChat, onLifecycle } = renderRoster([coordinator]);
     const detail = view.getByTestId("roster-detail:identity:coordinator");

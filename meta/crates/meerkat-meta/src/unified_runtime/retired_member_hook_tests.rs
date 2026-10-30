@@ -7,12 +7,15 @@
 //! An explicit or scoped retire releases the member: the identity stays a
 //! member of Core's mob, active on the same session at the same generation,
 //! and its next delivery materializes it again under a new registration.
-//! Only a roster pass that no longer lists the identity ends its incarnation,
-//! as `Unlisted`. A roster pass hands its retirements to the hook after the
-//! bootstrap controller is released, also when a later step of the pass
-//! fails, so a hook may refresh the roster itself. Replacements, reprofiles,
-//! held aborts and shutdowns never reach it, and a hook error leaves the
-//! retirement standing and reaches the error hook once.
+//! The hook hears of a release before the retire answers. An incarnation
+//! Core ends (the roster no longer lists the identity: `Unlisted`; a reset or
+//! a delete rotates the identity onto a fresh session: `Reset`, `Delete`)
+//! reaches the hook from Core's journal, after the step answered: also when
+//! a later step of the same roster pass fails, and with no Meta lock held,
+//! so a hook may refresh the roster itself. Replacements on the same session
+//! (a reload, a respawn), reprofiles, held aborts and shutdowns never reach
+//! it, and a hook error leaves the retirement standing and reaches the error
+//! hook once.
 //!
 //! Each call names the exact Core registration the retire or release ended,
 //! read before it. A registration still current after Core answered is not
@@ -77,6 +80,13 @@ fn gateway_identity_runtime(
 /// The setup deadline of the fixture's held passes.
 const HOLD: Duration = Duration::from_mins(1);
 
+/// How long a row waits for a hook call its step owes.
+const CALL_DEADLINE: Duration = Duration::from_mins(1);
+
+/// How long a row waits, after the calls it awaited, for one that must not
+/// come.
+const SETTLE: Duration = Duration::from_millis(500);
+
 /// What the hook saw, in order.
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<Vec<RetiredIdentityMember>>>);
@@ -84,6 +94,39 @@ struct Seen(Arc<Mutex<Vec<RetiredIdentityMember>>>);
 impl Seen {
     fn calls(&self) -> Vec<RetiredIdentityMember> {
         self.0.lock().unwrap().clone()
+    }
+
+    /// The calls once the hook saw at least `count`, or what it saw when
+    /// [`CALL_DEADLINE`] passed: an incarnation Core ends reaches the hook
+    /// after the step that ended it answered.
+    async fn at_least(&self, count: usize) -> Vec<RetiredIdentityMember> {
+        let deadline = tokio::time::Instant::now() + CALL_DEADLINE;
+        loop {
+            let calls = self.calls();
+            if calls.len() >= count || tokio::time::Instant::now() >= deadline {
+                return calls;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The calls once nothing more came for [`SETTLE`].
+    async fn settled(&self) -> Vec<RetiredIdentityMember> {
+        tokio::time::sleep(SETTLE).await;
+        self.calls()
+    }
+}
+
+/// The value `slot` holds once it holds one, or `None` when
+/// [`CALL_DEADLINE`] passed first.
+async fn once_set<T: Clone>(slot: &Mutex<Option<T>>) -> Option<T> {
+    let deadline = tokio::time::Instant::now() + CALL_DEADLINE;
+    loop {
+        let value = slot.lock().unwrap().clone();
+        if value.is_some() || tokio::time::Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -370,7 +413,7 @@ async fn an_unlisted_identity_reaches_the_hook_once() {
         .refresh_desired_topology_tracked()
         .await
         .expect("the roster pass runs");
-    let calls = fixture.seen.calls();
+    let calls = fixture.seen.at_least(1).await;
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].identity, fixture.other);
     assert_eq!(calls[0].cause, RetiredIdentityCause::Unlisted);
@@ -380,7 +423,11 @@ async fn an_unlisted_identity_reaches_the_hook_once() {
         .refresh_desired_topology_tracked()
         .await
         .expect("the repeat pass runs");
-    assert_eq!(fixture.seen.calls().len(), 1, "a repeat pass calls nothing");
+    assert_eq!(
+        fixture.seen.settled().await.len(),
+        1,
+        "a repeat pass calls nothing"
+    );
     assert_eq!(
         fixture.status(&fixture.kept).await.state,
         IdentityLifecycleState::Active,
@@ -391,8 +438,8 @@ async fn an_unlisted_identity_reaches_the_hook_once() {
 
 /// A boot pass that finds a live member Meta spawned for an identity the
 /// roster no longer lists, which this runtime never registered, retires it
-/// as `Unlisted` and hands it to the hook once, after the pass's bootstrap
-/// controller is released.
+/// as `Unlisted` and hands it to the hook once, never under the pass's
+/// bootstrap controller: the controller comes free while the hook runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_boot_pass_hands_its_unlisted_retirement_to_the_hook() {
     let dir = tempfile::tempdir().unwrap();
@@ -414,7 +461,14 @@ async fn a_boot_pass_hands_its_unlisted_retirement_to_the_hook() {
         let probe = probe.clone();
         Box::pin(async move {
             let runtime = probe.upgrade().expect("the identity runtime");
-            *observed.lock().unwrap() = Some(runtime.bootstrap_controller_is_free());
+            // A hook called under the controller would wait for itself.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let mut free = runtime.bootstrap_controller_is_free();
+            while !free && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                free = runtime.bootstrap_controller_is_free();
+            }
+            *observed.lock().unwrap() = Some(free);
             Ok(())
         })
     });
@@ -430,14 +484,14 @@ async fn a_boot_pass_hands_its_unlisted_retirement_to_the_hook() {
         .bootstrap_roster(&[member(&fixture.kept)])
         .await
         .expect("the boot pass runs");
-    let calls = seen.calls();
+    let calls = seen.at_least(1).await;
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].identity, fixture.other);
     assert_eq!(calls[0].cause, RetiredIdentityCause::Unlisted);
     assert_eq!(
-        *controller_free.lock().unwrap(),
+        once_set(&controller_free).await,
         Some(true),
-        "the hook runs after the bootstrap controller is released"
+        "the hook never runs under the bootstrap controller"
     );
     let _ = fixture.runtime.shutdown().await;
 }
@@ -474,14 +528,15 @@ async fn a_hook_that_refreshes_the_roster_does_not_deadlock() {
     .await
     .expect("the outer pass does not deadlock")
     .expect("the outer pass runs");
-    assert_eq!(*inner.lock().unwrap(), Some(true), "the inner pass ran");
-    assert_eq!(fixture.seen.calls().len(), 1);
+    assert_eq!(once_set(&inner).await, Some(true), "the inner pass ran");
+    assert_eq!(fixture.seen.settled().await.len(), 1);
     let _ = fixture.runtime.shutdown().await;
 }
 
-/// Replacements, a pass that lists every live member and a shutdown never
-/// reach the hook: each keeps or replaces the identity's member, and none
-/// ends it.
+/// Replacements on the same session (a reload, a respawn), a pass that
+/// lists every live member and a shutdown never reach the hook: each keeps
+/// or replaces the identity's member on its own session, and none ends its
+/// incarnation's place in the roster.
 #[tokio::test(flavor = "multi_thread")]
 async fn replacements_listed_passes_and_shutdown_never_reach_the_hook() {
     let dir = tempfile::tempdir().unwrap();
@@ -497,22 +552,96 @@ async fn replacements_listed_passes_and_shutdown_never_reach_the_hook() {
         .await
         .expect("the member respawns");
     fixture
-        .identities()
-        .reset_tracked(&fixture.other)
-        .await
-        .expect("the member resets");
-    fixture
         .context
         .refresh_desired_topology_tracked()
         .await
         .expect("a pass that lists every member runs");
     assert!(
-        fixture.seen.calls().is_empty(),
+        fixture.seen.settled().await.is_empty(),
         "{:?}",
         fixture.seen.calls()
     );
     let _ = fixture.runtime.shutdown().await;
     assert!(fixture.seen.calls().is_empty(), "a shutdown calls nothing");
+}
+
+/// A reset ends the identity's incarnation and seats its next one on a
+/// fresh session, in one Core rotation. The hook hears of the incarnation
+/// that ended, once, cause `reset`: its runtime id, generation and session,
+/// and the registration its build was given, which the rotation ended.
+///
+/// RED before lifecycle effects were projected from Core's journal: the hook
+/// was called only from Meta's retire verbs, never for a reset's
+/// predecessor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_delivers_its_predecessor_to_the_retirement_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Fixture::start(&dir, "retired-hook-reset").await;
+    let before = fixture.status(&fixture.kept).await;
+    let session = before.session_id.clone().expect("the member's session");
+    let built = fixture.builds.registrations_on(&session);
+    fixture
+        .identities()
+        .reset_tracked(&fixture.kept)
+        .await
+        .expect("the reset rotates the identity");
+    let calls = fixture.seen.at_least(1).await;
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let retired = &calls[0];
+    assert_eq!(retired.identity, fixture.kept);
+    assert_eq!(retired.cause.as_str(), "reset");
+    assert_eq!(
+        Some(&retired.agent_runtime_id),
+        before.agent_runtime_id.as_ref()
+    );
+    assert_eq!(retired.session_id, before.session_id);
+    assert_eq!(
+        Some(retired.generation),
+        before.generation.map(meerkat_mob::Generation::get)
+    );
+    assert_eq!(
+        retired.registration.as_ref(),
+        built.first(),
+        "the registration the predecessor's build was given: {built:?}"
+    );
+    let after = fixture.status(&fixture.kept).await;
+    assert_ne!(
+        after.session_id, before.session_id,
+        "the fresh life runs on a fresh session"
+    );
+    assert_eq!(fixture.seen.settled().await.len(), 1, "called once");
+    let _ = fixture.runtime.shutdown().await;
+}
+
+/// A delete starts the identity's next life on a fresh session, in one Core
+/// rotation: the hook hears of the incarnation that ended, once, cause
+/// `delete`.
+///
+/// RED before lifecycle effects were projected from Core's journal: the hook
+/// was called only from Meta's retire verbs, never for a delete's
+/// predecessor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_delivers_its_predecessor_to_the_retirement_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Fixture::start(&dir, "retired-hook-delete").await;
+    let before = fixture.status(&fixture.other).await;
+    fixture
+        .identities()
+        .delete_identity_tracked(&fixture.other)
+        .await
+        .expect("the delete rotates the identity")
+        .expect("Core held the identity");
+    let calls = fixture.seen.at_least(1).await;
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].identity, fixture.other);
+    assert_eq!(calls[0].cause.as_str(), "delete");
+    assert_eq!(calls[0].session_id, before.session_id);
+    assert_eq!(
+        Some(calls[0].generation),
+        before.generation.map(meerkat_mob::Generation::get)
+    );
+    assert_eq!(fixture.seen.settled().await.len(), 1, "called once");
+    let _ = fixture.runtime.shutdown().await;
 }
 
 /// A held add the host refuses aborts its member before publication: no
@@ -543,7 +672,7 @@ async fn an_aborted_held_add_never_reaches_the_hook() {
         }
     }
     assert!(
-        fixture.seen.calls().is_empty(),
+        fixture.seen.settled().await.is_empty(),
         "{:?}",
         fixture.seen.calls()
     );
@@ -610,7 +739,8 @@ async fn a_hook_error_is_reported_apart_from_the_retirement() {
 /// keeps the incarnation, so the same scope stays current: a second scoped
 /// retire releases nothing and reaches the hook naming no registration. Once
 /// a reset rotates the identity to its next incarnation the old scope is
-/// stale, and neither the reset nor the stale scope calls the hook.
+/// stale: the reset reaches the hook for the incarnation it ended (cause
+/// `reset`), and the stale scope calls nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_incarnation() {
     let dir = tempfile::tempdir().unwrap();
@@ -647,6 +777,13 @@ async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_inca
         .reset_tracked(&fixture.kept)
         .await
         .expect("the reset rotates the identity to its next incarnation");
+    let calls = fixture.seen.at_least(3).await;
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls[2].cause.as_str(), "reset", "{calls:?}");
+    assert_eq!(
+        calls[2].generation, calls[0].generation,
+        "the reset ended the incarnation the releases kept"
+    );
     match fixture
         .identities()
         .retire_at_scope_tracked(&fixture.kept, &scope)
@@ -656,9 +793,9 @@ async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_inca
         other => panic!("an old scope is stale once the identity rotated: {other:?}"),
     }
     assert_eq!(
-        fixture.seen.calls().len(),
-        2,
-        "neither the reset nor a stale scope calls the hook"
+        fixture.seen.settled().await.len(),
+        3,
+        "a stale scope calls nothing"
     );
     let _ = fixture.runtime.shutdown().await;
 }
@@ -703,7 +840,7 @@ async fn a_retirement_before_a_failed_step_still_reaches_the_hook() {
         .refresh_desired_topology()
         .await
         .expect_err("the pass fails after its first retire");
-    let calls = seen.calls();
+    let calls = seen.at_least(1).await;
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].identity, gone);
     assert_eq!(calls[0].cause, RetiredIdentityCause::Unlisted);
@@ -1176,7 +1313,7 @@ async fn a_reprofile_never_reaches_the_hook() {
         Some(crate::identity_first::WakeRefusalRemedy::ResolveRoleMigration),
         "the undeclared role move is held typed: {after:?}"
     );
-    let calls = fixture.seen.calls();
+    let calls = fixture.seen.settled().await;
     assert!(calls.is_empty(), "{calls:?}");
     let _ = fixture.runtime.shutdown().await;
 }

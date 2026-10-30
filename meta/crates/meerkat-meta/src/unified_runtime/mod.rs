@@ -66,6 +66,8 @@ pub mod in_flight_drain;
 #[cfg(test)]
 pub(crate) mod in_flight_drain_tests;
 pub mod lifecycle;
+#[cfg(test)]
+mod lifecycle_effect_restart_tests;
 pub mod live_compose;
 pub mod mob_events;
 pub mod mob_ops;

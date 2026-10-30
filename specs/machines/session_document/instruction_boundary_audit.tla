@@ -23,6 +23,11 @@
 \*     an application at a FreshRun start or by a fold at a run's first
 \*     request; never mid-turn, never on ResumeRun or NoRun, never by a
 \*     write, a record, a rebind or a release.
+\*   AuditEffectiveHoldsOnlyActiveSlots: the slots in effect are Active
+\*     slots only, as the shell re-seeds them from the session's entry rows
+\*     before every operation: an applied revoke leaves its slot out of
+\*     effect, exactly as a slot no entry named, so the machine the audit
+\*     drives without re-seeding is the machine the shell runs.
 \*   AuditApplicationReachesTheTarget: after an application or a run-start
 \*     fold, nothing is pending.
 \*   AuditOneEntryPerRunStart: one run start mints at most one entry,
@@ -55,13 +60,14 @@
 \* run with -continue): an application happened, an applied revoke, a
 \* mob-owned target in effect, a target another mob bound after its owning
 \* mob released it, and a released mob's instructions revoked at a run
-\* start. The runner's --mutants mode seeds nine defects into a copy of the
+\* start. The runner's --mutants mode seeds ten defects into a copy of the
 \* generated model and requires TLC to refuse each with the invariant it
-\* targets: apply on ResumeRun, apply a mid-run fold from the target,
-\* accept a stale session write, skip the leading-prefix check, accept
-\* another mob's record, let a rebind take a mob-owned target, record a
-\* session write over the active budget, keep a released mob's
-\* instructions at a run start, and keep the target on a release.
+\* targets: apply on ResumeRun, keep a revoked slot in effect at an
+\* application, apply a mid-run fold from the target, accept a stale
+\* session write, skip the leading-prefix check, accept another mob's
+\* record, let a rebind take a mob-owned target (its ownership guard
+\* dropped), record a session write over the active budget, keep a released
+\* mob's instructions at a run start, and keep the target on a release.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* instruction_boundary_audit.sh (its constants, its invariants and its
@@ -210,6 +216,7 @@ AuditRecord(m, g, snap) ==
     /\ AuditSeeded
     /\ \/ RecordInstructionTargetAdvance(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
        \/ RecordInstructionTargetActiveBudgetExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
+       \/ RecordInstructionTargetSlotLimitExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
        \/ RecordInstructionTargetAlreadyRecorded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
        \/ RecordInstructionTargetOwnedBySession(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
        \/ RecordInstructionTargetOwnedByOtherMob(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
@@ -354,6 +361,8 @@ AuditSpec == AuditInit /\ [][AuditNext]_audit_all_vars
 
 AuditEffectiveChangesOnlyAtRunStart ==
     "EffectiveChangedOutsideRunStart" \notin audit_breach
+AuditEffectiveHoldsOnlyActiveSlots ==
+    AuditSeeded => \A s \in DOMAIN AuditEffective.effect : AuditEffective.effect[s] = "Active"
 AuditApplicationReachesTheTarget == "ApplicationLeftPending" \notin audit_breach
 AuditOneEntryPerRunStart == "SeveralEntriesAtOneRunStart" \notin audit_breach
 AuditAppliedRevokeStaysAbsent ==

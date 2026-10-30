@@ -30,12 +30,13 @@ type State = SessionDocumentMachineState;
 type Transition = SessionDocumentMachineTransition;
 type TransitionError = SessionDocumentMachineTransitionError;
 
-const ARMS: [&str; 29] = [
+const ARMS: [&str; 30] = [
     "RecoverSessionInstructionState",
     "RecoverSessionInstructionTarget",
     "RecoverSessionInstructionEffective",
     "RecordInstructionTargetAdvance",
     "RecordInstructionTargetActiveBudgetExceeded",
+    "RecordInstructionTargetSlotLimitExceeded",
     "RecordInstructionTargetAlreadyRecorded",
     "RecordInstructionTargetOwnedBySession",
     "RecordInstructionTargetOwnedByOtherMob",
@@ -415,17 +416,17 @@ fn assert_refused_by_every_arm(authority: &mut Authority, input: Input, case: &s
 
 #[test]
 fn recover_adopts_a_consistent_projection() {
-    let target = Slots::empty()
+    let projected = Slots::empty()
         .active("tone", 1, DIGEST_X, 9)
         .absent("zone", 2);
     let in_effect = Slots::empty().active("tone", 1, DIGEST_X, 9);
     let authority =
-        seeded(&Seed::mob_owned("mob-a", 3, target.clone()).in_effect(2, in_effect.clone()));
+        seeded(&Seed::mob_owned("mob-a", 3, projected.clone()).in_effect(2, in_effect.clone()));
     assert_eq!(owner(&authority), Some(InstructionTargetOwner::Mob));
     assert_eq!(owner_mob(&authority).as_deref(), Some("mob-a"));
     assert_eq!(generation(&authority), Some(3));
     assert_eq!(entry_sequence(&authority), Some(2));
-    assert_eq!(target(&authority), target);
+    assert_eq!(target(&authority), projected);
     assert_eq!(effective(&authority), in_effect);
 
     // A session no target was ever recorded for recovers empty, and slots in
@@ -814,16 +815,54 @@ fn record_target_over_the_active_budget_is_refused() {
 }
 
 #[test]
+fn record_target_over_the_slot_limit_is_refused() {
+    // A snapshot over the slot limit, into an unowned target or from the
+    // owning mob, records nothing, and the slot limit is decided before the
+    // active budget.
+    let over_both = Slots::many(64).active("big", 1, DIGEST_Y, ACTIVE_BUDGET);
+    for (case, seed, snapshot) in [
+        ("an unowned target", Seed::empty(), Slots::many(65)),
+        (
+            "the owning mob's target",
+            Seed::mob_owned("mob-a", 2, Slots::many(3)),
+            Slots::many(65),
+        ),
+        ("a snapshot over the budget too", Seed::empty(), over_both),
+    ] {
+        let mut authority = seeded(&seed);
+        let before = authority.state().clone();
+        let transition = apply(&mut authority, record("mob-a", 3, &snapshot));
+        assert_eq!(
+            transition.effects(),
+            refused(InstructionWriteRefusal::SlotLimitExceeded).as_slice(),
+            "{case}"
+        );
+        assert_eq!(authority.state(), &before, "{case}: nothing is recorded");
+    }
+    // Another mob's target is refused for its owner first.
+    let mut authority = seeded(&Seed::mob_owned("mob-a", 2, Slots::many(3)));
+    assert_verdict_only(
+        &mut authority,
+        record("mob-b", 3, &Slots::many(65)),
+        &refused(InstructionWriteRefusal::OwnedByOtherMob),
+    );
+    // Exactly the limit is recorded.
+    let mut authority = seeded(&Seed::empty());
+    let transition = apply(&mut authority, record("mob-a", 1, &Slots::many(64)));
+    assert_eq!(
+        transition.effects(),
+        recorded(1, InstructionWriteOutcome::Recorded).as_slice()
+    );
+    assert_eq!(target(&authority).revision.len(), 64);
+}
+
+#[test]
 fn a_malformed_snapshot_is_taken_by_no_arm() {
     let mut authority = seeded(&Seed::empty());
     let mut torn = Slots::empty().active("a", 1, DIGEST_X, 1);
     torn.digest.clear();
     for (case, input) in [
         ("a snapshot without a mob", record("", 1, &Slots::empty())),
-        (
-            "a snapshot over the slot limit",
-            record("mob-a", 1, &Slots::many(65)),
-        ),
         (
             "a snapshot whose maps name different slots",
             record("mob-a", 1, &torn),
@@ -1195,6 +1234,31 @@ fn only_the_owning_mob_releases_a_target() {
     );
 }
 
+#[test]
+fn the_rebind_arms_check_ownership_in_a_named_guard() {
+    // The instruction boundary audit's rebind mutant drops exactly the
+    // attach's ownership guard, so each rebind arm keeps its ownership check
+    // in a guard of its own.
+    let schema = dsl_session_document_machine();
+    for (arm, guard) in [
+        ("RebindInstructionOwner", "session_owned"),
+        ("RebindInstructionOwnerUnowned", "unowned"),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == arm)
+            .unwrap_or_else(|| panic!("SessionDocumentMachine must declare {arm}"));
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|declared| declared.name == guard),
+            "{arm} must check ownership in its guard `{guard}`"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ResolveRunStartInstructions
 // ---------------------------------------------------------------------------
@@ -1239,8 +1303,8 @@ fn fresh_run_start_applies_the_pending_changes_in_one_entry() {
         assert_eq!(entry_sequence(&authority), Some(2));
         assert_eq!(
             effective(&authority),
-            seed.target,
-            "the target is now in effect"
+            Slots::empty().active("tone", 2, DIGEST_Y, 6),
+            "the target's Active slots are now in effect, and its revoked slot is not"
         );
         assert_eq!(effective_generation(&authority), Some(2));
         assert_eq!(target(&authority), seed.target, "applying records nothing");
@@ -1411,7 +1475,11 @@ fn run_start_fold_applies_the_target() {
             .as_slice(),
             "{lowering:?}"
         );
-        assert_eq!(effective(&authority), seed.target);
+        assert_eq!(
+            effective(&authority),
+            Slots::empty().active("tone", 2, DIGEST_Y, 6),
+            "{lowering:?}: the target's Active slots are now in effect, and its revoked slot is not"
+        );
         assert_eq!(effective_generation(&authority), Some(2));
         assert_eq!(entry_sequence(&authority), Some(2));
     }
@@ -1486,6 +1554,129 @@ fn other_folds_keep_the_slots_in_effect() {
         assert_eq!(target(&authority), seed.target, "{case}");
         assert_eq!(entry_sequence(&authority), Some(2), "{case}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The machine and its re-seed
+// ---------------------------------------------------------------------------
+
+/// The machine as the shell records it and re-seeds it before its next
+/// operation: the owner, the generation, the high-water and the recorded
+/// target as held, and the slots in effect as the session's entry rows leave
+/// them, where a revoked slot is not in effect, exactly as a slot no entry
+/// named. The last entry row's generation and sequence are the machine's
+/// own here: the rows that use this mint no entry after an application.
+fn reseeded(authority: &Authority) -> Authority {
+    let held = effective(authority);
+    let mut in_effect = Slots::empty();
+    for (slot, effect) in &held.effect {
+        if *effect == InstructionEffect::Active {
+            in_effect = in_effect.active(
+                slot,
+                held.revision[slot],
+                &held.digest[slot],
+                held.bytes[slot],
+            );
+        }
+    }
+    let recorded_target = target(authority);
+    let high_water = entry_sequence(authority).expect("a recovered session");
+    let mut recovered = Authority::new();
+    for input in [
+        Input::RecoverSessionInstructionState {
+            session_id: session(),
+            owner: owner(authority).expect("a recovered session"),
+            owner_mob: owner_mob(authority).expect("a recovered session"),
+            target_generation: generation(authority).expect("a recovered session"),
+            entry_sequence: high_water,
+        },
+        Input::RecoverSessionInstructionTarget {
+            session_id: session(),
+            revision: recorded_target.revision,
+            effect: recorded_target.effect,
+            digest: recorded_target.digest,
+            bytes: recorded_target.bytes,
+        },
+        Input::RecoverSessionInstructionEffective {
+            session_id: session(),
+            revision: in_effect.revision,
+            effect: in_effect.effect,
+            digest: in_effect.digest,
+            bytes: in_effect.bytes,
+            generation: effective_generation(authority).expect("a recovered session"),
+            last_entry_sequence: high_water,
+        },
+    ] {
+        let transition = apply(&mut recovered, input);
+        assert_eq!(
+            transition.effects(),
+            [Effect::SessionInstructionStateRecovered].as_slice()
+        );
+    }
+    recovered
+}
+
+#[test]
+fn the_machine_equals_its_reseed_after_an_applied_revoke_through_rebinds_and_a_lower_write() {
+    // A session owner activates a slot at revision 5 and revokes it at
+    // revision 6, and each change is applied at a fresh run start.
+    let mut machine = seeded(&Seed::empty());
+    for input in [
+        activate("tone", 5, DIGEST_X, 5),
+        fresh_run(InstructionLowering::MidConversation, false),
+        revoke("tone", 6),
+    ] {
+        apply(&mut machine, input);
+    }
+    let transition = apply(
+        &mut machine,
+        fresh_run(InstructionLowering::MidConversation, false),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::InstructionEntryAuthorized {
+            entry_sequence: 2,
+            generation: 2
+        }]
+        .as_slice()
+    );
+    assert_eq!(
+        effective(&machine),
+        Slots::empty(),
+        "an applied revoke leaves the slot out of effect"
+    );
+    assert_eq!(target(&machine), Slots::empty().absent("tone", 6));
+
+    // The shell re-seeds before every operation; the machine it holds in
+    // memory is exactly what a re-seed recovers.
+    let mut production = reseeded(&machine);
+    assert_eq!(production.state(), machine.state());
+
+    // A mob attaches (the only rebind of a session-owned target) and later
+    // releases the target, a host adopts it, and writes the slot at a
+    // revision below the revoked one: on both machines every step takes the
+    // same arm and leaves the same state, and the write records a new slot.
+    for (step, input) in [
+        ("an attach", rebind(InstructionTargetOwner::Mob, "mob-a")),
+        ("the mob's release", release("mob-a")),
+        (
+            "a host's adoption",
+            rebind(InstructionTargetOwner::Session, ""),
+        ),
+        ("a lower write", activate("tone", 3, DIGEST_Y, 4)),
+    ] {
+        let in_memory = apply(&mut machine, input.clone());
+        production = reseeded(&production);
+        let after_reseed = apply(&mut production, input);
+        assert_eq!(in_memory.effects(), after_reseed.effects(), "{step}");
+        assert_eq!(production.state(), machine.state(), "{step}");
+        assert_eq!(reseeded(&machine).state(), machine.state(), "{step}");
+    }
+    assert_eq!(
+        target(&machine),
+        Slots::empty().active("tone", 3, DIGEST_Y, 4)
+    );
+    assert_eq!(generation(&machine), Some(1));
 }
 
 // ---------------------------------------------------------------------------

@@ -2,15 +2,16 @@
 # TLC audit of the operator-instruction region of the generated
 # SessionDocumentMachine, driven as the shell drives it and checked on the
 # machine's own per-slot state: the slots in effect change only at a FreshRun
-# start or a run-start fold, an application reaches the target and coalesces
-# every earlier write into one entry, an applied revoke holds until a later
-# write, a mid-run fold, a write, a record, a rebind and a release leave the
-# slots in effect alone, a session write never lowers a revision, a
-# leading-prefix-only model applies only on a leading System prefix, a
-# mob-owned target changes owner only when its own mob releases it, a
-# release empties the target and the next fresh run start revokes what the
-# released mob had in effect, a rebind starts from the right target, and the
-# target stays within the active budget.
+# start or a run-start fold and hold only Active slots (as the shell re-seeds
+# them), an application reaches the target and coalesces every earlier write
+# into one entry, an applied revoke holds until a later write, a mid-run
+# fold, a write, a record, a rebind and a release leave the slots in effect
+# alone, a session write never lowers a revision, a leading-prefix-only
+# model applies only on a leading System prefix, a mob-owned target changes
+# owner only when its own mob releases it, a release empties the target and
+# the next fresh run start revokes what the released mob had in effect, a
+# rebind starts from the right target, and the target stays within the
+# active budget.
 #
 # usage: instruction_boundary_audit.sh [--mutants] [extra tlc args...]
 #
@@ -21,15 +22,18 @@
 # arm or field fails the run instead of a vacuous pass. It then checks the
 # invariants (safety), and reruns with the reachability witnesses' negations
 # as extra invariants under -continue, requiring TLC to report each of them
-# violated. With --mutants it seeds nine defects into a copy of the
+# violated. With --mutants it seeds ten defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
 # targets:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
+#   - keep a revoked slot in effect at an application (the slots in effect
+#     take the target's whole effect map);
 #   - apply a mid-run fold from the target (the run-start guard dropped);
 #   - accept a stale session write (the higher-revision guard dropped);
 #   - skip the leading-prefix check (any lowering but Unavailable applies);
 #   - accept another mob's record (the owning-mob guard dropped);
-#   - let a rebind take a mob-owned target (the rebind guard dropped);
+#   - let a rebind take a mob-owned target (the attach's ownership guard
+#     dropped, alone);
 #   - record a session write over the active budget (its budget guard
 #     dropped);
 #   - keep a released mob's instructions at a run start (the no-change arm
@@ -70,6 +74,7 @@ arms = {
     "RecoverSessionInstructionEffective": recover_effective,
     "RecordInstructionTargetAdvance": record,
     "RecordInstructionTargetActiveBudgetExceeded": record,
+    "RecordInstructionTargetSlotLimitExceeded": record,
     "RecordInstructionTargetAlreadyRecorded": record,
     "RecordInstructionTargetOwnedBySession": record,
     "RecordInstructionTargetOwnedByOtherMob": record,
@@ -103,6 +108,7 @@ for name in (
     "InstructionLoweringValues",
     "instruction_change_pending(",
     "session_document_instruction_active_bytes(",
+    "session_document_instruction_active_slots(",
 ):
     assert name in text, f"model.tla declares no {name}"
 print("premise holds: the generated model defines every instruction arm the audit drives")
@@ -122,6 +128,7 @@ replace_exact_line() {
 }
 
 audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
+  AuditEffectiveHoldsOnlyActiveSlots
   AuditApplicationReachesTheTarget
   AuditOneEntryPerRunStart
   AuditAppliedRevokeStaysAbsent
@@ -245,6 +252,9 @@ PY
   mutate apply_on_resume_run AuditEffectiveChangesOnlyAtRunStart \
     ResolveRunStartInstructionsApply 'run_start = "FreshRun"' \
     '    /\ (run_start # "NoRun")'
+  mutate revoked_slot_kept_in_effect AuditEffectiveHoldsOnlyActiveSlots \
+    ResolveRunStartInstructionsApply "session_instruction_effective_effect' =" \
+    "    /\\ session_instruction_effective_effect' = MapSet(session_instruction_effective_effect, session_id, session_instruction_target_effect[session_id])"
   mutate mid_run_fold_applies_target AuditMidRunFoldKeepsEffective \
     AuthorizeInstructionFoldAtRunStart 'at_run_start = TRUE' \
     '    /\ TRUE'
@@ -258,7 +268,7 @@ PY
     RecordInstructionTargetAdvance '= mob_id)' \
     '    /\ TRUE'
   mutate rebind_takes_a_mob_target AuditMobTargetBoundUntilReleased \
-    RebindInstructionOwner 'Cardinality(DOMAIN' \
+    RebindInstructionOwner '((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Session"))' \
     '    /\ TRUE'
   mutate budget_exceeded_write_accepted AuditTargetWithinBudget \
     SetSessionInstructionNew '1048576 >= ' \

@@ -721,17 +721,17 @@ fi
 # run start, all lowerings, folds at and after a run's first request,
 # session writes, mob records, rebinds and releases) within the ci.cfg step
 # bound, and checks the machine's own per-slot state: the slots in effect
-# change only at a FreshRun start or a run-start fold, an application
-# reaches the target with one entry per run start, an applied revoke holds,
-# a mid-run fold keeps what is in effect, a session write never lowers a
-# revision, a leading-prefix-only model applies only on a leading System
-# prefix, a mob-owned target changes owner only by its own mob's release, a
-# release empties the target and the next fresh run start revokes what the
-# released mob had in effect, a rebind starts from the right target, and the
-# target stays within the active budget. It first checks that the generated
-# model defines every arm it drives, and requires its five witnesses
-# reached. --mutants refuses nine seeded defects, each by the invariant it
-# targets. Not yet measured on a hosted runner; it joins
+# change only at a FreshRun start or a run-start fold and hold only Active
+# slots, an application reaches the target with one entry per run start, an
+# applied revoke holds, a mid-run fold keeps what is in effect, a session
+# write never lowers a revision, a leading-prefix-only model applies only on
+# a leading System prefix, a mob-owned target changes owner only by its own
+# mob's release, a release empties the target and the next fresh run start
+# revokes what the released mob had in effect, a rebind starts from the
+# right target, and the target stays within the active budget. It first
+# checks that the generated model defines every arm it drives, and requires
+# its five witnesses reached. --mutants refuses ten seeded defects, each by
+# the invariant it targets. Not yet measured on a hosted runner; it joins
 # this shard as the lightest one measured locally.
 instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
 if [[ ! -x "${instruction_boundary_audit}" ]]; then
@@ -924,7 +924,7 @@ run_machine_verify() {
 # shards in parallel, audits-h took 298 s and audits-c 273 s, where audits-c
 # took 455 s with the identity entry audit; neither shard is measured on a
 # hosted runner yet. The SessionDocumentMachine instruction boundary audit
-# with --mutants joined audits-h after these measurements (seven runs over a
+# with --mutants joined audits-h after these measurements (twelve runs over a
 # model that does not extend meerkat_machine; not yet measured).
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the

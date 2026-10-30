@@ -550,6 +550,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessReleasedInstructionsRevoked is violated."' \
   'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
   'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
+  'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

@@ -6244,6 +6244,53 @@ mod tests {
     }
 
     #[test]
+    fn session_document_instruction_natives_have_the_rust_semantics_in_tla() {
+        // The DSL authority, the kernel oracle and the Core mirror give these
+        // natives one meaning, pinned here as the generated TLA renders it:
+        // a slot map with one slot set (insert or replace), the body bytes of
+        // a slot set's Active slots (a slot the bytes map does not name
+        // counts nothing), and the entries of a slot map whose slot is
+        // Active.
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+        let model = render_machine_semantic_model(&schema).expect("render model");
+        let slot_after_set = r"session_document_instruction_slot_after_set(current, slot, value) ==
+    MapSet(current, slot, value)
+";
+        let active_bytes = r#"session_document_instruction_active_bytes(slot_effect, slot_bytes) ==
+    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)
+        SessionDocumentInstructionActiveBytesOver(instruction_slots) ==
+            IF instruction_slots = {} THEN 0
+            ELSE LET instruction_slot == CHOOSE candidate_slot \in instruction_slots : TRUE
+                 IN (IF slot_effect[instruction_slot] = "Active" /\ instruction_slot \in DOMAIN slot_bytes
+                     THEN slot_bytes[instruction_slot] ELSE 0)
+                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \ {instruction_slot})
+    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)
+"#;
+        let active_slots = r#"session_document_instruction_active_slots(slot_effect, slot_values) ==
+    [instruction_slot \in {candidate_slot \in DOMAIN slot_values :
+            candidate_slot \in DOMAIN slot_effect /\ slot_effect[candidate_slot] = "Active"}
+        |-> slot_values[instruction_slot]]
+"#;
+        for (native, definition) in [
+            (
+                "session_document_instruction_slot_after_set",
+                slot_after_set,
+            ),
+            ("session_document_instruction_active_bytes", active_bytes),
+            ("session_document_instruction_active_slots", active_slots),
+        ] {
+            assert!(
+                model.contains(definition),
+                "the generated model must define {native} with its Rust semantics"
+            );
+            assert!(
+                model.matches(&format!("{native}(")).count() > 1,
+                "the generated arms must call the formally defined {native}"
+            );
+        }
+    }
+
+    #[test]
     fn meerkat_session_id_native_helper_matches_typed_option_contract() {
         let model =
             render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");

@@ -4561,16 +4561,36 @@ impl MobActor {
                 {
                     return Some(RetirementReply::Rotate { rotation, reply });
                 }
-                reply.fail(MobError::LifecycleOperationPending {
-                    intent: format!("rotation of member {identity}"),
-                });
+                // Another rotation waits for the standing one: a same-session
+                // rotation the mob finishes itself, or a FreshSession one its
+                // re-issue or `redrive_retirement` finishes.
+                let intent = if standing_target == mob_dsl::RotationTarget::SameSession {
+                    format!("same-session rotation of member {identity}")
+                } else {
+                    format!("rotation of member {identity}")
+                };
+                reply.fail(MobError::LifecycleOperationPending { intent });
                 return None;
             }
             RetirementReply::Retire(reply) if redriven => RotationReply::Redrive(reply),
-            // The actor's own re-drive leaves a host-pending identity's
-            // rotation to its host, which keeps its own record of it and
-            // re-issues it: the rotation then runs once, on that re-issue.
-            RetirementReply::Owned if self.host_pending(identity) => return None,
+            // The actor's own re-drive leaves a host-pending member's
+            // FreshSession rotation to its host, which keeps its own record
+            // of it and re-issues it: the rotation then runs once, on that
+            // re-issue (`redrive_retirement` re-drives it too). A same-session
+            // rotation is the mob's own and is always re-driven.
+            RetirementReply::Owned
+                if standing_target == mob_dsl::RotationTarget::FreshSession
+                    && self.host_pending(identity) =>
+            {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    rotation_target = "fresh_session",
+                    next_session = %standing_session.0,
+                    "the mob leaves a host-pending member's rotation to the host's rotate_member (redrive_retirement re-drives it too)"
+                );
+                return None;
+            }
             RetirementReply::Owned => RotationReply::Owned,
             other => {
                 let error = MobError::LifecycleOperationPending {
@@ -4612,6 +4632,62 @@ impl MobActor {
             .state()
             .member_host_preparation_pending
             .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+    }
+
+    /// Hold, at a start, a host-pending member's interrupted FreshSession
+    /// rotation for its host, which keeps its own record of it (see
+    /// [`super::super::MobBuilder::with_host_pending_members`]): the start
+    /// does not re-drive it. It is recorded stuck at admission with a typed
+    /// cause that names the wait, so a plain retire answers
+    /// `MemberRetirementStuck` with it and a Shutdown reports it, and the
+    /// host's `rotate_member` with the same spec (or a typed
+    /// `redrive_retirement`) re-drives it, once. Answers whether it held the
+    /// rotation: one it cannot read is left to the start's own re-drive.
+    pub(in crate::runtime) async fn hold_rotation_for_host(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> bool {
+        let Some(entry) = self.roster.read().await.get(identity).cloned() else {
+            return false;
+        };
+        let Some(next_session) = self
+            .dsl_authority
+            .state()
+            .member_rotation_session_ids
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            .map(|session| session.0.clone())
+        else {
+            return false;
+        };
+        tracing::info!(
+            mob_id = %self.definition.id,
+            agent_identity = %identity,
+            rotation_target = "fresh_session",
+            next_session = %next_session,
+            "the start leaves a host-pending member's interrupted rotation to the host's rotate_member (redrive_retirement re-drives it too)"
+        );
+        let cause = Arc::new(MobError::LifecycleOperationPending {
+            intent: format!(
+                "the host's rotate_member of member {identity}: the host keeps the record of its interrupted rotation onto session {next_session} (redrive_retirement re-drives it)"
+            ),
+        });
+        let stage = super::super::RetirementStage::ADMISSION;
+        let generation = entry.generation;
+        self.stuck_retirements.insert(
+            identity.clone(),
+            StuckRetirement {
+                entry,
+                stage,
+                cause: Arc::clone(&cause),
+                registration_refused: false,
+            },
+        );
+        self.lifecycle_observations.publish(
+            identity,
+            generation,
+            super::super::RetirementSettlement::Stuck { stage, cause },
+        );
+        true
     }
 
     /// Whether `identity`'s current incarnation is Retiring while the host

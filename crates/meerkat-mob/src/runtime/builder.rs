@@ -8049,13 +8049,23 @@ impl MobBuilder {
     /// clears the mark, durably, in the same step.
     ///
     /// A rotation's start row records it, so the start finishes a rotation a
-    /// crash interrupted itself, with no host record. A host that keeps its
-    /// own record of the rotation passes the identity here instead: the start
-    /// then holds the interrupted retirement open (it neither finishes the
-    /// rotation itself nor ends it as a plain retirement) until the host
-    /// calls [`MobHandle::rotate_member`] again, which finishes the rotation
-    /// on the same session, once. The same holds for a rotation whose start
-    /// row predates the record.
+    /// crash interrupted itself, with no host record. A member passed here
+    /// whose interrupted rotation is a FreshSession one (a
+    /// [`MobHandle::rotate_member`]) is the host's to finish, since the host
+    /// keeps its own record of it: the start does not re-drive it. It holds
+    /// the interrupted retirement open (it neither finishes the rotation
+    /// itself nor ends it as a plain retirement), logs that it did, and
+    /// records the retirement stuck at admission with a cause that names the
+    /// wait ([`MobHandle::retirement_settlement`]). The host's next
+    /// [`MobHandle::rotate_member`] call with the same spec finishes it on the
+    /// same session, once ([`MobHandle::redrive_retirement`] re-drives it
+    /// too). A rotation whose start row predates the record is re-driven as
+    /// a plain retirement, whose terminal waits for the host's call. A
+    /// same-session rotation (a respawn) is the mob's own: the start finishes
+    /// it whatever this set says. Until the host acts, the member stays
+    /// Retiring: its wakes are refused, any other rotation of it is refused
+    /// retryable, and a plain retire answers
+    /// [`MobError::MemberRetirementStuck`] with that cause.
     pub fn with_host_pending_members(
         mut self,
         members: impl IntoIterator<Item = AgentIdentity>,
@@ -11409,27 +11419,48 @@ impl MobBuilder {
             // Complete: the start waits for it before it hands the mob back
             // (see its end).
             let mut recovered_phase_intent_first_attempt = None;
-            let recovered_retirements = if resume_destroy_cleanup {
+            let mut recovered_retirements = if resume_destroy_cleanup {
                 Vec::new()
             } else {
-                actor
-                    .dsl_authority
-                    .state()
+                let state = actor.dsl_authority.state();
+                state
                     .identity_to_runtime
                     .iter()
                     .filter(|(_, runtime_id)| {
                         matches!(
-                            actor
-                                .dsl_authority
-                                .state()
-                                .member_state_markers
-                                .get(*runtime_id),
+                            state.member_state_markers.get(*runtime_id),
                             Some(crate::machines::mob_machine::MobMemberState::Retiring)
                         )
                     })
                     .map(|(identity, _)| crate::ids::AgentIdentity::from(identity.0.as_str()))
                     .collect::<Vec<_>>()
             };
+            // The interrupted FreshSession rotation of a host-pending member
+            // is the host's to finish: the host keeps its own record of it
+            // and calls `rotate_member` again, which re-drives it once. The
+            // start holds it for the host (recorded stuck with a typed cause)
+            // instead of re-driving it; `redrive_retirement` re-drives it
+            // too. A same-session rotation is the mob's own and is always
+            // re-driven here.
+            let held_for_host = {
+                let state = actor.dsl_authority.state();
+                recovered_retirements
+                    .iter()
+                    .filter(|identity| {
+                        let identity =
+                            crate::machines::mob_machine::AgentIdentity::from_domain(identity);
+                        state.member_host_preparation_pending.contains(&identity)
+                            && state.member_rotation_targets.get(&identity)
+                                == Some(&crate::machines::mob_machine::RotationTarget::FreshSession)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            for identity in held_for_host {
+                if actor.hold_rotation_for_host(&identity).await {
+                    recovered_retirements.retain(|recovered| recovered != &identity);
+                }
+            }
             // Cold-recovery convergence workers are owned by this actor instance.
             // Register them before moving the actor into its run loop so every
             // terminal path can abort and join them before command-channel closure.

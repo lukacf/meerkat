@@ -645,23 +645,25 @@ fi
 # entry (the replay of its row, or its reseat's ladder opened with entry
 # custody) through the dormant seat, the live and the archive-only
 # retirement to its archive terminal, the rotation, the legacy fresh-life
-# respawn and its refusal of an entry, and the mob's destroy (DestroyMob and
-# DestroyFromAny), under every generated invariant (every unseat ends an
-# entry; a destroyed mob holds no entry and no entry custody), the retire
-# run's own properties and four action properties (a
+# respawn and its refusal of an entry (in Running and Stopped), the legacy
+# respawn's topology-preserving archive terminals, and the mob's destroy
+# (DestroyMob and DestroyFromAny), under every generated invariant (every
+# unseat ends an entry; a destroyed mob holds no entry and no entry custody),
+# the retire run's own properties and five action properties (a
 # seat records an entry exactly when its ladder holds entry custody, a
 # rotation keeps the entry, an entry only by a custody seat or a replayed
 # row; the legacy fresh-life respawn admitted only for a member that is no
-# entry). Both run with TLC coverage and require every listed arm to fire, a
-# floor of distinct states and their twenty-two witnesses reached, and
-# --mutants refuses eleven seeded defects: a reconcile that retires an entry, a
+# entry, and its topology-preserving archive never taking an entry). Both run
+# with TLC coverage and require every listed arm to fire, a floor of
+# distinct states and their twenty-four witnesses reached, and --mutants
+# refuses twelve seeded defects: a reconcile that retires an entry, a
 # probe that answers an entry's name as a plain duplicate, an adoption
 # without the observation, the replay of an entry row on an unseated
 # identity, an archive and a destroy's member archive that keep the entry, a
 # DestroyMob that keeps the entries, a DestroyFromAny that keeps an open
 # ladder's entry custody, a rotation that drops the entry, a seat that
-# ignores its ladder's entry custody and a fresh-life respawn admitted for an
-# entry.
+# ignores its ladder's entry custody, a fresh-life respawn admitted for an
+# entry and a topology-preserving archive that takes an entry.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2

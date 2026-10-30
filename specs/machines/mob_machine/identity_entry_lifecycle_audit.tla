@@ -18,7 +18,9 @@
 \* With an entry present the run reaches the dormant seat, the live and the
 \* archive-only retirement to every local archive terminal it drives, the
 \* rotation's terminals in Running and Stopped, the legacy fresh-life
-\* respawn's admission and its refusal of an entry, and the mob's destroy:
+\* respawn's admission and its refusal of an entry (in Running and
+\* Stopped), the legacy respawn's topology-preserving archive terminals,
+\* and the mob's destroy:
 \* its admission, its member retirement and archive, DestroyMob and the
 \* forced DestroyFromAny (with an open ladder's entry custody too). The run
 \* leaves out the retire run's replay of the exempt row, which entries do not
@@ -44,11 +46,14 @@
 \*     of its row;
 \*   AuditFreshLifeRespawnNeverAnEntry (action property): the legacy
 \*     fresh-life respawn is admitted only for a member that is no identity
-\*     entry (an entry's successor keeps its session and its entry).
+\*     entry (an entry's successor keeps its session and its entry);
+\*   AuditPreservingArchiveNeverAnEntry (action property): the legacy
+\*     respawn's topology-preserving archive terminal never takes an
+\*     identity entry, whatever the shell previewed.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. With --mutants the
-\* runner also seeds seven defects into a copy of the generated model and
+\* runner also seeds eight defects into a copy of the generated model and
 \* requires TLC to refuse each (see identity_entry_audit.sh).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
@@ -85,12 +90,21 @@ LDestroyArchives ==
 
 \* The legacy fresh-life respawn (retire, then spawn on a new session) of
 \* member 1's incarnation, its first, its reseat's or its rotation's next:
-\* admitted for a worker, refused for an identity entry. Neither changes
+\* admitted for a worker, refused for an identity entry in every phase an
+\* entry lives in (this run reaches Running and Stopped). Neither changes
 \* anything.
 LRespawn ==
     \E rid \in {Rid1, Rid2, Rid3} :
         \/ RespawnRunning(Id1, rid)
         \/ RespawnIdentityEntryRefusedRunning(Id1, rid)
+        \/ RespawnIdentityEntryRefusedStopped(Id1, rid)
+
+\* The legacy respawn's archive terminals, which keep the machine's
+\* topology for the respawn's successor: member 1's first incarnation, as
+\* the plain archives take it.
+LPreservingArchives ==
+    \/ ObserveMemberRetirementArchivedLivePreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+    \/ ObserveMemberRetirementArchivedRetiredPreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
 
 LifecycleNext ==
     \/ WRecover
@@ -109,6 +123,7 @@ LifecycleNext ==
     \/ RRuntimeRetired
     \/ WDetach
     \/ PlainArchives
+    \/ LPreservingArchives
     \/ RRecoverStarted
     \/ RAuthorize
     \/ RotationArms
@@ -161,6 +176,10 @@ AuditLifecycleEntryOnlyWithCause ==
 AuditFreshLifeRespawnNeverAnEntry ==
     [][\A rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid) => Id1 \notin LEntries]_vars
 
+\* The legacy respawn's topology-preserving archive terminal never takes an
+\* identity entry.
+AuditPreservingArchiveNeverAnEntry == [][LPreservingArchives => Id1 \notin LEntries]_vars
+
 (***************************************************************************)
 (* Reachability goals, each checked as an expected violation of its        *)
 (* negation: a state goal joins the invariants, a step goal the properties.*)
@@ -188,6 +207,15 @@ AuditWitnessCustodyDestroyed == spawn_exec_entry_custody # {} /\ DestroyFromAny
 AuditWitnessEntryRespawnRefused ==
     /\ Id1 \in LEntries
     /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnIdentityEntryRefusedRunning(Id1, rid)
+\* The fresh-life respawn of an entry's member is refused in a stopped mob.
+AuditWitnessEntryRespawnRefusedStopped ==
+    /\ Id1 \in LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnIdentityEntryRefusedStopped(Id1, rid)
+\* A worker's topology-preserving archive terminal.
+AuditWitnessWorkerPreservingArchive ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ Id1 \notin LEntries
+    /\ LPreservingArchives
 \* A worker's fresh-life respawn is admitted.
 AuditWitnessWorkerRespawnAdmitted ==
     /\ Id1 \in DOMAIN identity_to_runtime
@@ -205,4 +233,6 @@ NotAuditWitnessEntryDestroyedForced == [][~AuditWitnessEntryDestroyedForced]_var
 NotAuditWitnessCustodyDestroyed == [][~AuditWitnessCustodyDestroyed]_vars
 NotAuditWitnessEntryRespawnRefused == [][~AuditWitnessEntryRespawnRefused]_vars
 NotAuditWitnessWorkerRespawnAdmitted == [][~AuditWitnessWorkerRespawnAdmitted]_vars
+NotAuditWitnessEntryRespawnRefusedStopped == [][~AuditWitnessEntryRespawnRefusedStopped]_vars
+NotAuditWitnessWorkerPreservingArchive == [][~AuditWitnessWorkerPreservingArchive]_vars
 ====

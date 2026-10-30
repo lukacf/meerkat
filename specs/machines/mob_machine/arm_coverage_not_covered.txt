@@ -179,6 +179,7 @@ AdvanceDefinition* definition epoch advance; no audit drives it
 Reconcile* desired-roster reconcile in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 AdoptLegacyIdentityEntryMobNotRunning* the legacy adoption in the Completed and Destroyed phases; identity_entry_audit drives every other arm and the Stopped one
+RespawnIdentityEntryRefusedCompleted the legacy fresh-life respawn's refusal of an identity entry in the Completed phase; identity_entry_audit drives its Running and Stopped arms
 ResetToRunning mob reset; no audit drives it
 RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
 ShutdownStopped Shutdown outside Running; member_residency_audit drives ShutdownRunning

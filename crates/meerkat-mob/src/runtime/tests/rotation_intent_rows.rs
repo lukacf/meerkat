@@ -47,16 +47,23 @@ struct RotationMob {
 
 impl RotationMob {
     async fn new(label: &str) -> Self {
+        Self::new_with(label, |builder| builder).await
+    }
+
+    /// [`Self::new`], with `configure` applied to the mob's builder.
+    async fn new_with(label: &str, configure: impl FnOnce(MobBuilder) -> MobBuilder) -> Self {
         let keys = tempfile::tempdir().expect("a comms identity root");
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(
-            with_unique_mob_id(sample_definition(), label),
-            storage.clone(),
+        let handle = configure(
+            MobBuilder::new(
+                with_unique_mob_id(sample_definition(), label),
+                storage.clone(),
+            )
+            .with_session_service(service.clone())
+            .with_member_comms_identity_root(keys.path()),
         )
-        .with_session_service(service.clone())
-        .with_member_comms_identity_root(keys.path())
         .create()
         .await
         .expect("create the mob");
@@ -1363,6 +1370,100 @@ async fn respawn_with_successor_spec_of_an_identity_entry_is_refused_typed() {
     assert!(
         matches!(
             mob.handle.identity_entry(&id("entry-spec")),
+            Ok(IdentityEntryRead::Entry(_))
+        ),
+        "the member stays the entry's"
+    );
+}
+
+/// Counts the spawn customizations it is asked for.
+#[derive(Default)]
+struct CountingCustomizer {
+    spawns: std::sync::atomic::AtomicUsize,
+}
+
+impl SpawnMemberCustomizer for CountingCustomizer {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// `respawn` of an identity entry's member in a stopped mob is refused by
+/// MobMachine before anything runs: its refusal twin answers in every phase
+/// an entry lives in, so the respawn takes the same-session path, whose
+/// start a stopped mob refuses, and the host's spawn customizer is never
+/// asked for an entry's fresh life. The journal, MobMachine's rotation facts
+/// and the member's roster anchor are as they were.
+///
+/// RED: let the refusal twin answer in Running only: in the stopped mob the
+/// routing finds no refusal, the respawn takes the fresh-life path and asks
+/// the customizer for the entry's would-be successor before its admission
+/// refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_of_an_identity_entry_in_a_stopped_mob_is_refused_before_anything_runs() {
+    let customizer = Arc::new(CountingCustomizer::default());
+    let mob = RotationMob::new_with("entry-stopped-respawn", |builder| {
+        builder
+            .with_spawn_member_customizer(Arc::clone(&customizer) as Arc<dyn SpawnMemberCustomizer>)
+    })
+    .await;
+    mob.handle
+        .spawn_spec(entry_spec("stopped-entry"))
+        .await
+        .expect("the host declares a spawned entry");
+    tokio::time::timeout(STEP, mob.handle.stop())
+        .await
+        .expect("the stop answers")
+        .expect("stop the mob");
+    let customized = customizer.spawns.load(std::sync::atomic::Ordering::SeqCst);
+    let journal_before = mob.journal().await.len();
+    let anchor_before = roster_anchor(&mob.handle, "stopped-entry").await;
+
+    let refused = tokio::time::timeout(STEP, mob.handle.respawn(id("stopped-entry"), None))
+        .await
+        .expect("the respawn answers");
+    assert!(
+        matches!(
+            &refused,
+            Err(crate::runtime::handle::MobRespawnError::Mob(_))
+        ),
+        "the stopped mob refuses the entry's respawn typed: {refused:?}"
+    );
+    assert_eq!(
+        customizer.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        customized,
+        "the customizer is never asked for an entry's fresh life"
+    );
+    assert_eq!(
+        mob.journal().await.len(),
+        journal_before,
+        "no row was written"
+    );
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        let dsl_identity = dsl::AgentIdentity::from_domain(&id("stopped-entry"));
+        assert!(
+            !state.member_rotation_targets.contains_key(&dsl_identity)
+                && !state
+                    .member_rotation_session_ids
+                    .contains_key(&dsl_identity),
+            "MobMachine holds no rotation of the entry"
+        );
+    }
+    assert_eq!(
+        roster_anchor(&mob.handle, "stopped-entry").await,
+        anchor_before,
+        "the entry's roster anchor is unchanged"
+    );
+    assert!(
+        matches!(
+            mob.handle.identity_entry(&id("stopped-entry")),
             Ok(IdentityEntryRead::Entry(_))
         ),
         "the member stays the entry's"

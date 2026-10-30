@@ -12846,6 +12846,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
+            // Only the legacy fresh-life respawn preserves topology, and it
+            // never respawns an identity entry (RespawnRunning admits none):
+            // its archive refuses an entry too, whatever the shell previewed.
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
@@ -13133,6 +13137,9 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
+            // As in the live arm: a legacy fresh-life respawn's archive
+            // refuses an identity entry.
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
@@ -22036,12 +22043,14 @@ macro_rules! mob_catalog_machine_dsl {
             emit ExposePendingSpawn
         }
 
-        // The fresh-life respawn of an identity entry's member, refused:
-        // nothing changes, and the shell answers the refusal typed (the
-        // entry's member is respawned on its own session instead).
-        transition RespawnIdentityEntryRefusedRunning {
+        // The fresh-life respawn of an identity entry's member, refused in
+        // every phase an entry lives in: nothing changes, and the shell
+        // answers the refusal typed (the entry's member is respawned on its
+        // own session instead, which a mob that is not Running refuses), so
+        // no fresh-life step runs for an entry in any phase.
+        transition RespawnIdentityEntryRefused {
+            per_phase [Running, Stopped, Completed]
             on input Respawn { agent_identity, agent_runtime_id }
-            guard { self.lifecycle_phase == Phase::Running }
             guard "identity_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
             update {}

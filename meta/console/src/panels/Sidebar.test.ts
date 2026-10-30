@@ -1732,6 +1732,28 @@ test("sidebar last activity merges the roster's time with newer frames this cons
   assert.equal(__sidebarTest.agentLastActivity(teamAgent("d", "Delta"), times), undefined);
 });
 
+test("sidebar last activity counts only frames of the agent acting, as the server does", () => {
+  // History rebuilt from a session and synthesized frames are stamped when
+  // the console observes them; lifecycle records, interaction failures and
+  // memory events record something done to the agent. None of them is the
+  // agent acting, so an idle agent stays as idle as its roster says.
+  const frames = [
+    { id: "h", event: "runtime_notice_snapshot", sourceKind: "session_history", identity: "agent:a", timestampMs: 1_000_000 },
+    { id: "s", event: "text_delta", sourceKind: "synthetic", identity: "agent:a", timestampMs: 1_000_001 },
+    { id: "r", event: "identity_retired", sourceKind: "console_event", identity: "agent:a", timestampMs: 1_000_002 },
+    { id: "x", event: "interaction_failed", sourceKind: "console_event", identity: "agent:a", timestampMs: 1_000_003 },
+    { id: "m", event: "memory.record.promoted", sourceKind: "console_event", identity: "agent:a", timestampMs: 1_000_004 },
+    { id: "live", event: "text_delta", sourceKind: "console_event", identity: "agent:b", timestampMs: 300 },
+    { id: "send", event: "user_message", sourceKind: "send", identity: "agent:c", timestampMs: 400 },
+    { id: "bare", event: "text_delta", identity: "agent:d", timestampMs: 500 },
+  ] satisfies ConsoleFrame[];
+  const times = __sidebarTest.newestFrameTimes(frames);
+
+  assert.deepEqual(Array.from(times.entries()).sort(), [["agent:b", 300], ["agent:c", 400], ["agent:d", 500]]);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("a", "Alpha", { last_activity_ms: 10 }), times), 10);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("b", "Bravo", { last_activity_ms: 10 }), times), 300);
+});
+
 test("sidebar row detail is a human line: role or group, then status in words or last activity", () => {
   const now = 10 * 60 * 60 * 1000;
   const minutes = (count: number) => count * 60 * 1000;

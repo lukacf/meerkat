@@ -648,13 +648,37 @@ function compareBySidebarSort(order: SidebarSortContext, a: ConsoleAgent, b: Con
   return aRank - bRank;
 }
 
-/** The newest frame time this console saw for each identity. */
+/**
+ * Frame sources that record an agent acting. History the console rebuilds
+ * from a session and frames it synthesizes are stamped when it observes
+ * them, not when the agent acted.
+ */
+const ACTING_FRAME_SOURCES: ReadonlySet<string> = new Set(["console_event", "send", "tool_application"]);
+/** Live event kinds that record something done to an agent, not the agent acting. */
+const NON_ACTING_FRAME_EVENTS: ReadonlySet<string> = new Set([
+  "identity_respawned",
+  "identity_retired",
+  "identity_reset",
+  "identity_deleted",
+  "interaction_failed",
+]);
+
+/**
+ * Whether a frame records its agent acting: the rule the server's
+ * `last_activity_ms` follows. A frame that names no source still counts.
+ */
+function isActingFrame(frame: ConsoleFrame): boolean {
+  if (frame.sourceKind !== undefined && !ACTING_FRAME_SOURCES.has(frame.sourceKind)) return false;
+  return !NON_ACTING_FRAME_EVENTS.has(frame.event) && !frame.event.startsWith("memory.");
+}
+
+/** The newest time this console saw each identity act. */
 function newestFrameTimes(frames: readonly ConsoleFrame[]): Map<string, number> {
   const newest = new Map<string, number>();
   for (const frame of frames) {
     const identity = frame.identity;
     const at = frame.timestampMs;
-    if (!identity || typeof at !== "number" || !Number.isFinite(at)) continue;
+    if (!identity || typeof at !== "number" || !Number.isFinite(at) || !isActingFrame(frame)) continue;
     const known = newest.get(identity);
     if (known === undefined || at > known) newest.set(identity, at);
   }

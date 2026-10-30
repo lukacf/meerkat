@@ -48,6 +48,9 @@ export interface MemoryRecordsFilter {
 }
 
 export interface MemoryPanelProps {
+  /** The team picker, when the console serves more than one team; shown
+   * among the header actions. */
+  runtimeControl?: React.ReactNode;
   records: MemoryPanelRecord[];
   realms: string[];
   quarantineRecords: MemoryPanelRecord[];
@@ -2039,6 +2042,7 @@ export function MemoryLiveStrip({
 // ── Main panel ────────────────────────────────────────────────────────────
 
 export function MemoryPanel({
+  runtimeControl,
   records,
   realms,
   quarantineRecords,
@@ -2259,6 +2263,7 @@ export function MemoryPanel({
       <div className="gating memory-panel" data-testid="memory-panel">
         <div className="gating__head">
           <h2>Memory</h2>
+          {runtimeControl ? <><span className="spacer" />{runtimeControl}</> : null}
         </div>
         <div className="gating__empty" data-testid="memory-unavailable">
           The memory panel is not configured on this runtime.
@@ -2284,6 +2289,7 @@ export function MemoryPanel({
           {records.length} records
           {realms.length > 1 ? ` · ${realms.length} realms` : ""}
         </p>
+        {runtimeControl ? <><span className="spacer" />{runtimeControl}</> : null}
       </div>
       <div className="gating__tabs">
         {MEMORY_TABS.map((candidate) => (

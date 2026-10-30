@@ -30,6 +30,7 @@ import {
   useConsoleDockController,
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
+import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -923,6 +924,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids): panels show names, with the key in a tooltip.
+  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map((agent) => ({
+    id: agent.identity || agent.agent_id,
+    label: agent.label,
+    role: agent.role,
+    aliases: [agent.member_id, agent.agent_id, agent.session_id],
+  }))), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
@@ -1282,24 +1291,44 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return requireWorkbenchTarget(buildControlTarget(kind));
   }
 
-  function runtimeScopedPanel(kind: "memory" | "workgraph", content: React.ReactNode) {
-    if (emptyPanelRegistry) return <div className="console-panel runtime-panel-empty">
-      <h2>{kind === "memory" ? "Memory" : "WorkGraph"}</h2>
-      <p role="status">No teams are running.</p>
-      <p>Finish setting up a team to inspect its memory and work graph.</p>
-    </div>;
+  // Memory and WorkGraph read one team's runtime at a time. The team picker
+  // is handed to the panel, which shows it among its header actions.
+  function runtimeScopedPanel(kind: "memory" | "workgraph", render: (runtimeControl: React.ReactNode) => React.ReactNode) {
+    const title = kind === "memory" ? "Memory" : "WorkGraph";
+    if (emptyPanelRegistry) return (
+      <PanelShell className="runtime-panel-empty">
+        <PanelHeader title={title} />
+        <EmptyState
+          kind="not-configured"
+          role="status"
+          title="No teams are running."
+          body="Finish setting up a team to inspect its memory and work graph."
+        />
+      </PanelShell>
+    );
     const runtimes = experience?.panel_runtimes;
-    if (!runtimes) return content;
+    if (!runtimes) return render(null);
     const loaded = (kind === "memory" ? memoryDataRuntimeKey : workGraphDataRuntimeKey) === panelRuntimeKey;
+    const runtimeControl = (
+      <SelectField
+        className="runtime-panel-control"
+        label="Mob"
+        ariaLabel={`${kind === "memory" ? "Memory" : "Work Graph"} mob`}
+        value={panelRuntimeKey}
+        options={[
+          ...(runtimes.some(runtime => runtime.key === panelRuntimeKey) ? [] : [{ value: panelRuntimeKey, label: "Runtime unavailable" }]),
+          ...runtimes.map(runtime => ({ value: runtime.key, label: runtime.label })),
+        ]}
+        onChange={key => setPanelRuntimeSelection({ scope: persistentSendScope, key })}
+      />
+    );
     return <div className="runtime-scoped-panel" key={`${kind}:${panelRuntimeKey}`}>
-      <label className="runtime-panel-selector">Mob
-        <select aria-label={`${kind === "memory" ? "Memory" : "Work Graph"} mob`} value={panelRuntimeKey}
-          onChange={event => setPanelRuntimeSelection({scope: persistentSendScope, key: event.target.value})}>
-          {!runtimes.some(runtime => runtime.key === panelRuntimeKey) && <option value={panelRuntimeKey}>Runtime unavailable</option>}
-          {runtimes.map(runtime => <option key={runtime.key} value={runtime.key}>{runtime.label}</option>)}
-        </select>
-      </label>
-      {loaded ? content : <div className="console-panel" role="status">Loading {kind === "memory" ? "memory" : "work graph"}...</div>}
+      {loaded ? render(runtimeControl) : (
+        <PanelShell>
+          <PanelHeader title={title} actions={runtimeControl} />
+          <LoadingState label={`Loading ${kind === "memory" ? "memory" : "work graph"}`} rows={5} />
+        </PanelShell>
+      )}
     </div>;
   }
 
@@ -5723,8 +5752,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "memory")
-      return runtimeScopedPanel("memory",
+      return runtimeScopedPanel("memory", (runtimeControl) =>
         <MemoryPanel
+          runtimeControl={runtimeControl}
           records={memoryData.records}
           realms={memoryData.realms}
           quarantineRecords={memoryData.quarantineRecords}
@@ -5787,8 +5817,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     if (target.kind === "workgraph") {
       const workGraphPanelHandlers = makeWorkGraphOperatorHandlers();
-      return runtimeScopedPanel("workgraph",
+      return runtimeScopedPanel("workgraph", (runtimeControl) =>
         <WorkGraphPanel
+          runtimeControl={runtimeControl}
           data={workGraphData}
           canManage={canManageWorkGraph}
           onRefresh={() => void refreshWorkGraphData()}
@@ -5808,6 +5839,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   return (
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
+    <AgentDirectoryProvider directory={agentDirectory}>
     <div
       className="cc-theme-scope meta-shell"
       data-cc-theme={theme}
@@ -5928,6 +5960,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>
   );

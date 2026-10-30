@@ -4382,9 +4382,5 @@ svg[data-svg="fit"],
 .gating__list > div > p { margin: 14px 18px; color: var(--ink-muted); }
 
 .runtime-scoped-panel { display:flex; flex-direction:column; height:100%; min-height:0; }
-.runtime-panel-empty { gap:12px; }
-.runtime-panel-empty h2, .runtime-panel-empty p { margin:0; }
-.runtime-panel-empty p { color:var(--ink-muted); }
 .runtime-scoped-panel > :last-child { flex:1; min-height:0; }
-.runtime-panel-selector { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); font:13px var(--sans); }
-.runtime-panel-selector select { flex:1; min-width:0; padding:7px 10px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:var(--r-sm); }
+.runtime-panel-control .cc-select__control { max-width: 220px; }

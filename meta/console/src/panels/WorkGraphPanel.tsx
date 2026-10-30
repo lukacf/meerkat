@@ -35,6 +35,9 @@ export interface WorkGraphPanelData {
 // request-close) carry the goal WORK ITEM's revision; attention actions
 // (pause / resume / reassign) carry the binding's machine revision.
 interface WorkGraphPanelProps {
+  /** The team picker, when the console serves more than one team; shown
+   * among the header actions. */
+  runtimeControl?: React.ReactNode;
   data: WorkGraphPanelData;
   canManage: boolean;
   onRefresh: () => void;
@@ -361,6 +364,7 @@ function AttentionRow({
 }
 
 export function WorkGraphPanel({
+  runtimeControl,
   data,
   canManage,
   onRefresh,
@@ -394,6 +398,7 @@ export function WorkGraphPanel({
   if (data.unavailable) {
     return (
       <div className="console-panel workgraph" data-testid="workgraph-panel">
+        {runtimeControl ? <div className="workgraph__head">{runtimeControl}</div> : null}
         <div className="workgraph__empty">WorkGraph is not configured on this runtime.</div>
       </div>
     );
@@ -407,6 +412,7 @@ export function WorkGraphPanel({
           <span className="workgraph__captured">as of {capturedAt}</span>
         ) : null}
         <span className="workgraph__spacer" />
+        {runtimeControl}
         <div className="workgraph__view-toggle" role="group" aria-label="WorkGraph view mode">
           <button
             type="button"

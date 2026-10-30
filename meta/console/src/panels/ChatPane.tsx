@@ -2684,7 +2684,8 @@ export function ChatPane({
         <div className="composer__footer">
           <span>To: <b style={{ color: "var(--ink-muted)" }} title={identity}>{agentLabel}</b></span>
           {voiceActive && <span>· text to background agent</span>}
-          {agent?.role && (<>
+          {/* The role, unless it only repeats the name ("To: Coordinator"). */}
+          {agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && (<>
             <span>·</span>
             <span>{humanizeEnum(agent.role)}</span>
           </>)}

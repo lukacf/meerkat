@@ -993,6 +993,10 @@ test("the composer reads the agent's role in words, in the UI font", () => {
   const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
   assert.equal(footer.replace(/<[^>]*>/g, "").includes("Memory steward"), true);
   assert.equal(footer.replace(/<[^>]*>/g, "").includes("memory-steward"), false);
+  // A role that only repeats the name is left out of the footer.
+  const same = renderToStaticMarkup(React.createElement(ChatPane, { agent: { ...agent, label: "Coordinator", role: "coordinator" } as never, agentLabel: "Coordinator", identity: "steward", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  const sameFooter = (/<div class="composer__footer">([\s\S]*?)<\/div>/.exec(same)?.[1] ?? "").replace(/<[^>]*>/g, "");
+  assert.equal(sameFooter.split("Coordinator").length - 1, 1);
 });
 
 test("stock folds consecutive proven generic completion but keeps unknown visible", () => {

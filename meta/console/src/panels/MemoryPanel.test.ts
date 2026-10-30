@@ -69,6 +69,30 @@ const {
   quarantineRationaleProblem,
   quarantineDecisionSummary,
   quarantineDecisionErrorText,
+  verdictTone,
+  formatSize,
+  kindLabel,
+  trustDisplay,
+  trustChipTone,
+  statusWord,
+  statusChipTone,
+  authorDisplay,
+  scopeKindLabel,
+  scopeKeyOf,
+  scopeOwnerName,
+  scopeHeading,
+  overviewScopeName,
+  scopeCountsText,
+  targetName,
+  evidenceDisplay,
+  evidenceDetails,
+  injectionMoment,
+  utilityDisplay,
+  reviewVerdictLabel,
+  dreamVerdictChips,
+  dreamOpKindsDisplay,
+  partitionName,
+  knowledgeSegmentTitle,
 } = __memoryTest;
 
 function record(overrides: Partial<MemoryPanelRecord> & Pick<MemoryPanelRecord, "id" | "scope">): MemoryPanelRecord {
@@ -228,7 +252,7 @@ test("filter bar builds the server's scope/identity/scope_key/status params", ()
 
 test("memory section outcomes classify -32030 as denied and -32601 as unavailable", () => {
   // Mirror the transport contract: network.ts annotates thrown errors with
-  // `rpcError` (code/message/data) — the exact shape jsonRpcErrorCode reads.
+  // `rpcError` (code/message/data), the exact shape jsonRpcErrorCode reads.
   const rpcError = (code: number): Error => {
     const error = new Error(`RPC error ${code}`);
     (error as Error & { rpcError?: { code?: unknown } }).rpcError = { code };
@@ -249,7 +273,7 @@ test("a per-method capability miss classifies as denied (intersection under enfo
   // Exact shape thrown by requireCapability (headless.ts): a plain Error,
   // raised client-side before the RPC, with no rpcError annotation. Under an
   // enforced view the server drops methods the principal cannot call from
-  // meta/capabilities — e.g. a scoped read grant loses panel/dreams — so
+  // meta/capabilities (a scoped read grant loses panel/dreams, for example), so
   // the miss is denial by intersection, not a fatal panel error.
   assert.equal(
     memorySectionOutcome(new Error("Meta capability missing for meta/memory/panel/dreams")),
@@ -474,7 +498,7 @@ const emptyVerdictInputs = {
   lattice: null,
 };
 
-test("verdict strip mounts six tiles; missing surfaces are named", () => {
+test("verdict strip mounts six tiles; checks this console cannot run say so", () => {
   const tiles = computeVerdictTiles(emptyVerdictInputs);
   assert.deepEqual(
     tiles.map((tile) => tile.id),
@@ -482,12 +506,26 @@ test("verdict strip mounts six tiles; missing surfaces are named", () => {
   );
   const byId = new Map(tiles.map((tile) => [tile.id, tile]));
   assert.equal(byId.get("echo-safety")?.status, "unverifiable");
-  assert.match(byId.get("echo-safety")?.lines[0] || "", /not available here/);
+  assert.equal(byId.get("echo-safety")?.summary, "Not checked automatically");
+  assert.match(
+    byId.get("echo-safety")?.lines.join(" ") || "",
+    /injection history on the Knowledge tab marks repeated injections/,
+  );
   assert.equal(byId.get("taint-wall")?.status, "unverifiable");
-  assert.match(byId.get("taint-wall")?.lines[0] || "", /not available here/);
+  assert.equal(byId.get("taint-wall")?.summary, "Not checked automatically");
+  assert.match(
+    byId.get("taint-wall")?.lines.join(" ") || "",
+    /Pipeline tab marks proposals from tainted sessions/,
+  );
   assert.equal(byId.get("store-floor")?.status, "unverifiable");
-  assert.match(byId.get("store-floor")?.lines[0] || "", /panel\/overview/);
+  assert.equal(byId.get("store-floor")?.summary, "Store totals are not available");
   assert.equal(verdictStatusLabel("unverifiable"), "UNVERIFIABLE");
+  // Tile copy is plain words: no method names, surfaces, invariants or
+  // page-walk talk, and no dash used as punctuation.
+  for (const tile of tiles) {
+    const copy = [tile.label, tile.summary, ...tile.lines].join(" ");
+    assert.doesNotMatch(copy, /panel\/|surface \d|invariant|page-walk|\u2014|\u2013/, `${tile.id}: ${copy}`);
+  }
 });
 
 test("tiles whose evidence the principal cannot read render no-grant, never green", () => {
@@ -498,19 +536,29 @@ test("tiles whose evidence the principal cannot read render no-grant, never gree
   });
   const byId = new Map(tiles.map((tile) => [tile.id, tile]));
   assert.equal(byId.get("lattice")?.status, "no-grant");
+  assert.equal(byId.get("lattice")?.summary, "No access to records");
   assert.equal(byId.get("recall")?.status, "no-grant");
   assert.equal(byId.get("dreams")?.status, "no-grant");
+  assert.equal(byId.get("dreams")?.summary, "No access to the dream history");
   assert.equal(byId.get("taint-wall")?.status, "no-grant");
   assert.equal(verdictStatusLabel("no-grant"), "NO GRANT");
+  // A check that cannot run is never green.
+  assert.equal(verdictTone("no-grant"), "locked");
+  assert.equal(verdictTone("unverifiable"), "locked");
+  assert.equal(verdictTone("holding"), "ok");
+  assert.equal(verdictTone("degraded"), "warn");
+  assert.equal(verdictTone("violated"), "crit");
 });
 
-test("lattice tile reports violations and the partial-walk header honestly", () => {
+test("lattice tile reports violations and a partial walk honestly", () => {
   const holding = computeVerdictTiles({
     ...emptyVerdictInputs,
     lattice: { checked: 3, complete: true, llmCeilingViolations: [], chainViolations: [] },
   }).find((tile) => tile.id === "lattice");
   assert.equal(holding?.status, "holding");
-  assert.match(holding?.lines[1] || "", /checked 3\/3/);
+  assert.equal(holding?.summary, "No record breaks the trust rules");
+  assert.ok(holding?.lines.includes("0 violations"), JSON.stringify(holding?.lines));
+  assert.ok(holding?.lines.includes("Checked 3 of 3 records."), JSON.stringify(holding?.lines));
   assert.deepEqual(holding?.evidence, []);
 
   const capped = computeVerdictTiles({
@@ -523,7 +571,11 @@ test("lattice tile reports violations and the partial-walk header honestly", () 
     },
   }).find((tile) => tile.id === "lattice");
   assert.equal(capped?.status, "violated");
-  assert.match(capped?.lines[1] || "", /first 2000 — partial/);
+  assert.equal(capped?.summary, "1 record breaks the trust rules in the first 2000");
+  assert.ok(
+    capped?.lines.includes("Checked the first 2000 records; the check stops at 2000."),
+    JSON.stringify(capped?.lines),
+  );
 });
 
 test("violated lattice tile carries its evidence refs, capped with a +N more line", () => {
@@ -541,8 +593,10 @@ test("violated lattice tile carries its evidence refs, capped with a +N more lin
     },
   }).find((candidate) => candidate.id === "lattice");
   assert.equal(tile?.status, "violated");
+  assert.equal(tile?.summary, "7 records break the trust rules");
   assert.equal(tile?.evidence?.length, 5);
   assert.deepEqual(tile?.evidence?.[0], { id: "bad-0", realm: "default" });
+  assert.equal(tile?.evidenceMore, 2);
   assert.ok(tile?.lines.some((line) => line === "+2 more violations"));
 });
 
@@ -567,9 +621,13 @@ test("a settled lattice verdict is retained (with a re-check marker) during re-r
   assert.equal(tile?.status, "holding");
   assert.equal(tile?.rechecking, true);
   assert.equal(idle?.rechecking, false);
-  // The re-check renders over the tile, so it adds no line that would grow
-  // the tile row and move the tiles below.
+  // The re-check renders over the tile, so it changes none of the tile's
+  // text: the tile row keeps its height and the tiles around it stay put.
   assert.deepEqual(tile?.lines, idle?.lines);
+  assert.equal(tile?.summary, idle?.summary);
+  // A settled tile never reads as running (the browser layout proofs wait
+  // for exactly that).
+  assert.doesNotMatch([tile?.summary, ...(tile?.lines || [])].join(" "), /running|re-checking/);
 
   const cold = computeVerdictTiles({
     ...emptyVerdictInputs,
@@ -577,7 +635,9 @@ test("a settled lattice verdict is retained (with a re-check marker) during re-r
     latticeRunning: true,
   }).find((candidate) => candidate.id === "lattice");
   assert.equal(cold?.status, "unverifiable");
-  assert.match(cold?.lines[0] || "", /page-walk running/);
+  assert.equal(cold?.summary, "Checking the records");
+  const never = computeVerdictTiles(emptyVerdictInputs).find((candidate) => candidate.id === "lattice");
+  assert.equal(never?.summary, "Not checked yet");
 });
 
 test("lattice fingerprint is stable across content-identical refreshes", () => {
@@ -629,10 +689,26 @@ test("recall and dreams tiles compute from loaded usage and dream recency", () =
   });
   const byId = new Map(tiles.map((tile) => [tile.id, tile]));
   assert.equal(byId.get("recall")?.status, "degraded");
-  assert.match(byId.get("recall")?.lines[0] || "", /1 dead weight of 2/);
+  assert.equal(byId.get("recall")?.summary, "1 of 2 records never helps");
+  assert.ok(
+    byId.get("recall")?.lines.includes("1 of 2 loaded records is never useful."),
+    JSON.stringify(byId.get("recall")?.lines),
+  );
+  // Nine injections of a 100-byte record.
+  assert.ok(
+    byId.get("recall")?.lines.includes("About 900 B spent injecting them."),
+    JSON.stringify(byId.get("recall")?.lines),
+  );
   assert.equal(byId.get("dreams")?.status, "holding");
-  assert.match(byId.get("dreams")?.lines[0] || "", /last run 2h ago/);
-  assert.match(byId.get("dreams")?.lines[1] || "", /1 quarantined/);
+  assert.equal(byId.get("dreams")?.summary, "Last run 2h ago, 1 change quarantined");
+  assert.ok(byId.get("dreams")?.lines.includes("1 change quarantined."));
+
+  const healthy = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    records: [record({ id: "fine", scope: { scope: "realm", realm: "default" } })],
+  }).find((tile) => tile.id === "recall");
+  assert.equal(healthy?.status, "holding");
+  assert.equal(healthy?.summary, "No record is injected without helping");
 });
 
 // ── Phase-1: holdings scope overview ───────────────────────────────────────
@@ -820,7 +896,7 @@ test("bug 1: clearing the filter invalidates an in-flight fetch", async () => {
   const { state, pending, pager, page } = pagerHarness();
 
   const filtered = pager.applyFilter({ status: "active" });
-  await pager.applyFilter({}); // clear — synchronous reset, bumps the sequence
+  await pager.applyFilter({}); // clear: synchronous reset, bumps the sequence
   assert.equal(state.paged, null);
 
   pending[0](page(["stale-1"], null));
@@ -878,7 +954,7 @@ test("bug 2: an unchanged blur during load-more cannot reset the appended page",
   assert.deepEqual(state.paged?.records.map((r) => r.id), ["base-1", "more-1"]);
 });
 
-test("bug 3: unfiltered load-more rows render — grouped view reads the accumulated page", () => {
+test("bug 3: unfiltered load-more rows render; the grouped view reads the accumulated page", () => {
   const base = [
     record({ id: "a1", scope: { scope: "identity", realm: "default", identity: "identity:ada" } }),
   ];
@@ -1060,17 +1136,19 @@ test("store-floor tile flips from unverifiable to a data-driven verdict", () => 
   const tileById = (tiles: ReturnType<typeof computeVerdictTiles>) =>
     new Map(tiles.map((tile) => [tile.id, tile]));
 
-  // No overview yet → the phase-1 boot state, naming the surface.
+  // No overview yet: the tile says the totals are not available.
   const booted = tileById(computeVerdictTiles(emptyVerdictInputs)).get("store-floor");
   assert.equal(booted?.status, "unverifiable");
+  assert.equal(booted?.summary, "Store totals are not available");
 
-  // Denied → no-grant, never green.
+  // Denied: no-grant, never green.
   const denied = tileById(
     computeVerdictTiles({ ...emptyVerdictInputs, overviewDenied: true }),
   ).get("store-floor");
   assert.equal(denied?.status, "no-grant");
+  assert.equal(denied?.summary, "No access to store totals");
 
-  // Calm store → holding with the OK verdict line and the floors echoed.
+  // Calm store: holding, with the limits echoed in the help.
   const calm = tileById(
     computeVerdictTiles({
       ...emptyVerdictInputs,
@@ -1081,25 +1159,49 @@ test("store-floor tile flips from unverifiable to a data-driven verdict", () => 
     }),
   ).get("store-floor");
   assert.equal(calm?.status, "holding");
-  assert.match(calm?.lines[0] || "", /^OK — no scope at floor pressure/);
-  assert.match(calm?.lines[1] || "", /4000 records \/ 32\.0MB/);
+  assert.equal(calm?.summary, "No scope is near its limit");
+  assert.ok(calm?.lines.includes("No scope is near its limit (1 scope checked)."), JSON.stringify(calm?.lines));
+  assert.ok(calm?.lines.includes("Limit per scope: 4000 records or 32.0 MB."), JSON.stringify(calm?.lines));
 
-  // Pressure → degraded, naming the pressured scopes.
-  const pressure = tileById(
+  // Pressure: degraded, naming the pressured scopes.
+  const pressuredInputs = {
+    ...emptyVerdictInputs,
+    overview: {
+      scopes: [
+        overviewScope({ scope_kind: "identity", scope_key: "router", floor_pressure: true }),
+        overviewScope({ scope_kind: "mob", scope_key: "research" }),
+      ],
+      floors: { records: 4000, bytes: 32 * 1024 * 1024 },
+    },
+  };
+  const pressure = tileById(computeVerdictTiles(pressuredInputs)).get("store-floor");
+  assert.equal(pressure?.status, "degraded");
+  assert.equal(pressure?.summary, "router is near its limit");
+  assert.ok(pressure?.lines.includes("Near the limit: router."), JSON.stringify(pressure?.lines));
+  // With the agent directory the panel names the agent the way people know it.
+  const named = tileById(
+    computeVerdictTiles({
+      ...pressuredInputs,
+      scopeName: (scope) =>
+        overviewScopeName(scope, (key) => (key === "router" ? "Release Router" : key)),
+    }),
+  ).get("store-floor");
+  assert.equal(named?.summary, "Release Router is near its limit");
+  // Two scopes at the limit read as a count.
+  const both = tileById(
     computeVerdictTiles({
       ...emptyVerdictInputs,
       overview: {
         scopes: [
           overviewScope({ scope_kind: "identity", scope_key: "router", floor_pressure: true }),
-          overviewScope({ scope_kind: "mob", scope_key: "research" }),
+          overviewScope({ scope_kind: "mob", scope_key: "research", floor_pressure: true }),
         ],
-        floors: { records: 4000, bytes: 32 * 1024 * 1024 },
       },
     }),
   ).get("store-floor");
-  assert.equal(pressure?.status, "degraded");
-  assert.match(pressure?.lines[0] || "", /^PRESSURE — 1 scope at floor/);
-  assert.match(pressure?.lines[1] || "", /router/);
+  assert.equal(both?.summary, "2 scopes are near their limit");
+  assert.ok(both?.lines.includes("Near the limit: router, Team research."), JSON.stringify(both?.lines));
+  assert.ok(both?.lines.includes("The per-scope limit is not reported."), JSON.stringify(both?.lines));
 });
 
 // ── Phase-2: injection ledger DUP annotation ───────────────────────────────
@@ -1124,7 +1226,7 @@ test("consecutive duplicate injections per identity carry the DUP flag", () => {
   // Newest-first, as panel/injections serves them.
   const annotated = annotateInjectionDups([
     ledgerEntry("ada", "rec-1", 400), // dup: ada's previous row was also rec-1
-    ledgerEntry("bob", "rec-1", 300), // NOT a dup — different identity
+    ledgerEntry("bob", "rec-1", 300), // NOT a dup: different identity
     ledgerEntry("ada", "rec-1", 200),
     ledgerEntry("ada", "rec-2", 100),
   ]);
@@ -1202,7 +1304,7 @@ test("dream run detail normalizes phases in order, non-zero verdicts, and skips"
     },
     skips: ["group g-2 failed"],
   });
-  // Phase order is the steward's execution order — never re-sorted.
+  // Phase order is the steward's execution order, never re-sorted.
   assert.deepEqual(detail.phases, [
     ["orient", "ok"],
     ["gather", "31 candidates"],
@@ -1316,7 +1418,7 @@ test("the quarantine decision is offered only for hash-bound identity quarantine
   );
 });
 
-test("quarantine decision summaries name the successor and replays", () => {
+test("quarantine decision summaries say what happened and carry the record IDs apart", () => {
   const released: MemoryQuarantineDecideResult = {
     outcome: "released",
     realm: "default",
@@ -1335,31 +1437,44 @@ test("quarantine decision summaries name the successor and replays", () => {
       },
     },
   };
-  assert.match(quarantineDecisionSummary(released), /Released as mem-q-released/);
-  assert.match(
-    quarantineDecisionSummary({ ...released, outcome: "already_released" }),
-    /Already released as mem-q-released; nothing changed/,
-  );
-  assert.match(
-    quarantineDecisionSummary({ ...released, outcome: "tombstoned", successor: null }),
-    /Tombstoned/,
-  );
-  assert.match(
+  const summaries = [];
+  const releaseNotice = quarantineDecisionSummary(released);
+  summaries.push(releaseNotice);
+  assert.match(releaseNotice.text, /^Released\. A new active record holds this memory at observed trust/);
+  // The successor's ID moved out of the sentence into its own copyable ID.
+  assert.deepEqual(releaseNotice.ids, [{ label: "New record", value: "mem-q-released" }]);
+  const replay = quarantineDecisionSummary({ ...released, outcome: "already_released" });
+  summaries.push(replay);
+  assert.equal(replay.text, "Already released earlier; nothing changed.");
+  assert.deepEqual(replay.ids, [{ label: "New record", value: "mem-q-released" }]);
+  const tombstoned = quarantineDecisionSummary({ ...released, outcome: "tombstoned", successor: null });
+  summaries.push(tombstoned);
+  assert.equal(tombstoned.text, "Tombstoned; it will never be recalled.");
+  assert.deepEqual(tombstoned.ids, []);
+  const withPromotion = (invalidated: string[]) =>
     quarantineDecisionSummary({
       ...released,
       outcome: "tombstoned",
       successor: null,
       decision: {
         ...released.decision,
-        review: { ...released.decision.review, verdict: "tombstone", invalidated_promotions: ["gate-1"] },
+        review: { ...released.decision.review, verdict: "tombstone", invalidated_promotions: invalidated },
       },
-    }),
-    /Pending promotion gate-1 invalidated; it can no longer publish/,
-  );
-  assert.match(
-    quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null }),
-    /Already tombstoned/,
-  );
+    });
+  const one = withPromotion(["gate-1"]);
+  summaries.push(one);
+  assert.match(one.text, /The promotion waiting on it was cancelled and can no longer publish/);
+  assert.deepEqual(one.ids, [{ label: "Cancelled promotion", value: "gate-1" }]);
+  const two = withPromotion(["gate-1", "gate-2"]);
+  summaries.push(two);
+  assert.match(two.text, /The 2 promotions waiting on it were cancelled/);
+  assert.deepEqual(two.ids.map((id) => id.value), ["gate-1", "gate-2"]);
+  const again = quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null });
+  summaries.push(again);
+  assert.equal(again.text, "Already tombstoned; nothing changed.");
+  for (const notice of summaries) {
+    assert.doesNotMatch(notice.text, /mem-q|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+  }
 });
 
 test("quarantine rationale is limited in UTF-8 bytes, as the server counts it", () => {
@@ -1385,47 +1500,192 @@ test("quarantine decision errors render typed refusals without echoing content",
         data: { kind: "memory_quarantine_review_refused", ...data },
       },
     });
-  assert.match(
-    quarantineDecisionErrorText(refused({ reason: "gate_pending", pending_id: "gate-1" })),
-    /gate-1 is waiting on it; decide it in the Gating inbox/,
+  const notices = [];
+  const gate = quarantineDecisionErrorText(refused({ reason: "gate_pending", pending_id: "gate-1" }));
+  notices.push(gate);
+  assert.equal(
+    gate.text,
+    "Refused: a promotion of this record is waiting for approval. Decide it in Approvals. Tombstoning the record instead cancels that promotion.",
   );
-  assert.match(
-    quarantineDecisionErrorText(
-      refused({ reason: "gate_pending", pending_id: "gate-1", expires_at_ms: 0 }),
-    ),
-    /or wait until it expires, 1970-01-01T00:00:00.000Z\)\. Tombstoning the record instead invalidates that promotion/,
+  assert.deepEqual(gate.ids, [{ label: "Waiting promotion", value: "gate-1" }]);
+  const expiring = quarantineDecisionErrorText(
+    refused({ reason: "gate_pending", pending_id: "gate-1", expires_at_ms: Date.UTC(2026, 9, 31, 12) }),
   );
+  notices.push(expiring);
   assert.match(
-    quarantineDecisionErrorText(refused({ reason: "successor_conflict", successor_id: "mem-q-released" })),
-    /already holds the release id mem-q-released; nothing was changed/,
+    expiring.text,
+    /Decide it in Approvals, or wait until it expires on .*2026.*\. Tombstoning the record instead cancels that promotion\./,
   );
-  assert.match(
-    quarantineDecisionErrorText(refused({ reason: "secret_detected", class: "aws-access-key-id" })),
-    /aws-access-key-id secret pattern; tombstone is the only exit/,
+  const conflict = quarantineDecisionErrorText(
+    refused({ reason: "successor_conflict", successor_id: "mem-q-released" }),
   );
-  assert.match(
-    quarantineDecisionErrorText(refused({ reason: "content_mismatch" })),
-    /Reload it and review again/,
+  notices.push(conflict);
+  assert.match(conflict.text, /already holds the ID this release would create; nothing was changed/);
+  assert.deepEqual(conflict.ids, [{ label: "Conflicting record", value: "mem-q-released" }]);
+  const secret = quarantineDecisionErrorText(refused({ reason: "secret_detected", class: "aws-access-key-id" }));
+  notices.push(secret);
+  assert.match(secret.text, /aws-access-key-id secret pattern; tombstone is the only exit/);
+  const mismatch = quarantineDecisionErrorText(refused({ reason: "content_mismatch" }));
+  notices.push(mismatch);
+  assert.match(mismatch.text, /Reload it and review again/);
+  const releasedAs = quarantineDecisionErrorText(
+    refused({ reason: "not_quarantined", status: "tombstoned", released_as: "mem-q-released" }),
   );
-  assert.match(
-    quarantineDecisionErrorText(
-      refused({ reason: "not_quarantined", status: "tombstoned", released_as: "mem-q-released" }),
-    ),
-    /already released as mem-q-released/,
+  notices.push(releasedAs);
+  assert.equal(releasedAs.text, "Refused: it was already released.");
+  assert.deepEqual(releasedAs.ids, [{ label: "Released as", value: "mem-q-released" }]);
+  const active = quarantineDecisionErrorText(refused({ reason: "not_quarantined", status: "active" }));
+  notices.push(active);
+  assert.match(active.text, /the record is active, not quarantined/);
+  const stale = quarantineDecisionErrorText(
+    refused({ reason: "stale_update", prior: "mem-p", prior_status: "tombstoned" }),
   );
-  assert.match(
-    quarantineDecisionErrorText(refused({ reason: "not_quarantined", status: "active" })),
-    /the record is active, not quarantined/,
+  notices.push(stale);
+  assert.match(stale.text, /the version this record replaces is tombstoned; tombstone it instead/);
+  assert.deepEqual(stale.ids, [{ label: "Replaced version", value: "mem-p" }]);
+  const denied = quarantineDecisionErrorText(
+    Object.assign(new Error("access denied: agent.memory.write"), { rpcError: { code: -32030 } }),
   );
-  assert.match(
-    quarantineDecisionErrorText(refused({ reason: "stale_update", prior: "mem-p", prior_status: "tombstoned" })),
-    /\(mem-p\) is tombstoned/,
+  notices.push(denied);
+  assert.match(denied.text, /^No grant/);
+  for (const notice of notices) {
+    assert.doesNotMatch(notice.text, /mem-q|mem-p|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+  }
+  assert.deepEqual(quarantineDecisionErrorText(new Error("network down")), { text: "network down", ids: [] });
+});
+
+// ── Display helpers: what people read ──────────────────────────────────────
+
+test("sizes, kinds, trust and status read as words", () => {
+  assert.equal(formatSize(0), "0 B");
+  assert.equal(formatSize(860), "860 B");
+  assert.equal(formatSize(2210), "2.2 KB");
+  assert.equal(formatSize(32 * 1024 * 1024), "32.0 MB");
+  assert.equal(kindLabel("open_loop"), "Open loop");
+  assert.equal(kindLabel("fact"), "Fact");
+  assert.equal(kindLabel("brand_new_kind"), "Brand new kind");
+  assert.equal(kindLabel(undefined), "Record");
+  assert.equal(trustDisplay("agent_observed"), "Observed");
+  assert.equal(trustDisplay("agent_verified"), "Verified");
+  assert.equal(trustDisplay("operator"), "Operator");
+  assert.equal(trustChipTone("agent_verified"), "ok");
+  assert.equal(trustChipTone("application"), "ok");
+  assert.equal(trustChipTone("agent_observed"), "neutral");
+  assert.equal(trustChipTone("untrusted"), "neutral");
+  // The superseding record's ID stays out of the status word; the Biography
+  // offers the newer version as a link and keeps its ID in the technical
+  // details ("Replaced by").
+  assert.equal(statusWord({ status: "superseded", by: "mem-9" }), "Superseded");
+  assert.equal(statusWord({ status: "quarantined", reason: "conflict" }), "Quarantined");
+  assert.equal(statusWord(undefined), "Unknown");
+  assert.equal(statusChipTone({ status: "active" }), "ok");
+  assert.equal(statusChipTone({ status: "quarantined" }), "warn");
+  assert.equal(statusChipTone({ status: "tombstoned" }), "neutral");
+});
+
+test("authors, evidence and injections name people, not keys", () => {
+  const names = (key: string) => (key === "identity:x" ? "Xavier" : key.replace(/^identity:/, ""));
+  assert.equal(authorDisplay({ author: "agent", identity: "identity:x" }), "x (agent)");
+  assert.equal(authorDisplay({ author: "agent", identity: "identity:x" }, names), "Xavier (agent)");
+  assert.equal(authorDisplay({ author: "agent" }), "An agent");
+  assert.equal(authorDisplay({ author: "steward", run_id: "run-1" }), "The memory steward");
+  assert.equal(authorDisplay({ author: "distiller", run_id: "run-2" }), "The memory distiller");
+  assert.equal(authorDisplay({ author: "operator" }), "An operator");
+  assert.equal(authorDisplay({ author: "application" }), "The application");
+  assert.equal(authorDisplay(undefined), "Unknown");
+
+  assert.equal(
+    evidenceDisplay({ session_id: "s", generation: 2, range: [1, 5] }, "Ada"),
+    "Conversation with Ada, messages 1-5",
   );
-  assert.match(
-    quarantineDecisionErrorText(
-      Object.assign(new Error("access denied: agent.memory.write"), { rpcError: { code: -32030 } }),
-    ),
-    /No grant/,
+  assert.equal(evidenceDisplay({ range: [3, 3] }), "Conversation, message 3");
+  assert.equal(evidenceDisplay({ revision: "r7" }), "Conversation");
+  assert.equal(evidenceDetails({ session_id: "s", generation: 2, revision: "r7" }), "generation 2 · revision r7");
+  assert.equal(evidenceDetails({}), "");
+
+  assert.equal(injectionMoment("build"), "at startup");
+  assert.equal(injectionMoment("turn"), "during a turn");
+  assert.equal(
+    utilityDisplay({
+      usage: { injected_count: 6, explicit_recall_count: 1, judged_useful_count: 0 },
+      body_bytes: 1000,
+    }),
+    "Injected 6 times · recalled 1 time · judged useful 0 times · about 5.9 KB spent",
   );
-  assert.equal(quarantineDecisionErrorText(new Error("network down")), "network down");
+  assert.equal(utilityDisplay({ usage: undefined, body_bytes: 10 }), "Never injected or recalled");
+  assert.equal(reviewVerdictLabel("dead_weight"), "Never useful");
+  assert.equal(reviewVerdictLabel("needs_correction"), "Needs correction");
+});
+
+test("scopes read as whose memory it is", () => {
+  const names = (key: string) => (key === "identity:ada" ? "Ada" : key);
+  assert.equal(scopeKindLabel("identity"), "Agent memory");
+  assert.equal(scopeKindLabel("mob"), "Team memory");
+  assert.equal(scopeKindLabel("operator"), "Operator memory");
+  assert.equal(scopeKindLabel("realm"), "Shared memory");
+  assert.equal(scopeOwnerName("identity", "identity:ada", names), "Ada");
+  assert.equal(scopeOwnerName("mob", "ops-team"), "ops-team");
+  assert.equal(scopeOwnerName("realm", ""), "Everyone");
+  assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:luka" }), "luka");
+  assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:ada" }, names), "Ada");
+  assert.equal(scopeHeading({ scope: "mob", realm: "default", mob: "ops-team" }), "Team memory · ops-team");
+  assert.equal(scopeHeading({ scope: "operator", realm: "default", operator: "op-1" }), "Operator memory · op-1");
+  assert.equal(scopeHeading({ scope: "realm", realm: "default" }), "Shared memory");
+  assert.equal(scopeKeyOf({ scope: "operator", realm: "default", operator: "op-1" }), "op-1");
+  assert.equal(scopeKeyOf({ scope: "realm", realm: "default" }), "");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "identity", scope_key: "router" })), "router");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "mob", scope_key: "research" })), "Team research");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "realm", scope_key: "" })), "Shared memory");
+  assert.equal(scopeCountsText({ active: 3, superseded: 1 }), "3 active, 1 superseded");
+  assert.equal(scopeCountsText({ active: 1, quarantined: 2, tombstoned: 1 }), "1 active, 2 quarantined, 1 tombstoned");
+  assert.equal(scopeCountsText({}), "0 active");
+  assert.equal(targetName("identity", "agent:support-triage"), "support-triage");
+  assert.equal(targetName("identity", "identity:ada", names), "Ada");
+  assert.equal(targetName("mob", "ops-team"), "ops-team (team)");
+  assert.equal(targetName("operator", "admin@example.test"), "admin@example.test (operator)");
+  assert.equal(targetName("realm", ""), "everyone");
+});
+
+test("dream runs read as whose memory they tidied and what changed", () => {
+  assert.deepEqual(
+    dreamVerdictChips([
+      ["kept", 5],
+      ["quarantined", 1],
+      ["proposals_accepted", 3],
+    ]),
+    [
+      { key: "kept", label: "5 kept", tone: "neutral" },
+      { key: "quarantined", label: "1 quarantined", tone: "warn" },
+      { key: "proposals_accepted", label: "3 proposals accepted", tone: "neutral" },
+    ],
+  );
+  assert.equal(
+    dreamOpKindsDisplay({ promote: 3, merge: 2, quarantine: 1, noop: 0 }),
+    "3 promoted, 2 merged, 1 quarantined",
+  );
+  assert.equal(dreamOpKindsDisplay({ reshuffle: 2 }), "2 reshuffle");
+  assert.equal(dreamOpKindsDisplay(undefined), "");
+  const names = (key: string) => (key === "identity:coordinator" ? "Coordinator" : "");
+  assert.equal(partitionName("identity:coordinator", names), "Coordinator");
+  assert.equal(partitionName("identity:coordinator"), "coordinator");
+  assert.equal(partitionName("mob:ops-team"), "ops-team (team)");
+  assert.equal(partitionName("operator:admin@example.test"), "admin@example.test (operator)");
+  assert.equal(partitionName("realm"), "everyone");
+  assert.equal(partitionName("custom:thing"), "custom:thing");
+  assert.equal(partitionName(undefined), "");
+});
+
+test("knowledge segments read in words while their testid keys stay raw", () => {
+  const records = [
+    record({ id: "a", scope: { scope: "identity", realm: "default", identity: "router" } }),
+    record({ id: "m", scope: { scope: "mob", realm: "default", mob: "research" } }),
+  ];
+  const [own, team, operator, shared] = knowledgeComposition(records, "router");
+  // memory-knowledge-segment:${label} keeps keying by the raw label.
+  assert.equal(own.label, "identity:router");
+  assert.equal(team.label, "mob (all mobs)");
+  assert.equal(knowledgeSegmentTitle(own, "Router"), "Router's own memory");
+  assert.equal(knowledgeSegmentTitle(team, "Router"), "Team memory");
+  assert.equal(knowledgeSegmentTitle(operator, "Router"), "Operator memory");
+  assert.equal(knowledgeSegmentTitle(shared, "Router"), "Shared memory");
 });

@@ -1,6 +1,48 @@
 import React from "react";
-import { CopyButton } from "@console-components";
 import type { ConversationTimelineEntry } from "@console-core";
+import { CopyButton } from "../../../packages/console-components/src/copy-button";
+import {
+  AgentAvatar,
+  AgentName,
+  Button,
+  Chip,
+  EmptyState,
+  KeyValueList,
+  KitGlyph,
+  ListRow,
+  LoadingState,
+  Meter,
+  Notice,
+  PanelBody,
+  PanelHeader,
+  PanelSection,
+  PanelShell,
+  PanelTabs,
+  RelativeTime,
+  RowList,
+  SearchField,
+  SectionHeader,
+  SelectField,
+  StatTile,
+  StatusDot,
+  StatusRow,
+  TechnicalDetails,
+  TechnicalId,
+  TileGrid,
+  Toolbar,
+  agentDisplayName,
+  formatAbsoluteTime,
+  formatDuration,
+  formatRelativeTime,
+  humanizeEnum,
+  joinMeta,
+  plural,
+  stripAgentKeyPrefix,
+  useAgentDirectory,
+  type PanelTab,
+  type SelectOption,
+  type Tone,
+} from "../../../packages/console-components/src/panel-kit";
 import { describeMemoryTimelineEvent } from "../lib/adapters";
 import { errorMessage, jsonRpcErrorCode } from "../lib/errors";
 import type {
@@ -24,9 +66,9 @@ import type {
   MemoryQuarantineVerdict,
   MemoryRecordScope,
   MemoryRecordStatus,
+  MemoryScopeOverview,
   MemoryTrust,
 } from "../types";
-import { PanelStatusRow } from "./PanelStatusRow";
 
 export interface MemoryRecordDetail {
   realm: string;
@@ -110,7 +152,7 @@ export interface MemoryPanelProps {
     identity: string | undefined,
     evidence: MemoryEvidenceRef,
   ) => Promise<ConversationTimelineEntry[] | null>;
-  /// Deep-link into the gating inbox — memory promotion verdicts ride the
+  /// Deep-link into the gating inbox: memory promotion verdicts ride the
   /// normal gating flow, never a parallel decision surface here.
   onOpenGating?: () => void;
   /// The operator half of quarantine review (meta/memory/quarantine/decide)
@@ -415,7 +457,7 @@ export function filtersEquivalent(a: MemoryRecordsFilter, b: MemoryRecordsFilter
 }
 
 /// Message prefix of the error the headless layer throws when
-/// meta/capabilities omits a method (`requireCapability`, headless.ts) —
+/// meta/capabilities omits a method (`requireCapability`, headless.ts),
 /// raised client-side before any RPC is issued, so no rpcError code exists.
 const CAPABILITY_MISS_PREFIX = "Meta capability missing for ";
 
@@ -425,7 +467,7 @@ const CAPABILITY_MISS_PREFIX = "Meta capability missing for ";
 /// also classifies as DENIED: under an enforced view the server intersects
 /// meta/capabilities per principal (a scoped read grant drops panel/dreams
 /// and panel/quarantine from the method list), so the miss IS denial by
-/// intersection — it must degrade that section, never abort the whole panel.
+/// intersection: it must degrade that section, never abort the whole panel.
 /// Only the server's -32601 (store not configured) renders memory-unavailable.
 export function memorySectionOutcome(error: unknown): "denied" | "unavailable" | "error" {
   const code = jsonRpcErrorCode(error);
@@ -443,7 +485,7 @@ export interface MemoryPagedState {
   records: MemoryPanelRecord[];
   nextCursor: string | null;
   /// The query behind this page (or its load-more continuation) was denied
-  /// (-32030). Renders "no grant" — a denied scope must never be
+  /// (-32030). Renders "no grant": a denied scope must never be
   /// indistinguishable from an empty store.
   denied?: boolean;
 }
@@ -453,7 +495,7 @@ export interface RecordsListView {
   /// Flat display order (mode "flat"): the accumulated page, utility-sorted
   /// when the sort mode asks for it.
   records: MemoryPanelRecord[];
-  /// Grouped display (mode "grouped") — built from the SAME accumulated
+  /// Grouped display (mode "grouped"), built from the SAME accumulated
   /// source load-more appends to, so appended rows always render.
   groups: MemoryScopeGroup[];
   cursor: string | null;
@@ -480,7 +522,7 @@ export function buildRecordsListView(args: {
 
 export interface MemoryRecordsPagerDeps {
   /// Resolves the page, or null when the query was DENIED (-32030). Other
-  /// failures must throw — the pager keeps the prior page for those (the
+  /// failures must throw: the pager keeps the prior page for those (the
   /// caller surfaces them via its own error banner).
   query: (params: Record<string, unknown>) => Promise<MemoryPanelRecordsResult | null>;
   setPaged: (paged: MemoryPagedState | null) => void;
@@ -606,7 +648,7 @@ export function recordUtility(
 }
 
 /// Utility ordering: dead weight first (most bytes wasted at the top), then
-/// ascending usefulness ratio — the rows most likely to need demotion lead.
+/// ascending usefulness ratio: the rows most likely to need demotion lead.
 export function sortRecordsByUtility(records: MemoryPanelRecord[]): MemoryPanelRecord[] {
   return [...records].sort((a, b) => {
     const ua = recordUtility(a);
@@ -774,7 +816,7 @@ export async function runLatticeWalk(
   };
 }
 
-// ── Verdict tiles (§3.1 strip / §5 widgets) ───────────────────────────────
+// ── Verdict tiles (the Holdings checks) ───────────────────────────────────
 
 export type VerdictStatus = "holding" | "degraded" | "violated" | "unverifiable" | "no-grant";
 
@@ -782,18 +824,22 @@ export interface VerdictTile {
   id: "echo-safety" | "taint-wall" | "lattice" | "recall" | "dreams" | "store-floor";
   label: string;
   status: VerdictStatus;
+  /// What the check found, in one plain sentence: the tile's visible line.
+  summary: string;
+  /// What the check covers and how far it got: the tile's help tooltip.
   lines: string[];
   /// A settled verdict whose page-walk is running again. It renders over the
-  /// tile's corner, outside the line flow.
+  /// tile's corner, outside the text flow.
   rechecking?: boolean;
   /// Tiles are doors: clicking opens the tab holding the evidence.
   targetTab: MemoryTab;
-  /// The rows that made the verdict red — each opens its Biography directly
-  /// (capped; an "+N more" line accompanies when truncated).
+  /// The rows that made the verdict red; each opens its Biography directly.
+  /// Capped at VERDICT_EVIDENCE_MAX; `evidenceMore` counts the rest.
   evidence?: LatticeViolationRef[];
+  evidenceMore?: number;
 }
 
-/// How many violating record ids render on a VIOLATED tile before "+N more".
+/// How many violating records render on a VIOLATED tile before "+N more".
 export const VERDICT_EVIDENCE_MAX = 5;
 
 const VERDICT_STATUS_LABEL: Record<VerdictStatus, string> = {
@@ -808,6 +854,21 @@ export function verdictStatusLabel(status: VerdictStatus): string {
   return VERDICT_STATUS_LABEL[status];
 }
 
+/// The tone of a verdict: holding ok, degraded warn, violated crit. A check
+/// that cannot run (unverifiable, no grant) is locked, never green.
+export function verdictTone(status: VerdictStatus): Tone {
+  switch (status) {
+    case "holding":
+      return "ok";
+    case "degraded":
+      return "warn";
+    case "violated":
+      return "crit";
+    default:
+      return "locked";
+  }
+}
+
 export interface VerdictInputs {
   records: MemoryPanelRecord[];
   recordsDenied: boolean;
@@ -816,121 +877,161 @@ export interface VerdictInputs {
   lattice: LatticeWalkResult | null;
   latticeRunning?: boolean;
   /// Store overview (panel/overview), with scopes ALREADY filtered through
-  /// visibleOverviewScopes — a denied scope's floor pressure must not leak
+  /// visibleOverviewScopes: a denied scope's floor pressure must not leak
   /// into the tile. Null while the surface has not answered.
   overview?: {
     scopes: MemoryScopeOverview[];
     floors?: { records?: number; bytes?: number };
   } | null;
   overviewDenied?: boolean;
+  /// Names a scope in the tile copy ("Support Triage", "Team ops-team").
+  /// Defaults to overviewScopeName without an agent directory.
+  scopeName?: (scope: MemoryScopeOverview) => string;
   now?: number;
 }
 
+const RECORDS_NOT_READABLE = "Your access does not include reading memory records.";
+
 export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   const now = inputs.now ?? Date.now();
+  const nameScope = inputs.scopeName ?? ((scope: MemoryScopeOverview) => overviewScopeName(scope));
   const tiles: VerdictTile[] = [];
 
-  // Phase-1 boot state (§7): echo-safety, taint wall, and store floor name
-  // the exact missing surface instead of guessing from partial data.
+  // Echo safety and the taint wall cannot be assessed from the panel's
+  // reads. They say so, and point at the related evidence, instead of
+  // guessing from partial data.
   tiles.push({
     id: "echo-safety",
-    label: "ECHO-SAFETY",
+    label: "Echo safety",
     status: "unverifiable",
-    lines: ["Automatic echo-safety assessment is not available here."],
+    summary: "Not checked automatically",
+    lines: [
+      "Echo safety: the same memory should not be injected into an agent again and again.",
+      "This console cannot check it automatically. The injection history on the Knowledge tab marks repeated injections.",
+    ],
     targetTab: "knowledge",
   });
   tiles.push({
     id: "taint-wall",
-    label: "TAINT WALL",
+    label: "Taint wall",
     status: inputs.recordsDenied ? "no-grant" : "unverifiable",
-    lines: inputs.recordsDenied
-      ? ["records not readable by this principal"]
-      : ["Automatic taint-wall assessment is not available here."],
+    summary: inputs.recordsDenied ? "No access to records" : "Not checked automatically",
+    lines: [
+      "Taint wall: memory written in an untrusted session stays quarantined.",
+      inputs.recordsDenied
+        ? RECORDS_NOT_READABLE
+        : "This console cannot check it automatically. The Pipeline tab marks proposals from tainted sessions.",
+    ],
     targetTab: "pipeline",
   });
 
+  const latticeScope =
+    "Lattice: records written by agents stay at observed trust or below, and replacement chains have no loops or gaps.";
   if (inputs.recordsDenied) {
     tiles.push({
       id: "lattice",
-      label: "LATTICE",
+      label: "Lattice",
       status: "no-grant",
-      lines: ["records not readable by this principal"],
+      summary: "No access to records",
+      lines: [latticeScope, RECORDS_NOT_READABLE],
       targetTab: "records",
     });
   } else if (!inputs.lattice) {
     tiles.push({
       id: "lattice",
-      label: "LATTICE",
+      label: "Lattice",
       status: "unverifiable",
-      lines: [inputs.latticeRunning ? "page-walk running…" : "page-walk not run"],
+      summary: inputs.latticeRunning ? "Checking the records" : "Not checked yet",
+      lines: [
+        latticeScope,
+        inputs.latticeRunning
+          ? "Checking the records now."
+          : "The check runs once the records have loaded.",
+      ],
       targetTab: "records",
     });
   } else {
-    // A settled verdict is retained while a re-check runs — the tile must
-    // not flicker to UNVERIFIABLE on every debounced live refresh. The
-    // re-check shows over the tile's corner rather than as another line, so
-    // it never grows the tile row and moves the tiles below.
+    // A settled verdict is retained while a re-check runs: the tile must not
+    // flicker to UNVERIFIABLE on every debounced live refresh. The re-check
+    // shows over the tile's corner, so the tile's text never changes and the
+    // tiles around it never move.
     const walk = inputs.lattice;
     const violations = [...walk.llmCeilingViolations, ...walk.chainViolations];
+    const count = violations.length;
+    const coverage = walk.complete ? "" : ` in the first ${walk.checked}`;
     tiles.push({
       id: "lattice",
-      label: "LATTICE",
-      status: violations.length > 0 ? "violated" : "holding",
+      label: "Lattice",
+      status: count > 0 ? "violated" : "holding",
+      summary:
+        count > 0
+          ? `${plural(count, "record")} ${count === 1 ? "breaks" : "break"} the trust rules${coverage}`
+          : `No record breaks the trust rules${coverage}`,
       lines: [
-        violations.length > 0
-          ? `${violations.length} violation${violations.length === 1 ? "" : "s"}`
-          : "0 violations",
+        latticeScope,
+        plural(count, "violation"),
         walk.complete
-          ? `checked ${walk.checked}/${walk.checked}`
-          : `checked first ${walk.checked} — partial (cap ${LATTICE_WALK_MAX_RECORDS})`,
-        "invariant (b) needs ever_quarantined (surface 2)",
-        ...(violations.length > VERDICT_EVIDENCE_MAX
-          ? [`+${violations.length - VERDICT_EVIDENCE_MAX} more violations`]
+          ? `Checked ${walk.checked} of ${plural(walk.checked, "record")}.`
+          : `Checked the first ${plural(walk.checked, "record")}; the check stops at ${LATTICE_WALK_MAX_RECORDS}.`,
+        ...(count > VERDICT_EVIDENCE_MAX
+          ? [`+${count - VERDICT_EVIDENCE_MAX} more violations`]
           : []),
       ],
       rechecking: inputs.latticeRunning === true,
       targetTab: "records",
       evidence: violations.slice(0, VERDICT_EVIDENCE_MAX),
+      evidenceMore: Math.max(0, count - VERDICT_EVIDENCE_MAX),
     });
   }
 
+  const recallScope = `Recall: a record injected at least ${DEAD_INJECTION_THRESHOLD} times without ever being judged useful counts as never useful; it only costs space.`;
   if (inputs.recordsDenied) {
     tiles.push({
       id: "recall",
-      label: "RECALL",
+      label: "Recall",
       status: "no-grant",
-      lines: ["records not readable by this principal"],
+      summary: "No access to records",
+      lines: [recallScope, RECORDS_NOT_READABLE],
       targetTab: "records",
     });
   } else {
     const dead = inputs.records.filter((record) => recordUtility(record).dead);
     const deadBytes = dead.reduce((sum, record) => sum + recordUtility(record).bytesSpent, 0);
+    const loaded = inputs.records.length;
     tiles.push({
       id: "recall",
-      label: "RECALL",
+      label: "Recall",
       status: dead.length > 0 ? "degraded" : "holding",
+      summary:
+        dead.length > 0
+          ? `${dead.length} of ${plural(loaded, "record")} never ${dead.length === 1 ? "helps" : "help"}`
+          : "No record is injected without helping",
       lines: [
-        `${dead.length} dead weight of ${inputs.records.length} loaded`,
-        `~${formatBytes(deadBytes)} spent (approx)`,
+        recallScope,
+        `${dead.length} of ${plural(loaded, "loaded record")} ${dead.length === 1 ? "is" : "are"} never useful.`,
+        ...(dead.length > 0 ? [`About ${formatSize(deadBytes)} spent injecting them.`] : []),
       ],
       targetTab: "records",
     });
   }
 
+  const dreamsScope = "Dreams: the memory steward's dream runs, which review, merge and tidy memory.";
   if (inputs.dreamsDenied) {
     tiles.push({
       id: "dreams",
-      label: "DREAMS",
+      label: "Dreams",
       status: "no-grant",
-      lines: ["dream audit not readable by this principal"],
+      summary: "No access to the dream history",
+      lines: [dreamsScope, "Your access does not include the dream history."],
       targetTab: "dreams",
     });
   } else if (inputs.dreams.length === 0) {
     tiles.push({
       id: "dreams",
-      label: "DREAMS",
+      label: "Dreams",
       status: "unverifiable",
-      lines: ["no dream runs in the durable audit yet"],
+      summary: "No dream has run yet",
+      lines: [dreamsScope, "The audit log holds no dream run yet."],
       targetTab: "dreams",
     });
   } else {
@@ -938,66 +1039,79 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
       ...inputs.dreams.map((run) => run.last_op_at_ms || run.first_op_at_ms || 0),
     );
     const quarantined = inputs.dreams.reduce((sum, run) => sum + (run.quarantined_ops || 0), 0);
+    const when = formatRelativeTime(lastOp, now);
+    const lastRun = when ? `Last run ${when}` : "Last run time unknown";
     tiles.push({
       id: "dreams",
-      label: "DREAMS",
+      label: "Dreams",
       status: "holding",
+      summary:
+        quarantined > 0 ? `${lastRun}, ${plural(quarantined, "change")} quarantined` : lastRun,
       lines: [
-        `last run ${relativeAge(lastOp, now)}`,
-        quarantined > 0 ? `⚠ ${quarantined} quarantined ops` : "0 quarantined ops",
-        "verdict sheet needs persisted DreamRun (surface 11)",
+        dreamsScope,
+        `${lastRun}.`,
+        quarantined > 0
+          ? `${plural(quarantined, "change")} quarantined.`
+          : "No change quarantined.",
       ],
       targetTab: "dreams",
     });
   }
 
+  const floorScope =
+    "Store floor: warns when a scope holds close to the per-scope limit of records or space.";
   if (inputs.overviewDenied) {
     tiles.push({
       id: "store-floor",
-      label: "STORE FLOOR",
+      label: "Store floor",
       status: "no-grant",
-      lines: ["store overview not readable by this principal"],
+      summary: "No access to store totals",
+      lines: [floorScope, "Your access does not include the store totals."],
       targetTab: "holdings",
     });
   } else if (!inputs.overview) {
     tiles.push({
       id: "store-floor",
-      label: "STORE FLOOR",
+      label: "Store floor",
       status: "unverifiable",
-      lines: ["needs meta/memory/panel/overview (surface 1)"],
+      summary: "Store totals are not available",
+      lines: [floorScope, "This runtime does not report store totals."],
       targetTab: "holdings",
     });
   } else {
     const floor = storeFloorVerdict(inputs.overview.scopes);
     const floors = inputs.overview.floors;
-    const floorLine = floors
-      ? `floors ${floors.records ?? "?"} records / ${
-          typeof floors.bytes === "number" ? formatBytes(floors.bytes) : "?"
-        } per scope`
-      : "floors unreported";
+    const limitLine = floors
+      ? `Limit per scope: ${floors.records ?? "?"} records or ${
+          typeof floors.bytes === "number" ? formatSize(floors.bytes) : "?"
+        }.`
+      : "The per-scope limit is not reported.";
+    const names = floor.pressured.map((scope) => nameScope(scope));
     tiles.push({
       id: "store-floor",
-      label: "STORE FLOOR",
+      label: "Store floor",
       status: floor.status === "ok" ? "holding" : "degraded",
+      summary:
+        floor.status === "ok"
+          ? "No scope is near its limit"
+          : names.length === 1
+            ? `${names[0]} is near its limit`
+            : `${names.length} scopes are near their limit`,
       lines:
         floor.status === "ok"
           ? [
-              `OK — no scope at floor pressure (${inputs.overview.scopes.length} scopes)`,
-              floorLine,
+              floorScope,
+              `No scope is near its limit (${plural(inputs.overview.scopes.length, "scope")} checked).`,
+              limitLine,
             ]
-          : [
-              `PRESSURE — ${floor.pressured.length} scope${
-                floor.pressured.length === 1 ? "" : "s"
-              } at floor`,
-              floor.pressured.map((scope) => overviewScopeLabel(scope)).join(" · "),
-              floorLine,
-            ],
+          : [floorScope, `Near the limit: ${names.join(", ")}.`, limitLine],
       targetTab: "holdings",
     });
   }
 
   return tiles;
 }
+
 
 // ── Holdings scope overview (client-side, from loaded rows) ───────────────
 
@@ -1148,7 +1262,7 @@ export function storeFloorVerdict(scopes: MemoryScopeOverview[]): StoreFloorVerd
 export interface AnnotatedInjection {
   entry: MemoryLedgerEntry;
   /// The same identity's immediately-previous ledger row injected the same
-  /// record — the consecutive-duplicate tripwire for the historical
+  /// record: the consecutive-duplicate tripwire for the historical
   /// ~18.5KB/turn echo defect.
   dup: boolean;
 }
@@ -1196,7 +1310,7 @@ export interface NormalizedDreamRunDetail {
   /// Non-zero verdict counters, in the steward's declaration order.
   verdicts: Array<[string, number]>;
   skips: string[];
-  /// Set when the stored detail did not parse as the expected shape — the
+  /// Set when the stored detail did not parse as the expected shape: the
   /// sheet degrades to the raw text instead of pretending it was empty.
   raw: string | null;
 }
@@ -1252,7 +1366,7 @@ export interface EvidenceExcerptLine {
 
 /// Project adapter-formatted conversation entries into excerpt lines. The
 /// message range indexes evidence against session generations, which the
-/// console timeline only approximates — the excerpt says so.
+/// console timeline only approximates; the excerpt says so.
 export function evidenceExcerptLines(
   entries: ConversationTimelineEntry[],
   range?: [number, number],
@@ -1394,63 +1508,424 @@ function quarantineRationaleProblem(rationale: string): string | null {
     : null;
 }
 
-/// One line describing what a quarantine decision did.
-function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): string {
+/// A message about a quarantine decision: a plain sentence, plus the record
+/// or promotion IDs it concerns, which render as copyable technical IDs
+/// after the sentence instead of inside it.
+export interface QuarantineNotice {
+  text: string;
+  ids: Array<{ label: string; value: string }>;
+}
+
+/// What a quarantine decision did. The panel then opens the record it left
+/// active (the release) or the decided record itself.
+function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): QuarantineNotice {
   const successor = result.successor?.memory_id;
+  const successorIds = successor ? [{ label: "New record", value: successor }] : [];
   switch (result.outcome) {
     case "released":
-      return `Released as ${successor ?? "a new record"} (agent_observed, ever-quarantined); the original is kept, tombstoned.`;
+      return {
+        text: "Released. A new active record holds this memory at observed trust, marked as once quarantined; the quarantined original is kept as tombstoned.",
+        ids: successorIds,
+      };
     case "already_released":
-      return `Already released as ${successor ?? "a new record"}; nothing changed.`;
+      return { text: "Already released earlier; nothing changed.", ids: successorIds };
     case "tombstoned": {
       const invalidated = result.decision?.review?.invalidated_promotions ?? [];
-      return invalidated.length > 0
-        ? `Tombstoned; it will never be recalled. Pending promotion ${invalidated.join(", ")} invalidated; it can no longer publish.`
-        : "Tombstoned; it will never be recalled.";
+      return {
+        text:
+          invalidated.length === 0
+            ? "Tombstoned; it will never be recalled."
+            : `Tombstoned; it will never be recalled. ${
+                invalidated.length === 1
+                  ? "The promotion waiting on it was cancelled"
+                  : `The ${invalidated.length} promotions waiting on it were cancelled`
+              } and can no longer publish.`,
+        ids: invalidated.map((id) => ({ label: "Cancelled promotion", value: id })),
+      };
     }
     case "already_tombstoned":
-      return "Already tombstoned; nothing changed.";
+      return { text: "Already tombstoned; nothing changed.", ids: [] };
     default:
-      return `Decided: ${String(result.outcome)}`;
+      return { text: `Decided: ${humanizeEnum(String(result.outcome)).toLowerCase()}.`, ids: [] };
   }
 }
 
-/// Human text for a failed quarantine decision: the typed refusal reasons
-/// of meta/memory/quarantine/decide, the access denial, or the raw error.
-function quarantineDecisionErrorText(error: unknown): string {
+/// A failed quarantine decision in words: the typed refusal reasons of
+/// meta/memory/quarantine/decide, the access denial, or the raw error.
+function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
   const rpcError = (error as { rpcError?: { code?: unknown; data?: unknown } } | null)?.rpcError;
   if (rpcError?.code === -32030) {
-    return "No grant: deciding needs memory.quarantine.review plus view, memory read and memory write (release) or delete (tombstone) on this identity.";
+    return {
+      text: "No grant. Deciding needs the quarantine review grant, plus view and memory read on this agent, and memory write to release or delete to tombstone.",
+      ids: [],
+    };
   }
   const data = (rpcError?.data ?? null) as Record<string, unknown> | null;
   if (data?.kind === "memory_quarantine_review_refused") {
     switch (data.reason) {
       case "not_found":
-        return "Refused: no such record in this identity's scope.";
+        return { text: "Refused: this record is no longer in the agent's memory.", ids: [] };
       case "content_mismatch":
-        return "Refused: the record differs from the one loaded here. Reload it and review again.";
+        return {
+          text: "Refused: the record differs from the one loaded here. Reload it and review again.",
+          ids: [],
+        };
       case "not_quarantined":
         return data.released_as
-          ? `Refused: it was already released as ${String(data.released_as)}.`
-          : `Refused: the record is ${String(data.status)}, not quarantined.`;
+          ? {
+              text: "Refused: it was already released.",
+              ids: [{ label: "Released as", value: String(data.released_as) }],
+            }
+          : { text: `Refused: the record is ${String(data.status)}, not quarantined.`, ids: [] };
       case "gate_pending": {
         const expires =
-          typeof data.expires_at_ms === "number"
-            ? ` (or wait until it expires, ${new Date(data.expires_at_ms).toISOString()})`
+          typeof data.expires_at_ms === "number" && data.expires_at_ms > 0
+            ? `, or wait until it expires on ${formatAbsoluteTime(data.expires_at_ms)}`
             : "";
-        return `Refused: gated promotion ${String(data.pending_id)} is waiting on it; decide it in the Gating inbox${expires}. Tombstoning the record instead invalidates that promotion.`;
+        return {
+          text: `Refused: a promotion of this record is waiting for approval. Decide it in Approvals${expires}. Tombstoning the record instead cancels that promotion.`,
+          ids: data.pending_id ? [{ label: "Waiting promotion", value: String(data.pending_id) }] : [],
+        };
       }
       case "successor_conflict":
-        return `Refused: another record already holds the release id ${String(data.successor_id)}; nothing was changed.`;
+        return {
+          text: "Refused: another record already holds the ID this release would create; nothing was changed.",
+          ids: data.successor_id ? [{ label: "Conflicting record", value: String(data.successor_id) }] : [],
+        };
       case "secret_detected":
-        return `Refused: the content matches the ${String(data.class)} secret pattern; tombstone is the only exit.`;
+        return {
+          text: `Refused: the content matches the ${String(data.class)} secret pattern; tombstone is the only exit.`,
+          ids: [],
+        };
       case "stale_update":
-        return `Refused: the version this update replaces (${String(data.prior)}) is ${String(data.prior_status)}; tombstone it instead.`;
+        return {
+          text: `Refused: the version this record replaces is ${String(data.prior_status)}; tombstone it instead.`,
+          ids: data.prior ? [{ label: "Replaced version", value: String(data.prior) }] : [],
+        };
       default:
         break;
     }
   }
-  return errorMessage(error);
+  return { text: errorMessage(error), ids: [] };
+}
+
+// ── Display helpers ───────────────────────────────────────────────────────
+// What people read. The data helpers above keep their exact outputs (tests
+// and pivots depend on them); these turn the same data into words.
+
+/// A key resolver: an agent key to the name people know it by.
+export type NameOf = (key: string) => string;
+
+/// A size for people: "860 B", "2.2 KB", "32.0 MB".
+export function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const KIND_LABEL: Record<string, string> = {
+  preference: "Preference",
+  fact: "Fact",
+  gotcha: "Gotcha",
+  procedure: "Procedure",
+  relationship: "Relationship",
+  open_loop: "Open loop",
+  reference: "Reference",
+};
+
+/// A record kind in words: "Fact", "Open loop".
+export function kindLabel(kind: string | undefined): string {
+  if (!kind) return "Record";
+  return KIND_LABEL[kind] ?? humanizeEnum(kind);
+}
+
+const TRUST_DISPLAY: Record<MemoryTrust, string> = {
+  untrusted: "Untrusted",
+  agent_observed: "Observed",
+  agent_verified: "Verified",
+  application: "Application",
+  operator: "Operator",
+};
+
+/// A trust level in words: "Observed", "Verified".
+export function trustDisplay(trust: MemoryTrust | undefined): string {
+  if (!trust) return "Unknown trust";
+  return TRUST_DISPLAY[trust] ?? humanizeEnum(trust);
+}
+
+/// Trust chips are green from verified up and neutral below; status chips
+/// carry the warnings.
+export function trustChipTone(trust: MemoryTrust | undefined): Tone {
+  return trustTone(trust) === "positive" ? "ok" : "neutral";
+}
+
+const STATUS_WORD: Record<MemoryRecordStatus["status"], string> = {
+  active: "Active",
+  superseded: "Superseded",
+  quarantined: "Quarantined",
+  tombstoned: "Tombstoned",
+};
+
+/// A record status in one word: "Active", "Superseded".
+export function statusWord(status: MemoryRecordStatus | undefined): string {
+  if (!status) return "Unknown";
+  return STATUS_WORD[status.status] ?? humanizeEnum(status.status);
+}
+
+export function statusChipTone(status: MemoryRecordStatus | undefined): Tone {
+  switch (status?.status) {
+    case "active":
+      return "ok";
+    case "quarantined":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
+/// Who wrote a record: "Coordinator (agent)", "The memory steward".
+export function authorDisplay(
+  author: MemoryAuthor | undefined,
+  nameOf: NameOf = stripAgentKeyPrefix,
+): string {
+  if (!author) return "Unknown";
+  switch (author.author) {
+    case "agent":
+      return author.identity ? `${nameOf(author.identity) || author.identity} (agent)` : "An agent";
+    case "steward":
+      return "The memory steward";
+    case "distiller":
+      return "The memory distiller";
+    case "operator":
+      return "An operator";
+    case "application":
+      return "The application";
+    default:
+      return "Unknown";
+  }
+}
+
+/// What kind of memory a scope holds: "Agent memory", "Team memory".
+export function scopeKindLabel(kind: string): string {
+  switch (kind) {
+    case "identity":
+      return "Agent memory";
+    case "mob":
+      return "Team memory";
+    case "operator":
+      return "Operator memory";
+    case "realm":
+      return "Shared memory";
+    default:
+      return humanizeEnum(kind) || "Memory";
+  }
+}
+
+/// The key a scope is filed under (empty for the realm-wide scope).
+export function scopeKeyOf(scope: MemoryRecordScope): string {
+  switch (scope.scope) {
+    case "identity":
+      return scope.identity;
+    case "mob":
+      return scope.mob;
+    case "operator":
+      return scope.operator;
+    case "realm":
+      return "";
+  }
+}
+
+/// The owner of a scope by name: the agent's display name, the team or
+/// operator key as given (capitals are never invented), "Everyone".
+export function scopeOwnerName(kind: string, key: string, nameOf: NameOf = stripAgentKeyPrefix): string {
+  switch (kind) {
+    case "identity":
+      return nameOf(key) || key;
+    case "realm":
+      return "Everyone";
+    default:
+      return key || humanizeEnum(kind);
+  }
+}
+
+/// A records group heading: the agent's name, or the kind of memory and
+/// its key ("Team memory · ops-team").
+export function scopeHeading(scope: MemoryRecordScope, nameOf: NameOf = stripAgentKeyPrefix): string {
+  switch (scope.scope) {
+    case "identity":
+      return nameOf(scope.identity) || scope.identity;
+    case "realm":
+      return "Shared memory";
+    default:
+      return joinMeta(scopeKindLabel(scope.scope), scopeKeyOf(scope));
+  }
+}
+
+/// A store-totals scope named in a sentence: "Support Triage",
+/// "Team ops-team", "Shared memory".
+export function overviewScopeName(scope: MemoryScopeOverview, nameOf: NameOf = stripAgentKeyPrefix): string {
+  switch (scope.scope_kind) {
+    case "identity":
+      return nameOf(scope.scope_key) || scope.scope_key;
+    case "mob":
+      return `Team ${scope.scope_key}`;
+    case "operator":
+      return `Operator ${scope.scope_key}`;
+    case "realm":
+      return "Shared memory";
+    default:
+      return [scope.scope_kind, scope.scope_key].filter(Boolean).join(" ");
+  }
+}
+
+/// A scope's record counts in words: "3 active, 1 superseded".
+export function scopeCountsText(counts: {
+  active?: number;
+  quarantined?: number;
+  superseded?: number;
+  tombstoned?: number;
+}): string {
+  const parts = [`${counts.active ?? 0} active`];
+  if ((counts.quarantined ?? 0) > 0) parts.push(`${counts.quarantined} quarantined`);
+  if ((counts.superseded ?? 0) > 0) parts.push(`${counts.superseded} superseded`);
+  if ((counts.tombstoned ?? 0) > 0) parts.push(`${counts.tombstoned} tombstoned`);
+  return parts.join(", ");
+}
+
+/// Where a proposal or promotion goes: an agent by name, "ops-team (team)",
+/// "everyone".
+export function targetName(kind: string, key: string, nameOf: NameOf = stripAgentKeyPrefix): string {
+  switch (kind) {
+    case "identity":
+      return nameOf(key) || key;
+    case "mob":
+      return `${key} (team)`;
+    case "operator":
+      return `${key} (operator)`;
+    case "realm":
+      return "everyone";
+    default:
+      return [kind, key].filter(Boolean).join(" ");
+  }
+}
+
+/// An evidence reference as a sentence: "Conversation with Coordinator,
+/// messages 12-18". The session, generation and revision stay technical.
+export function evidenceDisplay(evidence: MemoryEvidenceRef, who?: string): string {
+  const base = who ? `Conversation with ${who}` : "Conversation";
+  if (evidence.range && evidence.range.length === 2) {
+    const [start, end] = evidence.range;
+    return start === end ? `${base}, message ${start}` : `${base}, messages ${start}-${end}`;
+  }
+  return base;
+}
+
+/// The technical half of an evidence reference: "generation 4".
+export function evidenceDetails(evidence: MemoryEvidenceRef): string {
+  return joinMeta(
+    typeof evidence.generation === "number" ? `generation ${evidence.generation}` : null,
+    evidence.revision ? `revision ${evidence.revision}` : null,
+  );
+}
+
+/// When a record was injected: a build-surface injection happens as the
+/// agent starts, a turn-surface one during a turn.
+export function injectionMoment(surface: string | undefined): string {
+  return surface === "build" ? "at startup" : "during a turn";
+}
+
+/// A record's usefulness in words, for the least-useful-first list.
+export function utilityDisplay(record: Pick<MemoryPanelRecord, "usage" | "body_bytes">): string {
+  const utility = recordUtility(record);
+  if (utility.injected === 0 && utility.recalled === 0) return "Never injected or recalled";
+  return joinMeta(
+    `Injected ${plural(utility.injected, "time")}`,
+    `recalled ${plural(utility.recalled, "time")}`,
+    `judged useful ${plural(utility.useful, "time")}`,
+    utility.bytesSpent > 0 ? `about ${formatSize(utility.bytesSpent)} spent` : null,
+  );
+}
+
+const REVIEW_VERDICT_LABEL: Record<string, string> = {
+  dead_weight: "Never useful",
+};
+
+/// A usage-audit verdict in words: dead_weight reads "Never useful".
+export function reviewVerdictLabel(verdict: string): string {
+  return REVIEW_VERDICT_LABEL[verdict] ?? humanizeEnum(verdict);
+}
+
+/// A dream run's non-zero verdict counters as chips: "5 kept", "1
+/// quarantined". Counters about quarantine, blocks or dead weight warn.
+export function dreamVerdictChips(
+  verdicts: Array<[string, number]>,
+): Array<{ key: string; label: string; tone: Tone }> {
+  return verdicts.map(([name, count]) => ({
+    key: name,
+    label: `${count} ${humanizeEnum(name).toLowerCase()}`,
+    tone: /quarantin|blocked|dead|reject/.test(name) ? "warn" : "neutral",
+  }));
+}
+
+const OP_KIND_DONE: Record<string, string> = {
+  create: "created",
+  promote: "promoted",
+  merge: "merged",
+  quarantine: "quarantined",
+  supersede: "superseded",
+  tombstone: "tombstoned",
+  update: "updated",
+  release: "released",
+};
+
+/// A dream run's changes by kind, most first: "3 promoted, 2 merged".
+export function dreamOpKindsDisplay(opKinds: Record<string, number> | undefined): string {
+  if (!opKinds) return "";
+  return Object.entries(opKinds)
+    .filter(([, count]) => typeof count === "number" && count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([kind, count]) => `${count} ${OP_KIND_DONE[kind] ?? humanizeEnum(kind).toLowerCase()}`)
+    .join(", ");
+}
+
+/// Whose memory a dream ran over, from its partition key
+/// ("identity:coordinator" reads "Coordinator").
+export function partitionName(partition: string | undefined, nameOf: NameOf = stripAgentKeyPrefix): string {
+  if (!partition) return "";
+  const separator = partition.indexOf(":");
+  const kind = separator > 0 ? partition.slice(0, separator) : partition;
+  const key = separator > 0 ? partition.slice(separator + 1) : "";
+  if (kind === "realm") return "everyone";
+  if (!key) return partition;
+  switch (kind) {
+    case "identity":
+    case "agent":
+    case "member":
+      return nameOf(partition) || key;
+    case "mob":
+      return `${key} (team)`;
+    case "operator":
+      return `${key} (operator)`;
+    default:
+      return partition;
+  }
+}
+
+/// A knowledge-lens segment in words, for the selected agent.
+export function knowledgeSegmentTitle(segment: KnowledgeSegment, agentName: string): string {
+  switch (segment.filter.scope) {
+    case "identity":
+      return `${agentName}'s own memory`;
+    case "mob":
+      return "Team memory";
+    case "operator":
+      return "Operator memory";
+    case "realm":
+      return "Shared memory";
+    default:
+      return segment.label;
+  }
 }
 
 export const __memoryTest = {
@@ -1512,29 +1987,146 @@ export const __memoryTest = {
   quarantineRationaleProblem,
   quarantineDecisionSummary,
   quarantineDecisionErrorText,
+  // Display helpers
+  verdictTone,
+  formatSize,
+  kindLabel,
+  trustDisplay,
+  trustChipTone,
+  statusWord,
+  statusChipTone,
+  authorDisplay,
+  scopeKindLabel,
+  scopeKeyOf,
+  scopeOwnerName,
+  scopeHeading,
+  overviewScopeName,
+  scopeCountsText,
+  targetName,
+  evidenceDisplay,
+  evidenceDetails,
+  injectionMoment,
+  utilityDisplay,
+  reviewVerdictLabel,
+  dreamVerdictChips,
+  dreamOpKindsDisplay,
+  partitionName,
+  knowledgeSegmentTitle,
 };
 
-// ── Presentational sub-components ─────────────────────────────────────────
+// ── Presentational pieces ─────────────────────────────────────────────────
 
-function Chip({ label, tone }: { label: string; tone?: string }): React.JSX.Element {
+/// Display names for agent keys, from the directory the console provides.
+function useNameOf(): NameOf {
+  const directory = useAgentDirectory();
+  return React.useCallback((key: string) => agentDisplayName(key, directory), [directory]);
+}
+
+/// Parts of a meta line joined with the middle dot, skipping empty ones.
+function MetaLine({ parts }: { parts: React.ReactNode[] }): React.JSX.Element {
+  const shown = parts.filter(
+    (part) => part !== null && part !== undefined && part !== false && part !== "",
+  );
   return (
-    <span className="chip memory-chip" data-tone={tone || "neutral"}>
-      {label}
+    <>
+      {shown.map((part, index) => (
+        <React.Fragment key={index}>
+          {index > 0 ? " · " : null}
+          {part}
+        </React.Fragment>
+      ))}
+    </>
+  );
+}
+
+/// Where a proposal or promotion goes, with the agent's name when it is
+/// an agent's memory.
+function ScopeTarget({ kind, scopeKey }: { kind: string; scopeKey: string }): React.JSX.Element {
+  if (kind === "identity") return <AgentName id={scopeKey} />;
+  return <>{targetName(kind, scopeKey)}</>;
+}
+
+/// The facts line under a record title: its kind in words, then the trust
+/// and status chips. Rows leave out "Active", the default.
+function RecordFacts({
+  record,
+  showActive = false,
+  hideStatus = false,
+  onOpenNewer,
+}: {
+  record: Pick<MemoryPanelRecord, "kind" | "trust" | "status">;
+  showActive?: boolean;
+  hideStatus?: boolean;
+  onOpenNewer?: () => void;
+}): React.JSX.Element {
+  const status = record.status?.status;
+  return (
+    <span className="memory-facts">
+      <span className="memory-facts__kind">{kindLabel(record.kind)}</span>
+      <Chip tone={trustChipTone(record.trust)}>{trustDisplay(record.trust)}</Chip>
+      {status && !hideStatus && (showActive || status !== "active") ? (
+        <Chip tone={statusChipTone(record.status)}>{statusWord(record.status)}</Chip>
+      ) : null}
+      {status === "superseded" && !hideStatus ? (
+        onOpenNewer ? (
+          <button type="button" className="memory-link" onClick={onOpenNewer}>
+            Open the newer version
+          </button>
+        ) : (
+          <span className="memory-facts__note">replaced by a newer version</span>
+        )
+      ) : null}
     </span>
   );
 }
 
-function SectionNote({
-  children,
-  testid,
+/// A record named by its title (looked up in the loaded records) that opens
+/// its Biography. A record that is not loaded shows its ID, middle-truncated.
+function RecordLink({
+  id,
+  realm,
+  titles,
+  testId,
+  className,
+  onOpen,
 }: {
-  children: React.ReactNode;
-  testid?: string;
+  id: string;
+  realm: string | undefined;
+  titles: ReadonlyMap<string, string>;
+  testId?: string;
+  className?: string;
+  onOpen: (realm: string | undefined, memoryId: string) => void;
 }): React.JSX.Element {
+  const title = titles.get(id);
   return (
-    <div className="memory-note" data-testid={testid}>
-      {children}
-    </div>
+    <button
+      type="button"
+      className={className ? `memory-link ${className}` : "memory-link"}
+      data-testid={testId}
+      title={title ? id : undefined}
+      onClick={() => onOpen(realm, id)}
+    >
+      {title ?? <TechnicalId value={id} copy={false} />}
+    </button>
+  );
+}
+
+/// A quarantine message: the sentence, then the IDs it concerns.
+function QuarantineNoticeText({ notice }: { notice: QuarantineNotice }): React.JSX.Element {
+  return (
+    <>
+      {notice.text}
+      {notice.ids.length > 0 ? (
+        <span className="memory-notice-ids">
+          {notice.ids.map((id) => (
+            <span className="memory-notice-ids__item" key={`${id.label}:${id.value}`}>
+              <span className="memory-notice-ids__label">{id.label}</span>
+              <TechnicalId value={id.value} label={id.label} />
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </>
   );
 }
 
@@ -1548,32 +2140,40 @@ function RecordRow({
   onSelect: () => void;
 }): React.JSX.Element {
   const utility = utilityMode ? recordUtility(record) : null;
+  const reason = record.status?.status === "quarantined" ? record.status.reason : undefined;
   return (
-    <button
-      type="button"
-      className="memory-row"
-      data-testid={`memory-record:${record.id}`}
-      onClick={onSelect}
+    <ListRow
+      className="memory-record-row"
+      testId={`memory-record:${record.id}`}
+      onActivate={onSelect}
+      title={record.title || "Untitled record"}
+      titleAttr={record.title || undefined}
+      subtitle={<RecordFacts record={record} />}
+      meta={
+        <>
+          {utility?.dead ? <Chip tone="warn">Never useful</Chip> : null}
+          <RelativeTime value={record.updated_at_ms} />
+        </>
+      }
     >
-      <span className="memory-row__title">{record.title || record.id}</span>
-      <span className="memory-row__meta">
-        <Chip label={record.kind} />
-        <Chip label={trustLabel(record.trust)} tone={trustTone(record.trust)} />
-        <Chip label={statusLabel(record.status)} tone={statusTone(record.status)} />
-        {utility?.dead ? <Chip label="DEAD" tone="warning" /> : null}
-        <span className="memory-row__age">{relativeAge(record.updated_at_ms)}</span>
-      </span>
-      {utility ? (
-        <span className="memory-row__meta memory-row__utility">{utilityLine(record)}</span>
+      {reason || utility ? (
+        <>
+          {reason ? (
+            <span className="memory-row-note" title={reason}>
+              {reason}
+            </span>
+          ) : null}
+          {utility ? <span className="memory-row-note">{utilityDisplay(record)}</span> : null}
+        </>
       ) : null}
-    </button>
+    </ListRow>
   );
 }
 
 interface EvidenceState {
   key: string;
   /// "not-found": the session did not appear in the recent timeline window
-  /// (it may merely be older than the window — never claim it is gone).
+  /// (it may merely be older than the window; never claim it is gone).
   /// "empty-range": the session was found but the evidence range holds no
   /// renderable message entries.
   status: "loading" | "loaded" | "not-found" | "empty-range";
@@ -1588,20 +2188,26 @@ function evidenceKey(evidence: MemoryEvidenceRef, index: number): string {
 /// provenance above it are what the reviewer decides on; the request binds
 /// the record's content hash so a changed record is refused, not decided.
 function QuarantineDecisionBlock({
-  realm,
   record,
   onDecide,
 }: {
-  realm: string;
   record: MemoryFullRecord;
   onDecide: (verdict: MemoryQuarantineVerdict, rationale: string | undefined) => Promise<void>;
 }): React.JSX.Element {
+  const nameOf = useNameOf();
+  const rationaleId = React.useId();
   const [rationale, setRationale] = React.useState("");
   const [pending, setPending] = React.useState<MemoryQuarantineVerdict | null>(null);
-  const [failure, setFailure] = React.useState<string | null>(null);
+  const [failure, setFailure] = React.useState<QuarantineNotice | null>(null);
   const rationaleProblem = quarantineRationaleProblem(rationale);
   const blocked = pending !== null || rationaleProblem !== null;
-  const notice = rationaleProblem ?? failure;
+  const notice: QuarantineNotice | null = rationaleProblem
+    ? { text: rationaleProblem, ids: [] }
+    : failure;
+  const owner =
+    record.scope.scope === "identity"
+      ? `${nameOf(record.scope.identity) || record.scope.identity}'s memory`
+      : "this memory";
   async function decide(verdict: MemoryQuarantineVerdict): Promise<void> {
     if (rationaleProblem !== null) return;
     setPending(verdict);
@@ -1615,48 +2221,50 @@ function QuarantineDecisionBlock({
     }
   }
   return (
-    <div className="memory-detail__section" data-testid="memory-quarantine-decide">
-      <span className="memory-detail__label">Review</span>
-      <div className="memory-detail__line">
-        Release makes this an active agent_observed record of{" "}
-        {record.scope.scope === "identity" ? record.scope.identity : "this scope"} (realm {realm});
-        it stays capped below verified trust because it was quarantined. Tombstone discards it.
-      </div>
-      <input
-        className="cc-input memory-quarantine__rationale"
-        aria-label="Rationale"
-        data-testid="memory-quarantine-rationale"
-        placeholder="Rationale (optional, recorded in the audit)"
-        value={rationale}
-        disabled={pending !== null}
-        onChange={(event) => setRationale(event.target.value)}
-      />
-      <div className="memory-detail__line">
-        <button
-          type="button"
-          className="memory-back"
-          data-testid="memory-quarantine-release"
-          disabled={blocked}
-          onClick={() => void decide("release")}
-        >
-          {pending === "release" ? "Releasing…" : "Release"}
-        </button>{" "}
-        <button
-          type="button"
-          className="memory-back"
-          data-testid="memory-quarantine-tombstone"
-          disabled={blocked}
-          onClick={() => void decide("tombstone")}
-        >
-          {pending === "tombstone" ? "Tombstoning…" : "Tombstone"}
-        </button>
-      </div>
-      {notice ? (
-        <div className="memory-detail__line" data-testid="memory-quarantine-error">
-          {notice}
+    <section className="memory-detail__section memory-review" data-testid="memory-quarantine-decide">
+      <SectionHeader as="h4" label="Review" />
+      <div className="memory-detail__content memory-review__body">
+        <Notice tone="warn">
+          Release makes this an active record in {owner} at observed trust. Because it was
+          quarantined, it can never reach verified trust. Tombstone discards it for good.
+        </Notice>
+        <label className="memory-review__label" htmlFor={rationaleId}>
+          Rationale, optional and kept in the audit log
+        </label>
+        <input
+          id={rationaleId}
+          className="cc-input memory-quarantine__rationale"
+          aria-label="Rationale"
+          data-testid="memory-quarantine-rationale"
+          placeholder="Why you release or tombstone it"
+          value={rationale}
+          disabled={pending !== null}
+          onChange={(event) => setRationale(event.target.value)}
+        />
+        <div className="cc-btn-row">
+          <Button
+            data-testid="memory-quarantine-release"
+            disabled={blocked}
+            onClick={() => void decide("release")}
+          >
+            {pending === "release" ? "Releasing…" : "Release"}
+          </Button>
+          <Button
+            variant="danger"
+            data-testid="memory-quarantine-tombstone"
+            disabled={blocked}
+            onClick={() => void decide("tombstone")}
+          >
+            {pending === "tombstone" ? "Tombstoning…" : "Tombstone"}
+          </Button>
         </div>
-      ) : null}
-    </div>
+        {notice ? (
+          <Notice tone="crit" testId="memory-quarantine-error">
+            <QuarantineNoticeText notice={notice} />
+          </Notice>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -1679,10 +2287,12 @@ function BiographyView({
     verdict: MemoryQuarantineVerdict,
     rationale: string | undefined,
   ) => Promise<void>;
-  decisionNotice?: string | null;
+  decisionNotice?: QuarantineNotice | null;
 }): React.JSX.Element {
+  const nameOf = useNameOf();
   const { record, chain, injections } = detail;
   const provenance = record.provenance;
+  const author = provenance?.author;
   const evidence = provenance?.evidence || [];
   const verification = provenance?.verification;
   const usage = record.usage;
@@ -1696,9 +2306,14 @@ function BiographyView({
   const recordIdentity =
     record.scope.scope === "identity"
       ? record.scope.identity
-      : provenance?.author?.author === "agent"
-        ? provenance.author.identity
+      : author?.author === "agent"
+        ? author.identity
         : undefined;
+  const conversationWith = recordIdentity ? nameOf(recordIdentity) || recordIdentity : undefined;
+  const supersededBy = record.status?.status === "superseded" ? record.status.by : undefined;
+  const authorRun =
+    author && (author.author === "steward" || author.author === "distiller") ? author.run_id : undefined;
+  const scopeKey = scopeKeyOf(record.scope);
 
   async function openEvidence(ref: MemoryEvidenceRef, index: number): Promise<void> {
     if (!onLoadEvidence) return;
@@ -1710,24 +2325,23 @@ function BiographyView({
     const lines = entries ? evidenceExcerptLines(entries, ref.range) : [];
     setEvidenceState({
       key,
-      status:
-        entries === null ? "not-found" : lines.length > 0 ? "loaded" : "empty-range",
+      status: entries === null ? "not-found" : lines.length > 0 ? "loaded" : "empty-range",
       lines,
     });
   }
 
   return (
-    <div className="memory-detail" data-testid="memory-detail">
-      <div className="memory-detail__head">
-        <button type="button" className="memory-back" onClick={onBack} data-testid="memory-detail-back">
-          ← Back
-        </button>
-        <h3>{record.title || record.id}</h3>
-        <span className="memory-detail__chips">
-          <Chip label={record.kind} />
-          <Chip label={trustLabel(record.trust)} tone={trustTone(record.trust)} />
-          <Chip label={statusLabel(record.status)} tone={statusTone(record.status)} />
-        </span>
+    <article className="memory-detail" data-testid="memory-detail">
+      <div className="memory-detail__bar">
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<span className="memory-back-mark" />}
+          data-testid="memory-detail-back"
+          onClick={onBack}
+        >
+          All records
+        </Button>
         <CopyButton
           text={JSON.stringify(record, null, 2)}
           label="Copy record JSON"
@@ -1735,220 +2349,745 @@ function BiographyView({
         />
       </div>
 
+      <header className="memory-detail__head">
+        <h3 className="memory-detail__title">{record.title || "Untitled record"}</h3>
+        <div className="memory-detail__facts">
+          <RecordFacts
+            record={record}
+            showActive
+            onOpenNewer={
+              supersededBy ? () => onSelectRecord(realmOfRecord(record), supersededBy) : undefined
+            }
+          />
+          <span className="memory-detail__owner">
+            {record.scope.scope === "identity" ? (
+              <>
+                <AgentName id={record.scope.identity} />
+                {"'s memory"}
+              </>
+            ) : (
+              scopeHeading(record.scope, nameOf)
+            )}
+            {record.updated_at_ms ? (
+              <>
+                {", updated "}
+                <RelativeTime value={record.updated_at_ms} />
+              </>
+            ) : null}
+          </span>
+        </div>
+      </header>
+
       {record.description ? (
         <p className="memory-detail__description">{record.description}</p>
       ) : null}
 
-      <pre className="memory-detail__body" data-testid="memory-detail-body">{record.body}</pre>
+      <div className="memory-detail__body" data-testid="memory-detail-body">
+        {record.body}
+      </div>
 
       {decisionNotice ? (
-        <div className="memory-note" data-testid="memory-quarantine-outcome">
-          {decisionNotice}
-        </div>
+        <Notice tone="ok" testId="memory-quarantine-outcome" className="memory-detail__notice">
+          <QuarantineNoticeText notice={decisionNotice} />
+        </Notice>
       ) : null}
 
       {onDecideQuarantine && canDecideQuarantinedRecord(record) ? (
         <QuarantineDecisionBlock
           key={record.id}
-          realm={detail.realm}
           record={record}
           onDecide={(verdict, rationale) => onDecideQuarantine(record, verdict, rationale)}
         />
       ) : null}
 
       {record.tags && record.tags.length > 0 ? (
-        <div className="memory-detail__tags">
+        <div className="cc-chips memory-detail__tags">
           {record.tags.map((tag) => (
-            <Chip key={tag} label={tag} tone="muted" />
+            <Chip key={tag}>{tag}</Chip>
           ))}
         </div>
       ) : null}
 
-      <div className="memory-detail__section" data-testid="memory-detail-born">
-        <span className="memory-detail__label">Born</span>
-        <div className="memory-detail__line">{authorLine(provenance?.author)}</div>
-        {evidence.length > 0 ? (
-          <div className="memory-evidence">
-            {evidence.map((ref, index) => (
-              <button
-                type="button"
-                className="memory-evidence__ref"
-                key={`ev-${index}`}
-                data-testid={`memory-evidence:${index}`}
-                onClick={() => void openEvidence(ref, index)}
-                disabled={!onLoadEvidence}
-                title={onLoadEvidence ? "Open transcript window" : undefined}
-              >
-                {evidenceLabel(ref)}
-              </button>
-            ))}
-          </div>
-        ) : null}
-        {evidenceState ? (
-          evidenceState.status === "loading" ? (
-            <div className="memory-detail__line">Loading transcript…</div>
-          ) : evidenceState.status === "not-found" ? (
-            <div className="memory-detail__line" data-testid="memory-evidence-degraded">
-              Session not found in the recent timeline window — evidence reference retained
-              as label only.
-            </div>
-          ) : evidenceState.status === "empty-range" ? (
-            <div className="memory-detail__line" data-testid="memory-evidence-empty">
-              Session found, but no message entries in the evidence range — the window is
-              approximate against the console timeline.
-            </div>
-          ) : (
-            <div className="memory-excerpt" data-testid="memory-evidence-excerpt">
-              <div className="memory-detail__line memory-excerpt__note">
-                Approximate window against the console timeline (evidence indexes a session
-                generation).
+      <section className="memory-detail__section" data-testid="memory-detail-born">
+        <SectionHeader as="h4" label="Where it came from" />
+        <div className="memory-detail__content">
+          <KeyValueList
+            items={[
+              {
+                key: "author",
+                label: "Written by",
+                value:
+                  author?.author === "agent" && author.identity ? (
+                    <>
+                      <AgentName id={author.identity} />
+                      {" (agent)"}
+                    </>
+                  ) : (
+                    authorDisplay(author, nameOf)
+                  ),
+              },
+              evidence.length > 0
+                ? {
+                    key: "evidence",
+                    label: "Evidence",
+                    value: (
+                      <span className="memory-evidence">
+                        {evidence.map((ref, index) => {
+                          const details = evidenceDetails(ref);
+                          return (
+                            <button
+                              type="button"
+                              className="memory-evidence__ref"
+                              key={`ev-${index}`}
+                              data-testid={`memory-evidence:${index}`}
+                              onClick={() => void openEvidence(ref, index)}
+                              disabled={!onLoadEvidence}
+                              title={onLoadEvidence ? "Open the conversation" : undefined}
+                            >
+                              <span className="memory-evidence__label">
+                                {evidenceDisplay(ref, conversationWith)}
+                              </span>
+                              {ref.session_id || details ? (
+                                <span className="memory-evidence__meta">
+                                  {ref.session_id ? (
+                                    <TechnicalId value={ref.session_id} copy={false} />
+                                  ) : null}
+                                  {ref.session_id && details ? " · " : null}
+                                  {details}
+                                </span>
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </span>
+                    ),
+                  }
+                : null,
+              verification?.checked
+                ? { key: "verified", label: "Verified", value: verification.checked }
+                : null,
+            ]}
+          />
+          {evidenceState ? (
+            evidenceState.status === "loading" ? (
+              <p className="memory-caption" role="status">
+                Loading the conversation…
+              </p>
+            ) : evidenceState.status === "not-found" ? (
+              <Notice testId="memory-evidence-degraded">
+                This conversation was not found in the recent timeline window. It may be older
+                than the window; only its reference is kept here.
+              </Notice>
+            ) : evidenceState.status === "empty-range" ? (
+              <Notice testId="memory-evidence-empty">
+                The conversation was found, but it has no messages in this range. Ranges are
+                matched to the console timeline approximately.
+              </Notice>
+            ) : (
+              <div className="memory-excerpt" data-testid="memory-evidence-excerpt">
+                <p className="memory-excerpt__note">
+                  Matched to the console timeline approximately.
+                </p>
+                {evidenceState.lines.map((line) => (
+                  <div className="memory-excerpt__line" key={line.id}>
+                    <span className="memory-excerpt__speaker">{line.speaker}</span>
+                    <span className="memory-excerpt__text">{line.text}</span>
+                  </div>
+                ))}
               </div>
-              {evidenceState.lines.map((line) => (
-                <div className="memory-excerpt__line" key={line.id}>
-                  <span className="memory-excerpt__speaker">{line.speaker}</span>
-                  <span className="memory-excerpt__text">{line.text}</span>
-                </div>
-              ))}
-            </div>
-          )
-        ) : null}
-        {verification?.checked ? (
-          <div className="memory-detail__line memory-detail__verification">
-            verified: {verification.checked}
-          </div>
-        ) : null}
-      </div>
+            )
+          ) : null}
+        </div>
+      </section>
 
       {lane.length > 0 ? (
-        <div className="memory-detail__section" data-testid="memory-detail-lineage">
-          <span className="memory-detail__label">Lineage</span>
-          <div className="memory-chain">
+        <section className="memory-detail__section" data-testid="memory-detail-lineage">
+          <SectionHeader as="h4" label="History" count={lane.length} />
+          <RowList className="memory-chain">
             {lane.map(({ record: entry, current }) => (
-              <button
-                type="button"
-                className="memory-chain__row"
+              <ListRow
                 key={entry.id}
-                data-current={current ? "true" : undefined}
-                data-dimmed={current ? undefined : "true"}
-                data-testid={`memory-chain:${entry.id}`}
-                onClick={() => {
+                className="memory-chain__row"
+                dense
+                selected={current}
+                testId={`memory-chain:${entry.id}`}
+                dataAttributes={{
+                  "data-current": current ? "true" : undefined,
+                  "data-dimmed": current ? undefined : "true",
+                }}
+                onActivate={() => {
                   if (!current) onSelectRecord(realmOfRecord(entry), entry.id);
                 }}
-              >
-                <span className="memory-chain__marker">{current ? "●" : "○"}</span>
-                <span className="memory-chain__title">{entry.title || entry.id}</span>
-                <Chip label={trustLabel(entry.trust)} tone={trustTone(entry.trust)} />
-                <Chip label={statusLabel(entry.status)} tone={statusTone(entry.status)} />
-              </button>
+                lead={<span className="memory-chain__marker" aria-hidden="true" />}
+                title={entry.title || "Untitled record"}
+                titleAttr={entry.title || undefined}
+                meta={
+                  <>
+                    <Chip tone={trustChipTone(entry.trust)}>{trustDisplay(entry.trust)}</Chip>
+                    <Chip tone={statusChipTone(entry.status)}>{statusWord(entry.status)}</Chip>
+                    {current ? (
+                      <span className="memory-chain__current">Current</span>
+                    ) : (
+                      <RelativeTime value={entry.updated_at_ms} />
+                    )}
+                  </>
+                }
+              />
             ))}
-          </div>
-        </div>
+          </RowList>
+        </section>
       ) : null}
 
-      <div className="memory-detail__section" data-testid="memory-detail-life">
-        <span className="memory-detail__label">Life</span>
-        {usage ? (
-          <div className="memory-detail__line">
-            injected {usage.injected_count ?? 0} · recalled {usage.explicit_recall_count ?? 0} ·
-            judged useful {usage.judged_useful_count ?? 0}
-            {usage.last_injected_at_ms
-              ? ` · last injected ${relativeAge(usage.last_injected_at_ms)}`
-              : ""}
-          </div>
-        ) : (
-          <div className="memory-detail__line">no usage recorded</div>
-        )}
+      <section className="memory-detail__section" data-testid="memory-detail-life">
+        <SectionHeader as="h4" label="Usage" />
+        <p className="memory-usage">
+          {usage ? (
+            <>
+              injected {usage.injected_count ?? 0} · recalled {usage.explicit_recall_count ?? 0} ·
+              judged useful {usage.judged_useful_count ?? 0}
+              {usage.last_injected_at_ms ? (
+                <>
+                  {" · last injected "}
+                  <RelativeTime value={usage.last_injected_at_ms} />
+                </>
+              ) : null}
+            </>
+          ) : (
+            "No usage recorded yet."
+          )}
+        </p>
         {injections.length > 0 ? (
-          injections.map((injection, index) => (
-            <div className="memory-detail__line" key={`inj-${index}`}>
-              {injectionLine(injection)}
-            </div>
-          ))
+          <RowList className="memory-detail__rows">
+            {injections.map((injection, index) => (
+              <ListRow
+                key={`inj-${index}`}
+                dense
+                title={
+                  <>
+                    {"Given to "}
+                    <AgentName id={injection.identity} />
+                    {` ${injectionMoment(injection.surface)}`}
+                  </>
+                }
+                titleAttr={injection.session_key ? `Session ${injection.session_key}` : undefined}
+                meta={<RelativeTime value={injection.at_ms} />}
+              />
+            ))}
+          </RowList>
         ) : (
-          <div className="memory-detail__line">no injections recorded for this record</div>
+          <p className="memory-caption">No injections recorded for this record.</p>
         )}
-      </div>
+      </section>
 
-      <div className="memory-detail__section" data-testid="memory-detail-dreams">
-        <span className="memory-detail__label">Dreams</span>
+      <section className="memory-detail__section" data-testid="memory-detail-dreams">
+        <SectionHeader as="h4" label="Dreams" />
         {touchingRuns.length > 0 ? (
-          touchingRuns.map((run) => (
-            <div className="memory-detail__line" key={run.run_id}>
-              {run.run_id} · {dreamTimeRange(run)}
-              {run.quarantined_ops ? ` · ⚠ ${run.quarantined_ops} quarantined` : ""}
-            </div>
-          ))
+          <RowList className="memory-detail__rows">
+            {touchingRuns.map((run) => (
+              <ListRow
+                key={run.run_id}
+                dense
+                title="Reviewed by a dream"
+                titleAttr={`Dream run ${run.run_id}`}
+                meta={
+                  <>
+                    {run.quarantined_ops ? (
+                      <Chip tone="warn">{`${plural(run.quarantined_ops, "change")} quarantined`}</Chip>
+                    ) : null}
+                    <RelativeTime value={run.last_op_at_ms || run.first_op_at_ms} />
+                  </>
+                }
+              />
+            ))}
+          </RowList>
         ) : (
-          <div className="memory-detail__line">
-            no sampled dream runs reference this record (sample is ≤12 ids per run — exact
-            history needs the record history[] surface)
-          </div>
+          <p className="memory-caption">
+            No sampled dream run mentions this record. Each dream run lists a sample of up to 12
+            of the records it touched.
+          </p>
         )}
-      </div>
-    </div>
+      </section>
+
+      <TechnicalDetails
+        className="memory-detail__tech"
+        items={[
+          { label: "Memory ID", value: record.id },
+          { label: "Scope", value: record.scope.scope, plain: true },
+          scopeKey ? { label: "Scope key", value: scopeKey } : null,
+          { label: "Realm", value: detail.realm, plain: true },
+          { label: "Kind", value: record.kind, plain: true },
+          { label: "Trust", value: record.trust, plain: true },
+          { label: "Content hash", value: record.content_hash },
+          { label: "Replaces", value: record.supersedes },
+          { label: "Replaced by", value: supersededBy },
+          record.derived_from && record.derived_from.length > 0
+            ? {
+                label: "Derived from",
+                value: (
+                  <span className="memory-tech-list">
+                    {record.derived_from.map((id) => (
+                      <TechnicalId key={id} value={id} label="Record ID" />
+                    ))}
+                  </span>
+                ),
+              }
+            : null,
+          { label: "Author run", value: authorRun },
+          ...evidence.map((ref, index) =>
+            ref.session_id
+              ? {
+                  label: evidence.length > 1 ? `Evidence ${index + 1}` : "Evidence",
+                  value: (
+                    <span className="memory-tech-list">
+                      <TechnicalId value={ref.session_id} label="Session ID" />
+                      {evidenceDetails(ref) ? (
+                        <span className="memory-tech-note">{evidenceDetails(ref)}</span>
+                      ) : null}
+                    </span>
+                  ),
+                }
+              : null,
+          ),
+          touchingRuns.length > 0
+            ? {
+                label: "Dream runs",
+                value: (
+                  <span className="memory-tech-list">
+                    {touchingRuns.map((run) => (
+                      <TechnicalId key={run.run_id} value={run.run_id} label="Dream run ID" />
+                    ))}
+                  </span>
+                ),
+              }
+            : null,
+        ]}
+      />
+    </article>
+  );
+}
+
+// ── Holdings ──────────────────────────────────────────────────────────────
+
+/// The two checks this console can never run render last, muted, on one
+/// line.
+const MUTED_TILES: ReadonlySet<VerdictTile["id"]> = new Set(["echo-safety", "taint-wall"]);
+
+function VerdictTileCard({
+  tile,
+  muted,
+  recordTitles,
+  onOpen,
+  onOpenRecord,
+}: {
+  tile: VerdictTile;
+  muted: boolean;
+  recordTitles: ReadonlyMap<string, string>;
+  onOpen: (tile: VerdictTile) => void;
+  onOpenRecord: (realm: string | undefined, memoryId: string) => void;
+}): React.JSX.Element {
+  const tone = verdictTone(tile.status);
+  const evidence = tile.evidence ?? [];
+  return (
+    <StatTile
+      className={muted ? "memory-tile memory-tile--quiet" : "memory-tile"}
+      testId={`memory-verdict:${tile.id}`}
+      dataAttributes={{ "data-status": tile.status }}
+      label={tile.label}
+      tone={tone}
+      muted={muted}
+      help={tile.lines.join("\n")}
+      status={
+        <>
+          <Chip tone={tone} dot>
+            {verdictStatusLabel(tile.status)}
+          </Chip>
+          {tile.rechecking ? (
+            // Over the tile's corner, outside the text flow: a re-check never
+            // grows the tile or moves the tiles around it.
+            <span className="memory-tile__recheck" data-testid={`memory-verdict-recheck:${tile.id}`}>
+              <StatusDot tone="info" live />
+              re-checking
+            </span>
+          ) : null}
+        </>
+      }
+      summary={tile.summary}
+      onActivate={() => onOpen(tile)}
+    >
+      {evidence.length > 0 ? (
+        <>
+          {evidence.map((violation) => (
+            <RecordLink
+              key={violation.id}
+              className="memory-tile__evidence"
+              id={violation.id}
+              realm={violation.realm}
+              titles={recordTitles}
+              testId={`memory-verdict-evidence:${tile.id}:${violation.id}`}
+              onOpen={onOpenRecord}
+            />
+          ))}
+          {tile.evidenceMore ? (
+            <span className="memory-tile__more">{`+${tile.evidenceMore} more`}</span>
+          ) : null}
+        </>
+      ) : null}
+    </StatTile>
   );
 }
 
 function VerdictStrip({
   tiles,
+  recordTitles,
   onOpen,
   onOpenRecord,
 }: {
   tiles: VerdictTile[];
+  recordTitles: ReadonlyMap<string, string>;
   onOpen: (tile: VerdictTile) => void;
   onOpenRecord: (realm: string | undefined, memoryId: string) => void;
 }): React.JSX.Element {
+  const main = tiles.filter((tile) => !MUTED_TILES.has(tile.id));
+  const quiet = tiles.filter((tile) => MUTED_TILES.has(tile.id));
   return (
-    <div className="memory-tiles" data-testid="memory-verdict-strip">
-      {/* Tiles are div-role-buttons (SignalsRail idiom) so violation-evidence
-          buttons can nest inside: a red tile is a door to the exact rows that
-          made it red, not just to a tab. */}
-      {tiles.map((tile) => (
-        <div
-          className="memory-tile"
-          key={tile.id}
-          role="button"
-          tabIndex={0}
-          data-status={tile.status}
-          data-testid={`memory-verdict:${tile.id}`}
-          onClick={() => onOpen(tile)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") onOpen(tile);
-          }}
-        >
-          <span className="memory-tile__label">{tile.label}</span>
-          {tile.rechecking ? (
-            <span className="memory-tile__recheck" data-testid={`memory-verdict-recheck:${tile.id}`}>
-              re-checking…
-            </span>
-          ) : null}
-          <span className="memory-tile__status" data-status={tile.status}>
-            {verdictStatusLabel(tile.status)}
-          </span>
-          {tile.lines.map((line, index) => (
-            <span className="memory-tile__line" key={`l-${index}`}>
-              {line}
-            </span>
-          ))}
-          {(tile.evidence || []).map((violation) => (
-            <button
-              type="button"
-              className="memory-tile__evidence"
-              key={violation.id}
-              data-testid={`memory-verdict-evidence:${tile.id}:${violation.id}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenRecord(violation.realm, violation.id);
-              }}
-            >
-              {violation.id}
-            </button>
+    <div className="memory-checks" data-testid="memory-verdict-strip">
+      <TileGrid className="memory-tiles">
+        {main.map((tile) => (
+          <VerdictTileCard
+            key={tile.id}
+            tile={tile}
+            muted={false}
+            recordTitles={recordTitles}
+            onOpen={onOpen}
+            onOpenRecord={onOpenRecord}
+          />
+        ))}
+      </TileGrid>
+      {quiet.length > 0 ? (
+        <div className="memory-tiles-quiet">
+          {quiet.map((tile) => (
+            <VerdictTileCard
+              key={tile.id}
+              tile={tile}
+              muted
+              recordTitles={recordTitles}
+              onOpen={onOpen}
+              onOpenRecord={onOpenRecord}
+            />
           ))}
         </div>
-      ))}
+      ) : null}
     </div>
   );
 }
+
+/// One Holdings scope row, from the store totals or, when those are not
+/// available, from the loaded records.
+interface ScopeRowModel {
+  key: string;
+  kind: string;
+  scopeKey: string;
+  realm: string;
+  active: number;
+  quarantined: number;
+  superseded: number;
+  tombstoned: number;
+  bytes: number;
+  floorPressure: boolean;
+  filter: MemoryRecordsFilter;
+}
+
+function scopeRowFromOverview(scope: MemoryScopeOverview): ScopeRowModel {
+  return {
+    key: overviewScopeKey(scope),
+    kind: scope.scope_kind,
+    scopeKey: scope.scope_key,
+    realm: scope.realm,
+    active: scope.active ?? 0,
+    quarantined: scope.quarantined ?? 0,
+    superseded: scope.superseded ?? 0,
+    tombstoned: scope.tombstoned ?? 0,
+    bytes: scope.body_bytes ?? 0,
+    floorPressure: scope.floor_pressure === true,
+    filter: filterForOverviewScope(scope),
+  };
+}
+
+function scopeRowFromLoaded(row: ScopeOverviewRow): ScopeRowModel {
+  return {
+    key: row.key,
+    kind: row.scope.scope,
+    scopeKey: scopeKeyOf(row.scope),
+    realm: row.scope.realm,
+    active: row.active,
+    quarantined: row.quarantined,
+    superseded: row.superseded,
+    tombstoned: row.tombstoned,
+    bytes: row.bytes,
+    floorPressure: false,
+    filter: filterForScope(row.scope),
+  };
+}
+
+function ScopeRow({
+  row,
+  multiRealm,
+  limitTitle,
+  onOpen,
+}: {
+  row: ScopeRowModel;
+  multiRealm: boolean;
+  limitTitle: string;
+  onOpen: () => void;
+}): React.JSX.Element {
+  const nameOf = useNameOf();
+  const agent = row.kind === "identity";
+  const name = scopeOwnerName(row.kind, row.scopeKey, nameOf);
+  const counts = scopeCountsText(row);
+  return (
+    <ListRow
+      className="memory-scope-row"
+      testId={`memory-holdings-scope:${row.key}`}
+      onActivate={onOpen}
+      lead={agent ? <AgentAvatar name={name} /> : <span className="memory-scope-mark" aria-hidden="true" />}
+      title={agent ? <AgentName id={row.scopeKey} /> : name}
+      subtitle={joinMeta(scopeKindLabel(row.kind), multiRealm ? `realm ${row.realm}` : null, counts)}
+      meta={
+        <>
+          {row.floorPressure ? (
+            <Chip tone="warn" testId={`memory-holdings-floor:${row.key}`} title={limitTitle}>
+              Near limit
+            </Chip>
+          ) : null}
+          <Meter
+            className="memory-scope-meter"
+            showLabel={false}
+            label={counts}
+            segments={[
+              { value: row.active, tone: "ok", label: `${row.active} active` },
+              { value: row.quarantined, tone: "warn", label: `${row.quarantined} quarantined` },
+              { value: row.superseded, tone: "neutral", label: `${row.superseded} superseded` },
+              { value: row.tombstoned, tone: "locked", label: `${row.tombstoned} tombstoned` },
+            ]}
+          />
+          <span className="memory-size">{formatSize(row.bytes)}</span>
+        </>
+      }
+    />
+  );
+}
+
+/// Denied scopes vanish from the row-filtered listing; the one-row probes
+/// make them render as no-grant rows instead of silently not existing.
+function DeniedScopeRow({ kind }: { kind: "mob" | "operator" }): React.JSX.Element {
+  return (
+    <ListRow
+      className="memory-scope-row"
+      testId={`memory-holdings-scope-denied:${kind}`}
+      lead={<KitGlyph name="shield" className="memory-scope-lock" />}
+      title={kind === "mob" ? "Team memory" : "Operator memory"}
+      subtitle={`Needs the ${kind}.memory.read grant`}
+      meta={<Chip tone="locked">No grant</Chip>}
+    />
+  );
+}
+
+function HarvestRow({ harvest }: { harvest: MemoryHarvestEntry }): React.JSX.Element {
+  const nameOf = useNameOf();
+  const name = nameOf(harvest.identity) || harvest.identity;
+  const cause =
+    harvest.cause && harvest.cause.trim().toLowerCase() !== "retired" ? humanizeEnum(harvest.cause) : "";
+  return (
+    <ListRow
+      testId={`memory-harvest:${harvest.identity}`}
+      lead={<AgentAvatar name={name} />}
+      title={<AgentName id={harvest.identity} />}
+      subtitle={
+        harvest.retired_at_ms ? (
+          <RelativeTime
+            value={harvest.retired_at_ms}
+            prefix="Retired"
+            title={joinMeta(
+              formatAbsoluteTime(harvest.retired_at_ms),
+              harvest.session_key ? `session ${harvest.session_key}` : null,
+            )}
+          />
+        ) : (
+          "Retired"
+        )
+      }
+      meta={cause ? <Chip>{cause}</Chip> : undefined}
+    />
+  );
+}
+
+// ── Dreams ────────────────────────────────────────────────────────────────
+
+function DreamRunRow({
+  run,
+  expanded,
+  onToggle,
+}: {
+  run: MemoryDreamRunSheet;
+  expanded: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  const nameOf = useNameOf();
+  const detail = normalizeDreamRunDetail(run.detail);
+  const who = partitionName(run.partition, nameOf);
+  const at = run.completed_at_ms || run.started_at_ms;
+  const duration =
+    run.started_at_ms && run.completed_at_ms
+      ? formatDuration(run.completed_at_ms - run.started_at_ms)
+      : "";
+  const chips = dreamVerdictChips(detail.verdicts);
+  return (
+    <div className="memory-dream-run" data-testid={`memory-dream-run:${run.run_id}`}>
+      <ListRow
+        className="memory-dream-run__head"
+        testId={`memory-dream-run-toggle:${run.run_id}`}
+        onActivate={onToggle}
+        ariaExpanded={expanded}
+        lead={<span className="memory-disclosure" data-open={expanded ? "true" : undefined} aria-hidden="true" />}
+        title={who ? `Dream for ${who}` : "Dream"}
+        subtitle={
+          <MetaLine
+            parts={[
+              at ? <RelativeTime value={at} /> : null,
+              duration,
+              typeof run.ops_committed === "number" ? plural(run.ops_committed, "change") : null,
+            ]}
+          />
+        }
+        meta={
+          chips.length > 0 ? (
+            <>
+              {chips.map((chip) => (
+                <Chip key={chip.key} tone={chip.tone}>
+                  {chip.label}
+                </Chip>
+              ))}
+            </>
+          ) : undefined
+        }
+      />
+      {expanded ? (
+        <div className="memory-dream-run__detail" data-testid={`memory-dream-run-detail:${run.run_id}`}>
+          {detail.raw !== null ? (
+            <Notice>The details of this run are stored in a form this console cannot read.</Notice>
+          ) : (
+            <>
+              {detail.phases.length > 0 ? (
+                <ol className="memory-phases" aria-label="Phases">
+                  {detail.phases.map(([name, note], index) => (
+                    <li className="memory-phases__step" key={`ph-${index}`}>
+                      <KitGlyph name="check" className="memory-phases__mark" />
+                      <span className="memory-phases__name">{humanizeEnum(name)}</span>
+                      {note ? <span className="memory-phases__note">{note}</span> : null}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="memory-caption">No phases were recorded.</p>
+              )}
+              {detail.verdicts.length === 0 ? (
+                <p className="memory-caption">No changes were counted.</p>
+              ) : null}
+              {detail.skips.map((skip, index) => (
+                <Notice tone="warn" key={`sk-${index}`}>
+                  {skip}
+                </Notice>
+              ))}
+            </>
+          )}
+          <TechnicalDetails
+            items={[
+              { label: "Run ID", value: run.run_id },
+              { label: "Partition", value: run.partition },
+              { label: "Realm", value: run.realm, plain: true },
+              { label: "Started", value: formatAbsoluteTime(run.started_at_ms), plain: true },
+              { label: "Completed", value: formatAbsoluteTime(run.completed_at_ms), plain: true },
+              detail.raw !== null ? { label: "Stored details", value: detail.raw, plain: true } : null,
+            ]}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AuditRunRow({
+  run,
+  partition,
+  recordTitles,
+  onOpenRecord,
+}: {
+  run: MemoryDreamRun;
+  partition: string | undefined;
+  recordTitles: ReadonlyMap<string, string>;
+  onOpenRecord: (realm: string | undefined, memoryId: string) => void;
+}): React.JSX.Element {
+  const nameOf = useNameOf();
+  const who = partitionName(partition, nameOf);
+  const at = run.last_op_at_ms || run.first_op_at_ms;
+  const span =
+    run.first_op_at_ms && run.last_op_at_ms && run.last_op_at_ms > run.first_op_at_ms
+      ? formatDuration(run.last_op_at_ms - run.first_op_at_ms)
+      : "";
+  const touched = run.memory_ids || [];
+  const rationales = run.rationales || [];
+  return (
+    <ListRow
+      className="memory-audit-run"
+      testId={`memory-dream:${run.run_id}`}
+      title={who ? `Dream for ${who}` : "Dream run"}
+      titleAttr={`Dream run ${run.run_id}`}
+      subtitle={
+        <MetaLine
+          parts={[
+            at ? <RelativeTime value={at} /> : null,
+            span,
+            typeof run.ops === "number" ? plural(run.ops, "change") : null,
+            dreamOpKindsDisplay(run.op_kinds),
+          ]}
+        />
+      }
+      meta={
+        run.quarantined_ops && run.quarantined_ops > 0 ? (
+          <Chip tone="warn">{`${run.quarantined_ops} quarantined`}</Chip>
+        ) : undefined
+      }
+    >
+      {touched.length > 0 || rationales.length > 0 ? (
+        <>
+          {touched.length > 0 ? (
+            <span className="memory-touched">
+              <span className="memory-touched__label">Touched</span>
+              {touched.map((memoryId) => (
+                <RecordLink
+                  key={memoryId}
+                  className="memory-touched__record"
+                  id={memoryId}
+                  realm={run.realm}
+                  titles={recordTitles}
+                  testId={`memory-dream-record:${run.run_id}:${memoryId}`}
+                  onOpen={onOpenRecord}
+                />
+              ))}
+            </span>
+          ) : null}
+          {rationales.map((rationale, index) => (
+            <span className="memory-row-note memory-audit-run__note" key={`r-${index}`}>
+              {rationale}
+            </span>
+          ))}
+        </>
+      ) : null}
+    </ListRow>
+  );
+}
+
+// ── Live events ───────────────────────────────────────────────────────────
 
 /// Exported for the jsdom component-interaction lane, which pins the
 /// pause-on-scroll / N-behind / auto-unfreeze discipline.
@@ -1959,8 +3098,8 @@ export function MemoryLiveStrip({
   frames: ConsoleFrame[];
   onPivot: (realm: string | undefined, recordId: string) => void;
 }): React.JSX.Element {
-  // Live-follow discipline: pausing on scroll freezes the visible list;
-  // "N behind · jump to live" resumes. Frames dedupe by id so
+  // Live-follow discipline: scrolling away from the top freezes the visible
+  // list; "N behind · Jump to live" resumes. Frames dedupe by id so
   // snapshot_complete replays never double-render.
   const deduped = React.useMemo(() => dedupeFramesById(frames), [frames]);
   const [frozen, setFrozen] = React.useState<ConsoleFrame[] | null>(null);
@@ -1985,61 +3124,89 @@ export function MemoryLiveStrip({
   }
 
   return (
-    <div className="memory-group memory-live" data-testid="memory-live-strip">
-      <div className="memory-group__label">
-        Live memory events (in-memory ring — lossy)
-        {behind > 0 ? (
-          <button
-            type="button"
-            className="memory-live__jump"
-            data-testid="memory-live-jump"
-            onClick={jumpToLive}
-          >
-            {behind} behind · jump to live
-          </button>
-        ) : null}
-      </div>
-      <div className="memory-live__list" ref={listRef} onScroll={handleScroll}>
+    <section className="cc-section memory-live" data-testid="memory-live-strip">
+      <SectionHeader
+        label="Live events"
+        action={
+          behind > 0 ? (
+            <Button size="sm" variant="ghost" data-testid="memory-live-jump" onClick={jumpToLive}>
+              {`${behind} behind · Jump to live`}
+            </Button>
+          ) : null
+        }
+      />
+      <p className="memory-caption">Recent memory events, newest first. Older events are not kept here.</p>
+      <div className="cc-rows memory-live__list" ref={listRef} onScroll={handleScroll}>
         {shown.length === 0 ? (
-          <div className="memory-detail__line">No memory events in the ring.</div>
+          <EmptyState inline title="No memory events yet." />
         ) : (
           shown.map((frame) => {
-            const data = frame.data && typeof frame.data === "object"
-              ? (frame.data as Record<string, unknown>)
-              : {};
+            const data =
+              frame.data && typeof frame.data === "object"
+                ? (frame.data as Record<string, unknown>)
+                : {};
             const pivot = memoryFramePivot(frame);
+            const text = describeMemoryTimelineEvent(frame.event, data);
             return (
-              <div className="memory-live__row" key={frame.id} data-testid={`memory-live-row:${frame.id}`}>
-                <span className="memory-row__age">{relativeAge(frame.timestampMs)}</span>
-                <span className="memory-live__text">
-                  {describeMemoryTimelineEvent(frame.event, data)}
-                </span>
-                {pivot ? (
-                  <button
-                    type="button"
-                    className="memory-live__pivot"
-                    data-testid={`memory-live-pivot:${frame.id}`}
-                    onClick={() => onPivot(pivot.realm, pivot.recordId)}
-                  >
-                    state here
-                  </button>
-                ) : null}
-              </div>
+              <ListRow
+                key={frame.id}
+                dense
+                className="memory-live__row"
+                testId={`memory-live-row:${frame.id}`}
+                title={text}
+                titleAttr={text}
+                meta={
+                  <>
+                    {pivot ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        data-testid={`memory-live-pivot:${frame.id}`}
+                        onClick={() => onPivot(pivot.realm, pivot.recordId)}
+                      >
+                        Open record
+                      </Button>
+                    ) : null}
+                    <RelativeTime value={frame.timestampMs} />
+                  </>
+                }
+              />
             );
           })
         )}
-        {/* The ring keeps 1024 frames/identity, 4096 total — everything older
-            is unknowable live. The seam keeps "no events" from being mistaken
-            for "nothing happened". */}
+        {/* The ring keeps 1024 frames per identity, 4096 in total; anything
+            older is unknowable live. The seam keeps "no events" from being
+            mistaken for "nothing happened". */}
         <div className="memory-live__seam" data-testid="memory-live-seam">
-          — ring history starts here —
+          Live history starts here
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────
+
+const SCOPE_FILTER_OPTIONS: SelectOption[] = [
+  { value: "", label: "All" },
+  { value: "identity", label: "Agents" },
+  { value: "mob", label: "Teams" },
+  { value: "operator", label: "Operators" },
+  { value: "realm", label: "Shared" },
+];
+
+const STATUS_FILTER_OPTIONS: SelectOption[] = [
+  { value: "", label: "All" },
+  { value: "active", label: "Active" },
+  { value: "quarantined", label: "Quarantined" },
+  { value: "superseded", label: "Superseded" },
+  { value: "tombstoned", label: "Tombstoned" },
+];
+
+const SORT_OPTIONS: SelectOption[] = [
+  { value: "recency", label: "Recent" },
+  { value: "utility", label: "Least useful" },
+];
 
 export function MemoryPanel({
   runtimeControl,
@@ -2080,10 +3247,11 @@ export function MemoryPanel({
   onOpenGating,
   onDecideQuarantine,
 }: MemoryPanelProps): React.JSX.Element {
+  const nameOf = useNameOf();
   const [tab, setTab] = React.useState<MemoryTab>("holdings");
   // The outcome of the last quarantine decision, shown on the Biography it
-  // navigated to (the successor after a release, the origin otherwise).
-  const [decisionNotice, setDecisionNotice] = React.useState<string | null>(null);
+  // navigated to (the released record after a release, the origin otherwise).
+  const [decisionNotice, setDecisionNotice] = React.useState<QuarantineNotice | null>(null);
   const decideQuarantine = onDecideQuarantine
     ? async (
         record: MemoryFullRecord,
@@ -2126,7 +3294,7 @@ export function MemoryPanel({
     if (openRecordKey) setTab("records");
   }, [openRecordKey]);
 
-  // Lattice invariants (a)+(c) via the client page-walk. Deduped by a
+  // Lattice invariants (a) and (c) via the client page-walk. Deduped by a
   // CONTENT fingerprint (not array identity): content-identical debounced
   // live refreshes skip the walk entirely. While a re-check runs, the prior
   // result is retained so a settled tile never flickers to UNVERIFIABLE.
@@ -2167,11 +3335,11 @@ export function MemoryPanel({
       // A walk that did not settle a verdict never covered this fingerprint,
       // so un-mark it and the dep change that cancelled us starts a fresh walk
       // instead of skipping. Without this, a refresh landing mid-walk
-      // (re-dock, the 250ms memory.* debounce) leaves the tile on "page-walk
-      // running…" forever: the fingerprint reads as already-checked while
-      // lattice is still null and latticeRunning was never cleared (its
-      // finally is cancellation-guarded). A covered fingerprint stays marked,
-      // so a refresh that brings the same records does not walk them again.
+      // (re-dock, the 250ms memory.* debounce) leaves the tile checking
+      // forever: the fingerprint reads as already-checked while lattice is
+      // still null and latticeRunning was never cleared (its finally is
+      // cancellation-guarded). A covered fingerprint stays marked, so a
+      // refresh that brings the same records does not walk them again.
       if (!covered && latticeRanForRef.current === fingerprint) {
         latticeRanForRef.current = null;
       }
@@ -2179,11 +3347,13 @@ export function MemoryPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, records, recordsDenied, realms, nextCursor, loaded]);
 
-  // Holdings stays anchored on the base page (its label says "over the N
-  // loaded records"); the Records list renders from the accumulated view.
-  const overviewRows = React.useMemo(() => scopeOverviewRows(records), [records]);
+  // When the data last landed: each good refresh delivers new record arrays,
+  // a failed one keeps the old ones (and shows its error instead).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const updatedAt = React.useMemo(() => (loaded ? Date.now() : null), [records, loaded]);
+
   // Overview scopes with denied-probe kinds dropped (their denied rows render
-  // instead) — feeds both the Holdings table and the STORE FLOOR tile.
+  // instead); feeds both the Holdings scopes and the store floor tile.
   const overviewScopes = React.useMemo(
     () =>
       overview
@@ -2210,6 +3380,7 @@ export function MemoryPanel({
             ? { scopes: overviewScopes, floors: overview.floors }
             : null,
         overviewDenied,
+        scopeName: (scope) => overviewScopeName(scope, nameOf),
       }),
     [
       records,
@@ -2221,16 +3392,38 @@ export function MemoryPanel({
       overview,
       overviewScopes,
       overviewDenied,
+      nameOf,
     ],
   );
+  // Record titles for every place that only holds an ID (violations,
+  // injections, review verdicts, dream samples, promotions).
+  const recordTitles = React.useMemo(() => {
+    const titles = new Map<string, string>();
+    const add = (list: ReadonlyArray<Pick<MemoryPanelRecord, "id" | "title">> | undefined) => {
+      for (const entry of list ?? []) {
+        if (entry.title && !titles.has(entry.id)) titles.set(entry.id, entry.title);
+      }
+    };
+    add(records);
+    add(quarantineRecords);
+    add(paged?.records);
+    if (detail) add([detail.record, ...detail.chain]);
+    return titles;
+  }, [records, quarantineRecords, paged, detail]);
   const annotatedInjections = React.useMemo(
     () => annotateInjectionDups(injections),
     [injections],
   );
   const dreamSheets = React.useMemo(() => dreamRunsNewestFirst(dreamRuns), [dreamRuns]);
+  const sheetPartitions = React.useMemo(
+    () => new Map(dreamRuns.map((run) => [run.run_id, run.partition])),
+    [dreamRuns],
+  );
   const [expandedRuns, setExpandedRuns] = React.useState<Record<string, boolean>>({});
   const identities = React.useMemo(() => identityOptions(records), [records]);
-  const selectedIdentity = knowledgeIdentity || identities[0] || "";
+  const selectedIdentity = identities.includes(knowledgeIdentity)
+    ? knowledgeIdentity
+    : identities[0] || "";
   const memoryFrames = React.useMemo(
     () => liveFrames.filter((frame) => frame.event.startsWith("memory.")),
     [liveFrames],
@@ -2260,15 +3453,15 @@ export function MemoryPanel({
 
   if (unavailable) {
     return (
-      <div className="gating memory-panel" data-testid="memory-panel">
-        <div className="gating__head">
-          <h2>Memory</h2>
-          {runtimeControl ? <><span className="spacer" />{runtimeControl}</> : null}
-        </div>
-        <div className="gating__empty" data-testid="memory-unavailable">
-          The memory panel is not configured on this runtime.
-        </div>
-      </div>
+      <PanelShell className="memory-panel" testId="memory-panel">
+        <PanelHeader title="Memory" actions={runtimeControl || undefined} />
+        <EmptyState
+          kind="not-configured"
+          testId="memory-unavailable"
+          title="Memory is not set up for this team."
+          body="This runtime has no memory store configured, so there is nothing to show here."
+        />
+      </PanelShell>
     );
   }
 
@@ -2280,861 +3473,830 @@ export function MemoryPanel({
     sortMode,
   });
   const quarantineCount = quarantineRecords.length + pendingPromotions.length;
+  const multiRealm = realms.length > 1;
+  const recordCount = nextCursor ? `${records.length}+ records` : plural(records.length, "record");
+  const subtitle = !loaded
+    ? "Loading records"
+    : recordsDenied
+      ? "No access to records"
+      : joinMeta(recordCount, multiRealm ? plural(realms.length, "realm") : null);
+  const tabs: Array<PanelTab<MemoryTab>> = MEMORY_TABS.map((candidate) => ({
+    id: candidate,
+    label: memoryTabLabel(candidate),
+    count:
+      candidate === "pipeline" && quarantineCount > 0
+        ? quarantineCount
+        : candidate === "dreams" && dreams.length > 0
+          ? dreams.length
+          : null,
+    testId: `memory-tab:${candidate}`,
+  }));
 
-  return (
-    <div className="gating memory-panel" data-testid="memory-panel">
-      <div className="gating__head">
-        <h2>Memory</h2>
-        <p>
-          {records.length} records
-          {realms.length > 1 ? ` · ${realms.length} realms` : ""}
-        </p>
-        {runtimeControl ? <><span className="spacer" />{runtimeControl}</> : null}
-      </div>
-      <div className="gating__tabs">
-        {MEMORY_TABS.map((candidate) => (
-          <button
-            key={candidate}
-            className={`gating__tab ${tab === candidate ? "is-active" : ""}`}
-            onClick={() => setTab(candidate)}
-            data-testid={`memory-tab:${candidate}`}
-          >
-            {memoryTabLabel(candidate)}
-            {candidate === "pipeline" && quarantineCount > 0 ? (
-              <span className="n">{quarantineCount}</span>
-            ) : null}
-            {candidate === "dreams" && dreams.length > 0 ? (
-              <span className="n">{dreams.length}</span>
-            ) : null}
-          </button>
-        ))}
-        {/* One-release redirect alias (open Q6): the quarantine tab folded
-            into Pipeline; automation addressing memory-tab:quarantine keeps
-            working until the next release removes this. */}
-        <button
-          className="gating__tab memory-tab-alias"
-          onClick={() => setTab(resolveMemoryTabAlias("quarantine") || "pipeline")}
-          data-testid="memory-tab:quarantine"
-          aria-hidden="true"
-          tabIndex={-1}
+  function renderHoldings(): React.JSX.Element {
+    const rows: ScopeRowModel[] = overviewScopes
+      ? overviewScopes.map(scopeRowFromOverview)
+      : scopeOverviewRows(records).map(scopeRowFromLoaded);
+    const totalBytes = rows.reduce((sum, row) => sum + row.bytes, 0);
+    const floors = overview?.floors;
+    const limitTitle = floors
+      ? `Close to the per-scope limit of ${floors.records ?? "?"} records or ${
+          typeof floors.bytes === "number" ? formatSize(floors.bytes) : "?"
+        }.`
+      : "Close to the per-scope limit.";
+    const tainted = proposals.filter((proposal) => proposal.tainted).length;
+    const lastDream = dreams[0];
+    const lastDreamAt = lastDream ? lastDream.last_op_at_ms || lastDream.first_op_at_ms : undefined;
+    const scopesReady = loaded && !recordsDenied;
+    return (
+      <div className="memory-tab" data-testid="memory-holdings">
+        <PanelSection label="Checks">
+          <VerdictStrip
+            tiles={tiles}
+            recordTitles={recordTitles}
+            onOpen={openTile}
+            onOpenRecord={(realm, memoryId) => onSelectRecord(realm, memoryId)}
+          />
+        </PanelSection>
+
+        <PanelSection
+          label="Scopes"
+          count={scopesReady && rows.length > 0 ? rows.length : null}
+          action={
+            scopesReady && rows.length > 0 ? (
+              <span className="memory-section-meta">{`${formatSize(totalBytes)} in total`}</span>
+            ) : undefined
+          }
         >
-          Quarantine
-        </button>
-        <button
-          className="gating__tab"
-          onClick={() => onRefresh(tab === "records" && detail
-            ? { realm: detail.realm, memoryId: detail.record.id }
-            : undefined)}
-          data-testid="memory-refresh"
-        >
-          Refresh
-        </button>
-      </div>
-      {/* The refresh error sits in a reserved row between the tabs and the
-          body, so it never moves either under a click in progress. */}
-      <PanelStatusRow error={error} testId="memory-error" />
-
-      <div className="gating__list memory-panel__body">
-        {tab === "holdings" ? (
-          <div className="memory-groups" data-testid="memory-holdings">
-            <VerdictStrip
-              tiles={tiles}
-              onOpen={openTile}
-              onOpenRecord={(realm, memoryId) => onSelectRecord(realm, memoryId)}
-            />
-            {recordsDenied ? (
-              <SectionNote testid="memory-holdings-denied">
-                Records are not readable by this principal (access denied).
-              </SectionNote>
-            ) : (
-              <div className="memory-group">
-                <div className="memory-group__label">
-                  {overviewScopes
-                    ? `Scopes — store totals (panel/overview)${
-                        overview?.floors
-                          ? ` · floors ${overview.floors.records ?? "?"} records / ${
-                              typeof overview.floors.bytes === "number"
-                                ? formatBytes(overview.floors.bytes)
-                                : "?"
-                            } per scope`
-                          : ""
-                      }`
-                    : `Scopes — counts over the ${records.length} loaded records (full totals need panel/overview)`}
-                </div>
-                {overviewScopes ? (
-                  overviewScopes.length === 0 && !operatorScopeDenied && !mobScopeDenied ? (
-                    <div className="gating__empty">No memory records yet.</div>
-                  ) : (
-                    overviewScopes.map((scope) => {
-                      const key = overviewScopeKey(scope);
-                      return (
-                        <button
-                          type="button"
-                          className="memory-row memory-scope-row"
-                          key={key}
-                          data-testid={`memory-holdings-scope:${key}`}
-                          onClick={() => openRecordsFiltered(filterForOverviewScope(scope))}
-                        >
-                          <span className="memory-row__title">{overviewScopeLabel(scope)}</span>
-                          <span className="memory-row__meta">
-                            <Chip label={`${scope.active ?? 0} active`} tone="positive" />
-                            {(scope.quarantined ?? 0) > 0 ? (
-                              <Chip label={`${scope.quarantined} quarantined`} tone="warning" />
-                            ) : null}
-                            {(scope.superseded ?? 0) > 0 ? (
-                              <Chip label={`${scope.superseded} superseded`} tone="muted" />
-                            ) : null}
-                            {(scope.tombstoned ?? 0) > 0 ? (
-                              <Chip label={`${scope.tombstoned} tombstoned`} tone="muted" />
-                            ) : null}
-                            {scope.floor_pressure ? (
-                              <span data-testid={`memory-holdings-floor:${key}`}>
-                                <Chip label="FLOOR PRESSURE" tone="warning" />
-                              </span>
-                            ) : null}
-                            <span className="memory-row__age">
-                              {formatBytes(scope.body_bytes ?? 0)}
-                            </span>
-                          </span>
-                        </button>
-                      );
-                    })
-                  )
-                ) : overviewRows.length === 0 && !operatorScopeDenied && !mobScopeDenied ? (
-                  <div className="gating__empty">No memory records yet.</div>
-                ) : (
-                  overviewRows.map((row) => (
-                    <button
-                      type="button"
-                      className="memory-row memory-scope-row"
-                      key={row.key}
-                      data-testid={`memory-holdings-scope:${row.key}`}
-                      onClick={() => openRecordsFiltered(filterForScope(row.scope))}
-                    >
-                      <span className="memory-row__title">{row.label}</span>
-                      <span className="memory-row__meta">
-                        <Chip label={`${row.active} active`} tone="positive" />
-                        {row.quarantined > 0 ? (
-                          <Chip label={`${row.quarantined} quarantined`} tone="warning" />
-                        ) : null}
-                        {row.superseded > 0 ? (
-                          <Chip label={`${row.superseded} superseded`} tone="muted" />
-                        ) : null}
-                        {row.tombstoned > 0 ? (
-                          <Chip label={`${row.tombstoned} tombstoned`} tone="muted" />
-                        ) : null}
-                        <span className="memory-row__age">{formatBytes(row.bytes)}</span>
-                      </span>
-                      {row.trustMix ? (
-                        <span className="memory-row__meta memory-row__reason">{row.trustMix}</span>
-                      ) : null}
-                    </button>
-                  ))
-                )}
-                {/* Denied scopes vanish from the row-filtered listing; the
-                    one-row probes make them render as access-denied rows
-                    instead of silently not existing (§3.1 / §5 ABAC). */}
-                {mobScopeDenied ? (
-                  <div
-                    className="memory-row memory-row--static memory-scope-row"
-                    data-testid="memory-holdings-scope-denied:mob"
-                  >
-                    <span className="memory-row__title">Mob scopes</span>
-                    <span className="memory-row__meta">
-                      <Chip label="no grant" tone="warning" />
-                      <span className="memory-row__reason">requires mob.memory.read</span>
-                    </span>
-                  </div>
-                ) : null}
-                {operatorScopeDenied ? (
-                  <div
-                    className="memory-row memory-row--static memory-scope-row"
-                    data-testid="memory-holdings-scope-denied:operator"
-                  >
-                    <span className="memory-row__title">Operator scope</span>
-                    <span className="memory-row__meta">
-                      <Chip label="no grant" tone="warning" />
-                      <span className="memory-row__reason">requires operator.memory.read</span>
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            )}
-            <div className="memory-group">
-              <div className="memory-group__label">In transit</div>
-              <div className="memory-detail__line">
-                {dreams.length > 0
-                  ? `Last dream ${dreamTimeRange(dreams[0])} · ${dreams[0].ops ?? "—"} ops`
-                  : dreamsDenied
-                    ? "Dream audit: no grant"
-                    : "No dream runs recorded yet"}
-              </div>
-              <div className="memory-detail__line">
-                {canReviewQuarantine
-                  ? `Quarantine queue ${quarantineRecords.length} · pending gate ${pendingPromotions.length}`
-                  : "Quarantine queue: requires memory.quarantine.review"}
-              </div>
-              <div className="memory-detail__line">
-                {proposalsDenied
-                  ? "Proposals: no grant"
-                  : `Proposals: ${proposals.length} pending${
-                      proposals.filter((proposal) => proposal.tainted).length > 0
-                        ? ` · ${proposals.filter((proposal) => proposal.tainted).length} held (taint)`
-                        : ""
-                    }`}
-              </div>
-              <div className="memory-detail__line">
-                Detailed memory health is not available here.
-              </div>
-            </div>
-            <div className="memory-group" data-testid="memory-harvests">
-              <div className="memory-group__label">
-                Harvest queue — retired identities awaiting the exit-interview dream
-              </div>
-              {harvestsDenied ? (
-                <div className="memory-detail__line">Harvest queue: no grant.</div>
-              ) : harvests.length === 0 ? (
-                <div className="memory-detail__line">No pending harvests.</div>
-              ) : (
-                harvests.map((harvest, index) => (
-                  <div
-                    className="memory-row memory-row--static"
-                    key={`${harvest.realm}:${harvest.identity}:${index}`}
-                    data-testid={`memory-harvest:${harvest.identity}`}
-                  >
-                    <span className="memory-row__title">{harvest.identity}</span>
-                    <span className="memory-row__meta">
-                      {harvest.cause ? <Chip label={harvest.cause} tone="muted" /> : null}
-                      {harvest.session_key ? (
-                        <span className="memory-row__reason">session {harvest.session_key}</span>
-                      ) : null}
-                      <span className="memory-row__age">
-                        retired {relativeAge(harvest.retired_at_ms)}
-                      </span>
-                    </span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        ) : null}
-
-        {tab === "records" ? (
-          detail ? (
-            <BiographyView
-              detail={detail}
-              dreams={dreams}
-              onBack={() => {
-                setDecisionNotice(null);
-                onClearDetail();
-              }}
-              onSelectRecord={(realm, memoryId) => {
-                setDecisionNotice(null);
-                onSelectRecord(realm, memoryId);
-              }}
-              onLoadEvidence={onLoadEvidence}
-              onDecideQuarantine={decideQuarantine}
-              decisionNotice={decisionNotice}
-            />
-          ) : detailLoading ? (
-            <div className="gating__empty">Loading record…</div>
+          {recordsDenied ? (
+            <Notice tone="locked" testId="memory-holdings-denied">
+              Records: no grant. Your access does not include reading memory records.
+            </Notice>
+          ) : !loaded ? (
+            <LoadingState label="Loading memory" rows={3} />
           ) : (
-            <div className="memory-groups">
-              {onQueryRecords ? (
-                <div className="memory-filterbar" data-testid="memory-filter">
-                  <label>
-                    scope
-                    <select
-                      value={filter.scope || ""}
-                      data-testid="memory-filter:scope"
-                      onChange={(event) =>
-                        applyFilter({
-                          ...filter,
-                          scope: (event.target.value || undefined) as MemoryRecordsFilter["scope"],
-                        })
-                      }
-                    >
-                      <option value="">all</option>
-                      <option value="identity">identity</option>
-                      <option value="mob">mob</option>
-                      <option value="operator">operator</option>
-                      <option value="realm">realm</option>
-                    </select>
-                  </label>
-                  <label>
-                    identity / key
-                    <input
-                      value={filter.key || ""}
-                      data-testid="memory-filter-input"
-                      placeholder="identity or scope key"
-                      onChange={(event) => setFilter({ ...filter, key: event.target.value })}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") applyFilter(filter);
-                      }}
-                      onBlur={() => {
-                        // Re-query only on real change: a blur caused by
-                        // clicking load-more must not race the append.
-                        void pager.applyFilterIfChanged(filter);
-                      }}
+            <>
+              {!overviewScopes ? (
+                <p className="memory-caption">
+                  {`Counts cover the ${plural(records.length, "loaded record")}, not the whole store.`}
+                </p>
+              ) : null}
+              {rows.length === 0 && !operatorScopeDenied && !mobScopeDenied ? (
+                <EmptyState inline title="No memory records yet." />
+              ) : (
+                <RowList>
+                  {rows.map((row) => (
+                    <ScopeRow
+                      key={row.key}
+                      row={row}
+                      multiRealm={multiRealm}
+                      limitTitle={limitTitle}
+                      onOpen={() => openRecordsFiltered(row.filter)}
                     />
-                  </label>
-                  <label>
-                    status
-                    <select
-                      value={filter.status || ""}
-                      data-testid="memory-filter:status"
-                      onChange={(event) =>
-                        applyFilter({
-                          ...filter,
-                          status: (event.target.value || undefined) as MemoryRecordsFilter["status"],
-                        })
-                      }
-                    >
-                      <option value="">all</option>
-                      <option value="active">active</option>
-                      <option value="quarantined">quarantined</option>
-                      <option value="superseded">superseded</option>
-                      <option value="tombstoned">tombstoned</option>
-                    </select>
-                  </label>
-                  {realms.length > 1 ? (
-                    <label>
-                      realm
-                      <select
-                        value={filter.realm || ""}
-                        data-testid="memory-filter:realm"
-                        onChange={(event) =>
-                          applyFilter({
-                            ...filter,
-                            realm: event.target.value || undefined,
-                          })
-                        }
-                      >
-                        <option value="">all (merged page)</option>
-                        {realms.map((realm) => (
-                          <option key={realm} value={realm}>
-                            {realm}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  <label>
-                    sort
-                    <select
-                      value={sortMode}
-                      data-testid="memory-sort"
-                      onChange={(event) =>
-                        setSortMode(event.target.value === "utility" ? "utility" : "recency")
-                      }
-                    >
-                      <option value="recency">recency</option>
-                      <option value="utility">utility</option>
-                    </select>
-                  </label>
-                  {hasActiveFilter(filter) ? (
-                    <button
-                      type="button"
-                      className="memory-back"
-                      data-testid="memory-filter-clear"
-                      onClick={() => applyFilter({})}
-                    >
-                      clear
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-              {sortMode === "utility" ? (
-                <SectionNote testid="memory-utility-note">
-                  Utility mode estimates total bytes from injection count and record size.
-                  DEAD means injected at least {DEAD_INJECTION_THRESHOLD} times
-                  and never judged useful.
-                </SectionNote>
-              ) : null}
-              {realms.length > 1 && !filter.realm?.trim() ? (
-                <SectionNote testid="memory-multi-realm-note">
-                  Multi-realm view is a single merged page (keyset paging is
-                  per-realm) — pick a realm above to page through its records.
-                </SectionNote>
-              ) : null}
-              {pageLoading ? <div className="gating__empty">Loading records…</div> : null}
-              {!pageLoading && listView.records.length === 0 ? (
-                <div className="gating__empty" data-testid="memory-records-empty">
-                  {recordsDenied || listView.denied
-                    ? "Records: no grant."
-                    : "No memory records yet."}
-                </div>
-              ) : null}
-              {!pageLoading && listView.denied && listView.records.length > 0 ? (
-                <SectionNote testid="memory-records-denied-note">
-                  Further pages: no grant — the continuation of this query was
-                  denied for this principal.
-                </SectionNote>
-              ) : null}
-              {!pageLoading && listView.records.length > 0 ? (
-                listView.mode === "flat" ? (
-                  <div className="memory-group">
-                    {listView.records.map((record) => (
-                      <RecordRow
-                        key={record.id}
-                        record={record}
-                        utilityMode={sortMode === "utility"}
-                        onSelect={() => onSelectRecord(realmOfRecord(record), record.id)}
-                      />
-                    ))}
-                  </div>
+                  ))}
+                  {mobScopeDenied ? <DeniedScopeRow kind="mob" /> : null}
+                  {operatorScopeDenied ? <DeniedScopeRow kind="operator" /> : null}
+                </RowList>
+              )}
+            </>
+          )}
+        </PanelSection>
+
+        <PanelSection label="In progress" padded>
+          <KeyValueList
+            className="memory-progress"
+            items={[
+              {
+                key: "dream",
+                label: "Last dream",
+                value: lastDream ? (
+                  <MetaLine
+                    parts={[
+                      lastDreamAt ? <RelativeTime value={lastDreamAt} /> : "Time unknown",
+                      typeof lastDream.ops === "number" ? plural(lastDream.ops, "change") : null,
+                    ]}
+                  />
+                ) : dreamsDenied ? (
+                  "No grant"
                 ) : (
-                  listView.groups.map((group) => (
-                    <div className="memory-group" key={group.key} data-testid={`memory-group:${group.key}`}>
-                      <div className="memory-group__label">{group.label}</div>
-                      {group.records.map((record) => (
-                        <RecordRow
-                          key={record.id}
-                          record={record}
-                          onSelect={() => onSelectRecord(realmOfRecord(record), record.id)}
-                        />
-                      ))}
-                    </div>
-                  ))
-                )
-              ) : null}
-              {listView.cursor && onQueryRecords ? (
-                <button
-                  type="button"
-                  className="memory-back memory-load-more"
-                  data-testid="memory-load-more"
-                  disabled={pageLoading}
-                  onClick={loadMore}
-                >
-                  load more
-                </button>
-              ) : null}
-            </div>
+                  "No dream has run yet"
+                ),
+              },
+              {
+                key: "quarantine",
+                label: "Quarantine",
+                value: canReviewQuarantine ? (
+                  <span className="memory-progress__value">
+                    {`${plural(quarantineRecords.length, "record")}, ${pendingPromotions.length} waiting for approval`}
+                    <Button size="sm" onClick={() => setTab("pipeline")}>
+                      Open pipeline
+                    </Button>
+                  </span>
+                ) : (
+                  "Needs the memory.quarantine.review grant"
+                ),
+              },
+              {
+                key: "proposals",
+                label: "Proposals",
+                value: proposalsDenied
+                  ? "No grant"
+                  : `${proposals.length} waiting${
+                      tainted > 0
+                        ? `, ${tainted} held because ${tainted === 1 ? "its source was" : "their sources were"} tainted`
+                        : ""
+                    }`,
+              },
+            ]}
+          />
+        </PanelSection>
+
+        <PanelSection
+          label="Retired agents awaiting their summary"
+          count={!harvestsDenied && harvests.length > 0 ? harvests.length : null}
+          testId="memory-harvests"
+        >
+          {harvestsDenied ? (
+            <EmptyState inline kind="no-access" title="Retired agents: no grant." />
+          ) : harvests.length === 0 ? (
+            <EmptyState inline title="No retired agent is waiting." />
+          ) : (
+            <RowList>
+              {harvests.map((harvest, index) => (
+                <HarvestRow key={`${harvest.realm}:${harvest.identity}:${index}`} harvest={harvest} />
+              ))}
+            </RowList>
+          )}
+        </PanelSection>
+      </div>
+    );
+  }
+
+  function renderRecordList(): React.JSX.Element {
+    const filtered = hasActiveFilter(filter);
+    return (
+      <div className="memory-tab">
+        {onQueryRecords ? (
+          <Toolbar testId="memory-filter" className="memory-toolbar">
+            <SearchField
+              label="Agent or scope key"
+              placeholder="Agent or scope key"
+              value={filter.key || ""}
+              testId="memory-filter-input"
+              onChange={(value) => setFilter({ ...filter, key: value })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") applyFilter(filter);
+              }}
+              onBlur={() => {
+                // Re-query only on a real change: a blur caused by clicking
+                // load more must not race the append.
+                void pager.applyFilterIfChanged(filter);
+              }}
+            />
+            <SelectField
+              label="Scope"
+              value={filter.scope || ""}
+              options={SCOPE_FILTER_OPTIONS}
+              testId="memory-filter:scope"
+              onChange={(value) =>
+                applyFilter({ ...filter, scope: (value || undefined) as MemoryRecordsFilter["scope"] })
+              }
+            />
+            <SelectField
+              label="Status"
+              value={filter.status || ""}
+              options={STATUS_FILTER_OPTIONS}
+              testId="memory-filter:status"
+              onChange={(value) =>
+                applyFilter({ ...filter, status: (value || undefined) as MemoryRecordsFilter["status"] })
+              }
+            />
+            {multiRealm ? (
+              <SelectField
+                label="Realm"
+                value={filter.realm || ""}
+                options={[
+                  { value: "", label: "All realms" },
+                  ...realms.map((realm) => ({ value: realm, label: realm })),
+                ]}
+                testId="memory-filter:realm"
+                onChange={(value) => applyFilter({ ...filter, realm: value || undefined })}
+              />
+            ) : null}
+            <SelectField
+              label="Sort"
+              value={sortMode}
+              options={SORT_OPTIONS}
+              testId="memory-sort"
+              onChange={(value) => setSortMode(value === "utility" ? "utility" : "recency")}
+            />
+            {filtered ? (
+              <Button variant="ghost" data-testid="memory-filter-clear" onClick={() => applyFilter({})}>
+                Clear filters
+              </Button>
+            ) : null}
+          </Toolbar>
+        ) : null}
+        {sortMode === "utility" ? (
+          <Notice testId="memory-utility-note">
+            {`Least useful first: records injected at least ${DEAD_INJECTION_THRESHOLD} times and never judged useful lead, marked Never useful. Space spent is estimated from the injections and the record's size.`}
+          </Notice>
+        ) : null}
+        {multiRealm && !filter.realm?.trim() ? (
+          <Notice testId="memory-multi-realm-note">
+            This is one combined page across realms. Pick a realm to page through its records.
+          </Notice>
+        ) : null}
+        {!loaded || pageLoading ? <LoadingState label="Loading records" rows={4} /> : null}
+        {loaded && !pageLoading && listView.records.length === 0 ? (
+          recordsDenied || listView.denied ? (
+            <EmptyState
+              kind="no-access"
+              testId="memory-records-empty"
+              title="Records: no grant."
+              body="Your access does not include reading these memory records."
+            />
+          ) : filtered ? (
+            <EmptyState
+              kind="filtered"
+              testId="memory-records-empty"
+              title="No records match these filters."
+              action={<Button onClick={() => applyFilter({})}>Clear filters</Button>}
+            />
+          ) : (
+            <EmptyState
+              testId="memory-records-empty"
+              title="No memory records yet."
+              body="Records appear here once agents, dreams or operators write memory."
+            />
           )
         ) : null}
-
-        {tab === "knowledge" ? (
-          <div className="memory-groups" data-testid="memory-knowledge">
-            {identities.length === 0 ? (
-              <div className="gating__empty">
-                {recordsDenied
-                  ? "Records: no grant."
-                  : "No identity-scoped records loaded yet."}
-              </div>
-            ) : (
-              <>
-                <div className="memory-filterbar">
-                  <label>
-                    identity
-                    <select
-                      value={selectedIdentity}
-                      data-testid="memory-knowledge-identity"
-                      onChange={(event) => setKnowledgeIdentity(event.target.value)}
-                    >
-                      {identities.map((identity) => (
-                        <option key={identity} value={identity}>
-                          {identity}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <div className="memory-group">
-                  <div className="memory-group__label">
-                    Composition (scope union over loaded records)
-                  </div>
-                  {knowledgeComposition(records, selectedIdentity).map((segment) => (
-                    <button
-                      type="button"
-                      className="memory-row"
-                      key={segment.label}
-                      data-testid={`memory-knowledge-segment:${segment.label}`}
-                      onClick={() => openRecordsFiltered(segment.filter)}
-                    >
-                      <span className="memory-row__title">{segment.label}</span>
-                      <span className="memory-row__meta">
-                        <Chip label={`${segment.count} records`} />
-                        {segment.approximate ? (
-                          <span className="memory-row__reason">
-                            all {segment.label.split(" ")[0]}-scope rows — membership resolution
-                            needs panel/context (surface 10)
-                          </span>
-                        ) : null}
-                      </span>
-                    </button>
+        {loaded && !pageLoading && listView.denied && listView.records.length > 0 ? (
+          <Notice tone="locked" testId="memory-records-denied-note">
+            Further pages: no grant. Loading more of this list was denied for your access.
+          </Notice>
+        ) : null}
+        {loaded && !pageLoading && listView.records.length > 0 ? (
+          listView.mode === "flat" ? (
+            <section className="cc-section memory-record-group">
+              <SectionHeader
+                label={sortMode === "utility" && !filtered ? "Least useful first" : "Matching records"}
+                count={listView.records.length}
+              />
+              <RowList>
+                {listView.records.map((record) => (
+                  <RecordRow
+                    key={record.id}
+                    record={record}
+                    utilityMode={sortMode === "utility"}
+                    onSelect={() => onSelectRecord(realmOfRecord(record), record.id)}
+                  />
+                ))}
+              </RowList>
+            </section>
+          ) : (
+            listView.groups.map((group) => (
+              <section
+                className="cc-section memory-record-group"
+                key={group.key}
+                data-testid={`memory-group:${group.key}`}
+              >
+                <SectionHeader
+                  label={
+                    <>
+                      {group.scope.scope === "identity" ? (
+                        <AgentName id={group.scope.identity} />
+                      ) : (
+                        scopeHeading(group.scope, nameOf)
+                      )}
+                      {multiRealm ? ` · ${group.scope.realm}` : null}
+                    </>
+                  }
+                  count={group.records.length}
+                />
+                <RowList>
+                  {group.records.map((record) => (
+                    <RecordRow
+                      key={record.id}
+                      record={record}
+                      onSelect={() => onSelectRecord(realmOfRecord(record), record.id)}
+                    />
                   ))}
-                </div>
-              </>
-            )}
-            <SectionNote testid="memory-knowledge-as-injected">
-              AS-INJECTED is unverifiable in phase 1 — the composed injection block requires
-              meta/memory/panel/context (surface 10).
-            </SectionNote>
-            <div className="memory-group" data-testid="memory-knowledge-history">
-              <div className="memory-group__label">
-                Injection history (durable ledger, newest first)
-              </div>
-              {injectionsDenied ? (
-                <div className="memory-detail__line">Injection history: no grant.</div>
-              ) : annotatedInjections.length === 0 ? (
-                <div className="memory-detail__line">No injection-ledger rows yet.</div>
-              ) : (
-                annotatedInjections.map(({ entry, dup }, index) => (
-                  <div
-                    className="memory-row memory-row--static"
-                    key={`inj-${index}`}
-                    data-testid={`memory-injection:${index}`}
-                  >
-                    <button
-                      type="button"
-                      className="memory-dream__record"
-                      data-testid={`memory-injection-record:${index}`}
-                      onClick={() => onSelectRecord(entry.realm, entry.record_id)}
-                    >
-                      {entry.record_id}
-                    </button>
-                    <span className="memory-row__meta">
-                      <Chip label={entry.surface} tone="muted" />
-                      <span className="memory-row__reason">
-                        {entry.identity}
-                        {entry.session_key ? ` · session ${entry.session_key}` : ""}
-                      </span>
-                      {dup ? (
-                        <span data-testid={`memory-injection-dup:${index}`}>
-                          <Chip label="DUP" tone="warning" />
-                        </span>
-                      ) : null}
-                      <span className="memory-row__age">{relativeAge(entry.at_ms)}</span>
-                    </span>
-                  </div>
-                ))
-              )}
-              <SectionNote testid="memory-knowledge-budget">
-                Session memory budget data is not available here.
-              </SectionNote>
-            </div>
-          </div>
+                </RowList>
+              </section>
+            ))
+          )
         ) : null}
-
-        {tab === "pipeline" ? (
-          <div className="memory-quarantine" data-testid="memory-pipeline">
-            <div className="memory-detail__line memory-pipeline__stages" data-testid="memory-pipeline-stages">
-              PROPOSED ({proposalsDenied ? "no grant" : proposals.length}) ─▶ PENDING GATE (
-              {pendingPromotions.length}) ─▶ COMMITTED · QUAR (
-              {canReviewQuarantine ? quarantineRecords.length : "no grant"})
-            </div>
-            <div className="memory-note" data-testid="memory-quarantine-note">
-              {onDecideQuarantine
-                ? "Open a quarantined record to release or tombstone it. Gated promotions are decided in the Gating inbox; the memory steward's dream decides the rest."
-                : "Read-only here. Verdicts come from the memory steward's dream, the gating flow, and reviewers who hold the quarantine review and memory write grants."}
-            </div>
-            <div className="memory-group" data-testid="memory-pipeline-proposals">
-              <div className="memory-group__label">
-                Proposed — awaiting a dream verdict (taint captured at propose time)
-              </div>
-              {proposalsDenied ? (
-                <div className="memory-detail__line">Proposals: no grant.</div>
-              ) : proposals.length === 0 ? (
-                <div className="memory-detail__line">No pending proposals.</div>
-              ) : (
-                proposals.map((proposal) => (
-                  <div
-                    className="memory-row memory-row--static"
-                    key={`${proposal.realm}:${proposal.proposal_id}`}
-                    data-testid={`memory-proposal:${proposal.proposal_id}`}
-                  >
-                    <span className="memory-row__title">
-                      {proposal.title || proposal.proposal_id}
-                    </span>
-                    <span className="memory-row__meta">
-                      {proposal.kind ? <Chip label={proposal.kind} /> : null}
-                      <Chip
-                        label={`→ ${proposal.scope_kind}${
-                          proposal.scope_key ? `:${proposal.scope_key}` : ""
-                        }`}
-                        tone="muted"
-                      />
-                      {proposal.tainted ? (
-                        <span data-testid={`memory-proposal-taint:${proposal.proposal_id}`}>
-                          <Chip label="tainted" tone="warning" />
-                        </span>
-                      ) : null}
-                      {proposal.status ? (
-                        <Chip
-                          label={proposal.status}
-                          tone={proposal.status === "held" ? "warning" : "muted"}
-                        />
-                      ) : null}
-                      {proposal.author ? (
-                        <span className="memory-row__reason">{proposal.author}</span>
-                      ) : null}
-                      <span className="memory-row__age">
-                        {relativeAge(proposal.created_at_ms)}
-                      </span>
-                    </span>
-                  </div>
-                ))
-              )}
-            </div>
-            {canReviewQuarantine ? (
-              <>
-                {quarantineRecords.length === 0 && pendingPromotions.length === 0 ? (
-                  <div className="gating__empty">Quarantine queue is empty.</div>
-                ) : null}
-                {pendingPromotions.length > 0 ? (
-                  <div className="memory-group">
-                    <div className="memory-group__label">Pending gated promotions</div>
-                    {pendingPromotions.map((pending) => (
-                      <div
-                        className="memory-row memory-row--static"
-                        key={pending.pending_id}
-                        data-testid={`memory-pending:${pending.pending_id}`}
-                      >
-                        <span className="memory-row__title">
-                          {pending.record_id} → {pending.scope_kind}:{pending.scope_key}
-                        </span>
-                        <span className="memory-row__meta">
-                          {pending.rationale ? (
-                            <span className="memory-row__reason">{pending.rationale}</span>
-                          ) : null}
-                          {pending.status ? <Chip label={pending.status} tone="muted" /> : null}
-                          <span className="memory-row__age">{relativeAge(pending.created_at_ms)}</span>
-                          {onOpenGating ? (
-                            <button
-                              type="button"
-                              className="memory-back"
-                              data-testid={`memory-pipeline-decide:${pending.pending_id}`}
-                              onClick={onOpenGating}
-                            >
-                              → decide in Gating inbox
-                            </button>
-                          ) : null}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {quarantineRecords.length > 0 ? (
-                  <div className="memory-group">
-                    <div className="memory-group__label">Quarantined records</div>
-                    {quarantineRecords.map((record) => {
-                      const reason =
-                        record.status.status === "quarantined" ? record.status.reason : undefined;
-                      return (
-                        <button
-                          type="button"
-                          className="memory-row"
-                          key={record.id}
-                          data-testid={`memory-quarantine-record:${record.id}`}
-                          onClick={() => onSelectRecord(realmOfRecord(record), record.id)}
-                        >
-                          <span className="memory-row__title">{record.title || record.id}</span>
-                          <span className="memory-row__meta">
-                            {reason ? <span className="memory-row__reason">{reason}</span> : null}
-                            <Chip label={trustLabel(record.trust)} tone={trustTone(record.trust)} />
-                            <span className="memory-row__age">{relativeAge(record.created_at_ms)}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <SectionNote testid="memory-pipeline-no-grant">
-                Quarantine queue: no grant — rows require memory.quarantine.review.
-              </SectionNote>
-            )}
-            <div className="memory-group" data-testid="memory-review-queue">
-              <div className="memory-group__label">
-                Review queue — memories you might want to correct
-              </div>
-              {auditVerdictsDenied ? (
-                <div className="memory-detail__line">Review queue: no grant.</div>
-              ) : auditVerdicts.length === 0 ? (
-                <div className="memory-detail__line">Review queue is empty.</div>
-              ) : (
-                auditVerdicts.map((verdict) => (
-                  <div
-                    className="memory-row memory-row--static"
-                    key={`${verdict.realm}:${verdict.run_id}:${verdict.record_id}`}
-                    data-testid={`memory-review:${verdict.run_id}:${verdict.record_id}`}
-                  >
-                    <button
-                      type="button"
-                      className="memory-dream__record"
-                      data-testid={`memory-review-record:${verdict.run_id}:${verdict.record_id}`}
-                      onClick={() => onSelectRecord(verdict.realm, verdict.record_id)}
-                    >
-                      {verdict.record_id}
-                    </button>
-                    <span className="memory-row__meta">
-                      {verdict.verdict ? <Chip label={verdict.verdict} tone="warning" /> : null}
-                      {verdict.rationale ? (
-                        <span className="memory-row__reason">{verdict.rationale}</span>
-                      ) : null}
-                      <span className="memory-row__reason">{verdict.run_id}</span>
-                      <span className="memory-row__age">{relativeAge(verdict.created_at_ms)}</span>
-                    </span>
-                  </div>
-                ))
-              )}
-              <div className="memory-note">
-                Read-only — the correction affordance ships with the write-path design.
-              </div>
-            </div>
-            <MemoryLiveStrip
-              frames={memoryFrames}
-              onPivot={(realm, recordId) => void onSelectRecord(realm, recordId)}
-            />
-          </div>
-        ) : null}
-
-        {tab === "dreams" ? (
-          <div className="memory-dreams">
-            <div className="memory-group" data-testid="memory-dream-runs">
-              <div className="memory-group__label">
-                Durable verdict sheets (dream_runs — survive restarts)
-              </div>
-              {dreamRunsDenied ? (
-                <div className="memory-detail__line">Verdict sheets: no grant.</div>
-              ) : dreamSheets.length === 0 ? (
-                <div className="memory-detail__line">
-                  No persisted dream runs yet — runs before the dream_runs table land only in
-                  the audit reconstruction below.
-                </div>
-              ) : (
-                dreamSheets.map((run) => {
-                  const expanded = expandedRuns[run.run_id] === true;
-                  const detail = normalizeDreamRunDetail(run.detail);
-                  return (
-                    <div
-                      className="gpolicy memory-dream-run"
-                      key={run.run_id}
-                      data-testid={`memory-dream-run:${run.run_id}`}
-                    >
-                      <button
-                        type="button"
-                        className="memory-row memory-dream-run__head"
-                        data-testid={`memory-dream-run-toggle:${run.run_id}`}
-                        onClick={() =>
-                          setExpandedRuns((current) => ({
-                            ...current,
-                            [run.run_id]: !expanded,
-                          }))
-                        }
-                      >
-                        <span className="memory-row__title">
-                          {expanded ? "▾" : "▸"} {run.run_id}
-                        </span>
-                        <span className="memory-row__meta">
-                          {run.partition ? <Chip label={run.partition} tone="muted" /> : null}
-                          <span className="memory-row__reason">
-                            {dreamRunDuration(run)} ·{" "}
-                            {typeof run.ops_committed === "number"
-                              ? `${run.ops_committed} ops`
-                              : "— ops"}
-                          </span>
-                          <span className="memory-row__age">
-                            {relativeAge(run.completed_at_ms || run.started_at_ms)}
-                          </span>
-                        </span>
-                      </button>
-                      {expanded ? (
-                        <div
-                          className="memory-dream-run__detail"
-                          data-testid={`memory-dream-run-detail:${run.run_id}`}
-                        >
-                          {detail.raw !== null ? (
-                            <div className="memory-detail__line">
-                              unparsed detail: {detail.raw}
-                            </div>
-                          ) : (
-                            <>
-                              {detail.phases.length > 0 ? (
-                                detail.phases.map(([name, note], index) => (
-                                  <div className="memory-detail__line" key={`ph-${index}`}>
-                                    {name}
-                                    {note ? ` — ${note}` : ""}
-                                  </div>
-                                ))
-                              ) : (
-                                <div className="memory-detail__line">no phases recorded</div>
-                              )}
-                              <div className="memory-detail__line">
-                                verdicts:{" "}
-                                {detail.verdicts.length > 0
-                                  ? detail.verdicts
-                                      .map(([name, count]) => `${count} ${name}`)
-                                      .join(" · ")
-                                  : "all counters zero"}
-                              </div>
-                              {detail.skips.map((skip, index) => (
-                                <div
-                                  className="memory-detail__line memory-dream__rationale"
-                                  key={`sk-${index}`}
-                                >
-                                  skip: {skip}
-                                </div>
-                              ))}
-                            </>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-            <div className="memory-group__label">Reconstructed from audit rows</div>
-            {dreams.length === 0 ? (
-              <div className="gating__empty">
-                {dreamsDenied ? "Dream audit: no grant." : "No dream runs recorded yet."}
-              </div>
-            ) : (
-              dreams.map((run) => {
-                const summary = dreamOpKindsSummary(run.op_kinds);
-                return (
-                  <div className="gpolicy memory-dream" key={run.run_id} data-testid={`memory-dream:${run.run_id}`}>
-                    <div className="gpolicy__head">
-                      <span className="gpolicy__action">{run.run_id}</span>
-                      {run.quarantined_ops && run.quarantined_ops > 0 ? (
-                        <Chip label={`${run.quarantined_ops} quarantined`} tone="warning" />
-                      ) : null}
-                    </div>
-                    <div className="gpolicy__meta">{dreamTimeRange(run)}</div>
-                    <div className="gpolicy__meta">
-                      {typeof run.ops === "number" ? `${run.ops} ops` : "—"}
-                      {summary ? ` · ${summary}` : ""}
-                    </div>
-                    {(run.memory_ids || []).length > 0 ? (
-                      <div className="memory-dream__touched">
-                        touched:
-                        {(run.memory_ids || []).map((memoryId) => (
-                          <button
-                            type="button"
-                            className="memory-dream__record"
-                            key={memoryId}
-                            data-testid={`memory-dream-record:${run.run_id}:${memoryId}`}
-                            onClick={() => onSelectRecord(run.realm, memoryId)}
-                          >
-                            {memoryId}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {(run.rationales || []).map((rationale, index) => (
-                      <div className="memory-dream__rationale" key={`r-${index}`}>
-                        {rationale}
-                      </div>
-                    ))}
-                  </div>
-                );
-              })
-            )}
+        {listView.cursor && onQueryRecords ? (
+          <div className="memory-load-more">
+            <Button data-testid="memory-load-more" disabled={pageLoading} onClick={loadMore}>
+              Load more records
+            </Button>
           </div>
         ) : null}
       </div>
-    </div>
+    );
+  }
+
+  function renderKnowledge(): React.JSX.Element {
+    const agentName = selectedIdentity ? nameOf(selectedIdentity) || selectedIdentity : "";
+    const segments = selectedIdentity ? knowledgeComposition(records, selectedIdentity) : [];
+    const total = segments.reduce((sum, segment) => sum + segment.count, 0);
+    return (
+      <div className="memory-tab" data-testid="memory-knowledge">
+        {identities.length === 0 ? (
+          <EmptyState
+            inline
+            kind={recordsDenied ? "no-access" : "empty"}
+            title={recordsDenied ? "Records: no grant." : "No agent memory is loaded yet."}
+          />
+        ) : (
+          <>
+            <Toolbar className="memory-toolbar">
+              <SelectField
+                label="Agent"
+                value={selectedIdentity}
+                options={identities.map((identity) => ({
+                  value: identity,
+                  label: nameOf(identity) || identity,
+                }))}
+                testId="memory-knowledge-identity"
+                onChange={(value) => setKnowledgeIdentity(value)}
+              />
+            </Toolbar>
+            <PanelSection label={`What ${agentName} can draw on`} count={total}>
+              <RowList>
+                {segments.map((segment) => (
+                  <ListRow
+                    key={segment.label}
+                    className="memory-segment-row"
+                    testId={`memory-knowledge-segment:${segment.label}`}
+                    onActivate={() => openRecordsFiltered(segment.filter)}
+                    title={knowledgeSegmentTitle(segment, agentName)}
+                    subtitle={segment.approximate ? "Every record of this kind" : "Only this agent's records"}
+                    meta={
+                      <>
+                        <Meter
+                          className="memory-share-meter"
+                          showLabel={false}
+                          total={total}
+                          label={`${plural(segment.count, "record")} of ${total}`}
+                          segments={[{ value: segment.count, tone: "neutral" }]}
+                        />
+                        <span className="memory-count">{plural(segment.count, "record")}</span>
+                      </>
+                    }
+                  />
+                ))}
+              </RowList>
+              <p className="memory-caption">
+                Team, operator and shared counts include every record of that kind, because this
+                console cannot tell which teams an agent belongs to.
+              </p>
+            </PanelSection>
+          </>
+        )}
+        <PanelSection
+          label="Injection history"
+          count={!injectionsDenied && annotatedInjections.length > 0 ? annotatedInjections.length : null}
+          testId="memory-knowledge-history"
+        >
+          {injectionsDenied ? (
+            <EmptyState inline kind="no-access" title="Injection history: no grant." />
+          ) : annotatedInjections.length === 0 ? (
+            <EmptyState inline title="Nothing has been injected yet." />
+          ) : (
+            <RowList>
+              {annotatedInjections.map(({ entry, dup }, index) => (
+                <ListRow
+                  key={`inj-${index}`}
+                  className="memory-injection-row"
+                  testId={`memory-injection:${index}`}
+                  title={
+                    <RecordLink
+                      id={entry.record_id}
+                      realm={entry.realm}
+                      titles={recordTitles}
+                      testId={`memory-injection-record:${index}`}
+                      onOpen={onSelectRecord}
+                    />
+                  }
+                  subtitle={
+                    <>
+                      {"Given to "}
+                      <AgentName id={entry.identity} />
+                      {` ${injectionMoment(entry.surface)}`}
+                    </>
+                  }
+                  meta={
+                    <>
+                      {dup ? (
+                        <Chip
+                          tone="warn"
+                          testId={`memory-injection-dup:${index}`}
+                          title="The agent was given the same record in its previous injection too."
+                        >
+                          Repeated
+                        </Chip>
+                      ) : null}
+                      <RelativeTime
+                        value={entry.at_ms}
+                        title={joinMeta(
+                          formatAbsoluteTime(entry.at_ms),
+                          entry.session_key ? `session ${entry.session_key}` : null,
+                        )}
+                      />
+                    </>
+                  }
+                />
+              ))}
+            </RowList>
+          )}
+        </PanelSection>
+        <p className="memory-caption memory-footnote">
+          <span data-testid="memory-knowledge-as-injected">
+            The exact memory text given to an agent is not shown here.
+          </span>{" "}
+          <span data-testid="memory-knowledge-budget">
+            Per-session memory budgets are not shown here either.
+          </span>
+        </p>
+      </div>
+    );
+  }
+
+  function renderPipeline(): React.JSX.Element {
+    return (
+      <div className="memory-tab" data-testid="memory-pipeline">
+        <ol className="memory-stepper" data-testid="memory-pipeline-stages" aria-label="Pipeline stages">
+          <li className="memory-stepper__step">
+            <span className="memory-stepper__label">Proposed</span>{" "}
+            <span className="memory-stepper__count">{proposalsDenied ? "no grant" : proposals.length}</span>
+          </li>
+          <li className="memory-stepper__step">
+            <span className="memory-stepper__label">Waiting for approval</span>{" "}
+            <span className="memory-stepper__count">
+              {canReviewQuarantine ? pendingPromotions.length : "no grant"}
+            </span>
+          </li>
+          <li className="memory-stepper__step">
+            <span className="memory-stepper__label">Quarantined</span>{" "}
+            <span className="memory-stepper__count">
+              {canReviewQuarantine ? quarantineRecords.length : "no grant"}
+            </span>
+          </li>
+        </ol>
+        <Notice testId="memory-quarantine-note">
+          {onDecideQuarantine
+            ? "Open a quarantined record to release or tombstone it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest."
+            : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory."}
+        </Notice>
+
+        <PanelSection
+          label="Proposed"
+          count={!proposalsDenied && proposals.length > 0 ? proposals.length : null}
+          testId="memory-pipeline-proposals"
+        >
+          {proposalsDenied ? (
+            <EmptyState inline kind="no-access" title="Proposals: no grant." />
+          ) : proposals.length === 0 ? (
+            <EmptyState inline title="No proposal is waiting for a dream." />
+          ) : (
+            <RowList>
+              {proposals.map((proposal) => (
+                <ListRow
+                  key={`${proposal.realm}:${proposal.proposal_id}`}
+                  className="memory-proposal-row"
+                  testId={`memory-proposal:${proposal.proposal_id}`}
+                  title={proposal.title || "Untitled proposal"}
+                  titleAttr={joinMeta(proposal.title, `proposal ${proposal.proposal_id}`)}
+                  subtitle={
+                    <>
+                      {`${kindLabel(proposal.kind)} for `}
+                      <ScopeTarget kind={proposal.scope_kind} scopeKey={proposal.scope_key} />
+                      {proposal.author ? (
+                        <>
+                          {" · proposed by "}
+                          <AgentName id={proposal.author} />
+                        </>
+                      ) : null}
+                    </>
+                  }
+                  meta={
+                    <>
+                      {proposal.tainted ? (
+                        <Chip
+                          tone="warn"
+                          testId={`memory-proposal-taint:${proposal.proposal_id}`}
+                          title="Proposed in a session that read untrusted input."
+                        >
+                          Tainted
+                        </Chip>
+                      ) : null}
+                      {proposal.status && proposal.status !== "pending" ? (
+                        <Chip tone={proposal.status === "held" ? "warn" : "neutral"}>
+                          {humanizeEnum(proposal.status)}
+                        </Chip>
+                      ) : null}
+                      <RelativeTime value={proposal.created_at_ms} />
+                    </>
+                  }
+                />
+              ))}
+            </RowList>
+          )}
+        </PanelSection>
+
+        {canReviewQuarantine ? (
+          <>
+            <PanelSection
+              label="Waiting for approval"
+              count={pendingPromotions.length > 0 ? pendingPromotions.length : null}
+            >
+              {pendingPromotions.length === 0 ? (
+                <EmptyState inline title="No promotion is waiting for approval." />
+              ) : (
+                <RowList>
+                  {pendingPromotions.map((pending) => (
+                    <ListRow
+                      key={pending.pending_id}
+                      className="memory-pending-row"
+                      testId={`memory-pending:${pending.pending_id}`}
+                      onActivate={() => onSelectRecord(pending.realm, pending.record_id)}
+                      titleAttr={`Promotion ${pending.pending_id}`}
+                      title={
+                        recordTitles.get(pending.record_id) ?? (
+                          <TechnicalId value={pending.record_id} copy={false} />
+                        )
+                      }
+                      subtitle={
+                        <>
+                          {"To "}
+                          <ScopeTarget kind={pending.scope_kind} scopeKey={pending.scope_key} />
+                        </>
+                      }
+                      meta={
+                        <>
+                          {pending.status && pending.status !== "pending" ? (
+                            <Chip>{humanizeEnum(pending.status)}</Chip>
+                          ) : null}
+                          <RelativeTime value={pending.created_at_ms} />
+                        </>
+                      }
+                      actions={
+                        onOpenGating ? (
+                          <Button
+                            size="sm"
+                            data-testid={`memory-pipeline-decide:${pending.pending_id}`}
+                            onClick={onOpenGating}
+                          >
+                            Decide in Approvals
+                          </Button>
+                        ) : undefined
+                      }
+                    >
+                      {pending.rationale ? (
+                        <span className="memory-row-note" title={pending.rationale}>
+                          {pending.rationale}
+                        </span>
+                      ) : null}
+                    </ListRow>
+                  ))}
+                </RowList>
+              )}
+            </PanelSection>
+            <PanelSection
+              label="Quarantined"
+              count={quarantineRecords.length > 0 ? quarantineRecords.length : null}
+            >
+              {quarantineRecords.length === 0 ? (
+                <EmptyState inline title="Nothing is quarantined." />
+              ) : (
+                <RowList>
+                  {quarantineRecords.map((record) => {
+                    const reason =
+                      record.status.status === "quarantined" ? record.status.reason : undefined;
+                    return (
+                      <ListRow
+                        key={record.id}
+                        className="memory-quarantine-row"
+                        testId={`memory-quarantine-record:${record.id}`}
+                        onActivate={() => onSelectRecord(realmOfRecord(record), record.id)}
+                        title={record.title || "Untitled record"}
+                        titleAttr={record.title || undefined}
+                        subtitle={<RecordFacts record={record} hideStatus />}
+                        meta={<RelativeTime value={record.created_at_ms} />}
+                      >
+                        {reason ? (
+                          <span className="memory-row-note" title={reason}>
+                            {reason}
+                          </span>
+                        ) : null}
+                      </ListRow>
+                    );
+                  })}
+                </RowList>
+              )}
+            </PanelSection>
+          </>
+        ) : (
+          <Notice tone="locked" testId="memory-pipeline-no-grant">
+            Quarantine: no grant. Seeing the queue needs the memory.quarantine.review grant.
+          </Notice>
+        )}
+
+        <PanelSection
+          label="Worth a look"
+          count={!auditVerdictsDenied && auditVerdicts.length > 0 ? auditVerdicts.length : null}
+          testId="memory-review-queue"
+        >
+          {auditVerdictsDenied ? (
+            <EmptyState inline kind="no-access" title="Review queue: no grant." />
+          ) : auditVerdicts.length === 0 ? (
+            <EmptyState inline title="Nothing is flagged for a closer look." />
+          ) : (
+            <>
+              <p className="memory-caption">Records a dream flagged for a closer look.</p>
+              <RowList>
+                {auditVerdicts.map((verdict) => (
+                  <ListRow
+                    key={`${verdict.realm}:${verdict.run_id}:${verdict.record_id}`}
+                    className="memory-review-row"
+                    testId={`memory-review:${verdict.run_id}:${verdict.record_id}`}
+                    title={
+                      <RecordLink
+                        id={verdict.record_id}
+                        realm={verdict.realm}
+                        titles={recordTitles}
+                        testId={`memory-review-record:${verdict.run_id}:${verdict.record_id}`}
+                        onOpen={onSelectRecord}
+                      />
+                    }
+                    subtitle={verdict.rationale}
+                    meta={
+                      <>
+                        {verdict.verdict ? (
+                          <Chip tone="warn">{reviewVerdictLabel(verdict.verdict)}</Chip>
+                        ) : null}
+                        <RelativeTime
+                          value={verdict.created_at_ms}
+                          prefix="Flagged"
+                          title={joinMeta(
+                            formatAbsoluteTime(verdict.created_at_ms),
+                            `dream run ${verdict.run_id}`,
+                          )}
+                        />
+                      </>
+                    }
+                  />
+                ))}
+              </RowList>
+            </>
+          )}
+        </PanelSection>
+
+        <MemoryLiveStrip
+          frames={memoryFrames}
+          onPivot={(realm, recordId) => void onSelectRecord(realm, recordId)}
+        />
+      </div>
+    );
+  }
+
+  function renderDreams(): React.JSX.Element {
+    return (
+      <div className="memory-tab memory-dreams">
+        <PanelSection
+          label="Dream runs"
+          count={!dreamRunsDenied && dreamSheets.length > 0 ? dreamSheets.length : null}
+          testId="memory-dream-runs"
+        >
+          {dreamRunsDenied ? (
+            <EmptyState inline kind="no-access" title="Dream runs: no grant." />
+          ) : dreamSheets.length === 0 ? (
+            <EmptyState
+              inline
+              title="No dream run is recorded yet."
+              body="Older runs may still appear in the audit log below."
+            />
+          ) : (
+            <RowList>
+              {dreamSheets.map((run) => (
+                <DreamRunRow
+                  key={run.run_id}
+                  run={run}
+                  expanded={expandedRuns[run.run_id] === true}
+                  onToggle={() =>
+                    setExpandedRuns((current) => ({ ...current, [run.run_id]: !current[run.run_id] }))
+                  }
+                />
+              ))}
+            </RowList>
+          )}
+        </PanelSection>
+        <PanelSection
+          label="Earlier runs, from the audit log"
+          count={dreams.length > 0 ? dreams.length : null}
+        >
+          {dreams.length === 0 ? (
+            <EmptyState
+              inline
+              kind={dreamsDenied ? "no-access" : "empty"}
+              title={dreamsDenied ? "Dream audit: no grant." : "No dream runs recorded yet."}
+            />
+          ) : (
+            <RowList>
+              {dreams.map((run) => (
+                <AuditRunRow
+                  key={run.run_id}
+                  run={run}
+                  partition={sheetPartitions.get(run.run_id)}
+                  recordTitles={recordTitles}
+                  onOpenRecord={onSelectRecord}
+                />
+              ))}
+            </RowList>
+          )}
+        </PanelSection>
+      </div>
+    );
+  }
+
+  function renderRecords(): React.JSX.Element {
+    if (detail) {
+      return (
+        <BiographyView
+          detail={detail}
+          dreams={dreams}
+          onBack={() => {
+            setDecisionNotice(null);
+            onClearDetail();
+          }}
+          onSelectRecord={(realm, memoryId) => {
+            setDecisionNotice(null);
+            onSelectRecord(realm, memoryId);
+          }}
+          onLoadEvidence={onLoadEvidence}
+          onDecideQuarantine={decideQuarantine}
+          decisionNotice={decisionNotice}
+        />
+      );
+    }
+    if (detailLoading) return <LoadingState label="Loading record" rows={5} />;
+    return renderRecordList();
+  }
+
+  return (
+    <PanelShell className="memory-panel" testId="memory-panel">
+      <PanelHeader
+        title="Memory"
+        subtitle={subtitle}
+        divider={false}
+        actions={
+          <>
+            {runtimeControl}
+            <Button
+              icon={<KitGlyph name="refresh" />}
+              data-testid="memory-refresh"
+              onClick={() =>
+                onRefresh(
+                  tab === "records" && detail
+                    ? { realm: detail.realm, memoryId: detail.record.id }
+                    : undefined,
+                )
+              }
+            >
+              Refresh
+            </Button>
+          </>
+        }
+      />
+      <PanelTabs<MemoryTab> tabs={tabs} active={tab} onSelect={setTab} ariaLabel="Memory views" />
+      {/* One-release redirect alias (open Q6): the quarantine tab folded into
+          Pipeline; automation addressing memory-tab:quarantine keeps working
+          until the next release removes this. Outside the tab list, invisible
+          and out of the tab order. */}
+      <button
+        type="button"
+        className="memory-tab-alias"
+        onClick={() => setTab(resolveMemoryTabAlias("quarantine") || "pipeline")}
+        data-testid="memory-tab:quarantine"
+        aria-hidden="true"
+        tabIndex={-1}
+      >
+        Quarantine
+      </button>
+      {/* The reserved status row sits between the tabs and the body, so a
+          refresh error or its recovery never moves either under a click. */}
+      <StatusRow error={error} errorTestId="memory-error" updatedAt={updatedAt ?? undefined}>
+        {!loaded ? "Loading memory" : undefined}
+      </StatusRow>
+      <PanelBody className="memory-panel__body">
+        {tab === "holdings" ? renderHoldings() : null}
+        {tab === "records" ? renderRecords() : null}
+        {tab === "knowledge" ? renderKnowledge() : null}
+        {tab === "pipeline" ? renderPipeline() : null}
+        {tab === "dreams" ? renderDreams() : null}
+      </PanelBody>
+    </PanelShell>
   );
 }

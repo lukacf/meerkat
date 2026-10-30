@@ -83,12 +83,6 @@
       "count": 5
     },
     {
-      "file": "console/src/panels/MemoryPanel.tsx",
-      "code": 2304,
-      "message": "Cannot find name 'MemoryScopeOverview'.",
-      "count": 10
-    },
-    {
       "file": "console/src/panels/MetaDock.tsx",
       "code": 2339,
       "message": "Property 'id' does not exist on type 'ConsoleDockNode'.\n  Property 'id' does not exist on type 'ConsoleDockPanelNode'.",

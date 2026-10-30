@@ -4061,8 +4061,7 @@ async function runMemoryBodyClickAcrossRefreshProof() {
     // releases once its error has appeared or cleared. Boxes are measured
     // while pressed, so press styling is the same in both.
     // The pressed control's top-left and the body's box must hold. A tile's
-    // height may follow a sibling tile in its grid row (the lattice tile adds
-    // a "re-checking" line while its page-walk runs), which leaves the
+    // height may follow a sibling tile in its grid row, which leaves the
     // pointer on the same tile.
     const placement = async target => {
       const box = await target.boundingBox();
@@ -4092,22 +4091,24 @@ async function runMemoryBodyClickAcrossRefreshProof() {
       const tile = document.querySelector('[data-testid="memory-verdict:lattice"]');
       return tile?.getAttribute("data-status") === "holding" && !/running|re-checking/.test(tile.textContent || "");
     });
-    const knowledgeOpened = () => page.waitForFunction(
-      () => document.querySelector('[data-testid="memory-tab:knowledge"]')?.classList.contains("is-active"),
+    // The pressed tile is the first check, the lattice: it opens the tab
+    // that holds its evidence, Records.
+    const tileOpened = () => page.waitForFunction(
+      () => document.querySelector('[data-testid="memory-tab:records"]')?.classList.contains("is-active"),
       null, { timeout: 3000 }).then(() => true, () => false);
     const recordRequested = () => page.waitForRequest(request => request.url().endsWith("/console/rpc")
       && request.method() === "POST" && request.postDataJSON()?.method === "meta/memory/panel/record", { timeout: 3000 })
       .then(() => true, () => false);
 
     await memoryError.waitFor({ state: "detached" });
-    const tile = page.locator('[data-testid^="memory-verdict:"]').first();
+    const tile = page.getByTestId("memory-verdict:lattice");
     await tile.waitFor();
     await latticeSettled();
-    await pressAcrossRefresh("verdict-tile-across-failed-refresh", tile, true, knowledgeOpened);
+    await pressAcrossRefresh("verdict-tile-across-failed-refresh", tile, true, tileOpened);
     await page.getByTestId("memory-tab:holdings").click();
     await memoryError.waitFor();
     await latticeSettled();
-    await pressAcrossRefresh("verdict-tile-across-recovery", tile, false, knowledgeOpened);
+    await pressAcrossRefresh("verdict-tile-across-recovery", tile, false, tileOpened);
 
     await page.getByTestId("memory-tab:records").click();
     const row = page.getByTestId("memory-record:memory-1");

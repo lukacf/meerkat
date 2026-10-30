@@ -500,6 +500,21 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ClaimCompositionResidencyRunning",
     "ClaimCompositionResidencyRetired",
     "ClaimCompositionResidencyStopped",
+    "ReplaceToolGrantGateIdle",
+    "ReplaceToolGrantGateAttached",
+    "ReplaceToolGrantGateRunning",
+    "ReplaceToolGrantGateRetired",
+    "ReplaceToolGrantGateStopped",
+    "ApplyToolGrantOpenSetChangedIdle",
+    "ApplyToolGrantOpenSetChangedAttached",
+    "ApplyToolGrantOpenSetChangedRunning",
+    "ApplyToolGrantOpenSetChangedRetired",
+    "ApplyToolGrantOpenSetChangedStopped",
+    "ApplyToolGrantOpenSetUnchangedIdle",
+    "ApplyToolGrantOpenSetUnchangedAttached",
+    "ApplyToolGrantOpenSetUnchangedRunning",
+    "ApplyToolGrantOpenSetUnchangedRetired",
+    "ApplyToolGrantOpenSetUnchangedStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

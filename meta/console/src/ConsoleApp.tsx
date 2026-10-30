@@ -290,7 +290,7 @@ type MemoryPanelData = {
   loaded: boolean;
   /// Keyset cursor from the base records page (single-realm only).
   nextCursor: string | null;
-  /// Per-section -32030 outcomes so the panel can render "no grant"
+  /// Per-section -32030 outcomes so the panel can render "no access"
   /// (never green) instead of an indistinguishable empty section.
   recordsDenied: boolean;
   dreamsDenied: boolean;
@@ -3061,7 +3061,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor = recordsResult?.next_cursor ?? null;
       } catch (err) {
         // Access denied to records leaves the section empty but flagged, so
-        // the panel renders "no grant" instead of an empty store.
+        // the panel renders "no access" instead of an empty store.
         if (memorySectionOutcome(err) !== "denied") throw err;
         recordsDenied = true;
       }
@@ -3134,7 +3134,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
 
       // Phase-2 read surfaces, fetched in parallel with the same per-section
-      // -32030 tolerance: a denied surface renders "no grant", never an
+      // -32030 tolerance: a denied surface renders "no access", never an
       // indistinguishable empty section, and never aborts the panel load.
       const section = async <T,>(
         command: (typeof CONSOLE_COMMAND_NAMES)[keyof typeof CONSOLE_COMMAND_NAMES],
@@ -3249,7 +3249,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           { include_terminal: true },
         )) as WorkGraphSnapshotResult | null;
       } catch (err) {
-        // Access denied renders as "no grant", never an empty graph.
+        // Access denied renders as "no access", never an empty graph.
         if (jsonRpcErrorCode(err) !== -32030) throw err;
         denied = true;
       }
@@ -3302,7 +3302,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   /// Filtered/paged panel/records query for the Records filter bar, the
   /// keyset load-more, and the lattice page-walk. Resolves null STRICTLY on
-  /// -32030 (denied — consumers render "no grant", never an empty store);
+  /// -32030 (denied — consumers render "no access", never an empty store);
   /// other failures surface via the panel error banner and rethrow so the
   /// pager keeps the prior page instead of clobbering it.
   const queryMemoryRecords = React.useCallback(

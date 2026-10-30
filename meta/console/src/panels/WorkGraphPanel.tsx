@@ -58,7 +58,7 @@ export type WorkGraphViewMode = "tree" | "graph";
 let workGraphViewModeMemory: WorkGraphViewMode = "tree";
 
 /// Snapshot-backed panel state assembled by ConsoleApp. `denied` is a -32030
-/// access outcome (rendered as "no grant", never as an empty store);
+/// access outcome (rendered as "no access", never as an empty store);
 /// `unavailable` means no WorkGraph service is configured on the runtime.
 export interface WorkGraphPanelData {
   items: WorkGraphWireItem[];

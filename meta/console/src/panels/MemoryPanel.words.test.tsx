@@ -110,9 +110,26 @@ describe("Memory panel words", () => {
 
     openTab(view, "pipeline");
     expect(text(view, "memory-pipeline-no-grant")).toBe(
-      "Quarantine: no grant. You need permission to review quarantined memory to see the queue.",
+      "Quarantine: no access. You need permission to review quarantined memory to see the queue.",
     );
     expect(hasTitle(view, "memory-pipeline-no-grant", "Grant: memory.quarantine.review")).toBe(true);
+  });
+
+  it("says a record waits to move to team or operator memory, never a promotion", () => {
+    const view = renderPanel({ canReviewQuarantine: true, onDecideQuarantine: async () => undefined });
+    openTab(view, "pipeline");
+    const pipeline = text(view, "memory-pipeline");
+    expect(text(view, "memory-quarantine-note").includes(
+      "Records waiting to move to team or operator memory are decided in Approvals",
+    )).toBe(true);
+    expect(pipeline.includes("No record is waiting to move.")).toBe(true);
+    expect(/promot/i.test(pipeline)).toBe(false);
+    view.unmount();
+
+    const denied = renderPanel({ canReviewQuarantine: false });
+    openTab(denied, "pipeline");
+    expect(/no grant/i.test(text(denied, "memory-pipeline-stages"))).toBe(false);
+    expect(text(denied, "memory-pipeline-stages").includes("no access")).toBe(true);
   });
 
   it("names a team from its key and keeps the key as the tooltip", () => {

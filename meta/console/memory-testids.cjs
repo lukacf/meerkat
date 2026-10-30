@@ -21,7 +21,7 @@ module.exports = {
   // ── Tabs ──
   // `memory-tab:${id}` where id is holdings | records | knowledge |
   // pipeline | dreams. All five render for every principal; access shows up
-  // per section inside a tab ("no grant" notes), not by hiding tabs.
+  // per section inside a tab ("no access" notes), not by hiding tabs.
   // `memory-tab:quarantine` still exists as a ONE-RELEASE redirect alias
   // (open Q6): an invisible button (opacity 0, 1x1) outside the tab list
   // that switches to Pipeline. It keeps a bounding box so driver clicks land.
@@ -46,7 +46,7 @@ module.exports = {
   LOAD_MORE: "memory-load-more", // renders only while a keyset cursor exists (per realm)
   // Multi-realm without a realm picked: merged single page, no paging.
   MULTI_REALM_NOTE: "memory-multi-realm-note",
-  RECORDS_EMPTY: "memory-records-empty", // says "no grant" for denied queries, never "empty"
+  RECORDS_EMPTY: "memory-records-empty", // says "no access" for denied queries, never "empty"
   RECORDS_DENIED_NOTE: "memory-records-denied-note", // denied load-more continuation
 
   // ── Record detail / Biography ──
@@ -76,7 +76,7 @@ module.exports = {
 
   // ── Holdings tab ──
   HOLDINGS: "memory-holdings",
-  HOLDINGS_DENIED: "memory-holdings-denied", // records -32030: "no grant" note
+  HOLDINGS_DENIED: "memory-holdings-denied", // records -32030: "no access" note
   // `memory-holdings-scope:${scopeGroupKey}`: scope rows; click pivots to
   // Records pre-filtered to that scope. Rows render store TOTALS from
   // panel/overview when the surface answers (same key scheme); the
@@ -90,7 +90,7 @@ module.exports = {
   HARVESTS: "memory-harvests",
   harvest: (identity) => `memory-harvest:${identity}`,
   // Access-denied scope rows: the one-row probes ({scope, limit:1}) render
-  // these when the principal lacks the scope grant ("No grant" chip), so a
+  // these when the principal lacks the scope grant ("No access" chip), so a
   // denied scope is never indistinguishable from an empty one. Ids:
   // memory-holdings-scope-denied:operator / :mob.
   holdingsScopeDenied: (kind) => `memory-holdings-scope-denied:${kind}`,
@@ -119,7 +119,7 @@ module.exports = {
 
   // ── Pipeline tab (quarantine folded in) ──
   PIPELINE: "memory-pipeline",
-  PIPELINE_STAGES: "memory-pipeline-stages", // stepper: Proposed N, Waiting for approval N, Quarantined N ("no grant" without the review grant)
+  PIPELINE_STAGES: "memory-pipeline-stages", // stepper: Proposed N, Waiting for approval N, Quarantined N ("no access" without the review grant)
   // The inbound proposals lane (panel/proposals): pending proposals with
   // propose-time taint chips. Row id: memory-proposal:${proposalId}; taint
   // chip: memory-proposal-taint:${proposalId}.

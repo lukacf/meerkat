@@ -115,7 +115,7 @@ export interface MemoryPanelProps {
   nextCursor?: string | null;
   /// Per-section -32030 outcomes: the section data is empty because the
   /// principal lacks the grant, not because the store is empty. Tiles whose
-  /// evidence lives behind a denied section render "no grant", never green.
+  /// evidence lives behind a denied section render "no access", never green.
   recordsDenied?: boolean;
   dreamsDenied?: boolean;
   /// Scope-probe outcomes (§3.1/§5 ABAC): the unfiltered listing row-filters
@@ -125,7 +125,7 @@ export interface MemoryPanelProps {
   operatorScopeDenied?: boolean;
   mobScopeDenied?: boolean;
   /// Phase-2 read surfaces. Each section carries its own -32030 outcome so a
-  /// denied surface renders "no grant", never an indistinguishable empty one.
+  /// denied surface renders "no access", never an indistinguishable empty one.
   overview?: MemoryPanelOverviewResult | null;
   overviewDenied?: boolean;
   proposals?: MemoryProposalEntry[];
@@ -485,7 +485,7 @@ export function filtersEquivalent(a: MemoryRecordsFilter, b: MemoryRecordsFilter
 const CAPABILITY_MISS_PREFIX = "Meta capability missing for ";
 
 /// Classify a memory-section RPC failure: -32030 is an ABAC denial (render
-/// "no grant", never an empty store), -32601 means the panel is not wired on
+/// "no access", never an empty store), -32601 means the panel is not wired on
 /// this runtime, anything else is a real error. A per-method capability miss
 /// also classifies as DENIED: under an enforced view the server intersects
 /// meta/capabilities per principal (a scoped read grant drops panel/dreams
@@ -508,7 +508,7 @@ export interface MemoryPagedState {
   records: MemoryPanelRecord[];
   nextCursor: string | null;
   /// The query behind this page (or its load-more continuation) was denied
-  /// (-32030). Renders "no grant": a denied scope must never be
+  /// (-32030). Renders "no access": a denied scope must never be
   /// indistinguishable from an empty store.
   denied?: boolean;
 }
@@ -580,7 +580,7 @@ export function createMemoryRecordsPager(deps: MemoryRecordsPagerDeps) {
         const result = await deps.query(buildRecordsQueryParams(next, { resolveKey: deps.resolveKey }));
         if (seq !== seqCounter) return;
         if (result === null) {
-          // Denied filtered query: mark it so the view says "no grant",
+          // Denied filtered query: mark it so the view says "no access",
           // never "no memory records yet".
           deps.setPaged({ records: [], nextCursor: null, denied: true });
         } else {
@@ -824,7 +824,7 @@ export async function runLatticeWalk(
       if (realm) params.realm = realm;
       if (cursor) params.cursor = cursor;
       const page = await fetchPage(params);
-      if (page === null) return null; // access denied → tile renders no grant
+      if (page === null) return null; // access denied → tile renders no access
       all.push(...(page.records || []));
       if (!page.next_cursor) break; // this realm's cursor is exhausted
       cursor = page.next_cursor;
@@ -872,7 +872,7 @@ const VERDICT_STATUS_LABEL: Record<VerdictStatus, string> = {
   degraded: "DEGRADED",
   violated: "VIOLATED",
   unverifiable: "UNVERIFIABLE",
-  "no-grant": "NO GRANT",
+  "no-grant": "NO ACCESS",
 };
 
 export function verdictStatusLabel(status: VerdictStatus): string {
@@ -880,7 +880,7 @@ export function verdictStatusLabel(status: VerdictStatus): string {
 }
 
 /// The tone of a verdict: holding ok, degraded warn, violated crit. A check
-/// that cannot run (unverifiable, no grant) is locked, never green.
+/// that cannot run (unverifiable, no access) is locked, never green.
 export function verdictTone(status: VerdictStatus): Tone {
   switch (status) {
     case "holding":
@@ -937,11 +937,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
   // guessing from partial data.
   tiles.push({
     id: "echo-safety",
-    label: "Repeated injections",
+    label: "Repeated memory",
     status: "unverifiable",
     summary: "Not checked automatically",
     lines: [
-      "The same memory should not be injected into an agent again and again.",
+      "An agent should not be given the same memory again and again.",
       "This console cannot check it automatically. On the Knowledge tab, the list of memory given to agents marks repeats.",
     ],
     targetTab: "knowledge",
@@ -1019,7 +1019,7 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
     });
   }
 
-  const recallScope = `A record injected at least ${DEAD_INJECTION_THRESHOLD} times without ever being judged useful counts as never useful; it only costs space.`;
+  const recallScope = `A record given to agents at least ${DEAD_INJECTION_THRESHOLD} times without ever being judged useful counts as never useful; it only costs space.`;
   if (inputs.recordsDenied) {
     tiles.push({
       id: "recall",
@@ -1040,11 +1040,11 @@ export function computeVerdictTiles(inputs: VerdictInputs): VerdictTile[] {
       summary:
         dead.length > 0
           ? `${dead.length} of ${plural(loaded, "record")} never ${dead.length === 1 ? "helps" : "help"}`
-          : "No record is injected without helping",
+          : "No record is given to agents without helping",
       lines: [
         recallScope,
         `${dead.length} of ${plural(loaded, "loaded record")} ${dead.length === 1 ? "is" : "are"} never useful.`,
-        ...(dead.length > 0 ? [`About ${formatSize(deadBytes)} spent injecting them.`] : []),
+        ...(dead.length > 0 ? [`About ${formatSize(deadBytes)} spent giving them to agents.`] : []),
       ],
       targetTab: "records",
     });
@@ -1607,7 +1607,7 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
   const rpcError = (error as { rpcError?: { code?: unknown; data?: unknown } } | null)?.rpcError;
   if (rpcError?.code === -32030) {
     return {
-      text: "No grant. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
+      text: "No access. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
       ids: [],
       title: QUARANTINE_DECISION_GRANTS,
     };
@@ -1913,9 +1913,9 @@ export function injectionMoment(surface: string | undefined): string {
 /// A record's usefulness in words, for the least-useful-first list.
 export function utilityDisplay(record: Pick<MemoryPanelRecord, "usage" | "body_bytes">): string {
   const utility = recordUtility(record);
-  if (utility.injected === 0 && utility.recalled === 0) return "Never injected or recalled";
+  if (utility.injected === 0 && utility.recalled === 0) return "Never given to agents or recalled";
   return joinMeta(
-    `Injected ${plural(utility.injected, "time")}`,
+    `Given to agents ${plural(utility.injected, "time")}`,
     `recalled ${plural(utility.recalled, "time")}`,
     `judged useful ${plural(utility.useful, "time")}`,
     utility.bytesSpent > 0 ? `about ${formatSize(utility.bytesSpent)} spent` : null,
@@ -1955,7 +1955,7 @@ export function dreamVerdictChips(
 
 const OP_KIND_DONE: Record<string, string> = {
   create: "created",
-  promote: "promoted",
+  promote: "moved",
   merge: "merged",
   quarantine: "quarantined",
   supersede: "replaced",
@@ -1964,7 +1964,7 @@ const OP_KIND_DONE: Record<string, string> = {
   release: "released",
 };
 
-/// A dream run's changes by kind, most first: "3 promoted, 2 merged".
+/// A dream run's changes by kind, most first: "3 moved, 2 merged".
 export function dreamOpKindsDisplay(opKinds: Record<string, number> | undefined): string {
   if (!opKinds) return "";
   return Object.entries(opKinds)
@@ -2650,11 +2650,11 @@ function BiographyView({
         <p className="memory-usage">
           {usage ? (
             <>
-              injected {usage.injected_count ?? 0} · recalled {usage.explicit_recall_count ?? 0} ·
+              given to agents {usage.injected_count ?? 0} · recalled {usage.explicit_recall_count ?? 0} ·
               judged useful {usage.judged_useful_count ?? 0}
               {usage.last_injected_at_ms ? (
                 <>
-                  {" · last injected "}
+                  {" · last given "}
                   <RelativeTime value={usage.last_injected_at_ms} />
                 </>
               ) : null}
@@ -2682,7 +2682,7 @@ function BiographyView({
             ))}
           </RowList>
         ) : (
-          <p className="memory-caption">No injections recorded for this record.</p>
+          <p className="memory-caption">This record has not been given to an agent yet.</p>
         )}
       </section>
 
@@ -3007,7 +3007,7 @@ function DeniedScopeRow({ kind }: { kind: "mob" | "operator" }): React.JSX.Eleme
       lead={<KitGlyph name="shield" className="memory-scope-lock" />}
       title={kind === "mob" ? "Team memory" : "Operator memory"}
       subtitle={<span title={grantTitle(grant)}>{needsGrantText(grant)}</span>}
-      meta={<Chip tone="locked">No grant</Chip>}
+      meta={<Chip tone="locked">No access</Chip>}
     />
   );
 }
@@ -3681,7 +3681,7 @@ export function MemoryPanel({
         >
           {recordsDenied ? (
             <Notice tone="locked" testId="memory-holdings-denied">
-              Records: no grant. Your access does not include reading memory records.
+              Records: no access. Your access does not include reading memory records.
             </Notice>
           ) : !loaded ? (
             <LoadingState label="Loading memory" rows={3} />
@@ -3728,7 +3728,7 @@ export function MemoryPanel({
                     ]}
                   />
                 ) : dreamsDenied ? (
-                  "No grant"
+                  "No access"
                 ) : (
                   "No dream has run yet"
                 ),
@@ -3753,7 +3753,7 @@ export function MemoryPanel({
                 key: "proposals",
                 label: "Proposals",
                 value: proposalsDenied
-                  ? "No grant"
+                  ? "No access"
                   : `${proposals.length} waiting${
                       tainted > 0
                         ? `, ${tainted} held because ${tainted === 1 ? "its source was" : "their sources were"} untrusted`
@@ -3770,7 +3770,7 @@ export function MemoryPanel({
           testId="memory-harvests"
         >
           {harvestsDenied ? (
-            <EmptyState inline kind="no-access" title="Retired agents: no grant." />
+            <EmptyState inline kind="no-access" title="Retired agents: no access." />
           ) : harvests.length === 0 ? (
             <EmptyState inline title="No retired agent is waiting." />
           ) : (
@@ -3868,7 +3868,7 @@ export function MemoryPanel({
             <EmptyState
               kind="no-access"
               testId="memory-records-empty"
-              title="Records: no grant."
+              title="Records: no access."
               body="Your access does not include reading these memory records."
             />
           ) : filtered ? (
@@ -3888,7 +3888,7 @@ export function MemoryPanel({
         ) : null}
         {loaded && !pageLoading && listView.denied && listView.records.length > 0 ? (
           <Notice tone="locked" testId="memory-records-denied-note">
-            Further pages: no grant. Loading more of this list was denied for your access.
+            Further pages: no access. Loading more of this list was denied for your access.
           </Notice>
         ) : null}
         {loaded && !pageLoading && listView.records.length > 0 ? (
@@ -3969,7 +3969,7 @@ export function MemoryPanel({
           <EmptyState
             inline
             kind={recordsDenied ? "no-access" : "empty"}
-            title={recordsDenied ? "Records: no grant." : "No agent memory is loaded yet."}
+            title={recordsDenied ? "Records: no access." : "No agent memory is loaded yet."}
           />
         ) : (
           <>
@@ -4023,7 +4023,7 @@ export function MemoryPanel({
           testId="memory-knowledge-history"
         >
           {injectionsDenied ? (
-            <EmptyState inline kind="no-access" title="Memory given to agents: no grant." />
+            <EmptyState inline kind="no-access" title="Memory given to agents: no access." />
           ) : annotatedInjections.length === 0 ? (
             <EmptyState inline title="No memory has been given to an agent yet." />
           ) : (
@@ -4092,24 +4092,24 @@ export function MemoryPanel({
         <ol className="memory-stepper" data-testid="memory-pipeline-stages" aria-label="Pipeline stages">
           <li className="memory-stepper__step">
             <span className="memory-stepper__label">Proposed</span>{" "}
-            <span className="memory-stepper__count">{proposalsDenied ? "no grant" : proposals.length}</span>
+            <span className="memory-stepper__count">{proposalsDenied ? "no access" : proposals.length}</span>
           </li>
           <li className="memory-stepper__step">
             <span className="memory-stepper__label">Waiting for approval</span>{" "}
             <span className="memory-stepper__count">
-              {canReviewQuarantine ? pendingPromotions.length : "no grant"}
+              {canReviewQuarantine ? pendingPromotions.length : "no access"}
             </span>
           </li>
           <li className="memory-stepper__step">
             <span className="memory-stepper__label">Quarantined</span>{" "}
             <span className="memory-stepper__count">
-              {canReviewQuarantine ? quarantineRecords.length : "no grant"}
+              {canReviewQuarantine ? quarantineRecords.length : "no access"}
             </span>
           </li>
         </ol>
         <Notice testId="memory-quarantine-note">
           {onDecideQuarantine
-            ? "Open a quarantined record to release or discard it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest."
+            ? "Open a quarantined record to release or discard it. Records waiting to move to team or operator memory are decided in Approvals; the memory steward's dream decides the rest."
             : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory."}
         </Notice>
 
@@ -4119,7 +4119,7 @@ export function MemoryPanel({
           testId="memory-pipeline-proposals"
         >
           {proposalsDenied ? (
-            <EmptyState inline kind="no-access" title="Proposals: no grant." />
+            <EmptyState inline kind="no-access" title="Proposals: no access." />
           ) : proposals.length === 0 ? (
             <EmptyState inline title="No proposal is waiting for a dream." />
           ) : (
@@ -4175,7 +4175,7 @@ export function MemoryPanel({
               count={pendingPromotions.length > 0 ? pendingPromotions.length : null}
             >
               {pendingPromotions.length === 0 ? (
-                <EmptyState inline title="No promotion is waiting for approval." />
+                <EmptyState inline title="No record is waiting to move." />
               ) : (
                 <RowList>
                   {pendingPromotions.map((pending) => (
@@ -4263,7 +4263,7 @@ export function MemoryPanel({
         ) : (
           <Notice tone="locked" testId="memory-pipeline-no-grant">
             <span title={grantTitle("memory.quarantine.review")}>
-              {`Quarantine: no grant. ${needsGrantText("memory.quarantine.review")} to see the queue.`}
+              {`Quarantine: no access. ${needsGrantText("memory.quarantine.review")} to see the queue.`}
             </span>
           </Notice>
         )}
@@ -4274,7 +4274,7 @@ export function MemoryPanel({
           testId="memory-review-queue"
         >
           {auditVerdictsDenied ? (
-            <EmptyState inline kind="no-access" title="Review queue: no grant." />
+            <EmptyState inline kind="no-access" title="Review queue: no access." />
           ) : auditVerdicts.length === 0 ? (
             <EmptyState inline title="Nothing is flagged for a closer look." />
           ) : (
@@ -4336,7 +4336,7 @@ export function MemoryPanel({
           testId="memory-dream-runs"
         >
           {dreamRunsDenied ? (
-            <EmptyState inline kind="no-access" title="Dream runs: no grant." />
+            <EmptyState inline kind="no-access" title="Dream runs: no access." />
           ) : dreamSheets.length === 0 ? (
             <EmptyState
               inline
@@ -4366,7 +4366,7 @@ export function MemoryPanel({
             <EmptyState
               inline
               kind={dreamsDenied ? "no-access" : "empty"}
-              title={dreamsDenied ? "Dream audit: no grant." : "No dream runs recorded yet."}
+              title={dreamsDenied ? "Dream audit: no access." : "No dream runs recorded yet."}
             />
           ) : (
             <RowList>

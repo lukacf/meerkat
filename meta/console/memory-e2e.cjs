@@ -728,7 +728,7 @@ const grantFlows = [
       await openTab(page, "pipeline");
       await page.getByTestId(T.PIPELINE_NO_GRANT).waitFor({ timeout: 10_000 });
       const stages = await page.getByTestId(T.PIPELINE_STAGES).innerText();
-      assert(stages.includes("no grant"), `reader pipeline stages: ${stages}`);
+      assert(stages.includes("no access"), `reader pipeline stages: ${stages}`);
       assert.equal(
         await page.locator('[data-testid^="memory-pending:"]').count(),
         0,
@@ -744,7 +744,7 @@ const grantFlows = [
 
   {
     // Gate finding: a partial-grant principal (unscoped agent+mob reads,
-    // NO operator.memory.read) must see "no grant" — never the empty-store
+    // NO operator.memory.read) must see "no access" — never the empty-store
     // copy, never leaked operator rows.
     name: "partial grants render operator scope as no-grant",
     run: async ({ page, partialBaseUrl }) => {
@@ -760,7 +760,7 @@ const grantFlows = [
       const deniedRow = await page
         .getByTestId("memory-holdings-scope-denied:operator")
         .innerText();
-      assert(/no grant/i.test(deniedRow), `operator denied row copy: ${deniedRow}`);
+      assert(/no access/i.test(deniedRow), `operator denied row copy: ${deniedRow}`);
       assert.equal(
         await page.getByTestId("memory-holdings-scope-denied:mob").count(),
         0,
@@ -768,14 +768,14 @@ const grantFlows = [
       );
 
       // Records tab, scope=operator: the filtered query is DENIED (-32030
-      // entry gate) and must say "no grant", not "No memory records yet.".
+      // entry gate) and must say "no access", not "No memory records yet.".
       await openTab(page, "records");
       await page.getByTestId(T.FILTER).waitFor({ timeout: 10_000 });
       await page.getByTestId(T.FILTER_SCOPE).selectOption("operator");
       await page.waitForFunction(
         () => {
           const body = document.querySelector('[data-testid="memory-panel"]');
-          return body ? body.innerText.includes("Records: no grant.") : false;
+          return body ? body.innerText.includes("Records: no access.") : false;
         },
         null,
         { timeout: 10_000 },
@@ -839,7 +839,7 @@ const grantFlows = [
         { timeout: 15_000 },
       );
       const dreamsTile = await page.getByTestId(T.verdictTile("dreams")).innerText();
-      assert(/NO GRANT/.test(dreamsTile), `dreams tile copy: ${dreamsTile}`);
+      assert(/NO ACCESS/.test(dreamsTile), `dreams tile copy: ${dreamsTile}`);
 
       // The row-filtered listing still renders the granted agent's rows.
       await openTab(page, "records");

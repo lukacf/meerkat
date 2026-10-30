@@ -414,7 +414,7 @@ test("lattice walk pages a single realm with the keyset cursor", async () => {
   assert.equal(walk?.checked, 2);
   assert.equal(walk?.complete, true);
 
-  // Access denial propagates as null → the tile renders "no grant".
+  // Access denial propagates as null → the tile renders "no access".
   const denied = await runLatticeWalk(async () => null, { realms: ["default"] });
   assert.equal(denied, null);
 });
@@ -570,7 +570,7 @@ test("check tiles lead with plain names; the internal check name is only in the 
   });
   assert.deepEqual(
     tiles.map((tile) => tile.label),
-    ["Repeated injections", "Untrusted sessions", "Trust rules", "Usefulness", "Dream runs", "Storage limits"],
+    ["Repeated memory", "Untrusted sessions", "Trust rules", "Usefulness", "Dream runs", "Storage limits"],
   );
   const internal: Record<string, string> = {
     "echo-safety": "Echo safety",
@@ -603,7 +603,7 @@ test("tiles whose evidence the principal cannot read render no-grant, never gree
   assert.equal(byId.get("dreams")?.status, "no-grant");
   assert.equal(byId.get("dreams")?.summary, "No access to the dream history");
   assert.equal(byId.get("taint-wall")?.status, "no-grant");
-  assert.equal(verdictStatusLabel("no-grant"), "NO GRANT");
+  assert.equal(verdictStatusLabel("no-grant"), "NO ACCESS");
   // A check that cannot run is never green.
   assert.equal(verdictTone("no-grant"), "locked");
   assert.equal(verdictTone("unverifiable"), "locked");
@@ -758,7 +758,7 @@ test("recall and dreams tiles compute from loaded usage and dream recency", () =
   );
   // Nine injections of a 100-byte record.
   assert.ok(
-    byId.get("recall")?.lines.includes("About 900 B spent injecting them."),
+    byId.get("recall")?.lines.includes("About 900 B spent giving them to agents."),
     JSON.stringify(byId.get("recall")?.lines),
   );
   assert.equal(byId.get("dreams")?.status, "holding");
@@ -770,7 +770,7 @@ test("recall and dreams tiles compute from loaded usage and dream recency", () =
     records: [record({ id: "fine", scope: { scope: "realm", realm: "default" } })],
   }).find((tile) => tile.id === "recall");
   assert.equal(healthy?.status, "holding");
-  assert.equal(healthy?.summary, "No record is injected without helping");
+  assert.equal(healthy?.summary, "No record is given to agents without helping");
 });
 
 // ── Phase-1: holdings scope overview ───────────────────────────────────────
@@ -1615,7 +1615,7 @@ test("quarantine decision errors render typed refusals without echoing content",
     Object.assign(new Error("access denied: agent.memory.write"), { rpcError: { code: -32030 } }),
   );
   notices.push(denied);
-  assert.match(denied.text, /^No grant/);
+  assert.match(denied.text, /^No access/);
   // The permissions read as words; their grant names are the tooltip.
   assert.match(denied.text, /you need permission to review quarantined memory/);
   assert.match(denied.title ?? "", /memory\.quarantine\.review/);
@@ -1689,9 +1689,9 @@ test("authors, evidence and injections name people, not keys", () => {
       usage: { injected_count: 6, explicit_recall_count: 1, judged_useful_count: 0 },
       body_bytes: 1000,
     }),
-    "Injected 6 times · recalled 1 time · judged useful 0 times · about 5.9 KB spent",
+    "Given to agents 6 times · recalled 1 time · judged useful 0 times · about 5.9 KB spent",
   );
-  assert.equal(utilityDisplay({ usage: undefined, body_bytes: 10 }), "Never injected or recalled");
+  assert.equal(utilityDisplay({ usage: undefined, body_bytes: 10 }), "Never given to agents or recalled");
   assert.equal(reviewVerdictLabel("dead_weight"), "Never useful");
   assert.equal(reviewVerdictLabel("needs_correction"), "Needs correction");
 });
@@ -1747,7 +1747,7 @@ test("dream runs read as whose memory they tidied and what changed", () => {
   );
   assert.equal(
     dreamOpKindsDisplay({ promote: 3, merge: 2, quarantine: 1, noop: 0 }),
-    "3 promoted, 2 merged, 1 quarantined",
+    "3 moved, 2 merged, 1 quarantined",
   );
   // The store's own op names read as plain words.
   assert.equal(dreamOpKindsDisplay({ supersede: 2, tombstone: 1 }), "2 replaced, 1 discarded");

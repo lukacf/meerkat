@@ -318,12 +318,12 @@ describe("manual memory detail refresh", () => {
       fireEvent.click(await view.findByRole("button", { name: "Memory", exact: true }));
       fireEvent.click(await view.findByTestId("memory-tab:records"));
       fireEvent.click(await view.findByTestId("memory-record:refresh-record"));
-      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 0.*recalled 0/));
+      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 0.*recalled 0/));
       expect(detailParams).toHaveLength(1);
 
       count = 1;
       fireEvent.click(view.getByTestId("memory-refresh"));
-      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 1.*recalled 1/));
+      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 1.*recalled 1/));
       expect(detailParams).toHaveLength(2);
       expect(detailParams[1]).toMatchObject({ runtime_key: "alpha", realm: "fixture-realm", memory_id: "refresh-record" });
 
@@ -337,13 +337,13 @@ describe("manual memory detail refresh", () => {
       detailError = true;
       fireEvent.click(view.getByTestId("memory-refresh"));
       await waitFor(() => expect(view.getByTestId("memory-error")).toHaveTextContent("record refresh unavailable"));
-      expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 1.*recalled 1/);
+      expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 1.*recalled 1/);
       expect(view.getByRole("combobox", { name: "Memory team" })).toHaveValue("alpha");
 
       detailError = false;
       count = 2;
       fireEvent.click(view.getByTestId("memory-refresh"));
-      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 2.*recalled 2/));
+      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 2.*recalled 2/));
       expect(view.queryByTestId("memory-error")).toBeNull();
 
       count = 3;
@@ -354,7 +354,7 @@ describe("manual memory detail refresh", () => {
       await act(async () => releaseDetail?.());
       expect(view.getByTestId("memory-tab:holdings")).toHaveClass("is-active");
       fireEvent.click(view.getByTestId("memory-tab:records"));
-      expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 3.*recalled 3/);
+      expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 3.*recalled 3/);
 
       releaseDetail = undefined;
       fireEvent.click(view.getByTestId("memory-refresh"));
@@ -370,7 +370,7 @@ describe("manual memory detail refresh", () => {
 
       delayDetail = false;
       fireEvent.click(await view.findByTestId("memory-record:refresh-record"));
-      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 3.*recalled 3/));
+      await waitFor(() => expect(view.getByTestId("memory-detail")).toHaveTextContent(/given to agents 3.*recalled 3/));
       delayDetail = true;
       releaseDetail = undefined;
       fireEvent.click(view.getByTestId("memory-refresh"));

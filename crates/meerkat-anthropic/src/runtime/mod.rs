@@ -480,7 +480,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            AnthropicAuthMethod::GitHubCopilotOauth => {
+            AnthropicAuthMethod::GitHubCopilotOauth | AnthropicAuthMethod::GitHubCopilotPat => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {

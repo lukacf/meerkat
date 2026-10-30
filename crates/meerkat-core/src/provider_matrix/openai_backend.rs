@@ -56,7 +56,10 @@ impl OpenAiBackendKind {
                 OpenAiAuthMethod::ExternalChatGptTokens,
             ],
             Self::AzureOpenAi => &[OpenAiAuthMethod::AzureApiKey],
-            Self::Copilot => &[OpenAiAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                OpenAiAuthMethod::GitHubCopilotOauth,
+                OpenAiAuthMethod::GitHubCopilotPat,
+            ],
         }
     }
 

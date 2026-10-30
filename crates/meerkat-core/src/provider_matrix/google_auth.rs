@@ -10,6 +10,7 @@ pub enum GoogleAuthMethod {
     GoogleOauth,
     ComputeAdc,
     GitHubCopilotOauth,
+    GitHubCopilotPat,
 }
 
 impl GoogleAuthMethod {
@@ -22,6 +23,7 @@ impl GoogleAuthMethod {
         Self::GoogleOauth,
         Self::ComputeAdc,
         Self::GitHubCopilotOauth,
+        Self::GitHubCopilotPat,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -34,6 +36,7 @@ impl GoogleAuthMethod {
             "google_oauth" => Some(Self::GoogleOauth),
             "compute_adc" => Some(Self::ComputeAdc),
             "github_copilot_oauth" => Some(Self::GitHubCopilotOauth),
+            "github_copilot_pat" => Some(Self::GitHubCopilotPat),
             _ => None,
         }
     }
@@ -47,6 +50,7 @@ impl GoogleAuthMethod {
             Self::GoogleOauth => "google_oauth",
             Self::ComputeAdc => "compute_adc",
             Self::GitHubCopilotOauth => "github_copilot_oauth",
+            Self::GitHubCopilotPat => "github_copilot_pat",
         }
     }
 
@@ -58,7 +62,7 @@ impl GoogleAuthMethod {
         use crate::auth::token_store::PersistedAuthMode;
         match self {
             Self::ApiKey | Self::ApiKeyExpress => Some(PersistedAuthMode::ApiKey),
-            Self::BearerApiKey => Some(PersistedAuthMode::StaticBearer),
+            Self::BearerApiKey | Self::GitHubCopilotPat => Some(PersistedAuthMode::StaticBearer),
             Self::GoogleOauth => Some(PersistedAuthMode::GoogleOauth),
             Self::ExternalAuthorizer | Self::Adc | Self::ComputeAdc => None,
             Self::GitHubCopilotOauth => Some(PersistedAuthMode::GithubCopilotOauth),

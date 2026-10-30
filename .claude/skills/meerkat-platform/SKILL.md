@@ -1147,6 +1147,13 @@ rkat run -m claude-opus-5-5 "ship the release notes"          # an Anthropic mod
 Supported auth methods:
 
 - API keys (env or per-binding)
+- Headless Copilot inference: `github_copilot_pat` on a `copilot` backend,
+  with an explicit environment or external-resolver source and shared
+  `credential_account`. A service account (including a github.com EMU) needs
+  Copilot entitlement and a fine-grained PAT with Copilot Requests permission.
+  No interactive login, repository access, or provider-specific login is
+  required. PAT requests use the `copilot-developer-cli` integration header;
+  see `docs/guides/auth.mdx` for account-scoped configuration.
 - OAuth: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth` (OpenAI), `google_oauth` (Code Assist), `github_copilot_oauth` (GitHub device flow; requires `copilot`)
 - Cloud IAM: AWS Bedrock (`bedrock_aws_sigv4`), GCP Vertex (`vertex_google_auth`), Azure Foundry (`foundry_azure_ad`), Gemini ADC (`adc`, `compute_adc`). These compile only with the `meerkat-anthropic` features `bedrock`/`vertex`/`foundry` and `meerkat-gemini/adc`, which the prebuilt `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` do not enable; key and bearer methods (`bedrock_bearer`, `foundry_api_key`, `api_key_express`) need no extra feature.
 

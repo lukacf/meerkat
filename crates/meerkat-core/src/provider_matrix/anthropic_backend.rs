@@ -70,7 +70,10 @@ impl AnthropicBackendKind {
                 AnthropicAuthMethod::FoundryAzureAd,
                 AnthropicAuthMethod::ExternalAuthorizer,
             ],
-            Self::Copilot => &[AnthropicAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                AnthropicAuthMethod::GitHubCopilotOauth,
+                AnthropicAuthMethod::GitHubCopilotPat,
+            ],
         }
     }
     pub fn default_base_url(self) -> &'static str {

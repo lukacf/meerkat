@@ -58,7 +58,10 @@ impl GoogleBackendKind {
                 GoogleAuthMethod::ComputeAdc,
                 GoogleAuthMethod::ExternalAuthorizer,
             ],
-            Self::Copilot => &[GoogleAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                GoogleAuthMethod::GitHubCopilotOauth,
+                GoogleAuthMethod::GitHubCopilotPat,
+            ],
         }
     }
     pub fn default_base_url(self) -> &'static str {

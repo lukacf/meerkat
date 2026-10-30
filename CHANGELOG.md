@@ -35,6 +35,20 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Headless GitHub Copilot inference using service-account fine-grained PATs.
+  Explicit `github_copilot_pat` bindings share one account across model
+  families and use injected secrets without interactive login or repository
+  access. Discovery and inference send the PAT-compatible
+  `copilot-developer-cli` integration header; OAuth behavior is unchanged.
+
+### Breaking
+
+- `meerkat-core`: the exhaustive `OpenAiAuthMethod`, `AnthropicAuthMethod`,
+  and `GoogleAuthMethod` enums gain `GitHubCopilotPat`; downstream exhaustive
+  matches must handle the new variant.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

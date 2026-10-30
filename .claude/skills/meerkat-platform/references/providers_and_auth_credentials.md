@@ -94,7 +94,7 @@ Supported `backend_kind` / `auth_method` pairs:
 | anthropic | `bedrock` | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` |
 | anthropic | `vertex` | `vertex_google_auth`, `external_authorizer` |
 | anthropic | `foundry` | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` |
-| anthropic, openai, gemini | `copilot` | `github_copilot_oauth` |
+| anthropic, openai, gemini | `copilot` | `github_copilot_oauth`, `github_copilot_pat` |
 | openai | `openai_api` | `api_key`, `static_bearer`, `external_authorizer` |
 | openai | `chatgpt_backend` | `managed_chatgpt_oauth`, `external_chatgpt_tokens` |
 | openai | `azure_openai` | `azure_api_key` |

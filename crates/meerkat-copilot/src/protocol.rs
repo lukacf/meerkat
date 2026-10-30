@@ -12,6 +12,8 @@ pub const GITHUB_COPILOT_AUTHORIZER_LABEL: &str = "github-copilot";
 pub const GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID: &str = "github_copilot";
 
 const DEFAULT_INTEGRATION_ID: &str = "vscode-chat";
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+const PAT_INTEGRATION_ID: &str = "copilot-developer-cli";
 const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT;
 const DEFAULT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
@@ -149,6 +151,17 @@ impl Default for CopilotBackendConfig {
 }
 
 impl CopilotBackendConfig {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    pub(crate) fn from_pat_options(
+        options: &serde_json::Value,
+    ) -> Result<Self, CopilotProtocolError> {
+        let mut config = Self::from_options(options)?;
+        if options.get("integration_id").is_none() {
+            config.integration_id = PAT_INTEGRATION_ID.to_string();
+        }
+        Ok(config)
+    }
+
     pub fn from_options(options: &serde_json::Value) -> Result<Self, CopilotProtocolError> {
         if options.is_null() {
             return Ok(Self::default());

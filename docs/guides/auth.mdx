@@ -225,6 +225,118 @@ and the request is attempted normally. A known-unavailable error includes the
 compatible model IDs observed for that account; IDs outside Meerkat's built-in
 catalog also require a normal `[models.<id>]` configuration entry.
 
+### Headless Copilot inference with a service-account PAT
+
+Automation can use a GitHub Copilot service account, including an Enterprise
+Managed User on `github.com`, solely for access to hosted models. It needs a
+fine-grained PAT with the **Copilot Requests** account permission and Copilot
+entitlement allowed by the enterprise's policies. No repository permissions,
+repository association, browser login, Copilot CLI, or GitHub MCP are needed
+for this inference path.
+
+Use the `github_copilot_pat` auth method and inject the PAT from your secret
+manager. These three optional model routes share one credential account and
+one environment source; configure the routes your automation needs:
+
+```toml
+[realm.automation.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.automation.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_pat"
+source = { kind = "env", env = "SERVICE_COPILOT_TOKEN" }
+
+[realm.automation.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "copilot_service"
+
+[realm.automation.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.automation.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_pat"
+source = { kind = "env", env = "SERVICE_COPILOT_TOKEN" }
+
+[realm.automation.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "copilot_service"
+
+[realm.automation.backend.copilot_gemini]
+provider = "gemini"
+backend_kind = "copilot"
+
+[realm.automation.auth.copilot_gemini]
+provider = "gemini"
+auth_method = "github_copilot_pat"
+source = { kind = "env", env = "SERVICE_COPILOT_TOKEN" }
+
+[realm.automation.binding.copilot_gemini]
+backend_profile = "copilot_gemini"
+auth_profile = "copilot_gemini"
+credential_account = "copilot_service"
+```
+
+Put these declarations in the selected realm's config document. Select a
+binding such as `automation:copilot_gemini` using `--auth-binding` or the
+SDK's `auth_binding`, together with a model enabled for the account. The
+provider family identifies the model dialect, not a separate login or
+credential. Account model IDs must match exactly; an ID outside Meerkat's
+catalog also needs a `[models.<id>]` entry.
+
+Exporting the environment variable alone does not create these declarations.
+After configuring the realm, a minimal test is
+`rkat --realm automation run --auth-binding automation:copilot_gemini --model gemini-3.8-flash --tools none --no-web-search "Reply with exactly: OK"`.
+Use a binary built from a release or checkout containing PAT support; a
+system-installed older `rkat` does not pick up source changes automatically.
+For checkout testing, run `./scripts/repo-cargo run -p rkat --` followed by
+those arguments from the Meerkat repository root.
+
+For an account-enabled model not in the local catalog, declare its protocol
+family explicitly. For example, Copilot advertises Grok 4.7 on `/responses`:
+
+```toml
+[models."grok-4.7"]
+provider = "openai"
+```
+
+Select `automation:copilot_openai` for that model or for `gpt-6.1-sol`.
+Here `openai` selects the OpenAI-compatible client, not the model's vendor,
+credential issuer, or billing account: both still use the GitHub Copilot
+service credential. Backend/auth/binding names are arbitrary profile names;
+the Copilot model-discovery response selects the actual endpoint. The current
+configuration exposes this client-family distinction; a single account-level
+Copilot configuration with automatic model routing is a separate UX effort.
+
+The standard environment-source resolver applies, including the
+`RKAT_SERVICE_COPILOT_TOKEN` override. No ambient `GH_TOKEN`, `GITHUB_TOKEN`,
+stored OAuth account, or interactive sign-in is used as fallback. Hosts may
+instead supply a configured `external_resolver` returning an inline secret.
+Environment-backed PAT resolution requires neither a credential store nor
+AuthMachine login state.
+
+Meerkat sends the PAT directly to `https://api.githubcopilot.com` for model
+discovery and inference, using `Copilot-Integration-Id: copilot-developer-cli`.
+The existing OAuth default `vscode-chat` is rejected for PATs; an explicit
+backend `options.integration_id` is preserved for enterprise-approved
+integrations. PATs never enter the GitHub OAuth exchange or refresh flow.
+Model discovery must succeed before use, is cached for five minutes, and is
+invalidated when the secret source returns a different PAT. Every request
+re-resolves the source; missing or rejected credentials fail without
+interactive fallback or automatic replay of a rejected PAT.
+
+References: [GitHub PAT requirements](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)
+and [the documented PAT integration header](https://docs.docker.com/ai/docker-agent/providers/github-copilot/#copilot-integration-id-header).
+The native request contract was checked with a `github.com` EMU account:
+model discovery and a minimal Chat Completions request succeeded without
+repository access. This does not guarantee every enterprise policy or model
+endpoint; `.ghe.com` data-residency routing is not covered by this path.
+
 <Warning>
 GitHub does not currently publish a stable third-party Copilot inference
 contract. This native integration uses the observed GitHub device client
@@ -367,16 +479,16 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` | AWS SigV4, bearer, or host auth |
 | Anthropic | `vertex`            | `vertex_google_auth`, `external_authorizer` | Google auth or host auth |
 | Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` | Azure AI Foundry |
-| Anthropic | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Anthropic Messages dialect |
+| Anthropic | `copilot`           | `github_copilot_oauth`, `github_copilot_pat` | GitHub Copilot account; Anthropic Messages dialect |
 | OpenAI    | `openai_api`        | `api_key`, `static_bearer`, `external_authorizer` | Direct to api.openai.com or host-resolved auth |
 | OpenAI    | `azure_openai`      | `azure_api_key`       | Azure OpenAI Responses API; `base_url` required; session model is the Azure deployment name |
 | OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
 | OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
-| OpenAI    | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Responses or Chat Completions selected from account metadata |
+| OpenAI    | `copilot`           | `github_copilot_oauth`, `github_copilot_pat` | GitHub Copilot account; Responses or Chat Completions selected from account metadata |
 | Google    | `google_genai`      | `api_key`, `bearer_api_key`, `external_authorizer` | Direct to Google GenAI or host-resolved auth |
 | Google    | `vertex_ai`         | `api_key_express`, `adc`, `external_authorizer` | Vertex API Express, ADC, or host auth |
 | Google    | `google_code_assist` | `google_oauth`, `compute_adc`, `external_authorizer` | Code Assist OAuth, compute metadata, or host auth |
-| Google    | `copilot`             | `github_copilot_oauth` | GitHub Copilot account; OpenAI-compatible Chat Completions dialect |
+| Google    | `copilot`             | `github_copilot_oauth`, `github_copilot_pat` | GitHub Copilot account; OpenAI-compatible Chat Completions dialect |
 | Self-hosted | `self_hosted`, `openai_compatible` | `none`, `api_key`, `static_bearer` | Realm-bound credentials for configured `self_hosted` servers |
 
 External commands (`CredentialSourceSpec::Command`) and file

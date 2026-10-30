@@ -1720,7 +1720,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == OpenAiAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    OpenAiAuthMethod::GitHubCopilotOauth | OpenAiAuthMethod::GitHubCopilotPat
+                ),
             )
         }
         Provider::Anthropic => {
@@ -1728,7 +1731,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == AnthropicAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    AnthropicAuthMethod::GitHubCopilotOauth | AnthropicAuthMethod::GitHubCopilotPat
+                ),
             )
         }
         Provider::Gemini => {
@@ -1736,7 +1742,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == GoogleAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    GoogleAuthMethod::GitHubCopilotOauth | GoogleAuthMethod::GitHubCopilotPat
+                ),
             )
         }
         Provider::SelfHosted => {
@@ -3865,6 +3874,61 @@ credential_account = "shared"
         assert!(matches!(
             error,
             ProviderBindingError::CredentialAccountContractMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn copilot_pat_account_is_shared_across_model_families_not_other_auth_contracts() {
+        let mut section = RealmConfigSection::default();
+        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Gemini] {
+            let id = provider.as_str().to_string();
+            section.backend.insert(
+                id.clone(),
+                BackendProfileConfig {
+                    provider: id.clone(),
+                    backend_kind: "copilot".to_string(),
+                    base_url: None,
+                    server: None,
+                    options: serde_json::Value::Null,
+                },
+            );
+            section.auth.insert(
+                id.clone(),
+                AuthProfileConfig {
+                    provider: id.clone(),
+                    auth_method: "github_copilot_pat".to_string(),
+                    source: CredentialSourceSpec::Env {
+                        env: "SERVICE_COPILOT_TOKEN".to_string(),
+                        fallback: Vec::new(),
+                    },
+                    constraints: Default::default(),
+                    metadata_defaults: Default::default(),
+                },
+            );
+            section.binding.insert(
+                id.clone(),
+                ProviderBindingConfig {
+                    backend_profile: id.clone(),
+                    auth_profile: id,
+                    credential_account: Some(CredentialAccountId::parse("service").unwrap()),
+                    default_model: None,
+                    policy: Default::default(),
+                    provider_default: false,
+                },
+            );
+        }
+        RealmConnectionSet::from_config("automation", &section)
+            .expect("one account for all families");
+        section.auth.get_mut("openai").unwrap().auth_method = "github_copilot_oauth".to_string();
+        assert!(matches!(
+            RealmConnectionSet::from_config("automation", &section),
+            Err(ProviderBindingError::CredentialAccountContractMismatch { .. })
+        ));
+        section.auth.get_mut("openai").unwrap().auth_method = "static_bearer".to_string();
+        section.backend.get_mut("openai").unwrap().backend_kind = "openai_api".to_string();
+        assert!(matches!(
+            RealmConnectionSet::from_config("automation", &section),
+            Err(ProviderBindingError::CredentialAccountContractMismatch { .. })
         ));
     }
 

@@ -22,7 +22,8 @@ use meerkat_core::{
     HttpAuthorizer, Provider,
 };
 use meerkat_llm_core::provider_runtime::{
-    ProviderAuthError, ProviderClientError, ResolverEnvironment, ValidatedBinding,
+    NormalizedAuthMethod, ProviderAuthError, ProviderClientError, ResolverEnvironment,
+    ValidatedBinding,
 };
 use parking_lot::{Mutex, RwLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -39,6 +40,16 @@ const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+fn uses_pat(binding: &ValidatedBinding) -> bool {
+    use meerkat_core::provider_matrix::{AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod};
+    matches!(
+        binding.auth(),
+        NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotPat)
+            | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotPat)
+            | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotPat)
+    )
+}
 
 #[derive(Clone, Copy)]
 enum CopilotRequestIntent {
@@ -208,7 +219,7 @@ pub struct CopilotRuntime {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CopilotAccountCacheKey {
-    persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+    persistence_id: Option<meerkat_core::auth::ProviderAuthPersistenceId>,
     credential_identity: AuthCredentialIdentity,
 }
 
@@ -233,34 +244,39 @@ impl CopilotRuntime {
                 "Copilot backend requires an account-scoped credential identity".to_string(),
             ));
         }
-        if binding.auth().persisted_auth_mode() != Some(PersistedAuthMode::GithubCopilotOauth) {
+        let pat = uses_pat(binding);
+        if !pat
+            && binding.auth().persisted_auth_mode() != Some(PersistedAuthMode::GithubCopilotOauth)
+        {
             return Err(ProviderAuthError::SourceResolutionFailed(
-                "Copilot backend requires github_copilot_oauth".to_string(),
+                "Copilot backend requires github_copilot_oauth or github_copilot_pat".to_string(),
             ));
         }
-        if !matches!(
-            binding.auth_profile().source,
-            meerkat_core::CredentialSourceSpec::ManagedStore
-        ) {
+        if !pat
+            && !matches!(
+                binding.auth_profile().source,
+                meerkat_core::CredentialSourceSpec::ManagedStore
+            )
+        {
             return Err(ProviderAuthError::SourceResolutionFailed(
                 "github_copilot_oauth requires source.kind = managed_store".to_string(),
             ));
         }
-        let Some(persistence) = env.provider_auth_persistence() else {
-            return Err(ProviderAuthError::SourceResolutionFailed(
-                "Copilot requires provider-auth persistence and AuthMachine authority".to_string(),
-            ));
-        };
-        if env.auth_lease_handle.is_none() {
+        if !pat && (env.provider_auth_persistence().is_none() || env.auth_lease_handle.is_none()) {
             return Err(ProviderAuthError::SourceResolutionFailed(
                 "Copilot requires provider-auth persistence and AuthMachine authority".to_string(),
             ));
         }
 
-        let config = CopilotBackendConfig::from_options(&binding.backend_profile().options)
-            .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
+        let config = if pat {
+            CopilotBackendConfig::from_pat_options(&binding.backend_profile().options)
+        } else {
+            CopilotBackendConfig::from_options(&binding.backend_profile().options)
+        }
+        .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
         let state = self.account_state(
-            persistence.authority_id(),
+            env.provider_auth_persistence()
+                .map(ProviderAuthPersistence::authority_id),
             binding.credential_identity(),
             config,
         )?;
@@ -281,7 +297,7 @@ impl CopilotRuntime {
 
     fn account_state(
         &self,
-        persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+        persistence_id: Option<meerkat_core::auth::ProviderAuthPersistenceId>,
         identity: &AuthCredentialIdentity,
         config: CopilotBackendConfig,
     ) -> Result<Arc<CopilotAccountState>, ProviderAuthError> {
@@ -320,7 +336,7 @@ impl CopilotRuntime {
     ) -> Option<CopilotRouteResolution> {
         let persistence_id = match connection.auth_lease.kind() {
             meerkat_core::ResolvedAuthKind::DynamicAuthorizer(authorizer) => {
-                authorizer.persistence_authority_id()?
+                authorizer.persistence_authority_id()
             }
             _ => return None,
         };
@@ -1194,12 +1210,18 @@ impl Drop for CopilotRefreshFlight<'_> {
 struct CachedCopilotToken {
     generation: u64,
     token: String,
-    source_generation: u64,
+    source_generation: CopilotCredentialSource,
     source_expires_at: Option<DateTime<Utc>>,
     refresh_at: DateTime<Utc>,
     api_base: String,
     models: Option<Arc<CopilotModelSnapshot>>,
     model_discovery_refresh_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopilotCredentialSource {
+    OAuthGeneration(u64),
+    PersonalAccessToken,
 }
 
 impl std::fmt::Debug for CachedCopilotToken {
@@ -1264,6 +1286,9 @@ impl CopilotAuthorizer {
     }
 
     async fn ensure_token(&self) -> Result<CachedTokenView, ProviderAuthError> {
+        if uses_pat(&self.binding) {
+            return self.ensure_pat().await;
+        }
         let entry_flight_id = self
             .state
             .last_refresh_outcome
@@ -1348,7 +1373,8 @@ impl CopilotAuthorizer {
                 {
                     let mut cache = self.state.cache.write();
                     if let Some(current) = cache.as_mut()
-                        && current.source_generation == source_generation
+                        && current.source_generation
+                            == CopilotCredentialSource::OAuthGeneration(source_generation)
                         && current.token == cached.token
                     {
                         match models {
@@ -1450,7 +1476,7 @@ impl CopilotAuthorizer {
         *self.state.cache.write() = Some(CachedCopilotToken {
             generation,
             token: token.token,
-            source_generation,
+            source_generation: CopilotCredentialSource::OAuthGeneration(source_generation),
             source_expires_at: source.expires_at,
             refresh_at,
             api_base,
@@ -1463,16 +1489,91 @@ impl CopilotAuthorizer {
     fn fresh_cached(&self, source_generation: u64, now: DateTime<Utc>) -> Option<CachedTokenView> {
         let cache = self.state.cache.read();
         let cached = cache.as_ref()?;
-        (cached.source_generation == source_generation && now < cached.refresh_at).then(|| {
-            CachedTokenView {
+        (cached.source_generation == CopilotCredentialSource::OAuthGeneration(source_generation)
+            && now < cached.refresh_at)
+            .then(|| CachedTokenView {
                 generation: cached.generation,
                 token: cached.token.clone(),
                 api_base: cached.api_base.clone(),
                 model_discovery_due: cached
                     .model_discovery_refresh_at
                     .is_some_and(|refresh_at| now >= refresh_at),
+            })
+    }
+
+    async fn ensure_pat(&self) -> Result<CachedTokenView, ProviderAuthError> {
+        loop {
+            let token = meerkat_auth_core::resolver::resolve_simple_secret(
+                &self.binding.auth_profile().source,
+                &self.env,
+                &self.binding,
+            )
+            .await?;
+            if token.trim().is_empty() {
+                return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
             }
-        })
+            let now = (self.env.now)();
+            // Discovery belongs to the exact credential, never to a previous
+            // PAT left in the cache after the host rotated its secret source.
+            if let Some(cached) = self.state.cache.read().as_ref()
+                && cached.source_generation == CopilotCredentialSource::PersonalAccessToken
+                && cached.token == token
+                && now < cached.refresh_at
+            {
+                return Ok(CachedTokenView {
+                    generation: cached.generation,
+                    token,
+                    api_base: cached.api_base.clone(),
+                    model_discovery_due: false,
+                });
+            }
+            let notified = self.state.refresh_notify.notified();
+            if self
+                .state
+                .refresh_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                if self.state.refresh_in_flight.load(Ordering::Acquire) {
+                    notified.await;
+                }
+                continue;
+            }
+            let _flight = CopilotRefreshFlight(self.state.as_ref());
+            let models = self
+                .fetch_models(DEFAULT_COPILOT_API_BASE, &token)
+                .await
+                .map_err(|error| match error.status() {
+                    Some(401 | 403) => ProviderAuthError::Auth(AuthError::UserReauthRequired),
+                    Some(status) => ProviderAuthError::SourceResolutionFailed(format!(
+                        "Copilot PAT model discovery returned HTTP {status}"
+                    )),
+                    None => ProviderAuthError::SourceResolutionFailed(
+                        "Copilot PAT model discovery failed".to_string(),
+                    ),
+                })?;
+            let generation = self.state.next_generation.fetch_add(1, Ordering::Relaxed);
+            let api_base = DEFAULT_COPILOT_API_BASE.to_string();
+            *self.state.cache.write() = Some(CachedCopilotToken {
+                generation,
+                token: token.clone(),
+                source_generation: CopilotCredentialSource::PersonalAccessToken,
+                source_expires_at: None,
+                refresh_at: model_discovery_deadline(
+                    (self.env.now)(),
+                    StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
+                ),
+                api_base: api_base.clone(),
+                models: Some(Arc::new(models)),
+                model_discovery_refresh_at: None,
+            });
+            return Ok(CachedTokenView {
+                generation,
+                token,
+                api_base,
+                model_discovery_due: false,
+            });
+        }
     }
 
     async fn load_source_tokens(&self) -> Result<PersistedTokens, ProviderAuthError> {
@@ -1716,6 +1817,9 @@ impl HttpAuthorizer for CopilotAuthorizer {
         &self,
         response: &HttpAuthorizationResponse<'_>,
     ) -> Result<HttpAuthorizationResponseAction, AuthError> {
+        if uses_pat(&self.binding) && matches!(response.status, 401 | 403) {
+            return Err(AuthError::UserReauthRequired);
+        }
         if response.status == 401 {
             return Err(AuthError::Other(
                 "Copilot 401 observation requires its authorization receipt".to_string(),
@@ -1729,6 +1833,12 @@ impl HttpAuthorizer for CopilotAuthorizer {
         receipt: HttpAuthorizationReceipt,
         response: &HttpAuthorizationResponse<'_>,
     ) -> Result<HttpAuthorizationResponseAction, AuthError> {
+        if uses_pat(&self.binding) && matches!(response.status, 401 | 403) {
+            if let Some(generation) = receipt.generation() {
+                self.invalidate_derived_token_generation(generation);
+            }
+            return Err(AuthError::UserReauthRequired);
+        }
         if response.status == 401 {
             let generation = receipt.generation().ok_or_else(|| {
                 AuthError::Other(
@@ -2460,6 +2570,238 @@ mod tests {
         (auth_binding, validated)
     }
 
+    fn pat_binding(provider: Provider, options: serde_json::Value) -> ValidatedBinding {
+        let (_, oauth) = validated_binding();
+        let backend = BackendProfile {
+            provider,
+            options,
+            ..oauth.backend_profile().as_ref().clone()
+        };
+        let auth = AuthProfile {
+            provider,
+            auth_method: "github_copilot_pat".to_string(),
+            source: CredentialSourceSpec::Env {
+                env: "SERVICE_COPILOT_TOKEN".to_string(),
+                fallback: Vec::new(),
+            },
+            ..oauth.auth_profile().as_ref().clone()
+        };
+        ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+            oauth.auth_binding_ref(),
+            account_identity(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .expect("PAT account binding")
+    }
+
+    #[tokio::test]
+    async fn pat_headless_account_routes_use_verified_header_and_rotate_without_oauth() {
+        let token = Arc::new(RwLock::new(Some("first-test-secret".to_string())));
+        let current = token.clone();
+        let env = ResolverEnvironment::testing().with_env_lookup(move |name| {
+            if name == "SERVICE_COPILOT_TOKEN" {
+                current.read().clone()
+            } else {
+                None
+            }
+        });
+        let transport = Arc::new(ScriptedTransport::new([
+            models_response(),
+            models_response(),
+        ]));
+        let runtime = CopilotRuntime {
+            accounts: Mutex::new(BTreeMap::new()),
+            transport: transport.clone(),
+        };
+        let mut auths = Vec::new();
+        for (provider, model, endpoint) in [
+            (Provider::OpenAI, "gpt-test", CopilotEndpoint::Responses),
+            (
+                Provider::Anthropic,
+                "claude-test",
+                CopilotEndpoint::Messages,
+            ),
+            (
+                Provider::Gemini,
+                "gemini-test",
+                CopilotEndpoint::ChatCompletions,
+            ),
+        ] {
+            let binding = pat_binding(provider, serde_json::Value::Null);
+            let resolved = runtime
+                .resolve(&binding, &env)
+                .await
+                .expect("headless PAT resolves");
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider,
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::binding::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        "test-pat",
+                    ),
+                ),
+            };
+            let route = runtime
+                .resolve_route(&connection, provider, model)
+                .expect("no persistence required");
+            assert_eq!(route.access, CopilotModelAccess::Available { endpoint });
+            let mut headers = Vec::new();
+            resolved
+                .authorizer()
+                .authorize(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &format!("{DEFAULT_COPILOT_API_BASE}{}", endpoint.path()),
+                    headers: &mut headers,
+                })
+                .await
+                .expect("PAT inference headers");
+            assert!(headers.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case("Copilot-Integration-Id")
+                    && value == "copilot-developer-cli"
+            }));
+            assert!(
+                headers
+                    .iter()
+                    .any(|(key, value)| key.eq_ignore_ascii_case("Authorization")
+                        && value == "Bearer first-test-secret")
+            );
+            auths.push(resolved);
+        }
+        assert_eq!(transport.request_count(), 1, "shared account discovery");
+        *token.write() = Some("rotated-test-secret".to_string());
+        let authorizer = auths[0].authorizer();
+        let mut headers = Vec::new();
+        let receipt = authorizer
+            .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                method: "POST",
+                url: "https://api.githubcopilot.com/responses",
+                headers: &mut headers,
+            })
+            .await
+            .expect("host rotated PAT");
+        assert!(
+            headers
+                .iter()
+                .any(|(key, value)| key.eq_ignore_ascii_case("Authorization")
+                    && value == "Bearer rotated-test-secret")
+        );
+        for (url, headers) in transport.requests.lock().iter() {
+            assert_eq!(
+                url, "https://api.githubcopilot.com/models",
+                "no GitHub repository or OAuth endpoint"
+            );
+            assert_eq!(headers["copilot-integration-id"], "copilot-developer-cli");
+        }
+        assert_eq!(transport.request_count(), 2);
+        for status in [401, 403] {
+            assert!(matches!(
+                authorizer
+                    .observe_response_with_receipt(
+                        receipt,
+                        &HttpAuthorizationResponse {
+                            method: "POST",
+                            url: "https://api.githubcopilot.com/responses",
+                            status,
+                        }
+                    )
+                    .await,
+                Err(AuthError::UserReauthRequired)
+            ));
+        }
+        assert_eq!(transport.request_count(), 2, "no rejected-token replay");
+        *token.write() = None;
+        assert!(matches!(
+            authorizer.prepare_request().await,
+            Err(AuthError::MissingSecret)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pat_discovery_fails_closed_without_leaking_response_or_falling_back() {
+        for status in [400, 401, 403, 429, 500] {
+            let transport = Arc::new(ScriptedTransport::new([json_response(
+                status,
+                serde_json::json!({"message": "secret-echo-must-not-escape"}),
+            )]));
+            let runtime = CopilotRuntime {
+                accounts: Mutex::new(BTreeMap::new()),
+                transport: transport.clone(),
+            };
+            let env = ResolverEnvironment::testing().with_env_lookup(|name| {
+                (name == "SERVICE_COPILOT_TOKEN").then(|| "secret-echo-must-not-escape".to_string())
+            });
+            let error = match runtime
+                .resolve(
+                    &pat_binding(Provider::OpenAI, serde_json::Value::Null),
+                    &env,
+                )
+                .await
+            {
+                Ok(_) => panic!("discovery refusal must fail"),
+                Err(error) => error,
+            };
+            assert!(!error.to_string().contains("secret-echo-must-not-escape"));
+            if matches!(status, 401 | 403) {
+                assert!(matches!(
+                    error,
+                    ProviderAuthError::Auth(AuthError::UserReauthRequired)
+                ));
+            }
+            assert_eq!(transport.request_count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn pat_custom_integration_is_preserved_and_credentials_stay_on_copilot_origin() {
+        let transport = Arc::new(ScriptedTransport::new([models_response()]));
+        let runtime = CopilotRuntime {
+            accounts: Mutex::new(BTreeMap::new()),
+            transport: transport.clone(),
+        };
+        let env = ResolverEnvironment::testing().with_env_lookup(|name| {
+            (name == "SERVICE_COPILOT_TOKEN").then(|| "test-secret".to_string())
+        });
+        let resolved = runtime
+            .resolve(
+                &pat_binding(
+                    Provider::OpenAI,
+                    serde_json::json!({"integration_id": "enterprise-approved"}),
+                ),
+                &env,
+            )
+            .await
+            .expect("custom header");
+        assert_eq!(
+            transport.requests.lock()[0].1["copilot-integration-id"],
+            "enterprise-approved"
+        );
+        let mut headers = Vec::new();
+        assert!(
+            resolved
+                .authorizer()
+                .authorize(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url: "https://api.openai.com/responses",
+                    headers: &mut headers,
+                })
+                .await
+                .is_err()
+        );
+        assert!(headers.is_empty(), "PAT must not reach model-vendor origin");
+        assert_eq!(
+            CopilotBackendConfig::from_options(&serde_json::Value::Null)
+                .unwrap()
+                .integration_id,
+            "vscode-chat"
+        );
+    }
+
     async fn resolver_environment(
         auth_binding: &AuthBindingRef,
     ) -> (
@@ -2644,7 +2986,7 @@ mod tests {
     fn routes_with_one_account_share_derived_state() {
         let runtime = CopilotRuntime::new();
         let identity = account_identity();
-        let persistence_id = persistence_id();
+        let persistence_id = Some(persistence_id());
         let first = runtime
             .account_state(persistence_id, &identity, CopilotBackendConfig::default())
             .expect("first route");
@@ -2659,10 +3001,18 @@ mod tests {
         let runtime = CopilotRuntime::new();
         let identity = account_identity();
         let first = runtime
-            .account_state(persistence_id(), &identity, CopilotBackendConfig::default())
+            .account_state(
+                Some(persistence_id()),
+                &identity,
+                CopilotBackendConfig::default(),
+            )
             .expect("first persistence authority");
         let second = runtime
-            .account_state(persistence_id(), &identity, CopilotBackendConfig::default())
+            .account_state(
+                Some(persistence_id()),
+                &identity,
+                CopilotBackendConfig::default(),
+            )
             .expect("second persistence authority");
 
         assert!(!Arc::ptr_eq(&first, &second));
@@ -2675,8 +3025,7 @@ mod tests {
         let (env, _) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
-            .expect("test persistence")
-            .authority_id();
+            .map(ProviderAuthPersistence::authority_id);
         let state = runtime
             .account_state(
                 persistence_id,
@@ -2698,7 +3047,7 @@ mod tests {
         *state.cache.write() = Some(CachedCopilotToken {
             generation: 1,
             token: "derived".to_string(),
-            source_generation: 1,
+            source_generation: CopilotCredentialSource::OAuthGeneration(1),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             api_base: "https://first.example.test".to_string(),
@@ -2865,8 +3214,7 @@ mod tests {
         let (env, _) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
-            .expect("test persistence")
-            .authority_id();
+            .map(ProviderAuthPersistence::authority_id);
         let state = runtime
             .account_state(
                 persistence_id,
@@ -2896,7 +3244,7 @@ mod tests {
         *state.cache.write() = Some(CachedCopilotToken {
             generation: 1,
             token: "derived".to_string(),
-            source_generation: 1,
+            source_generation: CopilotCredentialSource::OAuthGeneration(1),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             api_base: "https://copilot.example.test".to_string(),
@@ -3047,7 +3395,7 @@ mod tests {
     fn shared_account_rejects_conflicting_backend_options() {
         let runtime = CopilotRuntime::new();
         let identity = account_identity();
-        let persistence_id = persistence_id();
+        let persistence_id = Some(persistence_id());
         let _first = runtime
             .account_state(persistence_id, &identity, CopilotBackendConfig::default())
             .expect("first route");

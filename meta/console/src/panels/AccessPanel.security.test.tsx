@@ -14,6 +14,23 @@ function props() {
   };
 }
 
+describe("Console access tabs", () => {
+  it("ties each tab to the panel it shows", () => {
+    render(<AccessPanel {...props()} />);
+    for (const tab of ["overview", "groups", "rules", "preview"]) {
+      const control = screen.getByTestId(`access-tab:${tab}`);
+      fireEvent.click(control);
+      expect(control.getAttribute("aria-selected")).toBe("true");
+      const panel = document.getElementById(control.getAttribute("aria-controls") ?? "");
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(control.getAttribute("id"));
+      expect(screen.getAllByRole("tabpanel").length).toBe(1);
+    }
+    const preview = screen.getByTestId("access-tab:preview");
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(preview.getAttribute("id"));
+  });
+});
+
 describe("backend-owned access affordances", () => {
   it("does not infer administration permission from a loaded configuration", () => {
     const input = props();
@@ -504,22 +521,5 @@ describe("permission words", () => {
     const option = screen.getByRole("option", { name: "View agents" }) as HTMLOptionElement;
     expect(option.value).toBe("agent.view");
     expect((screen.getByRole("option", { name: "custom.current.action" }) as HTMLOptionElement).value).toBe("custom.current.action");
-  });
-});
-
-describe("Console access tabs", () => {
-  it("ties each tab to the panel it shows", () => {
-    render(<AccessPanel {...props()} />);
-    for (const tab of ["overview", "groups", "rules", "preview"]) {
-      const control = screen.getByTestId(`access-tab:${tab}`);
-      fireEvent.click(control);
-      expect(control.getAttribute("aria-selected")).toBe("true");
-      const panel = document.getElementById(control.getAttribute("aria-controls") ?? "");
-      expect(panel?.getAttribute("role")).toBe("tabpanel");
-      expect(panel?.getAttribute("aria-labelledby")).toBe(control.getAttribute("id"));
-      expect(screen.getAllByRole("tabpanel").length).toBe(1);
-    }
-    const preview = screen.getByTestId("access-tab:preview");
-    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(preview.getAttribute("id"));
   });
 });

@@ -606,35 +606,6 @@ test("workgraph denied, unavailable, loading and failed states are designed, wit
   assert.ok(stale.includes('data-testid="workgraph-panel-item:root"'));
 });
 
-test("workgraph graph nodes are keyboard reachable buttons named by title and status", () => {
-  const fixture = graphFixture();
-  const html = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
-    items: fixture.items,
-    edges: fixture.edges,
-    attention: [],
-    selectedId: "child-run",
-  }));
-  assert.equal(count(html, 'role="button"'), 4);
-  // One tab stop for the whole graph, on the selected node; arrow keys
-  // reach the rest.
-  assert.equal(count(html, 'tabindex="0"'), 1);
-  assert.equal(count(html, 'tabindex="-1"'), 3);
-  assert.match(html, /data-item-id="child-run"[^>]*tabindex="0"/);
-  const unselected = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
-    items: fixture.items,
-    edges: fixture.edges,
-    attention: [],
-  }));
-  assert.equal(count(unselected, 'tabindex="0"'), 1);
-  assert.match(unselected, /data-item-id="root"[^>]*tabindex="0"/, "without a selection the first node is the tab stop");
-  assert.ok(html.includes('aria-label="Ship it, Open"'));
-  assert.ok(html.includes('aria-label="child-run, In progress"'));
-  assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
-  assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
-  assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
-});
-
-
 test("workgraph graph arrow keys move to the nearest node that way, Home and End to the first and last", () => {
   const { nodeToward } = __workGraphGraphViewTest;
   const box = (itemId: string, column: number, row: number) => ({ itemId, x: 24 + column * 220, y: 24 + row * 64, w: 168, h: 44 });
@@ -671,4 +642,32 @@ test("workgraph graph arrow keys move to the nearest node that way, Home and End
   assert.equal(nodeToward(grid, "n10:20", "ArrowUp"), "n10:19");
   assert.equal(nodeToward(grid, "n10:20", "Home"), "n0:0");
   assert.equal(nodeToward(grid, "n10:20", "End"), "n39:49");
+});
+
+test("workgraph graph nodes are keyboard reachable buttons named by title and status", () => {
+  const fixture = graphFixture();
+  const html = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
+    items: fixture.items,
+    edges: fixture.edges,
+    attention: [],
+    selectedId: "child-run",
+  }));
+  assert.equal(count(html, 'role="button"'), 4);
+  // One tab stop for the whole graph, on the selected node; arrow keys
+  // reach the rest.
+  assert.equal(count(html, 'tabindex="0"'), 1);
+  assert.equal(count(html, 'tabindex="-1"'), 3);
+  assert.match(html, /data-item-id="child-run"[^>]*tabindex="0"/);
+  const unselected = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
+    items: fixture.items,
+    edges: fixture.edges,
+    attention: [],
+  }));
+  assert.equal(count(unselected, 'tabindex="0"'), 1);
+  assert.match(unselected, /data-item-id="root"[^>]*tabindex="0"/, "without a selection the first node is the tab stop");
+  assert.ok(html.includes('aria-label="Ship it, Open"'));
+  assert.ok(html.includes('aria-label="child-run, In progress"'));
+  assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
+  assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
+  assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
 });

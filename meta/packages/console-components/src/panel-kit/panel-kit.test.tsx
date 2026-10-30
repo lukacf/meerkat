@@ -564,146 +564,6 @@ describe("StatTile", () => {
   });
 });
 
-describe("rows and controls", () => {
-  // A control inside another control: a button or link in a button, or in
-  // an element that claims the button role.
-  const NESTED_CONTROLS = [
-    "button button", "button a", "button [role='button']",
-    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
-  ].join(", ");
-
-  it("keeps a row's actions and extra content beside its button, never inside it", () => {
-    const open = vi.fn();
-    const claim = vi.fn();
-    const view = render(
-      <div>
-        <ListRow title="Coordinator" subtitle="Leads" onActivate={open} testId="plain" />
-        <ListRow
-          title="Research Analyst"
-          subtitle="Analyst"
-          meta={<span>2m ago</span>}
-          onActivate={open}
-          selected
-          ariaExpanded={false}
-          titleAttr="identity:analyst"
-          testId="with-actions"
-          dataAttributes={{ "data-state": "working" }}
-          actions={<Button size="sm" onClick={claim}>Claim</Button>}
-        >
-          <span>Waiting on a review</span>
-        </ListRow>
-      </div>,
-    );
-    const plain = view.getByTestId("plain");
-    expect(plain.tagName).toBe("BUTTON");
-    fireEvent.click(plain);
-    expect(open.mock.calls.length).toBe(1);
-
-    const row = view.getByTestId("with-actions");
-    expect(row.getAttribute("role") === null).toBe(true);
-    expect(row.getAttribute("tabindex") === null).toBe(true);
-    expect(row.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
-    expect(row.classList.contains("is-selected")).toBe(true);
-    expect(row.getAttribute("data-state")).toBe("working");
-    // The title is the row's button: a real button, so Enter and Space work
-    // natively, named by the title and described by the rest of the row.
-    const hit = view.getByRole("button", { name: "Research Analyst" });
-    expect(hit.tagName).toBe("BUTTON");
-    expect(hit.getAttribute("type")).toBe("button");
-    expect(hit.classList.contains("cc-row__hit")).toBe(true);
-    expect(hit.getAttribute("aria-current")).toBe("true");
-    expect(hit.getAttribute("aria-expanded")).toBe("false");
-    expect(hit.querySelector(".cc-row__title")?.getAttribute("title")).toBe("identity:analyst");
-    const described = (hit.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
-    expect(described).toEqual(["Analyst", "2m ago", "Waiting on a review"]);
-    const claimButton = view.getByRole("button", { name: "Claim" });
-    expect(hit.contains(claimButton)).toBe(false);
-
-    // The button, the row and its extra content open the row; an action
-    // does not.
-    fireEvent.click(hit);
-    fireEvent.click(row);
-    fireEvent.click(view.getByText("Waiting on a review"));
-    expect(open.mock.calls.length).toBe(4);
-    fireEvent.click(claimButton);
-    expect(claim.mock.calls.length).toBe(1);
-    expect(open.mock.calls.length).toBe(4);
-  });
-
-  it("keeps the button label as the button's own text and hides icons", () => {
-    const view = render(
-      <Button icon={<svg data-icon="refresh" />} variant="primary">
-        Confirm
-      </Button>,
-    );
-    const button = view.getByText("Confirm");
-    expect(button.tagName).toBe("BUTTON");
-    expect(button.textContent).toBe("Confirm");
-    expect(button.getAttribute("type")).toBe("button");
-    expect(button.classList.contains("cc-btn--primary")).toBe(true);
-    expect(button.querySelector(".cc-btn__icon")?.getAttribute("aria-hidden")).toBe("true");
-  });
-
-  it("marks pressed segments and labels search and select fields", () => {
-    const onChange = vi.fn();
-    const view = render(
-      <div>
-        <SegmentedControl
-          ariaLabel="View"
-          value="tree"
-          onChange={onChange}
-          options={[
-            { id: "tree", label: "Tree", testId: "view:tree" },
-            { id: "graph", label: "Graph", testId: "view:graph" },
-          ]}
-        />
-        <SearchField label="Search agents" value="" onChange={() => {}} />
-        <SelectField label="Mob" ariaLabel="Memory mob" value="a" onChange={() => {}} options={[{ value: "a", label: "Operations" }]} />
-      </div>,
-    );
-    expect(view.getByTestId("view:tree").getAttribute("aria-pressed")).toBe("true");
-    expect(view.getByTestId("view:graph").getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(view.getByTestId("view:graph"));
-    expect(onChange.mock.calls[0]?.[0]).toBe("graph");
-    expect(view.getByRole("searchbox", { name: "Search agents" }).tagName).toBe("INPUT");
-    expect(view.getByRole("combobox", { name: "Memory mob" }).tagName).toBe("SELECT");
-  });
-
-  it("pairs tone attributes with words and keeps dots decorative", () => {
-    const view = render(
-      <div>
-        <Chip tone="warn" testId="chip">Degraded</Chip>
-        <StatusDot tone="ok" live />
-        <StatusDot tone="crit" label="Stalled" />
-        <Meter label="1 of 5 done" segments={[{ value: 1, tone: "ok" }]} total={5} testId="meter" />
-      </div>,
-    );
-    expect(view.getByTestId("chip").getAttribute("data-tone")).toBe("warn");
-    expect(view.getByTestId("chip").textContent).toBe("Degraded");
-    const dots = view.container.querySelectorAll(".cc-dot");
-    expect(dots[0]?.getAttribute("aria-hidden")).toBe("true");
-    expect(dots[0]?.classList.contains("is-live")).toBe(true);
-    expect(view.getByRole("img", { name: "Stalled" }).classList.contains("cc-dot")).toBe(true);
-    expect(view.getByRole("img", { name: "1 of 5 done" }).classList.contains("cc-meter__track")).toBe(true);
-    expect((view.getByTestId("meter").querySelector(".cc-meter__seg") as HTMLElement | null)?.style.width).toBe("20%");
-  });
-
-  it("designs empty, no-access and notice states", () => {
-    const view = render(
-      <div>
-        <EmptyState title="No agents yet" body="Agents appear here once a team starts." testId="empty" />
-        <EmptyState kind="no-access" title="You don't have access to work items" testId="denied" />
-        <Notice tone="warn" testId="notice">This connection is read-only.</Notice>
-      </div>,
-    );
-    expect(view.getByTestId("empty").getAttribute("data-kind")).toBe("empty");
-    expect(view.getByText("No agents yet").className).toBe("cc-panel-empty__title");
-    expect(view.getByTestId("denied").querySelector('[data-glyph="shield"]') !== null).toBe(true);
-    expect(view.getByTestId("notice").getAttribute("data-tone")).toBe("warn");
-    expect(view.getByText("This connection is read-only.").className).toBe("cc-notice__text");
-  });
-});
-
 describe("SplitDetail", () => {
   const AGENTS = [
     { id: "coordinator", name: "Coordinator" },
@@ -966,5 +826,145 @@ describe("LoadingState", () => {
     expect(view.getByTestId("cards").classList.contains("cc-skeleton--cards")).toBe(true);
     expect(view.getByTestId("cards").querySelectorAll(".cc-skeleton__row").length).toBe(1);
     expect(view.getByTestId("many").querySelectorAll(".cc-skeleton__row").length).toBe(8);
+  });
+});
+
+describe("rows and controls", () => {
+  // A control inside another control: a button or link in a button, or in
+  // an element that claims the button role.
+  const NESTED_CONTROLS = [
+    "button button", "button a", "button [role='button']",
+    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+  ].join(", ");
+
+  it("keeps a row's actions and extra content beside its button, never inside it", () => {
+    const open = vi.fn();
+    const claim = vi.fn();
+    const view = render(
+      <div>
+        <ListRow title="Coordinator" subtitle="Leads" onActivate={open} testId="plain" />
+        <ListRow
+          title="Research Analyst"
+          subtitle="Analyst"
+          meta={<span>2m ago</span>}
+          onActivate={open}
+          selected
+          ariaExpanded={false}
+          titleAttr="identity:analyst"
+          testId="with-actions"
+          dataAttributes={{ "data-state": "working" }}
+          actions={<Button size="sm" onClick={claim}>Claim</Button>}
+        >
+          <span>Waiting on a review</span>
+        </ListRow>
+      </div>,
+    );
+    const plain = view.getByTestId("plain");
+    expect(plain.tagName).toBe("BUTTON");
+    fireEvent.click(plain);
+    expect(open.mock.calls.length).toBe(1);
+
+    const row = view.getByTestId("with-actions");
+    expect(row.getAttribute("role") === null).toBe(true);
+    expect(row.getAttribute("tabindex") === null).toBe(true);
+    expect(row.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
+    expect(row.classList.contains("is-selected")).toBe(true);
+    expect(row.getAttribute("data-state")).toBe("working");
+    // The title is the row's button: a real button, so Enter and Space work
+    // natively, named by the title and described by the rest of the row.
+    const hit = view.getByRole("button", { name: "Research Analyst" });
+    expect(hit.tagName).toBe("BUTTON");
+    expect(hit.getAttribute("type")).toBe("button");
+    expect(hit.classList.contains("cc-row__hit")).toBe(true);
+    expect(hit.getAttribute("aria-current")).toBe("true");
+    expect(hit.getAttribute("aria-expanded")).toBe("false");
+    expect(hit.querySelector(".cc-row__title")?.getAttribute("title")).toBe("identity:analyst");
+    const described = (hit.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+    expect(described).toEqual(["Analyst", "2m ago", "Waiting on a review"]);
+    const claimButton = view.getByRole("button", { name: "Claim" });
+    expect(hit.contains(claimButton)).toBe(false);
+
+    // The button, the row and its extra content open the row; an action
+    // does not.
+    fireEvent.click(hit);
+    fireEvent.click(row);
+    fireEvent.click(view.getByText("Waiting on a review"));
+    expect(open.mock.calls.length).toBe(4);
+    fireEvent.click(claimButton);
+    expect(claim.mock.calls.length).toBe(1);
+    expect(open.mock.calls.length).toBe(4);
+  });
+
+  it("keeps the button label as the button's own text and hides icons", () => {
+    const view = render(
+      <Button icon={<svg data-icon="refresh" />} variant="primary">
+        Confirm
+      </Button>,
+    );
+    const button = view.getByText("Confirm");
+    expect(button.tagName).toBe("BUTTON");
+    expect(button.textContent).toBe("Confirm");
+    expect(button.getAttribute("type")).toBe("button");
+    expect(button.classList.contains("cc-btn--primary")).toBe(true);
+    expect(button.querySelector(".cc-btn__icon")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("marks pressed segments and labels search and select fields", () => {
+    const onChange = vi.fn();
+    const view = render(
+      <div>
+        <SegmentedControl
+          ariaLabel="View"
+          value="tree"
+          onChange={onChange}
+          options={[
+            { id: "tree", label: "Tree", testId: "view:tree" },
+            { id: "graph", label: "Graph", testId: "view:graph" },
+          ]}
+        />
+        <SearchField label="Search agents" value="" onChange={() => {}} />
+        <SelectField label="Mob" ariaLabel="Memory mob" value="a" onChange={() => {}} options={[{ value: "a", label: "Operations" }]} />
+      </div>,
+    );
+    expect(view.getByTestId("view:tree").getAttribute("aria-pressed")).toBe("true");
+    expect(view.getByTestId("view:graph").getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(view.getByTestId("view:graph"));
+    expect(onChange.mock.calls[0]?.[0]).toBe("graph");
+    expect(view.getByRole("searchbox", { name: "Search agents" }).tagName).toBe("INPUT");
+    expect(view.getByRole("combobox", { name: "Memory mob" }).tagName).toBe("SELECT");
+  });
+
+  it("pairs tone attributes with words and keeps dots decorative", () => {
+    const view = render(
+      <div>
+        <Chip tone="warn" testId="chip">Degraded</Chip>
+        <StatusDot tone="ok" live />
+        <StatusDot tone="crit" label="Stalled" />
+        <Meter label="1 of 5 done" segments={[{ value: 1, tone: "ok" }]} total={5} testId="meter" />
+      </div>,
+    );
+    expect(view.getByTestId("chip").getAttribute("data-tone")).toBe("warn");
+    expect(view.getByTestId("chip").textContent).toBe("Degraded");
+    const dots = view.container.querySelectorAll(".cc-dot");
+    expect(dots[0]?.getAttribute("aria-hidden")).toBe("true");
+    expect(dots[0]?.classList.contains("is-live")).toBe(true);
+    expect(view.getByRole("img", { name: "Stalled" }).classList.contains("cc-dot")).toBe(true);
+    expect(view.getByRole("img", { name: "1 of 5 done" }).classList.contains("cc-meter__track")).toBe(true);
+    expect((view.getByTestId("meter").querySelector(".cc-meter__seg") as HTMLElement | null)?.style.width).toBe("20%");
+  });
+
+  it("designs empty, no-access and notice states", () => {
+    const view = render(
+      <div>
+        <EmptyState title="No agents yet" body="Agents appear here once a team starts." testId="empty" />
+        <EmptyState kind="no-access" title="You don't have access to work items" testId="denied" />
+        <Notice tone="warn" testId="notice">This connection is read-only.</Notice>
+      </div>,
+    );
+    expect(view.getByTestId("empty").getAttribute("data-kind")).toBe("empty");
+    expect(view.getByText("No agents yet").className).toBe("cc-panel-empty__title");
+    expect(view.getByTestId("denied").querySelector('[data-glyph="shield"]') !== null).toBe(true);
+    expect(view.getByTestId("notice").getAttribute("data-tone")).toBe("warn");
+    expect(view.getByText("This connection is read-only.").className).toBe("cc-notice__text");
   });
 });

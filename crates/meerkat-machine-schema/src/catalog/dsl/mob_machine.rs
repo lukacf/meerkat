@@ -2590,9 +2590,10 @@ macro_rules! mob_catalog_machine_dsl {
             // (ForgetArchivedSession).
             ArchivedSessionForgotten { agent_identity: AgentIdentity, session_id: SessionId, reason: Enum<ArchivedSessionForgetReason> },
             // The explicit resume's member authorization for a member whose
-            // host preparation is owed (AuthorizeExplicitResumeMemberHeldRunning):
-            // the resume does not rebuild it, and answers it held with the
-            // cause.
+            // host preparation is owed (AuthorizeExplicitResumeMemberHeldRunning,
+            // and its Stopped twin the resume's candidate selection probes):
+            // the resume neither prepares nor rebuilds it, and answers it held
+            // with the cause.
             ExplicitResumeMemberHeld { agent_identity: AgentIdentity, cause: Enum<HostPreparationCause> },
             // The verdict of a declared apply's opening (OpenDeclaredApply).
             DeclaredApplyOpenResolved { verdict: Enum<DeclaredApplyOpenVerdict> },
@@ -27269,6 +27270,25 @@ macro_rules! mob_catalog_machine_dsl {
             guard "host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == true }
             update {}
             to Running
+            emit ExplicitResumeMemberHeld { agent_identity: agent_identity, cause: self.member_host_preparation_causes.get_cloned(agent_identity).get("value") }
+        }
+
+        // The Held arm's twin while the mob is still Stopped: the explicit
+        // resume selects its candidates and prepares them (reads a Live
+        // member's session, asks the host's customizer, retires an actor
+        // whose binding changed) before the durable Resume, and answers a
+        // member whose host preparation is owed held there, before anything
+        // acts on it. A pure verdict, as the Running arm is; no other arm
+        // authorizes a member in Stopped.
+        transition AuthorizeExplicitResumeMemberHeldStopped {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == true }
+            update {}
+            to Stopped
             emit ExplicitResumeMemberHeld { agent_identity: agent_identity, cause: self.member_host_preparation_causes.get_cloned(agent_identity).get("value") }
         }
 

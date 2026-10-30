@@ -649,6 +649,9 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "AdmitResetRunning",
             "AdmitResetStopped",
             "AdmitResetCompleted",
+            // The explicit resume's held answer while the mob is still
+            // Stopped, before its preparation (0.9.9).
+            "AuthorizeExplicitResumeMemberHeldStopped",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

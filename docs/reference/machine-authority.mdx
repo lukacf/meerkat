@@ -166,7 +166,9 @@ their typed cause (`identity_entry_unseated`: `SeatOwed`,
 (`member_host_preparation_causes`, cause `RoleMigrationUndeclared`, which
 refuses every wake as a first-boot preparation does, holds a Live local
 member's run starts through `MeerkatMachine`'s `HostPreparation` hold reason
-and refuses the explicit resume of the member, and which ends at a verdict
+and refuses the explicit resume of the member (answered held while the
+mob is still Stopped, before the resume prepares any member, and again at
+its rebuild), and which ends at a verdict
 that restores the role or in the step that commits the declared one, never
 at the verdict that declares the move, and with its entry wherever the
 entry ends, `role_hold_belongs_to_an_entry`) and the archived session of an

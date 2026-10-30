@@ -701,13 +701,14 @@ fi
 # Stop, Resume and Complete, and the declared apply's open fact; one bound
 # host and the placed spawn ladder, its remote commit, its retirement and
 # the placed end; and an explicit resume over a member, Dormant or Live,
-# whose host preparation is owed or not. They check
+# whose host preparation is owed or not, probed while the mob is still
+# stopped and again once it runs. They check
 # every generated invariant (the declared apply's among them), exactly one
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
 # names them); they require every listed arm to fire, a floor of distinct
-# states and their fifty-three witnesses reached, and --mutants refuses
-# fifty-two seeded defects: one per declared apply invariant and property,
+# states and their fifty-four witnesses reached, and --mutants refuses
+# fifty-four seeded defects: one per declared apply invariant and property,
 # and one per guard of the declared apply that a reachable state needs.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
@@ -922,10 +923,10 @@ run_machine_verify() {
 # declared apply parts with --mutants, alone, locally with 4 TLC workers
 # (2026-10-30): apply (one whole-space run, 15 witnesses, 15 mutants)
 # 170 s; legacy (one run, 13 witnesses, 16 mutants) 219 s; roles (two
-# runs, 13 witnesses, 9 mutants) 186 s; hosted (three runs, 12 witnesses,
-# 12 mutants) 142 s. As one part (five runs, 28 witnesses, 17 mutants) the
-# declared apply took 300-305 s; with its seven runs, 53 witnesses and 52
-# mutants it would take about 717 s, past 10 minutes on a hosted runner.
+# runs, 13 witnesses, 9 mutants) 186 s; hosted (three runs, 13 witnesses,
+# 14 mutants) 154 s. As one part (five runs, 28 witnesses, 17 mutants) the
+# declared apply took 300-305 s; with its seven runs, 54 witnesses and 54
+# mutants it would take about 729 s, past 10 minutes on a hosted runner.
 # None of audits-g, audits-i and audits-k through audits-o has been
 # measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,

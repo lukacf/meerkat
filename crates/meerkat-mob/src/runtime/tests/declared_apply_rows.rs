@@ -300,7 +300,9 @@ impl ApplyMob {
             .expect("the entry read answers")
         {
             IdentityEntryRead::Entry(view) => Some(view.standing),
-            IdentityEntryRead::NotAnEntry { .. } => None,
+            IdentityEntryRead::NotAnEntry { .. }
+            | IdentityEntryRead::Unreadable { .. }
+            | IdentityEntryRead::Removed => None,
         }
     }
 
@@ -312,7 +314,9 @@ impl ApplyMob {
             .expect("the entry read answers")
         {
             IdentityEntryRead::Entry(view) => view.host_preparation,
-            IdentityEntryRead::NotAnEntry { .. } => None,
+            IdentityEntryRead::NotAnEntry { .. }
+            | IdentityEntryRead::Unreadable { .. }
+            | IdentityEntryRead::Removed => None,
         }
     }
 

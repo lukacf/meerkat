@@ -225,6 +225,7 @@ pub(crate) use dormant_seat::{SeatBuild, SeatBuildInputs, SeatLocalBuildInputs};
 mod builder;
 pub mod composition;
 pub mod conditions;
+mod created_identity;
 mod delegation;
 mod delivery_scope;
 mod delivery_wait;

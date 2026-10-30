@@ -179,6 +179,17 @@ pub enum DeclaredEntryRefusal {
     /// The roster carries a first-boot request for an identity it does not
     /// declare.
     UndeclaredFirstBootRequest,
+    /// A created identity entry holds the name
+    /// ([`super::IdentityEntryOrigin::Created`]): the declared apply never
+    /// declares over it.
+    NameOwnedByCreated,
+    /// The name is a removed created entry's
+    /// ([`super::IdentityEntryRead::Removed`]): it is never an entry or a
+    /// member again.
+    NameTombstoned,
+    /// The name's entry is one this build cannot read
+    /// ([`super::IdentityEntryRead::Unreadable`]): nothing acts on it.
+    NameUnreadable,
 }
 
 /// The declared apply's answer for one identity.
@@ -518,6 +529,11 @@ impl super::MobHandle {
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
     ///   listed name refuses that identity alone.
+    /// - A created identity entry's name, a removed created entry's name and
+    ///   a name whose entry this build cannot read are refused for that
+    ///   identity alone ([`DeclaredEntryRefusal::NameOwnedByCreated`],
+    ///   [`DeclaredEntryRefusal::NameTombstoned`],
+    ///   [`DeclaredEntryRefusal::NameUnreadable`]).
     /// - A candidate composition answers every identity refused and writes
     ///   nothing.
     ///
@@ -525,7 +541,7 @@ impl super::MobHandle {
     /// does not list whose member is seated is retired (its start row records
     /// the cause [`super::MemberRetirementCause::Unlisted`]), and the end of
     /// the retirement ends the entry; one no member holds is removed at once.
-    /// A worker is never unlisted. An entry whose member's retirement started
+    /// A worker is never unlisted, and neither is a created entry. An entry whose member's retirement started
     /// for another reason is left to it: the entry outlives that retirement,
     /// unseated, and a later complete apply removes it.
     ///
@@ -890,8 +906,10 @@ impl super::MobHandle {
             }))
     }
 
-    /// The declared identities the identity store manages: an intent row,
-    /// readable or not, names them. A mob without an identity store has none.
+    /// The declared identities the identity store manages: a host-adopted
+    /// intent row, readable or not, names them. A created entry's row is not
+    /// one: MobMachine refuses a created name itself. A mob without an
+    /// identity store has none.
     async fn declared_apply_intent_managed(
         &self,
         declared: &BTreeMap<AgentIdentity, DeclaredEntry>,
@@ -906,8 +924,11 @@ impl super::MobHandle {
         Ok(declared
             .keys()
             .filter(|identity| {
-                history.identity_management(identity)
-                    != super::MemberIdentityManagement::CommandDriven
+                matches!(
+                    history.identity_management(identity),
+                    super::MemberIdentityManagement::IntentManaged
+                        | super::MemberIdentityManagement::IntentUnreadable
+                )
             })
             .cloned()
             .collect())
@@ -1293,6 +1314,17 @@ impl super::MobHandle {
                     refusal: DeclaredEntryRefusal::NonAuthoritative,
                 }
             }
+            mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated => {
+                DeclaredEntryOutcome::Refused {
+                    refusal: DeclaredEntryRefusal::NameOwnedByCreated,
+                }
+            }
+            mob_dsl::IdentityEntryVerdict::RefusedNameTombstoned => DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameTombstoned,
+            },
+            mob_dsl::IdentityEntryVerdict::RefusedNameUnreadable => DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameUnreadable,
+            },
             // A seat verdict is realized by the seat step, and a mob that is
             // not running fails the declaration step itself.
             mob_dsl::IdentityEntryVerdict::SeatOwed

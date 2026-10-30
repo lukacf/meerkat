@@ -17753,19 +17753,23 @@ impl MobActor {
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
     /// `pending_spawns.contains_member` prechecks. An identity entry's name,
-    /// probed without entry custody, is refused
+    /// probed without entry custody, a created entry's name probed with
+    /// entry custody, and a reserved name (a removed created entry's, or
+    /// one whose entry this build cannot read) are refused
     /// [`MobError::IdentityMember`] before anything is created.
     fn probe_member_admission(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
     ) -> Result<(), MobError> {
-        match self.member_admission_verdict(agent_identity, entry_custody)? {
+        match self.member_admission_verdict(agent_identity, entry_custody, false)? {
             mob_dsl::MemberAdmissionVerdictKind::Admitted => Ok(()),
             mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected => {
                 Err(MobError::MemberAlreadyExists(agent_identity.clone()))
             }
-            mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected => {
+            mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected
+            | mob_dsl::MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin
+            | mob_dsl::MemberAdmissionVerdictKind::IdentityNameReserved => {
                 Err(MobError::IdentityMember {
                     member_id: agent_identity.clone(),
                 })
@@ -17775,17 +17779,18 @@ impl MobActor {
 
     /// MobMachine's member-admission verdict (`ProbeMemberAdmission`, a pure
     /// verdict in every lifecycle phase) for `agent_identity`, requested with
-    /// or without entry custody.
+    /// or without entry custody or created custody.
     fn member_admission_verdict(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<mob_dsl::MemberAdmissionVerdictKind, MobError> {
         let prepared = self.prepare_dsl_input(
             mob_dsl::MobMachineInput::ProbeMemberAdmission {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 entry_custody,
-                created_custody: false,
+                created_custody,
             },
             "probe_member_admission",
         )?;
@@ -17845,10 +17850,10 @@ impl MobActor {
     }
 
     /// A seat chunk's probes, on ONE fork of the authority instead of a
-    /// prepared authority per identity: for each `(identity, entry_custody)`,
-    /// its next generation ([`Self::mint_spawn_generation`]'s
+    /// prepared authority per identity: for each `(identity, entry_custody,
+    /// created_custody)`, its next generation ([`Self::mint_spawn_generation`]'s
     /// `ComputeRespawnGeneration`) and MobMachine's member-admission verdict
-    /// for its entry custody (`ProbeMemberAdmission`). Both are pure probes:
+    /// for its custody (`ProbeMemberAdmission`). Both are pure probes:
     /// they change no state, and the actor's state is fixed while it plans,
     /// so every answer, a refusal included, is the one a probe of its own
     /// would give. A prepared authority per identity copied the whole
@@ -17857,11 +17862,11 @@ impl MobActor {
     /// ones as named twice, so the verdict it plans with is that spec's own.
     fn probe_seat_chunk<'a>(
         &self,
-        specs: impl IntoIterator<Item = (&'a AgentIdentity, bool)>,
+        specs: impl IntoIterator<Item = (&'a AgentIdentity, bool, bool)>,
     ) -> BTreeMap<AgentIdentity, SeatChunkProbe> {
         let mut probe = self.dsl_authority.fork();
         let mut probes: BTreeMap<AgentIdentity, SeatChunkProbe> = BTreeMap::new();
-        for (agent_identity, entry_custody) in specs {
+        for (agent_identity, entry_custody, created_custody) in specs {
             if probes.contains_key(agent_identity) {
                 continue;
             }
@@ -17883,7 +17888,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::ProbeMemberAdmission {
                     agent_identity: dsl_identity,
                     entry_custody,
-                    created_custody: false,
+                    created_custody,
                 },
             )
             .map_err(|error| {

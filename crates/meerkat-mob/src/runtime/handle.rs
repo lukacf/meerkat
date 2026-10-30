@@ -7243,6 +7243,13 @@ pub struct SpawnMemberSpec {
     /// archived session is gone from the store: the dormant seat's row
     /// records it. Set only by the declared apply; a spawn ignores it.
     pub(crate) history_unavailable: Option<super::HistoryUnavailable>,
+    /// Whether the request acts for the created identity entry of its name
+    /// ([`crate::IdentityEntryOrigin::Created`]), owed its seat: the seat of
+    /// such an entry on its archived session at a start. A dormant seat with
+    /// it takes only that entry's name, never another's, and keeps its
+    /// member a created entry. Never taken from caller-supplied arguments;
+    /// a spawn ignores it.
+    pub(crate) created_custody: bool,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7268,6 +7275,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("definition_wiring", &self.definition_wiring)
             .field("entry_custody", &self.entry_custody)
+            .field("created_custody", &self.created_custody)
             .field("additional_instructions", &self.additional_instructions)
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
@@ -7308,7 +7316,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
 impl SpawnMemberSpec {
     /// An agent-lane request claims neither a host root nor an identity
     /// entry: an agent never declares an entry, so its request carries no
-    /// entry custody, and an entry's name is refused to it
+    /// entry or created custody, and an entry's name is refused to it
     /// ([`MobError::IdentityMember`]).
     fn mark_agent_creation(&mut self) {
         if matches!(
@@ -7318,6 +7326,7 @@ impl SpawnMemberSpec {
             self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
         }
         self.entry_custody = false;
+        self.created_custody = false;
     }
 
     /// Attach exact runtime-proven parent ancestry to a child launch.
@@ -7372,6 +7381,7 @@ impl SpawnMemberSpec {
             inherited_operator_authority_bound: None,
             fresh_session_id: None,
             history_unavailable: None,
+            created_custody: false,
         }
     }
 
@@ -16922,14 +16932,19 @@ impl MobHandle {
     /// Transition Stopped -> Running.
     ///
     /// When the actor fail-stopped, this returns why, typed, as
-    /// [`Self::status`] does.
+    /// [`Self::status`] does. A created identity entry owed its seat is
+    /// seated again on its archived session once the mob runs (see
+    /// [`super::IdentityEntryOrigin::Created`]).
     pub async fn resume(&self) -> Result<(), MobError> {
         let deadline = Instant::now() + super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT;
         match self
             .execute_machine_command(MobMachineCommand::Resume { deadline })
             .await?
         {
-            MobMachineCommandResult::Unit => Ok(()),
+            MobMachineCommandResult::Unit => {
+                self.reseat_owed_created_entries().await;
+                Ok(())
+            }
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),

@@ -840,6 +840,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "AdoptLegacyIdentityEntryNonAuthoritative",
                             "ResolveAgentLaneMemberAdmissionAdmittedRunning",
                             "ResolveAgentLaneMemberAdmissionIdentityMemberRunning",
+                            "ResolveAgentLaneMemberAdmissionUnreadableNameRunning",
                         ])
                         .effects(&[
                             "LegacyIdentityEntryAdoptionResolved",
@@ -871,6 +872,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DeclareIdentityEntryRefusedNameHeldByWorker",
                             "DeclareIdentityEntryRefusedHostAdopted",
                             "DeclareIdentityEntryRefusedNonAuthoritative",
+                            "DeclareIdentityEntryRefusedNameOwnedByCreated",
+                            "DeclareIdentityEntryRefusedNameTombstoned",
+                            "DeclareIdentityEntryRefusedNameUnreadable",
                             "DeclareIdentityEntryMobNotRunningStopped",
                             "DeclareIdentityEntryMobNotRunningCompleted",
                             "DeclareIdentityEntryMobNotRunningDestroyed",
@@ -892,6 +896,32 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "retiring_entry_is_a_declared_entry",
                             "held_creation_entry_was_never_created",
                             "archived_session_record_is_unseated",
+                        ]),
+                ),
+                machine_anchor(
+                    "mob_created_identity_entry_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/created_identity.rs",
+                    "MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, an unseated created entry awaits its preparation or is owed its seat, and created custody belongs to an open local ladder of a Created entry, never beside entry custody",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecoverCreatedIdentityEntrySeatedRunning",
+                            "RecoverCreatedIdentityEntrySeatedStopped",
+                            "RecoverCreatedIdentityEntryRetiredRunning",
+                            "RecoverCreatedIdentityEntryRetiredStopped",
+                            "RecoverCreatedIdentityEntryPendingRunning",
+                            "RecoverCreatedIdentityEntryPendingStopped",
+                            "RecoverCreatedIdentityEntryTombstoneRunning",
+                            "RecoverCreatedIdentityEntryTombstoneStopped",
+                            "RecoverCreatedIdentityEntryUnreadableRunning",
+                            "RecoverCreatedIdentityEntryUnreadableStopped",
+                            "ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning",
+                            "ProbeMemberAdmissionIdentityNameReservedRunning",
+                        ])
+                        .invariants(&[
+                            "unseated_created_entry_is_preparing_or_owed",
+                            "tombstone_is_never_an_entry",
+                            "entry_custodies_are_disjoint",
                         ]),
                 ),
                 machine_anchor(

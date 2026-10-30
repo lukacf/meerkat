@@ -754,6 +754,22 @@ impl InMemoryMobIdentityStore {
             },
         }
     }
+
+    /// Remove `identity`'s row from the intents table, whatever it holds, as
+    /// a store that never held it reads.
+    #[cfg(test)]
+    pub(crate) async fn remove_identity_row_for_test(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) {
+        let key = (mob_id.clone(), identity.clone());
+        let mut aggregate = self.aggregate.write().await;
+        let state = &mut aggregate.identity;
+        state.intents.remove(&key);
+        state.created.remove(&key);
+        state.unreadable_intents.remove(&key);
+    }
 }
 
 impl InMemoryMobRuntimeMetadataStore {

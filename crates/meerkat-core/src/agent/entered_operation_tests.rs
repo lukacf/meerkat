@@ -52,6 +52,8 @@ struct Owner {
     unnamed_rebuilds: AtomicUsize,
     /// The next entered run's answer after its operation ran.
     refuse_after_run: parking_lot::Mutex<Option<OperationAuthorizationError>>,
+    /// Runs at every current check of one of this owner's decisions.
+    on_check: parking_lot::Mutex<Option<Box<dyn FnMut() + Send>>>,
 }
 
 impl Owner {
@@ -68,6 +70,7 @@ impl Owner {
             contended: AtomicUsize::new(0),
             unnamed_rebuilds: AtomicUsize::new(0),
             refuse_after_run: parking_lot::Mutex::new(None),
+            on_check: parking_lot::Mutex::new(None),
         })
     }
 
@@ -132,6 +135,9 @@ impl PreparedOperationAuthorization for Decision {
         &self,
         _binding: &PreparedAuthorizationBinding,
     ) -> Result<(), OperationAuthorizationError> {
+        if let Some(hook) = self.owner.on_check.lock().as_mut() {
+            hook();
+        }
         if self.owner.tier() == self.tier
             && self.owner.sequence.load(Ordering::SeqCst) == self.sequence
         {
@@ -1173,10 +1179,11 @@ async fn a_waiting_entered_step_waits_out_a_held_exclusion_and_spends_once() {
     assert_eq!(observed.used(), 1, "Used once, after the effect");
 }
 
-/// A dispatch's own child issuance at R2 meets the held exclusion after its
-/// single consuming entry. The waiting form spends the review once, takes
-/// the issuance again through the entry's witness after one settled wait,
-/// and issues the child once; a later entry finds the review spent.
+/// A dispatch's own child issuance at R2 meets the held exclusion at its
+/// first issuance, under its single consuming entry. The waiting form spends
+/// the review once, takes the issuance again through the entry's witness
+/// after one settled wait, and issues the child once; a later entry finds
+/// the review spent.
 #[tokio::test(start_paused = true)]
 async fn a_waiting_dispatch_issuance_spends_once_and_issues_through_its_witness() {
     let owner = Owner::new(OperationReviewTier::R2);
@@ -1205,6 +1212,112 @@ async fn a_waiting_dispatch_issuance_spends_once_and_issues_through_its_witness(
         "two attempts, both at the tier the entry spent"
     );
     assert_eq!(dispositions.waits(), [true], "one settled wait");
+    assert_eq!(reviewer.0.load(Ordering::SeqCst), 1, "one review");
+    assert!(
+        matches!(
+            context.enter_governed_operation(call).map(drop),
+            Err(ToolError::ReviewUnsatisfied {
+                kind: ReviewUnsatisfiedKind::AlreadyConsumed,
+                ..
+            })
+        ),
+        "spent once, by the waiting form's entry"
+    );
+    guard.complete();
+    assert_eq!(observed.used(), 1, "Used once, after the effect");
+}
+
+/// Another actor's read of the approval owner, as `get` or `list` takes it,
+/// on a thread of its own: begun at the spend's final check after its commit
+/// (the first current check of `owner`'s decisions that finds the approval
+/// owner free after one that found it held for the commit) and held until
+/// released.
+struct ApprovalReader {
+    owner: Arc<Owner>,
+    reading: Arc<parking_lot::Mutex<Option<HeldRead>>>,
+}
+
+/// A reader thread holding the approval owner, and its release.
+type HeldRead = (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>);
+
+impl ApprovalReader {
+    fn after_the_spend(owner: &Arc<Owner>, approvals: &ApprovalService) -> Self {
+        let reading: Arc<parking_lot::Mutex<Option<HeldRead>>> = Arc::default();
+        let slot = Arc::clone(&reading);
+        let approvals = approvals.clone();
+        let mut committing = false;
+        *owner.on_check.lock() = Some(Box::new(move || {
+            if slot.lock().is_some() {
+                return;
+            }
+            if approvals.state_write_held() {
+                committing = true;
+            } else if committing {
+                let (held, holding) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let reader = approvals.clone();
+                let thread = std::thread::spawn(move || reader.read_state_until(&held, &released));
+                holding.recv().expect("the reader holds the approval owner");
+                *slot.lock() = Some((release, thread));
+            }
+        }));
+        Self {
+            owner: Arc::clone(owner),
+            reading,
+        }
+    }
+
+    /// The reader releases the approval owner; returns whether it held it.
+    fn release(self) -> bool {
+        *self.owner.on_check.lock() = None;
+        let Some((release, thread)) = self.reading.lock().take() else {
+            return false;
+        };
+        drop(release);
+        thread.join().expect("the reader's thread");
+        true
+    }
+}
+
+/// A dispatch's own child issuance at R2 whose first issuance meets another
+/// reader of the approval owner, begun after the spend's commit released the
+/// owner and held through the issuance, still issues on that first attempt:
+/// it is the synchronous form's own issuance under the entry, with no step
+/// admission for the reader to refuse. The review is spent once, nothing
+/// waits, and `Used` is reported once.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_dispatch_issuance_issues_first_under_its_entry_past_an_approval_read() {
+    let owner = Owner::new(OperationReviewTier::R2);
+    let approvals = ApprovalService::new();
+    let (review, reviewer, observed) = review(&approvals);
+    let d = dispatch(Arc::new(OwnerWork(Arc::clone(&owner))), &review).await;
+    let guard = d.guard();
+    let dispositions = Arc::new(Dispositions::default());
+    let context = observed_by(&d.context, &dispositions);
+    let (call, _) = d.prepared.tool_dispatch_parts().unwrap();
+    let started = tokio::time::Instant::now();
+
+    let reader = ApprovalReader::after_the_spend(&owner, &approvals);
+    let issued = context
+        .governed_operation(call)
+        .expect("governed")
+        .issue_child_if_current_within_after_owner_change(&(), &7_u32)
+        .await;
+    assert!(
+        reader.release(),
+        "a reader held the approval owner from the spend on"
+    );
+    let issued = issued.expect("issued on the first attempt, under the entry");
+    assert_eq!(*issued.downcast::<u32>().expect("typed"), 7);
+    assert_eq!(*owner.issued.lock(), vec![7], "issued once");
+    assert_eq!(
+        *owner.entered_tiers.lock(),
+        vec![OperationReviewTier::R2],
+        "one attempt, at the tier the entry spent"
+    );
+    assert_eq!(owner.contended.load(Ordering::SeqCst), 0);
+    assert!(dispositions.waits().is_empty(), "no wait");
+    assert_eq!(started.elapsed(), Duration::ZERO);
     assert_eq!(reviewer.0.load(Ordering::SeqCst), 1, "one review");
     assert!(
         matches!(
@@ -1344,11 +1457,14 @@ async fn a_step_whose_operation_ran_is_never_taken_again() {
 }
 
 /// A refusal to rebuild with no change in progress at the read (its holder
-/// finished before it) is taken once more without waiting, as a preparation
-/// rebuilds once: a step refused once runs on that rebuild, and one refused
-/// twice answers the typed refusal after its two attempts.
+/// finished before it) is one of the step's free rebuilds: the step pauses
+/// one backoff step (1 ms) within its deadline, reports a settled wait and
+/// is taken again. A step refused three times that way runs on its fourth
+/// attempt; one refused a fourth time answers the typed refusal at once,
+/// its free rebuilds spent: one bound for every retry, and never a fifth
+/// attempt.
 #[tokio::test(start_paused = true)]
-async fn with_no_change_in_progress_a_waiting_step_rebuilds_once() {
+async fn with_no_change_in_progress_a_refused_step_spends_its_free_rebuilds() {
     let owner = Owner::new(OperationReviewTier::R2);
     let approvals = ApprovalService::new();
     let (review, _, _) = review(&approvals);
@@ -1362,16 +1478,18 @@ async fn with_no_change_in_progress_a_waiting_step_rebuilds_once() {
         .expect("entered once");
     let started = tokio::time::Instant::now();
 
-    owner.unnamed_rebuilds.store(1, Ordering::SeqCst);
+    owner.unnamed_rebuilds.store(3, Ordering::SeqCst);
     let mut ran = 0;
     entered
         .run_if_current_within_after_owner_change(&(), || ran += 1)
         .await
-        .expect("its own rebuild runs");
+        .expect("it runs on its last free rebuild");
     assert_eq!(ran, 1);
-    assert_eq!(owner.entered_tiers.lock().len(), 2, "two attempts");
+    assert_eq!(owner.entered_tiers.lock().len(), 4, "four attempts");
+    assert_eq!(dispositions.waits(), [true; 3], "three settled pauses");
+    assert_eq!(started.elapsed(), Duration::from_millis(3), "1 ms each");
 
-    owner.unnamed_rebuilds.store(2, Ordering::SeqCst);
+    owner.unnamed_rebuilds.store(4, Ordering::SeqCst);
     assert_eq!(
         entered
             .issue_child_if_current_within_after_owner_change(&(), &7_u32)
@@ -1381,13 +1499,15 @@ async fn with_no_change_in_progress_a_waiting_step_rebuilds_once() {
     );
     assert_eq!(
         owner.entered_tiers.lock().len(),
-        4,
-        "two more attempts, then the refusal"
+        8,
+        "four more attempts, then the refusal"
     );
+    assert_eq!(owner.unnamed_rebuilds.load(Ordering::SeqCst), 0);
     assert!(owner.issued.lock().is_empty());
-    assert!(
-        dispositions.waits().is_empty(),
-        "nothing was in progress to wait for"
+    assert_eq!(
+        dispositions.waits(),
+        [true, true, true, true, true, true, false],
+        "three more settled pauses, then none: the free rebuilds are spent"
     );
-    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert_eq!(started.elapsed(), Duration::from_millis(6));
 }

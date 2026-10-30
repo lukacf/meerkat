@@ -1100,10 +1100,15 @@ impl GovernedDispatchOperation {
     /// bounds of [`crate::authorization::OwnerChangeChurn`] and never past
     /// this call's remaining tool time
     /// ([`ToolDispatchContext::remaining_tool_time`]), then tries again; with
-    /// no change in progress at that read it tries once more (its own
-    /// rebuild: the holder may have finished in between). Each wait is
-    /// traced at site `tool_step` and reported as this call's to the host's
-    /// operation refusal observer.
+    /// no change in progress at that read (the holder may have finished in
+    /// between) it pauses one backoff step and tries again. Every retry is
+    /// one of the step's free rebuilds, all within one deadline set at its
+    /// first wait. Each wait is traced at site `tool_step` and reported as
+    /// this call's to the host's operation refusal observer. A streaming
+    /// tool's inactivity window is not part of the remaining tool time:
+    /// inside a streaming tool, a wait longer than the window left ends as
+    /// the tool's inactivity timeout, as the execution policy gate's staging
+    /// wait does.
     ///
     /// Each attempt is the synchronous step itself, decided afresh, and it
     /// releases every guard, lock and custody read before it returns:
@@ -1210,19 +1215,34 @@ impl GovernedDispatchOperation {
     /// does (site `tool_child_issuance`). The work owner validates `further`
     /// and `intent` first. Then THIS dispatch's single consuming entry is
     /// made once, its staging waiting out an owner change in progress within
-    /// the dispatch's own bounds, as the dispatch's root staging does (site
-    /// `tool_entry`). The child is then issued through the entry's witness
+    /// the dispatch attempt's own bounds (site `tool_entry`). That staging
+    /// shares the attempt's waiting state with the attempt's other stagings
+    /// and its review's post-verdict check, so whatever they spent of its
+    /// deadline and free rebuilds is spent here too. Unlike the dispatch's
+    /// root staging, it never reviews again: at R2 an owner change it meets
+    /// supersedes the reviewed decision, so once the change completes the
+    /// call answers `ReviewUnsatisfied` (`ContextChanged`), as a later
+    /// synchronous call would. R1 goes on, and so does an R3 consent, which
+    /// its spend re-adjudicates.
+    ///
+    /// The child is then issued once under the entry just made, exactly as
+    /// the synchronous form issues it: with the entering decision and no
+    /// step admission, so another holder of the review owner (an approval
+    /// read, another dispatch's admission) cannot refuse it after the spend.
+    /// Only after a refusal to rebuild does it wait and issue again, through
+    /// the entry's witness
     /// ([`EnteredDispatchOperation::issue_child_if_current_within_after_owner_change`]),
-    /// whose attempts never spend: an R2 review or an R3 consent is spent
-    /// exactly once, however often the issuance waits. As for the
-    /// synchronous form, this is the dispatch's single consuming entry: for
-    /// R2 and R3 a second call finds the review spent. Nothing is held
-    /// across a wait. The returned box carries the grant owner's typed
+    /// whose attempts never spend and are each admitted by the review owner,
+    /// since the dispatch may have ended meanwhile. An R2 review or an R3
+    /// consent is spent exactly once, however often the issuance waits. As
+    /// for the synchronous form, this is the dispatch's single consuming
+    /// entry: for R2 and R3 a second call finds the review spent. Nothing is
+    /// held across a wait. The returned box carries the grant owner's typed
     /// outcome, which callers must keep: an outer `Ok` is no receipt.
     ///
     /// # Errors
     /// As [`Self::issue_child_if_current_within`], once the bounds are
-    /// spent; nothing was issued. A refusal after the entry is the witness
+    /// spent; nothing was issued. A refusal after a wait is the witness
     /// step's, with no not-dispatched certificate.
     pub async fn issue_child_if_current_within_after_owner_change(
         &self,
@@ -1243,19 +1263,45 @@ impl GovernedDispatchOperation {
             .authorization()
             .validate_child_issuance(further, intent)
             .map_err(crate::ToolError::from)?;
-        // The single consuming entry, made once; every later attempt goes
-        // through its witness, which never spends.
+        // The single consuming entry, made once.
         let (entering, custody) = self
             .context
             .enter_reviewed_effect_held_after_owner_change(call, Some(plan))
             .await?;
+        // The first issuance is the synchronous form's own, under the entry
+        // just made and with its custody held: the entering decision, and no
+        // step admission that a holder of the review owner could refuse.
+        let first = {
+            let entered = entering.as_ref().unwrap_or(&self.context);
+            let check = entered
+                .prepared_authorization
+                .as_ref()
+                .ok_or_else(governed_malformed)?;
+            self.work
+                .authorization()
+                .issue_child_if_current_within(
+                    check.binding(),
+                    check.validity().as_ref(),
+                    further,
+                    intent,
+                    check.review_tier(),
+                )
+                .map_err(crate::ToolError::from)
+        };
+        let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_child_issuance");
+        if !refuses_to_rebuild(&first) || !wait.again().await {
+            return first;
+        }
+        // Only a refusal to rebuild goes on, through the entry's witness:
+        // its attempts never spend, and each is admitted by the review owner,
+        // since the dispatch may have ended during the wait.
         let operation = match entering {
             Some(entering) => entering.governed_operation(call)?,
             None => self.clone(),
         };
         operation
             .into_entered(custody)?
-            .issue_child_if_current_within_after_owner_change(further, intent)
+            .issue_child_waiting(&mut wait, further, intent)
             .await
     }
 
@@ -3265,8 +3311,9 @@ fn refuses_to_rebuild<T>(answer: &Result<T, crate::ToolError>) -> bool {
 /// governed operation (the `_after_owner_change` forms of
 /// [`GovernedDispatchOperation`] and [`EnteredDispatchOperation`]): a fresh
 /// [`crate::authorization::OwnerChangeChurn`] reporting as the call's
-/// ([`ToolDispatchContext::owner_change_churn`]), each wait bounded by the
-/// call's remaining tool time read then, and the step's own one rebuild.
+/// ([`ToolDispatchContext::owner_change_churn`]), whose one deadline is set
+/// at the step's first wait, bounded by the call's remaining tool time read
+/// then, and whose free rebuilds bound every retry of the step.
 ///
 /// It is asked only after a synchronous attempt returned, so nothing that
 /// attempt took (the work owners' exclusion, an owner lock, a run-custody
@@ -3278,7 +3325,6 @@ struct StepOwnerChangeWait<'a> {
     work: &'a crate::WorkAuthorizationContext,
     site: &'static str,
     churn: crate::authorization::OwnerChangeChurn,
-    rebuilt: bool,
 }
 
 impl<'a> StepOwnerChangeWait<'a> {
@@ -3292,39 +3338,31 @@ impl<'a> StepOwnerChangeWait<'a> {
             work,
             site,
             churn: context.owner_change_churn(),
-            rebuilt: false,
         }
     }
 
     /// After an attempt that refused to rebuild ([`refuses_to_rebuild`]):
     /// whether to make it again. While the work reports an owner change in
     /// progress (a held reservation of the native owner's writer included),
-    /// wait for it within the bounds: again after a settled wait (a free
-    /// rebuild), never after an unsettled one. With no change in progress at
-    /// that read, again once (the step's own rebuild: the holder may have
-    /// finished between the attempt and the read), then never.
+    /// wait for it within the bounds; with none at that read (the holder may
+    /// have finished between the attempt and the read), pause one backoff
+    /// step first. Again only after a settled wait, one of the step's free
+    /// rebuilds; never after an unsettled one, past the deadline or once the
+    /// free rebuilds are spent.
     async fn again(&mut self) -> bool {
         let context = self.context;
         let operation = context
             .prepared_authorization()
             .map(|prepared| &prepared.binding().facts().operation_id);
-        match self
-            .churn
-            .wait_for_settled_change(
+        self.churn
+            .wait_for_refused_step(
                 self.work.authorization().as_ref(),
                 context.remaining_tool_time(),
                 self.site,
                 operation,
             )
             .await
-        {
-            Some(wait) => wait.settled(),
-            None if !self.rebuilt => {
-                self.rebuilt = true;
-                true
-            }
-            None => false,
-        }
+            .settled()
     }
 }
 

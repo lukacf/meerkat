@@ -20,7 +20,9 @@
 //! The wait witness is the step's first poll: pending means the step met
 //! A's hold and is waiting for it (A releases only after that poll), ready
 //! means it answered at once. Only the 50 ms hold of the waited rows is a
-//! sleep; every other order is a channel.
+//! sleep; every other order is a channel. The waited rows run on paused
+//! virtual time (A's thread never touches the runtime, and every deadline
+//! and wait is on the runtime's clock), so their timing is exact.
 
 use super::*;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -52,6 +54,7 @@ const TOOL_TIME: Duration = Duration::from_secs(600);
 /// B's tool time when A holds past it: well inside the 2 s owner-change
 /// bound, so the bound that ends B's wait is the tool time.
 const SHORT_TOOL_TIME: Duration = Duration::from_secs(1);
+const _: () = assert!(SHORT_TOOL_TIME.as_millis() < OWNER_CHANGE_WAIT_BOUND.as_millis());
 /// The documented hold of the waited rows, after B started waiting.
 const HOLD: Duration = Duration::from_millis(50);
 
@@ -261,7 +264,7 @@ async fn drive<F: std::future::Future>(
     holder: Holder,
     release: Release,
 ) -> (bool, Duration, F::Output) {
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     let mut step = std::pin::pin!(step);
     let answer = match futures::poll!(step.as_mut()) {
         std::task::Poll::Ready(answer) => {
@@ -644,7 +647,7 @@ async fn both_steps_wait_out_the_hold(hold: Hold) {
 }
 
 /// GREEN, variant 1: A holds an exclusion that never publishes.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_held_exclusion_is_waited_out_by_an_issuance_and_an_entered_step() {
     both_steps_wait_out_the_hold(Hold::Excluded).await;
 }
@@ -652,16 +655,16 @@ async fn a_held_exclusion_is_waited_out_by_an_issuance_and_an_entered_step() {
 /// GREEN, variant 2: A holds a published owner change. The R1 issuance
 /// meets it at its single entry, whose staging waits, and the entered step
 /// at its currentness check.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_held_owner_change_is_waited_out_by_an_issuance_and_an_entered_step() {
     both_steps_wait_out_the_hold(Hold::Change).await;
 }
 
 /// Bound, both variants: A holds past B's remaining tool time. Each step
-/// waits until that time ends, well before the 2 s owner-change bound, and
-/// answers the typed refusal to rebuild: nothing is issued, and the operation
-/// never ran.
-#[tokio::test]
+/// waits until that time ends, never past it and well before the 2 s
+/// owner-change bound (exact on paused time), and answers the typed refusal
+/// to rebuild: nothing is issued, and the operation never ran.
+#[tokio::test(start_paused = true)]
 async fn past_the_remaining_tool_time_each_step_answers_the_typed_rebuild_refusal() {
     for hold in [Hold::Excluded, Hold::Change] {
         let world = StepWorld::new();
@@ -680,8 +683,8 @@ async fn past_the_remaining_tool_time_each_step_answers_the_typed_rebuild_refusa
             "{hold:?}: the typed refusal to rebuild: {r1:?}"
         );
         assert!(
-            r1.took < OWNER_CHANGE_WAIT_BOUND,
-            "{hold:?}: the tool time ended the wait: {r1:?}"
+            r1.took <= SHORT_TOOL_TIME,
+            "{hold:?}: the tool time ended the wait, never past it: {r1:?}"
         );
         assert_eq!(world.child(), None, "{hold:?}: nothing issued");
 
@@ -694,8 +697,8 @@ async fn past_the_remaining_tool_time_each_step_answers_the_typed_rebuild_refusa
             "{hold:?}: the typed refusal to rebuild: {r2:?}"
         );
         assert!(
-            r2.took < OWNER_CHANGE_WAIT_BOUND,
-            "{hold:?}: the tool time ended the wait: {r2:?}"
+            r2.took <= SHORT_TOOL_TIME,
+            "{hold:?}: the tool time ended the wait, never past it: {r2:?}"
         );
         assert_eq!(r2.ran, 0, "{hold:?}: the operation never ran");
     }

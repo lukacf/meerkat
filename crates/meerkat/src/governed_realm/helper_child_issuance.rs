@@ -54,7 +54,13 @@ pub enum HelperChildIssuanceRefusal {
     /// owner change, clock or custody). No child was appended. On the
     /// dispatch and entered paths,
     /// [`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`]
-    /// waits out contention and owner changes before it answers this.
+    /// waits out contention and owner changes before it answers this. Once
+    /// the dispatch path of an R2 or R3 operation spent the dispatch's
+    /// review, issuing again through the dispatch path answers `Denied` (the
+    /// review is spent): a caller that may issue again after this answer
+    /// enters once with `ToolDispatchContext::enter_governed_operation` and
+    /// issues through [`GovernedHelperChildIssuance::from_entered`], whose
+    /// steps never spend.
     Unavailable,
     /// Whether a child was appended is unknown: the grant owner's append
     /// outcome was uncertain (the owner is then unavailable until restored),
@@ -100,6 +106,13 @@ struct PreparedSetup {
     operation_policy: Arc<GrantBackedWorkPolicy>,
     clock: Arc<dyn LocalAuthorizationClock>,
 }
+
+// The waiting issuance's future is `Send`, so a tool body (an `async_trait`
+// future) or a spawned task can await it.
+const _: fn(&GovernedHelperChildIssuance) = |issuance| {
+    fn send<T: Send>(_: T) {}
+    send(issuance.issue_or_recover_after_owner_change());
+};
 
 impl GovernedHelperChildIssuance {
     /// The issuance of `intent`. `source`, `complete_contributors`,

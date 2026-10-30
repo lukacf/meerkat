@@ -108,6 +108,17 @@ const _: () = {
     send_and_sync::<EnteredDispatchOperation>();
 };
 
+// The waiting steps' futures are `Send`, so a tool body (an `async_trait`
+// future on native targets) or a spawned task can await them.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn(&GovernedDispatchOperation, &EnteredDispatchOperation) = |operation, entered| {
+    fn send<T: Send>(_: T) {}
+    send(operation.run_if_current_within_after_owner_change(&(), || {}));
+    send(operation.issue_child_if_current_within_after_owner_change(&(), &()));
+    send(entered.run_if_current_within_after_owner_change(&(), || {}));
+    send(entered.issue_child_if_current_within_after_owner_change(&(), &()));
+};
+
 impl fmt::Debug for EnteredDispatchOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnteredDispatchOperation")
@@ -274,10 +285,12 @@ impl EnteredDispatchOperation {
     /// refusal it waits for the change to complete, within the bounds of
     /// [`crate::authorization::OwnerChangeChurn`] and never past the call's
     /// remaining tool time (`ToolDispatchContext::remaining_tool_time`),
-    /// then takes the step again; with no change in progress at that read it
-    /// takes it once more (its own rebuild: the holder may have finished in
-    /// between). Each wait is traced at site `tool_step` and reported as the
-    /// call's to the host's operation refusal observer.
+    /// then takes the step again; with no change in progress at that read
+    /// (the holder may have finished in between) it pauses one backoff step
+    /// and takes it again. Every retry is one of the step's free rebuilds,
+    /// all within one deadline set at its first wait. Each wait is traced at
+    /// site `tool_step` and reported as the call's to the host's operation
+    /// refusal observer.
     ///
     /// Each attempt is the synchronous step itself, decided afresh: it
     /// releases the work owners' exclusion, every owner lock, the run's
@@ -339,10 +352,22 @@ impl EnteredDispatchOperation {
             &self.0.operation.work,
             "tool_child_issuance",
         );
+        self.issue_child_waiting(&mut wait, further, intent).await
+    }
+
+    /// The waiting issuance's attempts under `wait`, the waiting state of
+    /// the step it serves: the dispatch's own waiting issuance goes on here
+    /// after its first issuance under the entry refused to rebuild and its
+    /// wait settled, with the bounds that wait already spent.
+    pub(super) async fn issue_child_waiting(
+        &self,
+        wait: &mut StepOwnerChangeWait<'_>,
+        further: &(dyn std::any::Any + Send + Sync),
+        intent: &(dyn std::any::Any + Send + Sync),
+    ) -> Result<Box<dyn std::any::Any + Send>, crate::ToolError> {
         loop {
             let answer = self.issue_child_if_current_within(further, intent);
-            let rebuild = refuses_to_rebuild(&answer);
-            if rebuild && wait.again().await {
+            if refuses_to_rebuild(&answer) && wait.again().await {
                 continue;
             }
             return answer;

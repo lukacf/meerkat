@@ -44,12 +44,14 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 // schema's own types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
 // The declared apply: unseated causes, host preparation causes, declared
-// placements, verdicts, the seal's verdict and why an archived session record
-// is let go. The schema's own types, one definition for both instantiations
-// of the machine.
+// placements, verdicts, the seal's verdict, why an archived session record
+// is let go, the kind of a host's first-boot request and the verdict of an
+// apply's opening. The schema's own types, one definition for both
+// instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
-    ArchivedSessionForgetReason, DeclaredRosterSealVerdict, EntryPlacementKind,
-    HostPreparationCause, IdentityEntryVerdict, UnseatedEntryCause,
+    ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
+    EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
+    UnseatedEntryCause,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;

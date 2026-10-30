@@ -106,23 +106,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Since 0.9.6 `customize_build` runs when an identity is seated, starts a
   fresh life or moves to a declared new role, and right before each build of
   its member, the first build after a restart (its first wake) included. At a
-  restart it runs only for the members the start builds (those that owe work
-  or a kickoff, or every member under `member_restore: "eager"`), after they
-  are built and before they run; a restart over idle members the mob already
-  holds calls it for none of them until they are built. `after_create`
-  follows a seat, a create, a fresh life or a role migration, never a wake's
-  build. A new test row pins this for a governed input after a clean
-  restart: no `customize_build` before the input, exactly one at its wake
-  with the context of the member's last build, no `after_create`, and the
-  member's next tool call served by the handler that build registered.
+  restart it runs only for the members the start builds (for example,
+  members that owe work or a kickoff, or every member under
+  `member_restore: "eager"`), after they are built and before they run; a
+  restart calls it for none of the other members until they are built.
+  `after_create` follows a seat, a create, a fresh life or a role migration,
+  never a wake's build. A new test row pins this for a governed input after
+  a clean restart: no `customize_build` before the input, exactly one at its
+  wake with the context of the member's last build, no `after_create`, and
+  the member's next tool call served by the handler that build registered.
 - A runtime `UnifiedRuntimeBuilder` composes gives its identity bridge the
   controller pin source of its mob runtime, as both gateways do. Before, its
   bridge had none: every governed send, governed dispatch and governed
   Console send to a member was refused `Unsupported` ("no controller pin
   source is installed for this bridge") after Meta had woken and built the
-  member, before the host's binder was asked, and attaching a live MCP
-  server to a member answered `Unsupported` too. The builder and both
-  gateways now build their identity bridge with one helper,
+  member, before the host's binder was asked, and
+  `PublicIdentityRuntime::attach_live_mcp_server` always answered
+  `Unsupported`. It now reaches the member's session owner and gives that
+  owner's documented answers: `Refused(NotCurrent)` for a member with no
+  live actor, `Busy` while its turn boundary is held, and `Unsupported` for
+  a session with no live attachment entry. The builder and both gateways
+  now build their identity bridge with one helper,
   `gateway_wiring::identity_session_bridge`, so the three compositions
   cannot drift apart again.
 

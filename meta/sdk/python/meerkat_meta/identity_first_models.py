@@ -903,10 +903,10 @@ class AgentBuildDraft:
         is created (seated), starts a fresh life or moves to a declared new
         role, and right before each build of its member, including the first
         build after a restart (the member's first wake). At a restart it runs
-        only for the members the start builds (those that owe work or a
-        kickoff, or every member under ``member_restore: "eager"``), after they
-        are built and before they run; a restart over idle members the mob
-        already holds calls it for none of them until they are built. The
+        only for the members the start builds (for example, members that owe
+        work or a kickoff, or every member under ``member_restore: "eager"``),
+        after they are built and before they run; a restart calls it for none
+        of the other members until they are built. The
         handler is dispatched in-process when the agent invokes the tool; it
         receives a dict of arguments and returns a JSON-serializable result.
         Use this for identity-scoped tools (MCP, comms, etc.): each build

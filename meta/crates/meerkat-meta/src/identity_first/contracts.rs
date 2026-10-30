@@ -693,13 +693,13 @@ impl RosterProvider for ProjectedRosterProvider {
 /// when a declared role migration moves it to its new role, and right before
 /// each build of its member, including the first build after a restart (the
 /// member's first wake). A member the start builds before the identity
-/// runtime is composed (one that owes work or a kickoff, or every member
-/// under `MemberRestore::Eager`) is built held instead, and customized once
-/// the roster pass composes the runtime: after that build, before the member
-/// runs. A restart over idle members the mob already holds calls it for none
-/// of them until they are built. It receives read-only context (identity,
-/// peers, topology) and the roster spec, and may mutate the `AgentBuildDraft`
-/// (model, prompts, labels, tools, etc.).
+/// runtime is composed (for example one that owes work or a kickoff, or every
+/// member under `MemberRestore::Eager`) is built held instead, and customized
+/// once the roster pass composes the runtime: after that build, before the
+/// member runs. A restart calls it for none of the other members until they
+/// are built. It receives read-only context (identity, peers, topology) and
+/// the roster spec, and may mutate the `AgentBuildDraft` (model, prompts,
+/// labels, tools, etc.).
 ///
 /// Resume selection is NOT part of this contract — Meta owns resume
 /// injection after customize_build completes.

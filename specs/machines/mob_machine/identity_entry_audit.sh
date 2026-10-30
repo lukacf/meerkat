@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# TLC audit of MobMachine identity entries.
+# TLC audit of MobMachine identity entries and the declared apply.
 #
-# usage: identity_entry_audit.sh [--mutants] [extra tlc args...]
+# usage: identity_entry_audit.sh [--mutants] [--part entry|apply]
+#                                [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
 # (every generated constant and invariant, unchanged), then adds the run's
@@ -9,7 +10,9 @@
 # other variable's update or invariant of the generated model reads
 # (model_step_count and topology_epoch). The runner first checks that the
 # model still reads neither counter anywhere else, and fails otherwise. It
-# checks two runs, each over its whole space with TLC coverage:
+# checks seven runs, each over its whole space with TLC coverage, in two
+# parts (--part entry: the entry and lifecycle runs; --part apply: the
+# apply, legacy, roles, held and placed runs; both by default):
 #
 # - entry (identity_entry_audit.tla; three identities, two runtime ids, fence
 #   tokens 1..2, generations 0..1, two sessions): a replayed member and a
@@ -18,68 +21,129 @@
 #   probe, the agent lane's member admission, the worker reconcile and
 #   ensure, the build seed's composition authority, the seal, Stop and
 #   Resume. It checks every generated invariant (the entry invariants among
-#   them: every entry is seated and local, no worker reconcile spawns or
-#   retires an entry, entry custody belongs to an open ladder), that exactly
-#   one arm of the admission probe, of the agent lane's admission and of the
-#   legacy adoption answers every input (AuditProbeExactlyOne,
-#   AuditAgentLaneExactlyOne, AuditAdoptionExactlyOne), that an entry's name
-#   probed without custody is refused as an entry's
+#   them: every entry is seated or unseated with a typed cause, no worker
+#   reconcile spawns or retires an entry, entry custody belongs to an open
+#   ladder), that exactly one arm of the admission probe, of the agent lane's
+#   admission and of the legacy adoption answers every input
+#   (AuditProbeExactlyOne, AuditAgentLaneExactlyOne, AuditAdoptionExactlyOne),
+#   that an entry's name probed without custody is refused as an entry's
 #   (AuditProbeRefusesEntryName), that an identity becomes an entry only by
-#   a custody commit, an observed adoption or the replay of its row
-#   (AuditEntryOnlyWithCause), and that an adoption without the legacy
-#   observation records nothing (AuditAdoptionNeedsObservation).
+#   the declared apply, a custody commit, an observed adoption or the replay
+#   of its row (AuditEntryOnlyWithCause), and that an adoption without the
+#   legacy observation records nothing (AuditAdoptionNeedsObservation).
 # - lifecycle (identity_entry_lifecycle_audit.tla, over
 #   member_residency_audit's retire run and its domains: two identities,
 #   three runtime ids, fence tokens 1..3, generations 0..1, three sessions,
 #   one wake attempt): the retire run's member made an entry by the replay
 #   of its row or by its reseat's ladder opened with entry custody, through
 #   the dormant seat, the live and the archive-only retirement to its
-#   archive terminal, the rotation, the legacy fresh-life respawn and its
-#   refusal of an entry (in Running and Stopped), the legacy respawn's
-#   topology-preserving archive terminals, and the mob's destroy (its
-#   member retirement and archive, DestroyMob and DestroyFromAny). It
-#   checks every generated
-#   invariant (every unseat ends an entry; a destroyed mob holds no entry and
-#   no entry custody), the retire run's own properties, that a dormant seat
-#   records an entry exactly when its ladder holds entry custody
-#   (AuditSeatRecordsEntryFromCustody), that a rotation's terminal keeps the
-#   entries (AuditRotationKeepsEntry), that an identity becomes an entry only
-#   by a seat that consumes its custody or the replay of its row
-#   (AuditLifecycleEntryOnlyWithCause), that the fresh-life respawn is
-#   admitted only for a member that is no entry
+#   archive terminal (which keeps the entry, unseated and owed its seat, with
+#   its archived session recorded), the reseat on that session, the
+#   rotation, the legacy fresh-life respawn and its refusal of an entry (in
+#   Running and Stopped), the legacy respawn's topology-preserving archive
+#   terminals, and the mob's destroy (its member retirement and archive,
+#   DestroyMob and DestroyFromAny). It checks every generated invariant (a
+#   destroyed mob holds no entry and no entry custody), the retire run's own
+#   properties, that a dormant seat records an entry exactly when its ladder
+#   holds entry custody (AuditSeatRecordsEntryFromCustody), that a
+#   rotation's terminal keeps the entries (AuditRotationKeepsEntry), that an
+#   identity becomes an entry only by a seat that consumes its custody or
+#   the replay of its row (AuditLifecycleEntryOnlyWithCause), that the
+#   fresh-life respawn is admitted only for a member that is no entry
 #   (AuditFreshLifeRespawnNeverAnEntry), and that its topology-preserving
 #   archive never takes an entry (AuditPreservingArchiveNeverAnEntry).
+# - apply, legacy, roles, held and placed (identity_entry_apply_audit.tla,
+#   over member_residency_audit's constants and the lifecycle run's domains
+#   plus a second profile): the declared apply. apply: a declared member
+#   seated Dormant by its custody ladder, retired to its archive terminal
+#   unlisted or not, declared again and revived on its archived session or,
+#   its record let go, seated on a fresh one; the seal over every desired
+#   set, the replay of an unlisted mark, a candidate composition, the reset
+#   and the forced destroy. legacy: a legacy member, a worker until adopted,
+#   then unlisted and retired, and its declarations and seal. roles:
+#   a seated entry declared under another role or mode (the role hold, the
+#   restamp, the migration, the rotation), a first-boot preparation, every
+#   WakeMember cause and the same-session rotation of a declared migration.
+#   held: held creation and the held spawn, entries hosted on their first
+#   use, the dormant seat's refusal of both, and Stop, Resume and Complete,
+#   where the declaration and the seal refuse. placed: one bound host and
+#   the placed spawn ladder with or without entry custody. They check every
+#   generated invariant (the declared apply's among them:
+#   unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
+#   held_creation_entry_was_never_created,
+#   archived_session_record_is_unseated,
+#   placed_entry_custody_is_hosted_on_first_use), exactly one arm answering
+#   every declaration and seal, a Declared entry leaving only at the seal's
+#   retirement end, the seal, a destroy or a reset, a candidate composition
+#   changing nothing, no wake opening an attempt for a member with a host
+#   preparation cause, the host's carry-out never ending a role hold, a
+#   declaration never replacing a first-boot
+#   preparation, a custody seat taking the archived session, the dormant
+#   seat taking only an entry owed its seat, and a ladder opened for an
+#   entry's name holding its custody.
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage). The runner
 # then reruns a run's space once per reachability witness, with that
 # witness's negation as an extra invariant (a state goal) or action property
 # (a step goal), and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds twelve defects
-# into a copy of the generated model and requires TLC to refuse each with the
-# invariant or property it breaks: in the entry run, a reconcile that retires
-# an entry, an admission probe that answers an entry's name without custody
-# as a plain duplicate, an adoption without the observation and the replay of
-# an entry row on an unseated identity; in the lifecycle run, an archive
-# terminal and the destroy's member archive that keep the entry, a DestroyMob
-# that keeps the entries, a DestroyFromAny that keeps an open ladder's entry
-# custody, a rotation's terminal that drops the entry, a dormant seat that
-# ignores its ladder's entry custody, a fresh-life respawn admitted for an
-# entry and a topology-preserving archive that takes an entry. An anchor
-# this script expects but
-# cannot find fails the run. Each TLC run is held to the canonical lane's
-# per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
+# properties are not vacuous. With --mutants it then seeds defects into a
+# copy of the generated model and requires TLC to refuse each with the
+# invariant or property it breaks: in the entry run, a reconcile that
+# retires an entry, an admission probe that answers an entry's name without
+# custody as a plain duplicate, an adoption without the observation and the
+# replay of an entry row on an unseated identity; in the lifecycle run, an
+# archive terminal that drops the kept entry's unseated cause, the destroy's
+# member archive that keeps the entry, a DestroyMob that keeps the entries,
+# a DestroyFromAny that keeps an open ladder's entry custody, a rotation's
+# terminal that drops the entry, a dormant seat that ignores its ladder's
+# entry custody, a fresh-life respawn admitted for an entry and a
+# topology-preserving archive that takes an entry; in the apply part, one
+# per declared apply invariant and property (see the mutants below). An
+# anchor this script expects but cannot find fails the run. Each TLC run is
+# held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
+# as TLC INCOMPLETE.
 set -euo pipefail
 
 run_mutants=false
-if [[ "${1:-}" == "--mutants" ]]; then
-  run_mutants=true
-  shift
-fi
+run_part=all
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mutants)
+      run_mutants=true
+      shift
+      ;;
+    --part)
+      run_part="${2:-}"
+      shift 2 || { echo "error: --part needs entry or apply" >&2; exit 2; }
+      ;;
+    *) break ;;
+  esac
+done
+case "${run_part}" in
+  all|entry|apply) ;;
+  *)
+    echo "error: unknown part '${run_part}' (entry or apply)" >&2
+    exit 2
+    ;;
+esac
+# usage: in_part <run>: whether the selected part checks <run>.
+in_part() {
+  case "$1" in
+    entry|lifecycle) [[ "${run_part}" == "all" || "${run_part}" == "entry" ]] ;;
+    apply|legacy|roles|held|placed) [[ "${run_part}" == "all" || "${run_part}" == "apply" ]] ;;
+    *) return 1 ;;
+  esac
+}
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
-entry_states=8736
-lifecycle_states=11921
+entry_states=12960
+lifecycle_states=12041
+apply_states=1940
+legacy_states=102
+roles_states=1224
+held_states=1000
+placed_states=136
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator, since every audit wrapper here is a plain application.
@@ -180,6 +244,136 @@ lifecycle_covered_actions=(
   RespawnRunning
   RespawnIdentityEntryRefusedRunning
   RespawnIdentityEntryRefusedStopped
+)
+
+apply_covered_actions=(
+  BeginSpawnExecFresh
+  AbortSpawnExecActiveRunning
+  AuthorizeSpawnProfileRunning
+  ObserveMemberRetirementArchivedLive
+  ResetToRunning
+  BeginPlacedCompletionLifecycleQuiesceFresh
+  RetireRunningReleasingArchiveOnly
+  RetireRunningPreservingBindingArchiveOnly
+  SessionIngressDetachedForMobDestroyRunning
+  DestroyFromAny
+  SeedMemberResidencyRunning
+  SealBootMaterializationPlan
+  CommitDormantSeatRunning
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryLifecycleInFlight
+  DeclareIdentityEntryRefusedNameHeldByWorker
+  DeclareIdentityEntryRefusedHostAdopted
+  DeclareIdentityEntryRefusedNonAuthoritative
+  DeclareIdentityEntryMobNotRunningDestroyed
+  SealDeclaredRosterSealed
+  SealDeclaredRosterNonAuthoritative
+  SealDeclaredRosterMobNotRunningDestroyed
+  RecoverIdentityEntryRetiringMarkedRunning
+  ForgetArchivedSession
+)
+
+legacy_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  ObserveMemberRetirementArchivedLive
+  RetireRunningReleasingArchiveOnly
+  RetireRunningPreservingBindingArchiveOnly
+  SessionIngressDetachedForMobDestroyRunning
+  SeedMemberResidencyRunning
+  PlanBootMaterializationStayDormant
+  SealBootMaterializationPlan
+  AdoptLegacyIdentityEntryAdopted
+  AdoptLegacyIdentityEntryNameHeldByWorker
+  AdoptLegacyIdentityEntryNotAdoptable
+  AdoptLegacyIdentityEntryNotSeated
+  AdoptLegacyIdentityEntryAlreadyAnEntry
+  AdoptLegacyIdentityEntryNonAuthoritative
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryLifecycleInFlight
+  DeclareIdentityEntryRefusedNameHeldByWorker
+  DeclareIdentityEntryRefusedHostAdopted
+  DeclareIdentityEntryRefusedNonAuthoritative
+  SealDeclaredRosterSealed
+  SealDeclaredRosterNonAuthoritative
+  RecoverIdentityEntryRetiringMarkedRunning
+)
+
+roles_covered_actions=(
+  AuthorizeSpawnProfileRunning
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverMemberPeerEndpointFreshRunning
+  ObserveRuntimeReady
+  ObserveMemberRetirementArchivedLive
+  ResolveMemberRevivalSucceededRunningLocal
+  RetireRunningReleasingArchiveOnly
+  RetireRunningPreservingBindingArchiveOnly
+  SessionIngressDetachedForMobDestroyRunning
+  SeedMemberResidencyRunning
+  WakeMemberAuthorizedRunning
+  WakeMemberJoinedRunning
+  WakeMemberAlreadyLiveRunning
+  WakeMemberRefusedRunning
+  PlanBootMaterializationWake
+  PlanBootMaterializationStayDormant
+  ResolveMemberHostPreparationRunning
+  ResolveMemberRevivalBoundRunning
+  AbandonMemberWakeDormantRunning
+  ReleaseMemberMaterializationReleasedRunning
+  ReleaseMemberMaterializationStaleRunning
+  RecoverIdentityEntrySeatedRunning
+  BeginMemberRotationSameSessionRunning
+  CommitMemberRotationSameSessionRunning
+  CommitMemberRotationSameSessionKickoffRunning
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRuntimeModeRestamp
+  DeclareIdentityEntryRoleMigrate
+  DeclareIdentityEntryRoleRotate
+  DeclareIdentityEntryRoleMigrationHeld
+  DeclareIdentityEntryLifecycleInFlight
+  DeclareIdentityEntryRefusedNameHeldByWorker
+)
+
+held_covered_actions=(
+  CommitSpawnMembershipFresh
+  BeginSpawnExecFresh
+  AbortSpawnExecActiveRunning
+  AuthorizeSpawnProfileRunning
+  RecoverRosterMemberRunning
+  RecoverRosterMemberRetiredRunning
+  StopRunning
+  ResumeStopped
+  CompleteRunning
+  BeginPlacedCompletionLifecycleQuiesceFresh
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  CommitDormantSeatRunning
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryHostedOnFirstUse
+  DeclareIdentityEntryAwaitHeldCreation
+  DeclareIdentityEntryLifecycleInFlight
+  DeclareIdentityEntryRefusedNameHeldByWorker
+  DeclareIdentityEntryMobNotRunningStopped
+  DeclareIdentityEntryMobNotRunningCompleted
+  SealDeclaredRosterSealed
+  SealDeclaredRosterMobNotRunningStopped
+  SealDeclaredRosterMobNotRunningCompleted
+)
+
+placed_covered_actions=(
+  BeginSpawnExecRemote
+  AbortSpawnExecMaterializePendingRunning
+  AuthorizeSpawnProfileRunning
+  BindOwnerBridgeSessionRunning
+  BeginHostBindFreshUnplaced
+  CommitHostBind
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryHostedOnFirstUse
+  DeclareIdentityEntryLifecycleInFlight
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -303,6 +497,61 @@ write_cfg() {
   AuditEpochIndex = ${epoch_index}
   AuditMaxAttempts = 1" "${cfg}"
       ;;
+    apply|legacy|roles|held|placed)
+      case "${run}" in
+        apply|legacy)
+          spec="ApplySpec"
+          if [[ "${run}" == "legacy" ]]; then
+            spec="LegacySpec"
+          fi
+          run_properties="
+  AuditEntryLeavesBySealDestroyOrReset
+  AuditCandidateChangesNothing
+  AuditApplyEntryOnlyWithCause
+  AuditSeatTakesArchivedSession"
+          run_invariants="
+  AuditDeclareExactlyOne
+  AuditSealExactlyOne"
+          ;;
+        roles)
+          spec="RolesSpec"
+          run_properties="
+  AuditHostPreparationNeverWoken
+  AuditHostStepKeepsRoleHold
+  AuditRoleHoldKeepsFirstBootRow"
+          run_invariants="
+  AuditRolesDeclareExactlyOne"
+          ;;
+        held)
+          spec="HeldSpec"
+          run_properties="
+  AuditDormantSeatTakesOnlyOwedEntries"
+          run_invariants="
+  AuditHeldDeclareExactlyOne
+  AuditSealExactlyOne"
+          ;;
+        placed)
+          spec="PlacedSpec"
+          run_properties="
+  AuditLadderReservesEntryName"
+          run_invariants="
+  AuditPlacedDeclareExactlyOne"
+          ;;
+      esac
+      # The lifecycle run's domains, and a second profile for a role move.
+      replace_exact_line "  AgentIdentityValues = {}" '  AgentIdentityValues = {"agentidentity_1", "agentidentity_2"}' "${cfg}"
+      replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"agentruntimeid_1", "agentruntimeid_2", "agentruntimeid_3"}' "${cfg}"
+      replace_exact_line "  FenceTokenValues = {1}" "  FenceTokenValues = {1, 2, 3}" "${cfg}"
+      replace_exact_line "  GenerationValues = {1}" "  GenerationValues = {0, 1}" "${cfg}"
+      replace_exact_line "  MobIdValues = {}" '  MobIdValues = {"mobid_1"}' "${cfg}"
+      replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1", "sessionid_2", "sessionid_3"}' "${cfg}"
+      replace_exact_line "  StringValues = {}" '  StringValues = {"profile_1", "profile_2", "model_1", "digest_1", "reason_1", "code_1", "objective_1"}' "${cfg}"
+      replace_exact_line "  ResumeAttemptIdValues = {}" '  ResumeAttemptIdValues = {"resumeattemptid_1"}' "${cfg}"
+      replace_exact_line "CONSTANTS" "CONSTANTS
+  AuditStepIndex = ${step_index}
+  AuditEpochIndex = ${epoch_index}
+  AuditMaxAttempts = 1" "${cfg}"
+      ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -351,6 +600,7 @@ run_tlc() {
   case "${run}" in
     entry) module="identity_entry_audit" ;;
     lifecycle) module="identity_entry_lifecycle_audit" ;;
+    apply|legacy|roles|held|placed) module="identity_entry_apply_audit" ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -408,7 +658,7 @@ check_space() {
   local action generated
   for action in "$@"; do
     generated="$(awk -v head="<${action} line " '
-      index($0, head) == 1 && $0 ~ / of module (model|identity_entry_audit|identity_entry_lifecycle_audit|member_residency_audit)( \([0-9]+ [0-9]+ [0-9]+ [0-9]+\))?>: [0-9]+:[0-9]+$/ {
+      index($0, head) == 1 && $0 ~ / of module (model|identity_entry_audit|identity_entry_lifecycle_audit|identity_entry_apply_audit|member_residency_audit)( \([0-9]+ [0-9]+ [0-9]+ [0-9]+\))?>: [0-9]+:[0-9]+$/ {
         split($NF, counts, ":"); total += counts[2]; found = 1
       }
       END { if (found) print total }' "${coverage}")"
@@ -420,8 +670,17 @@ check_space() {
   done
 }
 
-check_space entry "${entry_states}" "${entry_covered_actions[@]}"
-check_space lifecycle "${lifecycle_states}" "${lifecycle_covered_actions[@]}"
+if in_part entry; then
+  check_space entry "${entry_states}" "${entry_covered_actions[@]}"
+  check_space lifecycle "${lifecycle_states}" "${lifecycle_covered_actions[@]}"
+fi
+if in_part apply; then
+  check_space apply "${apply_states}" "${apply_covered_actions[@]}"
+  check_space legacy "${legacy_states}" "${legacy_covered_actions[@]}"
+  check_space roles "${roles_states}" "${roles_covered_actions[@]}"
+  check_space held "${held_states}" "${held_covered_actions[@]}"
+  check_space placed "${placed_states}" "${placed_covered_actions[@]}"
+fi
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
@@ -433,13 +692,32 @@ for witness in \
   "entry:Invariant:ProbeRefused" "entry:Invariant:LaneRefusedStopped" "entry:Invariant:TwoEntries" \
   "lifecycle:Action property:EntrySeated" "lifecycle:Invariant:EntryLive" \
   "lifecycle:Action property:EntryRetiredLive" "lifecycle:Action property:EntryArchived" \
+  "lifecycle:Action property:EntryReseatedOnRecord" \
   "lifecycle:Action property:EntryRotated" "lifecycle:Action property:EntryDestroyArchived" \
   "lifecycle:Action property:EntryDestroyedMob" "lifecycle:Action property:EntryDestroyedForced" \
   "lifecycle:Action property:CustodyDestroyed" \
   "lifecycle:Action property:EntryRespawnRefused" "lifecycle:Action property:WorkerRespawnAdmitted" \
   "lifecycle:Action property:EntryRespawnRefusedStopped" \
-  "lifecycle:Action property:WorkerPreservingArchive"; do
+  "lifecycle:Action property:WorkerPreservingArchive" \
+  "legacy:Action property:AdoptedThenUnlisted" "apply:Action property:RelistedAfterUnlist" \
+  "apply:Action property:Revived" "apply:Action property:RetiredEntryKept" \
+  "apply:Action property:FreshAfterForget" "apply:Action property:SealRemovesUnseated" \
+  "apply:Action property:ReplayMarked" "apply:Action property:CandidateRefused" \
+  "legacy:Action property:NameHeldByWorker" "apply:Action property:HostAdopted" \
+  "apply:Action property:InFlight" "apply:Action property:ResetEndsEntries" \
+  "apply:Action property:DestroyEndsEntries" \
+  "roles:Action property:RoleHoldRefusesPeerWake" "roles:Action property:MigrationVerdict" \
+  "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
+  "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
+  "roles:Action property:FirstBootKeptOverRoleHold" "roles:Action property:RoleHoldDroppedAtArchive" \
+  "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
+  "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
+  "placed:Action property:PlacedCustody" "placed:Action property:PlacedWorker" \
+  "placed:Action property:PlacedCustodyAborted"; do
   run="${witness%%:*}"
+  if ! in_part "${run}"; then
+    continue
+  fi
   rest="${witness#*:}"
   kind="${rest%%:*}"
   name="${rest#*:}"
@@ -501,6 +779,34 @@ def update_var(arm, var, rhs):
     body = body.replace("    /\\ " + frames[0] + "\n",
                         "    /\\ " + var + "' = " + rhs + "\n    /\\ UNCHANGED << " + kept + " >>\n")
     open(path, "w").write(text[:found.start()] + body + text[found.end():])
+
+def replace_update(arm, var, rhs):
+    """The arm updates `var`, which it updates already, to `rhs`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    lines = found.group(0).split("\n")
+    hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ " + var + "' = ")]
+    assert len(hits) == 1, f"expected one update of {var} in {arm}, found {len(hits)}"
+    lines[hits[0]] = "    /\\ " + var + "' = " + rhs
+    open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+
+def drop_guard(arm, needle):
+    """The arm loses the one guard line, before its first update, that
+    contains `needle`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    lines = found.group(0).split("\n")
+    first_update = next(i for i, line in enumerate(lines) if "' = " in line)
+    hits = [i for i, line in enumerate(lines[:first_update]) if line.startswith("    /\\ ") and needle in line]
+    assert len(hits) == 1, f"expected one guard with {needle!r} in {arm}, found {len(hits)}"
+    del lines[hits[0]]
+    open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+
+def replace_text(old, new):
+    """The one occurrence of `old` in the model becomes `new`."""
+    text = open(path).read()
+    assert text.count(old) == 1, f"expected one {old[:70]!r}, found {text.count(old)}"
+    open(path, "w").write(text.replace(old, new))
 PY
 
   # usage: mutate <run> <name> <expected violation regex>; reads a python
@@ -525,6 +831,7 @@ PY
     echo "mutant ${name} refused by $(grep -oE "Error: (${violation}) is violated" "${log}" | head -1)"
   }
 
+  if in_part entry; then
   # A reconcile that retires an entry: the retire helper ranges over every
   # bound identity again.
   mutate entry reconcile_retires_entry "Invariant worker_reconcile_spares_entries" <<'PY'
@@ -591,9 +898,10 @@ text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)
 PY
 
-  # The archive terminal of a retirement that keeps the member's entry.
-  mutate lifecycle archive_keeps_entry "Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
-keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_origins")
+  # The archive terminal of a retirement the seal did not start keeps the
+  # entry but records no unseated cause.
+  mutate lifecycle archive_drops_unseated_cause "Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_unseated")
 PY
 
   # The destroy's member archive that keeps the member's entry.
@@ -645,5 +953,109 @@ assert len(hits) == 1, f"expected one entry guard in the live preserving archive
 del lines[hits[0]]
 open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
 PY
+  fi
+
+  if in_part apply; then
+  # A seat that keeps the entry's unseated cause.
+  mutate apply seat_keeps_unseated_cause "Invariant unseated_entry_is_not_a_member" <<'PY'
+keep_var("CommitDormantSeatRunning", "identity_entry_unseated")
+PY
+
+  # A declaration that records the entry with no unseated cause.
+  mutate apply declare_records_no_cause "Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
+keep_var("DeclareIdentityEntrySeatOwed", "identity_entry_unseated")
+PY
+
+  # The end of an unlisted retirement that removes the entry and keeps its
+  # mark.
+  mutate apply terminal_keeps_mark "Invariant retiring_entry_is_a_declared_entry" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_retiring")
+PY
+
+  # A seat that keeps the archived session record of the identity it seats.
+  mutate apply seat_keeps_archived_record "Invariant archived_session_record_is_unseated" <<'PY'
+keep_var("CommitDormantSeatRunning", "identity_entry_archived_sessions")
+PY
+
+  # The rule before the declared apply: every retirement end removes the
+  # entry (and records no unseated cause), unlisted or not.
+  mutate apply archive_ends_any_entry "Action property AuditEntryLeavesBySealDestroyOrReset" <<'PY'
+replace_update("ObserveMemberRetirementArchivedLive", "identity_entry_origins", "MapRemove(identity_entry_origins, agent_identity)")
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_unseated")
+PY
+
+  # The seal marks a worker it does not list: the seal retires a worker.
+  mutate legacy seal_marks_worker "Invariant retiring_entry_is_a_declared_entry" <<'PY'
+replace_update("SealDeclaredRosterSealed", "identity_entry_retiring",
+               "(identity_entry_retiring \\cup {id \\in DOMAIN identity_to_runtime : ~(id \\in desired)})")
+PY
+
+  # A declaration on a candidate composition writes: the verdict helper no
+  # longer refuses a candidate.
+  mutate apply declare_on_candidate_writes "Action property AuditCandidateChangesNothing" <<'PY'
+replace_text('(IF (composition_authoritative = FALSE) THEN "RefusedNonAuthoritative" ELSE ',
+             '(IF FALSE THEN "RefusedNonAuthoritative" ELSE ')
+PY
+
+  # The seal of a candidate composition marks and removes: its authority
+  # guard dropped.
+  mutate apply seal_on_candidate_writes \
+    "Invariant AuditSealExactlyOne|Action property AuditCandidateChangesNothing" <<'PY'
+drop_guard("SealDeclaredRosterSealed", "composition_authority")
+PY
+
+  # A seat that holds an entry's custody binds another session than the
+  # identity's archived one.
+  mutate apply seat_takes_other_session "Action property AuditSeatTakesArchivedSession" <<'PY'
+drop_guard("CommitDormantSeatRunning", "spawn_exec_entry_custody")
+PY
+
+  # A wake that ignores a host preparation cause.
+  mutate roles wake_ignores_host_preparation "Action property AuditHostPreparationNeverWoken" <<'PY'
+replace_text('(IF (host_pending = TRUE) THEN Some("HostPreparationPending") ELSE ',
+             '(IF FALSE THEN Some("HostPreparationPending") ELSE ')
+PY
+
+  # The host's carry-out ends any cause, a role hold among them.
+  mutate roles resolve_ends_role_hold "Action property AuditHostStepKeepsRoleHold" <<'PY'
+replace_update("ResolveMemberHostPreparationRunning", "member_host_preparation_causes",
+               "MapRemove(member_host_preparation_causes, agent_identity)")
+PY
+
+  # A role hold that replaces a first-boot preparation.
+  mutate roles role_hold_replaces_first_boot "Action property AuditRoleHoldKeepsFirstBootRow" <<'PY'
+replace_update("DeclareIdentityEntryRoleMigrationHeld", "member_host_preparation_causes",
+               'MapSet(member_host_preparation_causes, agent_identity, "RoleMigrationUndeclared")')
+PY
+
+  # The verdict helper holds an identity created before for its held
+  # creation.
+  mutate held helper_holds_created_identity "Invariant held_creation_entry_was_never_created" <<'PY'
+replace_text('((held_creation = TRUE) /\\ (ever_created = FALSE))', '(held_creation = TRUE)')
+PY
+
+  # The dormant seat takes an entry awaiting its held creation or hosted on
+  # its first use.
+  mutate held dormant_seat_takes_held_or_hosted "Action property AuditDormantSeatTakesOnlyOwedEntries" <<'PY'
+drop_guard("CommitDormantSeatRunning", 'Some("SeatOwed")')
+PY
+
+  # The held spawn's commit keeps the entry's held creation cause.
+  mutate held spawn_commit_keeps_held_cause \
+    "Invariant unseated_entry_is_not_a_member|Invariant held_creation_entry_was_never_created" <<'PY'
+keep_var("CommitSpawnMembershipFresh", "identity_entry_unseated")
+PY
+
+  # The placed ladder holds the custody of an entry not hosted on its first
+  # use (or of no entry): its placed custody guard dropped.
+  mutate placed placed_custody_relaxed "Invariant placed_entry_custody_is_hosted_on_first_use" <<'PY'
+drop_guard("BeginSpawnExecRemote", 'Some("HostedOnFirstUse")')
+PY
+
+  # The placed ladder takes an entry's name without its custody.
+  mutate placed placed_spawn_takes_entry_name "Action property AuditLadderReservesEntryName" <<'PY'
+drop_guard("BeginSpawnExecRemote", "identity_entry_origins")
+PY
+  fi
 fi
 echo "identity entry audit passed"

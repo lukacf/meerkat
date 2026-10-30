@@ -380,13 +380,15 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # source_credential_publication_audit.sh (auth) requires each of its five
 # reachability witnesses violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
-# at or above each of its two runs' floors, a coverage block in which each
-# covered action of both runs generated a state, its twenty step
-# witnesses and four state witnesses violated, and with --mutants its
+# at or above each of its seven runs' floors, a coverage block in which each
+# covered action of every run generated a state, its forty-seven step
+# witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy
-# mutants' generated invariants, and its rotation, seat, respawn and
-# preserving-archive mutants' action properties violated.
+# mutants' generated invariants, its rotation, seat, respawn and
+# preserving-archive mutants' action properties, and its declared apply
+# mutants' generated invariants, totality invariants and action properties
+# violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -657,7 +659,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessWindowRenewed is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefusedValueBlocked is violated."' \
   'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
-  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
   'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
@@ -682,6 +684,35 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessWorkerRespawnAdmitted is violated."' \
   'echo "Error: Action property NotAuditWitnessEntryRespawnRefusedStopped is violated."' \
   'echo "Error: Action property NotAuditWitnessWorkerPreservingArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryReseatedOnRecord is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptedThenUnlisted is violated."' \
+  'echo "Error: Action property NotAuditWitnessRelistedAfterUnlist is violated."' \
+  'echo "Error: Action property NotAuditWitnessRevived is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetiredEntryKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessFreshAfterForget is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealRemovesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayMarked is violated."' \
+  'echo "Error: Action property NotAuditWitnessCandidateRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessNameHeldByWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessInFlight is violated."' \
+  'echo "Error: Action property NotAuditWitnessResetEndsEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyEndsEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldRefusesPeerWake is violated."' \
+  'echo "Error: Action property NotAuditWitnessMigrationVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessMigrationRestamped is violated."' \
+  'echo "Error: Action property NotAuditWitnessRestampVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessRotateVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldEnded is violated."' \
+  'echo "Error: Action property NotAuditWitnessFirstBootKeptOverRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldDroppedAtArchive is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldWaiting is violated."' \
+  'echo "Error: Action property NotAuditWitnessHeldSpawnSeats is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHosted is violated."' \
+  'echo "Error: Action property NotAuditWitnessEverCreatedOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCustody is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCustodyAborted is violated."' \
   'echo "Error: Action property AuditRotationKeepsEntry is violated."' \
   'echo "Error: Action property AuditSeatRecordsEntryFromCustody is violated."' \
   'echo "Error: Action property AuditFreshLifeRespawnNeverAnEntry is violated."' \
@@ -690,6 +721,19 @@ printf '%s\n' \
   'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
   'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
+  'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
+  'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
+  'echo "Error: Invariant archived_session_record_is_unseated is violated."' \
+  'echo "Error: Action property AuditEntryLeavesBySealDestroyOrReset is violated."' \
+  'echo "Error: Action property AuditCandidateChangesNothing is violated."' \
+  'echo "Error: Action property AuditSeatTakesArchivedSession is violated."' \
+  'echo "Error: Action property AuditHostPreparationNeverWoken is violated."' \
+  'echo "Error: Action property AuditHostStepKeepsRoleHold is violated."' \
+  'echo "Error: Action property AuditRoleHoldKeepsFirstBootRow is violated."' \
+  'echo "Error: Invariant held_creation_entry_was_never_created is violated."' \
+  'echo "Error: Action property AuditDormantSeatTakesOnlyOwedEntries is violated."' \
+  'echo "Error: Invariant placed_entry_custody_is_hosted_on_first_use is violated."' \
+  'echo "Error: Action property AuditLadderReservesEntryName is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -756,7 +800,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i audits-j audits-k"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

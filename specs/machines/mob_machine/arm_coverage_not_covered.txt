@@ -46,10 +46,8 @@ UnbindCoordinator* coordinator binding; no audit drives it
 BindObjective* objective owner bindings; no audit drives them
 ConcludeObjective* objective conclusions; no audit drives them
 RecoverObjective* objective owner and conclusion replay; no audit drives it
-BindOwner* owner bridge session binding; no audit drives it
 RecoverOwner* owner bridge session replay; no audit drives it
-BeginHost* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
-CommitHost* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+BeginHost* member-host bind replacement and re-request; identity_entry_audit's placed run binds one fresh host (BeginHostBindFreshUnplaced, CommitHostBind) for the placed spawn ladder only
 HostRebound* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
 RefreshHost* member-host capabilities; placed members (member hosts) are outside the audits: no audit binds a host or places a member
 RevokeHost* member-host revocation; placed members (member hosts) are outside the audits: no audit binds a host or places a member
@@ -90,18 +88,18 @@ RecoverRosterMemberRetirementStartedPlaced placed retirement-start replay; place
 ResolveMemberRevivalSucceededRunningPlaced a placed member's wake closes Live through its member host; placed members (member hosts) are outside the audits: no audit binds a host or places a member
 ObserveMemberRetirementArchivedStaleRuntime needs a Retiring runtime its identity no longer maps to; every audited unmapping arm clears that marker in the same step (member_lifecycle_audit AuditRetiringRuntimeMapped)
 ObserveMemberRetirementArchivedStaleRuntimeStopped needs a Retiring runtime its identity no longer maps to; every audited unmapping arm clears that marker in the same step (member_lifecycle_audit AuditRetiringRuntimeMapped)
-BeginSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-AbortSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-CommitSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-CompleteSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-CancelPending* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-StageSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-ComputeRespawn* respawn generation probe over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+BeginSpawn* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+AbortSpawn* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+CommitSpawn* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+CompleteSpawn* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+CancelPending* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+StageSpawn* spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+ComputeRespawn* respawn generation probe over the spawn ladder; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
+ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
 ProbeMember* spawn admission probe in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
-RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote) and its abort with one fixed shape
 Kickoff* member kickoff lifecycle; the seat owes no kickoff and no audit drives the kickoff arms
 RecoverMemberKickoff* member kickoff replay; no audit drives it
 AdmitSupervisor* supervisor rotation; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
@@ -180,7 +178,6 @@ Reconcile* desired-roster reconcile in the Completed and Destroyed phases; ident
 ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 AdoptLegacyIdentityEntryMobNotRunning* the legacy adoption in the Completed and Destroyed phases; identity_entry_audit drives every other arm and the Stopped one
 RespawnIdentityEntryRefusedCompleted the legacy fresh-life respawn's refusal of an identity entry in the Completed phase; identity_entry_audit drives its Running and Stopped arms
-ResetToRunning mob reset; no audit drives it
 RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
 ShutdownStopped Shutdown outside Running; member_residency_audit drives ShutdownRunning
 ShutdownCompleted Shutdown outside Running; member_residency_audit drives ShutdownRunning

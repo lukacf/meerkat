@@ -27,10 +27,12 @@
 \* read.
 \*
 \* Properties: every generated invariant of ci.cfg (kept), among them
-\* entry_is_seated_or_has_an_unseated_cause (every entry is seated, so every
-\* unseat ends the entry), entry_custody_ladder_is_open and
-\* destroyed_mob_holds_no_member_lifecycle (a destroyed mob holds no entry
-\* and no entry custody); the retire run's own properties
+\* entry_is_seated_or_has_an_unseated_cause (the end of a retirement the
+\* declared apply's seal did not start keeps the entry, unseated and owed its
+\* seat), unseated_entry_is_not_a_member, archived_session_record_is_unseated,
+\* entry_custody_ladder_is_open and destroyed_mob_holds_no_member_lifecycle
+\* (a destroyed mob holds no entry and no entry custody); the retire run's
+\* own properties
 \* (AuditAttemptEndsClosed, AuditRetireRoutesOnlyRegistered,
 \* AuditDestroyFencesRotation, AuditReseatUnbornIffNeverBorn,
 \* AuditRotationDecidesExemptionAnew, AuditWakingClosable and
@@ -191,9 +193,23 @@ AuditWitnessEntrySeated == \E unborn \in BOOLEAN, ex \in BOOLEAN : LSeatAs(unbor
 AuditWitnessEntryLive == Id1 \in LEntries /\ Phase1 = Some("Live")
 \* A Live entry's routed retirement starts.
 AuditWitnessEntryRetiredLive == Id1 \in LEntries /\ Phase1 = Some("Live") /\ RetireArms
-\* The archive terminal of an entry's retirement unseats it, which ends the
-\* entry.
-AuditWitnessEntryArchived == Id1 \in LEntries /\ PlainArchives /\ Id1 \notin DOMAIN identity_entry_origins'
+\* The archive terminal of an entry's retirement the seal did not start
+\* keeps the entry, unseated and owed its seat, with its archived session
+\* recorded.
+AuditWitnessEntryArchived ==
+    /\ Id1 \in LEntries
+    /\ PlainArchives
+    /\ Id1 \in DOMAIN identity_entry_origins'
+    /\ Id1 \in DOMAIN identity_entry_unseated'
+    /\ identity_entry_unseated'[Id1] = "SeatOwed"
+    /\ Id1 \in DOMAIN identity_entry_archived_sessions'
+\* The kept entry is seated again on its archived session by a seat that
+\* holds its custody: it comes back with its history.
+AuditWitnessEntryReseatedOnRecord ==
+    /\ Id1 \in LEntries
+    /\ Id1 \in DOMAIN identity_entry_archived_sessions
+    /\ identity_entry_archived_sessions[Id1] = Sess1
+    /\ \E unborn \in BOOLEAN, ex \in BOOLEAN : LSeatAs(unborn, ex)
 \* An entry is rotated: its next incarnation keeps the entry.
 AuditWitnessEntryRotated == Id1 \in LEntries /\ RCommitRotation
 \* The destroy's member archive ends an entry.
@@ -226,6 +242,7 @@ NotAuditWitnessEntrySeated == [][~AuditWitnessEntrySeated]_vars
 NotAuditWitnessEntryLive == ~AuditWitnessEntryLive
 NotAuditWitnessEntryRetiredLive == [][~AuditWitnessEntryRetiredLive]_vars
 NotAuditWitnessEntryArchived == [][~AuditWitnessEntryArchived]_vars
+NotAuditWitnessEntryReseatedOnRecord == [][~AuditWitnessEntryReseatedOnRecord]_vars
 NotAuditWitnessEntryRotated == [][~AuditWitnessEntryRotated]_vars
 NotAuditWitnessEntryDestroyArchived == [][~AuditWitnessEntryDestroyArchived]_vars
 NotAuditWitnessEntryDestroyedMob == [][~AuditWitnessEntryDestroyedMob]_vars

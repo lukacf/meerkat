@@ -800,9 +800,10 @@ run_machine_verify() {
 # audits-c = run-start hold 209-256, materialization-rollback keep with
 # --mutants 212-259, live worker start after close 20-27, approval
 # entered-step with --mutants 16-24: 457-566 s; plus the identity entry
-# audit with --mutants, added after these measurements: locally, with 4 TLC
-# workers, about 105 s (its whole-space run 41 s, eleven witnesses and four
-# mutants); the hosted shard has not been measured with it;
+# audit with --mutants, added after these measurements: its two whole-space
+# runs (entry and lifecycle), twenty witnesses and ten mutants took about
+# 175 s locally with 8 TLC workers, more on the hosted runner's 4; the hosted
+# shard is measured at validation;
 # audits-d = durable-tail recovery ownership with --mutants 179-233,
 # live-context outbox 122-153, peer request maps with --mutants 93-131,
 # live-context result barrier with --mutants 27-37: 421-554 s;

@@ -1051,6 +1051,69 @@ async fn the_worker_reconcile_and_ensure_refuse_entry_custody() {
     }
 }
 
+/// A seat batch that names a seated identity entry twice, once without and
+/// once with entry custody, answers its first spec from that spec's own
+/// admission verdict and refuses the second as named twice, in either
+/// order, and writes nothing.
+///
+/// RED: let a later spec of a name replace its earlier spec's probe in the
+/// chunk (`probe_seat_chunk` collecting last-wins): the custody-less first
+/// spec plans with the custody verdict and is answered as a seat of the
+/// entry instead of `IdentityMember`, and the custody first spec is refused
+/// `IdentityMember`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_name_twice_in_one_seat_batch_keeps_its_first_specs_verdict() {
+    let mob = EntryMob::new("entry-seat-twice").await;
+    mob.seat(entry_spec("twice-entry")).await;
+    let journal = mob.journal_len().await;
+    let named_twice = |outcome: &DormantSeatOutcome| {
+        matches!(
+            outcome,
+            DormantSeatOutcome::Refused { error: MobError::Internal(reason), .. }
+                if reason.contains("named twice")
+        )
+    };
+
+    let outcomes = mob
+        .handle
+        .seat_dormant_members(vec![worker_spec("twice-entry"), entry_spec("twice-entry")])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            &outcomes[0],
+            DormantSeatOutcome::Refused { error, .. } if is_identity_member(error, "twice-entry")
+        ) && named_twice(&outcomes[1]),
+        "the custody-less first spec is refused the entry's name: {outcomes:?}"
+    );
+
+    let outcomes = mob
+        .handle
+        .seat_dormant_members(vec![entry_spec("twice-entry"), worker_spec("twice-entry")])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            &outcomes[0],
+            DormantSeatOutcome::AlreadySeated { .. }
+                | DormantSeatOutcome::Refused {
+                    error: MobError::MemberAlreadyExists(_),
+                    ..
+                }
+        ) && named_twice(&outcomes[1]),
+        "the custody first spec is answered as the entry's own seat: {outcomes:?}"
+    );
+    assert_eq!(
+        mob.journal_len().await,
+        journal,
+        "neither batch wrote a row"
+    );
+    assert_eq!(
+        mob.entry("twice-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The legacy label's one reader (source guard)
 // ---------------------------------------------------------------------------
@@ -1297,9 +1360,10 @@ async fn members_seated_with_entry_fields_are_served_without_them() {
 /// binding and changes nothing: the restored members equal those of the
 /// journal that ends before the row, and the member wakes after the
 /// restart over the whole journal (the row carries the member's durable
-/// endpoint, so the reader keeps its endpoint check for it). The lane-run
-/// leg against the published Core is
-/// `legacy_adoption_row_replays_as_a_no_op_under_097` below.
+/// endpoint, so the reader keeps its endpoint check for it; the lane leg
+/// notes when that endpoint can be stale). The lane-run leg against the
+/// published Core is `legacy_adoption_row_replays_as_a_no_op_under_097`
+/// below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_adoption_row_replays_as_a_no_op_without_its_entry() {
     let mut mob = EntryMob::new("entry-rollback-adoption").await;
@@ -1409,6 +1473,15 @@ async fn members_seated_with_entry_fields_are_served_by_097() {
 /// row carries the member's durable endpoint when MobMachine held one; a
 /// Dormant seat may hold none, and the lane's wake shows Core 0.9.7 serves
 /// the member then too.
+///
+/// Known limit, rollback only: the endpoint the row carries can be stale.
+/// When a member's binding was repointed to a new session without an
+/// endpoint, MobMachine keeps the old one, and an adoption before the
+/// member's next wake writes that old endpoint on the row. Core 0.9.7 then
+/// checks the member against it instead of upgrading the member's endpoint,
+/// and can mark the member Broken; a wake or a rotation recovers it. This
+/// build is unaffected: its restore skips the adoption's row, so the binding
+/// row without an endpoint still drives the upgrade.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 resumes"]
 async fn legacy_adoption_row_replays_as_a_no_op_under_097() {

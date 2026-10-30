@@ -17823,52 +17823,56 @@ impl MobActor {
     /// they change no state, and the actor's state is fixed while it plans,
     /// so every answer, a refusal included, is the one a probe of its own
     /// would give. A prepared authority per identity copied the whole
-    /// machine state three times per seat.
+    /// machine state three times per seat. A name named twice keeps its
+    /// FIRST spec's probes: the planner plans that spec and refuses the later
+    /// ones as named twice, so the verdict it plans with is that spec's own.
     fn probe_seat_chunk<'a>(
         &self,
         specs: impl IntoIterator<Item = (&'a AgentIdentity, bool)>,
     ) -> BTreeMap<AgentIdentity, SeatChunkProbe> {
         let mut probe = self.dsl_authority.fork();
-        specs
-            .into_iter()
-            .map(|(agent_identity, entry_custody)| {
-                let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
-                let generation = mob_dsl::MobMachineMutator::apply(
-                    &mut probe,
-                    mob_dsl::MobMachineInput::ComputeRespawnGeneration {
-                        agent_identity: dsl_identity.clone(),
-                    },
-                )
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "DSL authority prepared batch (compute_respawn_generation) rejected: {error}"
-                    ))
-                })
-                .and_then(|transition| Self::respawn_generation_from_effects(transition.effects()));
-                let admission = mob_dsl::MobMachineMutator::apply(
-                    &mut probe,
-                    mob_dsl::MobMachineInput::ProbeMemberAdmission {
-                        agent_identity: dsl_identity,
-                        entry_custody,
-                    },
-                )
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "DSL authority prepared batch (probe_member_admission) rejected: {error}"
-                    ))
-                })
-                .and_then(|transition| {
-                    Self::member_admission_verdict_from_effects(transition.effects())
-                });
-                (
-                    agent_identity.clone(),
-                    SeatChunkProbe {
-                        generation,
-                        admission,
-                    },
-                )
+        let mut probes: BTreeMap<AgentIdentity, SeatChunkProbe> = BTreeMap::new();
+        for (agent_identity, entry_custody) in specs {
+            if probes.contains_key(agent_identity) {
+                continue;
+            }
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+            let generation = mob_dsl::MobMachineMutator::apply(
+                &mut probe,
+                mob_dsl::MobMachineInput::ComputeRespawnGeneration {
+                    agent_identity: dsl_identity.clone(),
+                },
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "DSL authority prepared batch (compute_respawn_generation) rejected: {error}"
+                ))
             })
-            .collect()
+            .and_then(|transition| Self::respawn_generation_from_effects(transition.effects()));
+            let admission = mob_dsl::MobMachineMutator::apply(
+                &mut probe,
+                mob_dsl::MobMachineInput::ProbeMemberAdmission {
+                    agent_identity: dsl_identity,
+                    entry_custody,
+                },
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "DSL authority prepared batch (probe_member_admission) rejected: {error}"
+                ))
+            })
+            .and_then(|transition| {
+                Self::member_admission_verdict_from_effects(transition.effects())
+            });
+            probes.insert(
+                agent_identity.clone(),
+                SeatChunkProbe {
+                    generation,
+                    admission,
+                },
+            );
+        }
+        probes
     }
 
     /// The one generation a `ComputeRespawnGeneration` transition emitted.

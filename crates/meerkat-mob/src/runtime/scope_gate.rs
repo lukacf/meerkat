@@ -1087,6 +1087,7 @@ mod tests {
         assert_eq!(
             MobCommand::AdmitControlScope {
                 required: ControlScope::Cancel,
+                subject: crate::runtime::state::ScopeAdmissionSubject::Mob,
                 reply_tx: tx,
             }
             .required_control_scope(),

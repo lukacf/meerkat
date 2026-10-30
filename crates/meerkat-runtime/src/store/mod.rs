@@ -1917,7 +1917,7 @@ impl PreparedHeadCanonicalProvisionalTail {
         }
         if candidate_session.id() != &session_id
             || candidate_session.messages().len() as u64 != successor_head.message_count
-            || candidate_session.version() != successor_head.version
+            || candidate_session.persisted_envelope_version() != successor_head.version
             || candidate_session.created_at() != successor_head.created_at
             || candidate_session.updated_at() != successor_head.updated_at
             || candidate_session.total_usage() != successor_head.usage
@@ -3746,7 +3746,7 @@ impl PreparedRecoveryEvidence {
                     ))
                 })?;
         if &successor_head.id != recovered.id()
-            || successor_head.version != recovered.version()
+            || successor_head.version != recovered.persisted_envelope_version()
             || successor_head.head_revision != conversation_digest
             || successor_head.message_count != recovered_message_count
             || successor_head.created_at != recovered.created_at()

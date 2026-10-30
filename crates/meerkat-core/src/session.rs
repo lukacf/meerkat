@@ -199,6 +199,11 @@ pub use transcript_history::{
 /// envelope crosses only the explicit one-time importer.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
+/// The envelope version a document without any operator-instruction fact is
+/// written with ([`Session::persisted_envelope_version`]): the released
+/// binaries' envelope, so such a document stays byte-identical.
+pub use crate::generated::session_persistence_version_authority::SESSION_ENVELOPE_BASELINE_VERSION;
+
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
 ///
@@ -1151,7 +1156,7 @@ impl Serialize for Session {
         }
         let history = self.history_caches.shared_state.get();
         let serde_repr = SessionWholeBlobSerdeRef {
-            version: self.version,
+            version: self.persisted_envelope_version(),
             id: &self.id,
             messages: self.messages(),
             created_at: &self.created_at,
@@ -2111,6 +2116,14 @@ impl Session {
 
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
+
+/// Metadata key holding the recorded operator-instruction target state: the
+/// owner, the target generation, the entry-sequence high-water and the slots
+/// the next run start applies (with the bodies still pending). A separate key
+/// from [`SESSION_DEFERRED_TURN_STATE_KEY`]: the target is long-lived and must
+/// not change [`Session::is_deferred_template`]. A document carrying it is
+/// written at envelope 5.
+pub const SESSION_INSTRUCTION_STATE_KEY: &str = "session_instruction_state_v1";
 
 /// Metadata key holding the open run cursor of a durable session.
 ///
@@ -5362,6 +5375,30 @@ impl Session {
     /// Get the session version
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Whether this document carries a fact only envelope 5 can read: the
+    /// recorded operator-instruction target state, or an operator-instruction
+    /// entry row. Entry rows leave the live transcript only through a
+    /// compaction fold, which records the target state (its entry-sequence
+    /// high-water) in the same rewrite, so a document whose rewrite graph
+    /// retains an entry row always carries the state too: once 5, always 5.
+    pub fn carries_operator_instruction_facts(&self) -> bool {
+        self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
+            || self.messages().iter().any(|message| {
+                matches!(message, Message::System(system) if system.instruction_entry.is_some())
+            })
+    }
+
+    /// The envelope version this document is written with: the current
+    /// version when it carries an operator-instruction fact, the baseline
+    /// otherwise, so a document without one stays byte-identical to what the
+    /// released binaries write and read. In memory every restored document
+    /// carries [`SESSION_VERSION`] ([`Self::version`]).
+    pub fn persisted_envelope_version(&self) -> u32 {
+        session_persistence_version_authority::session_envelope_version_for_document(
+            self.carries_operator_instruction_facts(),
+        )
     }
 
     /// Get all messages.

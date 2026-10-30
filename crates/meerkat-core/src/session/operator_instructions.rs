@@ -1207,3 +1207,64 @@ impl Session {
         Ok(())
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+impl Session {
+    /// Test seam: append one delta entry that activates `body` at `revision`
+    /// for (`namespace`, `key`), superseding the revision in effect, as a run
+    /// start would. It records no target state. Production code never calls
+    /// it.
+    #[doc(hidden)]
+    pub fn append_operator_instruction_activation_for_test(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        revision: u64,
+        body: &str,
+    ) -> Result<(), String> {
+        let slot = InstructionSlot {
+            namespace: InstructionNamespace::new(namespace).map_err(|error| error.to_string())?,
+            key: InstructionKey::new(key).map_err(|error| error.to_string())?,
+        };
+        let revision = InstructionRevision::new(revision).map_err(|error| error.to_string())?;
+        let effective = effective_operator_instructions(self.id(), self.messages())?;
+        let supersedes = effective
+            .slot(&slot)
+            .filter(|state| state.effect() == InstructionEffect::Active)
+            .map(EffectiveInstructionSlot::revision);
+        let mut active_after = effective
+            .slots()
+            .filter(|(other, _)| **other != slot)
+            .filter_map(|(other, state)| {
+                state.body().map(|body| ActiveOperatorInstruction {
+                    slot: other.clone(),
+                    revision: state.revision(),
+                    body: body.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        active_after.push(ActiveOperatorInstruction {
+            slot: slot.clone(),
+            revision,
+            body: body.to_string(),
+        });
+        let sequence = effective.last_entry_sequence().saturating_add(1);
+        let entry = mint_operator_instruction_delta(
+            OperatorInstructionEntryHeader {
+                origin_session_id: self.id().clone(),
+                entry_sequence: sequence,
+                target_generation: sequence,
+                run_id: None,
+            },
+            active_after,
+            vec![OperatorInstructionChangeContent::Activate {
+                slot,
+                revision,
+                supersedes,
+                body: body.to_string(),
+            }],
+            crate::types::message_timestamp_now(),
+        )?;
+        self.append_operator_instruction_entry(entry)
+    }
+}

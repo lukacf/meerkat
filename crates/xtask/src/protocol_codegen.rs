@@ -2934,7 +2934,13 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] =
         current_const: "SESSION_VERSION",
         current_accessor: "session_envelope_version",
         restore_fn: "restore_session_envelope_version",
-        row_version: None,
+        // Per document: envelope 5 only for a document carrying an
+        // operator-instruction fact, the baseline 4 otherwise.
+        row_version: Some(SessionPersistenceRowVersionSpec {
+            baseline_state_field: "session_envelope_baseline_version",
+            baseline_const: "SESSION_ENVELOPE_BASELINE_VERSION",
+            row_fn: "session_envelope_version_for_document",
+        }),
     },
     SessionPersistenceVersionFieldSpec {
         enum_variant: "StoredInputState",

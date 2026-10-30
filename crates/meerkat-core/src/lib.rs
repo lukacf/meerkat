@@ -582,6 +582,7 @@ pub use session::{
     InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
     InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
     MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
+    SESSION_ENVELOPE_BASELINE_VERSION, SESSION_INSTRUCTION_STATE_KEY,
     effective_operator_instructions, materialize_operator_instruction_messages,
     validate_operator_instruction_messages,
 };

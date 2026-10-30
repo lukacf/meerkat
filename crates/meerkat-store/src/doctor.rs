@@ -50,7 +50,7 @@
 //! report cannot be read as covering a pool it never touched.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,6 +171,11 @@ pub const FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED: &str
 /// transitions, and the physical/runtime owner references that keep exact
 /// states reachable.
 pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
+/// Sessions written at the envelope that carries operator-instruction facts
+/// (an entry row or the recorded target state). A release before operator
+/// instructions refuses them typed until a roll-forward; an operator lists
+/// them before a rollback. Informational.
+pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
 /// implying the unmeasured bytes are healthy.
@@ -860,6 +865,12 @@ fn diagnose_realm_dir(
                         Ok(tx) => {
                             sweep_dangling_blobs(&tx, realm_dir, &sessions_db, realm, diagnosis);
                             census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
+                            census_operator_instruction_envelopes(
+                                &tx,
+                                &sessions_db,
+                                realm,
+                                diagnosis,
+                            );
                         }
                         Err(err) => {
                             diagnosis.findings.push(
@@ -1799,6 +1810,119 @@ fn census_storage_footprint(
     report_frozen_archives(&archives, &gaps, db_path, realm, diagnosis);
     report_head_metadata_pool(&head_metadata, &gaps, db_path, realm, diagnosis);
     report_census_gaps(&gaps, db_path, realm, diagnosis);
+}
+
+/// The most session ids the operator-instruction envelope finding names.
+const OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP: usize = 50;
+
+/// Envelope lens of a head-less WholeBlob document: its version only.
+#[derive(Deserialize)]
+struct EnvelopeVersionLens {
+    version: u32,
+}
+
+/// The sessions of one database written at the operator-instruction
+/// envelope: head rows by their indexed `version`, and head-less WholeBlob
+/// documents by their envelope.
+fn operator_instruction_envelope_sessions(
+    conn: &Connection,
+    envelope: u32,
+) -> Result<BTreeSet<String>, rusqlite::Error> {
+    let mut sessions = BTreeSet::new();
+    let heads = table_exists(conn, "session_heads")?;
+    if heads {
+        let mut statement = conn.prepare(
+            "SELECT session_id FROM session_heads WHERE version = ?1 ORDER BY session_id",
+        )?;
+        let mut rows = statement.query(rusqlite::params![i64::from(envelope)])?;
+        while let Some(row) = rows.next()? {
+            sessions.insert(row.get::<_, String>(0)?);
+        }
+    }
+    if table_exists(conn, "sessions")? {
+        let sql = if heads {
+            "SELECT session_id, session_json FROM sessions \
+             WHERE session_id NOT IN (SELECT session_id FROM session_heads) ORDER BY session_id"
+        } else {
+            "SELECT session_id, session_json FROM sessions ORDER BY session_id"
+        };
+        let mut statement = conn.prepare(sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let document: JsonColumnBytes = row.get(1)?;
+            // An undecodable document is reported by the blob sweep.
+            if serde_json::from_slice::<EnvelopeVersionLens>(&document.into_bytes())
+                .is_ok_and(|lens| lens.version == envelope)
+            {
+                sessions.insert(session_id);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// One Info finding naming the sessions of this database a release without
+/// operator instructions refuses.
+fn census_operator_instruction_envelopes(
+    conn: &Connection,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let envelope =
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        );
+    let sessions = match operator_instruction_envelope_sessions(conn, envelope) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!(
+                        "could not list the sessions at the operator-instruction envelope \
+                         {envelope}: {error}"
+                    ),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    let listed = sessions
+        .iter()
+        .take(OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let overflow = sessions
+        .len()
+        .saturating_sub(OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP);
+    let overflow_note = if overflow > 0 {
+        format!(" and {overflow} more")
+    } else {
+        String::new()
+    };
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+            format!(
+                "{} session(s) carry operator instructions at session envelope {envelope}: \
+                 {listed}{overflow_note}; a release before operator instructions refuses them \
+                 typed until a roll-forward",
+                sessions.len()
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
 }
 
 /// Head rows: the classification key (live strand + prefix length) and the

@@ -699,7 +699,7 @@ fn an_empty_handoff_log_keeps_the_envelope_byte_identical() {
     );
     assert_eq!(
         encoded["version"],
-        meerkat_core::SESSION_VERSION,
+        meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION,
         "carrying the handoff log must not change the envelope version"
     );
 }

@@ -36,9 +36,10 @@ import type { Viewport } from "./topology/zoom-pan";
 /// the tree panel's status language, parent edges are solid arrows into the
 /// parent, blocks edges dashed amber. Pan by dragging, zoom with the wheel
 /// (non-passive listener inside useZoomPan so the dock scroll container
-/// never eats it), Fit resets to the fitted view. Nodes take keyboard focus
-/// and Enter or Space selects one. Mutations stay in the tree/attention
-/// sections - the graph only selects.
+/// never eats it), Fit resets to the fitted view. The graph is one tab
+/// stop: arrow keys move focus between nodes by position, Home and End go
+/// to the first and the last, and Enter or Space selects one. Mutations
+/// stay in the tree/attention sections - the graph only selects.
 ///
 /// Scale model: the viewBox is the measured frame size, so one SVG user
 /// unit is one CSS pixel and the CSS font sizes on the labels are real
@@ -246,6 +247,52 @@ function moreItemsNotDrawn(count: number): string {
   return `+${count} more ${count === 1 ? "item" : "items"} not drawn`;
 }
 
+type NodeBox = Pick<WorkGraphLayoutNode, "itemId" | "x" | "y" | "w" | "h">;
+
+const ARROW_STEPS: ReadonlyMap<string, readonly [number, number]> = new Map([
+  ["ArrowRight", [1, 0]],
+  ["ArrowLeft", [-1, 0]],
+  ["ArrowDown", [0, 1]],
+  ["ArrowUp", [0, -1]],
+]);
+
+/// Where a key moves focus in the graph, by layout position. An arrow goes
+/// to the nearest node ahead of it, weighing distance across the arrow
+/// double so a press keeps to its column or row; Home and End go to the
+/// first and the last node, column by column. One pass over the nodes;
+/// null when no node lies that way.
+function nodeToward(nodes: ReadonlyArray<NodeBox>, fromId: string, key: string): string | null {
+  if (key === "Home" || key === "End") {
+    let best: NodeBox | null = null;
+    for (const node of nodes) {
+      const first = !best || node.x < best.x || (node.x === best.x && node.y < best.y);
+      const last = !best || node.x > best.x || (node.x === best.x && node.y > best.y);
+      if (key === "Home" ? first : last) best = node;
+    }
+    return best ? best.itemId : null;
+  }
+  const step = ARROW_STEPS.get(key);
+  const from = step ? nodes.find((node) => node.itemId === fromId) : undefined;
+  if (!step || !from) return null;
+  const [ux, uy] = step;
+  const fromX = from.x + from.w / 2;
+  const fromY = from.y + from.h / 2;
+  let bestId: string | null = null;
+  let bestScore = Infinity;
+  for (const node of nodes) {
+    const dx = node.x + node.w / 2 - fromX;
+    const dy = node.y + node.h / 2 - fromY;
+    const ahead = dx * ux + dy * uy;
+    if (ahead < 1) continue;
+    const score = ahead + 2 * Math.abs(dx * uy - dy * ux);
+    if (score < bestScore) {
+      bestScore = score;
+      bestId = node.itemId;
+    }
+  }
+  return bestId;
+}
+
 /// A person by name with the raw key in the tooltip: the kit's AgentName
 /// markup, for names the work graph resolves itself (a stored display name
 /// is preferred over a bare key the directory does not know).
@@ -368,6 +415,11 @@ export function WorkGraphGraphView({
     return bound;
   }, [attention]);
   const directory = useAgentDirectory();
+  // One tab stop for the whole graph (a roving tab index): the node focused
+  // last, else the selected node, else the first. Arrow keys move between
+  // nodes, so a graph of any size costs one Tab press to cross.
+  const [focusedId, setFocusedId] = React.useState<string | null>(null);
+  const nodeIds = React.useMemo(() => new Set(layout.nodes.map((node) => node.itemId)), [layout]);
 
   if (layout.nodes.length === 0) {
     return <EmptyState inline title="No work items yet" />;
@@ -378,6 +430,18 @@ export function WorkGraphGraphView({
     return (item ? workGraphItemOwner(item, directory)?.name : "") || node.ownerLabel;
   };
   const selectedNode = selectedId ? layout.nodes.find((node) => node.itemId === selectedId) : undefined;
+  const tabStopId = focusedId && nodeIds.has(focusedId)
+    ? focusedId
+    : selectedNode ? selectedNode.itemId : nodeToward(layout.nodes, "", "Home");
+  const moveFocus = (event: React.KeyboardEvent<SVGGElement>, fromId: string) => {
+    const targetId = nodeToward(layout.nodes, fromId, event.key);
+    if (!targetId || targetId === fromId) return;
+    const target = Array.from(
+      event.currentTarget.ownerSVGElement?.querySelectorAll<SVGGElement>('[data-testid="workgraph-graph-node"]') ?? [],
+    ).find((element) => element.getAttribute("data-item-id") === targetId);
+    setFocusedId(targetId);
+    target?.focus();
+  };
 
   return (
     <div className="workgraph-graph" data-testid="workgraph-graph-frame">
@@ -472,7 +536,7 @@ export function WorkGraphGraphView({
                 className={`workgraph-graph__node is-${node.status}${selected ? " is-selected" : ""}`}
                 transform={`translate(${node.x} ${node.y})`}
                 role="button"
-                tabIndex={0}
+                tabIndex={node.itemId === tabStopId ? 0 : -1}
                 aria-label={`${node.title}, ${workGraphStatusWord(node.status)}`}
                 aria-current={selected ? "true" : undefined}
                 // Select on pointerdown, not click: the svg's pan handler
@@ -483,10 +547,17 @@ export function WorkGraphGraphView({
                   event.stopPropagation();
                   onSelect?.(node.itemId);
                 }}
+                onFocus={() => setFocusedId(node.itemId)}
                 onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect?.(node.itemId);
+                    return;
+                  }
+                  const navigation = ARROW_STEPS.has(event.key) || event.key === "Home" || event.key === "End";
+                  if (!navigation || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
                   event.preventDefault();
-                  onSelect?.(node.itemId);
+                  moveFocus(event, node.itemId);
                 }}
               >
                 <title>
@@ -570,4 +641,5 @@ export const __workGraphGraphViewTest = {
   fitViewport,
   FIT_MIN_SCALE,
   nodeMetaLine,
+  nodeToward,
 };

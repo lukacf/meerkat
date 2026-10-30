@@ -615,10 +615,60 @@ test("workgraph graph nodes are keyboard reachable buttons named by title and st
     selectedId: "child-run",
   }));
   assert.equal(count(html, 'role="button"'), 4);
-  assert.equal(count(html, 'tabindex="0"'), 4);
+  // One tab stop for the whole graph, on the selected node; arrow keys
+  // reach the rest.
+  assert.equal(count(html, 'tabindex="0"'), 1);
+  assert.equal(count(html, 'tabindex="-1"'), 3);
+  assert.match(html, /data-item-id="child-run"[^>]*tabindex="0"/);
+  const unselected = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
+    items: fixture.items,
+    edges: fixture.edges,
+    attention: [],
+  }));
+  assert.equal(count(unselected, 'tabindex="0"'), 1);
+  assert.match(unselected, /data-item-id="root"[^>]*tabindex="0"/, "without a selection the first node is the tab stop");
   assert.ok(html.includes('aria-label="Ship it, Open"'));
   assert.ok(html.includes('aria-label="child-run, In progress"'));
   assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
   assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
   assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
+});
+
+
+test("workgraph graph arrow keys move to the nearest node that way, Home and End to the first and last", () => {
+  const { nodeToward } = __workGraphGraphViewTest;
+  const box = (itemId: string, column: number, row: number) => ({ itemId, x: 24 + column * 220, y: 24 + row * 64, w: 168, h: 44 });
+  // The fixture's shape: a root and three children in the next column.
+  const tree = [box("root", 0, 0), box("child-run", 1, 0), box("child-done", 1, 1), box("child-stuck", 1, 2)];
+  assert.equal(nodeToward(tree, "root", "ArrowRight"), "child-run");
+  assert.equal(nodeToward(tree, "child-stuck", "ArrowLeft"), "root");
+  assert.equal(nodeToward(tree, "child-run", "ArrowDown"), "child-done");
+  assert.equal(nodeToward(tree, "child-stuck", "ArrowUp"), "child-done");
+  assert.equal(nodeToward(tree, "root", "ArrowUp"), null);
+  assert.equal(nodeToward(tree, "child-run", "ArrowRight"), null);
+  assert.equal(nodeToward(tree, "root", "Home"), "root");
+  assert.equal(nodeToward(tree, "root", "End"), "child-stuck");
+  assert.equal(nodeToward(tree, "root", "Enter"), null);
+  assert.equal(nodeToward(tree, "missing", "ArrowDown"), null);
+
+  // Centred dependency columns sit half a row apart: down keeps to its own
+  // column instead of the nearer centre beside it.
+  const centred = [box("a", 0, 0), box("b", 0, 1), box("c", 0, 2), box("d", 1, 0.5), box("e", 1, 1.5)];
+  assert.equal(nodeToward(centred, "a", "ArrowDown"), "b");
+  assert.equal(nodeToward(centred, "c", "ArrowDown"), null);
+  assert.equal(nodeToward(centred, "b", "ArrowRight"), "d");
+  assert.equal(nodeToward(centred, "e", "ArrowLeft"), "b");
+
+  // Thousands of nodes: one pass per key press.
+  const grid: ReturnType<typeof box>[] = [];
+  for (let column = 0; column < 40; column += 1) {
+    for (let row = 0; row < 50; row += 1) grid.push(box(`n${column}:${row}`, column, row));
+  }
+  assert.equal(grid.length, 2000);
+  assert.equal(nodeToward(grid, "n10:20", "ArrowRight"), "n11:20");
+  assert.equal(nodeToward(grid, "n10:20", "ArrowLeft"), "n9:20");
+  assert.equal(nodeToward(grid, "n10:20", "ArrowDown"), "n10:21");
+  assert.equal(nodeToward(grid, "n10:20", "ArrowUp"), "n10:19");
+  assert.equal(nodeToward(grid, "n10:20", "Home"), "n0:0");
+  assert.equal(nodeToward(grid, "n10:20", "End"), "n39:49");
 });

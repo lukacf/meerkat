@@ -92,6 +92,7 @@ export default defineConfig({
       "console/src/panels/OperatorPanel.test.tsx",
       "console/src/panels/RosterPanel.test.tsx",
       "console/src/panels/AgentDetailsPanel.test.tsx",
+      "console/src/panels/WorkGraphGraphView.test.tsx",
       "console/src/panels/TimelinePanel.test.tsx",
       "console/src/lib/memory-event-words.test.ts",
       "console/src/lib/operator-panel-integration.test.tsx",

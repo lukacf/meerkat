@@ -76,6 +76,15 @@ export function normalizeLastActivityMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** The first well-formed last activity time among a row's sources, as an agent field. */
+function lastActivityField(...values: unknown[]): Pick<ConsoleAgent, "last_activity_ms"> {
+  for (const value of values) {
+    const at = normalizeLastActivityMs(value);
+    if (at !== undefined) return { last_activity_ms: at };
+  }
+  return {};
+}
+
 export function normalizeAgents(
   experience: ConsoleExperience | null,
   modules: unknown[]
@@ -161,9 +170,7 @@ export function normalizeAgents(
         ...(typeof entry.side_chat_of === "string" && entry.side_chat_of.trim()
           ? { side_chat_of: entry.side_chat_of.trim() }
           : {}),
-        ...(normalizeLastActivityMs(entry.last_activity_ms) !== undefined
-          ? { last_activity_ms: normalizeLastActivityMs(entry.last_activity_ms) }
-          : {}),
+        ...lastActivityField(entry.last_activity_ms, statusRow?.last_activity_ms),
         model_capabilities: modelCapabilities,
         ...watchFields,
         ...((): Pick<ConsoleAgent, "unobserved"> => {
@@ -201,6 +208,7 @@ export function normalizeAgents(
         addressable,
         affordances: { can_send_message: addressable },
         model_capabilities: { image_input: false },
+        ...lastActivityField(statusRow.last_activity_ms),
         ...(statusRow.unobserved ? { unobserved: statusRow.unobserved } : {}),
       });
       seen.add(statusRow.identity.toLowerCase());
@@ -230,6 +238,7 @@ export function normalizeAgents(
         addressable: false,
         affordances: { can_send_message: false },
         model_capabilities: modelCapabilities,
+        ...lastActivityField(statusRow?.last_activity_ms),
         ...(statusRow?.unobserved ? { unobserved: statusRow.unobserved } : {}),
       };
     });

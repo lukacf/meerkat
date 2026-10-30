@@ -14660,6 +14660,9 @@ mod durability_gate_wait_tests;
 #[cfg(test)]
 mod commit_deadline_tests;
 
+#[cfg(test)]
+mod lost_admission_ack_tests;
+
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;
 

@@ -72,8 +72,8 @@ pub struct DecisionPage {
 }
 
 /// Which rows a listing reads. Every set field must match. Built from
-/// [`Self::default`] (every row) with the `with_` methods; it may gain
-/// fields.
+/// `DecisionListFilter::default()` (every row) with the `with_` methods; it
+/// may gain fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecisionListFilter {

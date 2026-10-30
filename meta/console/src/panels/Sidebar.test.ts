@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ConsoleAgent } from "../types";
-import { __sidebarTest } from "./Sidebar";
+import type { ConsoleAgent, ConsoleAgentListConfig, ConsoleFrame } from "../types";
+import { __sidebarTest, readSidebarPins } from "./Sidebar";
 
 test("sidebar treats broad-profile worker wired to commander as a child, not the host", () => {
   const commander: ConsoleAgent = {
@@ -1290,4 +1290,337 @@ test("sidebar lists a side chat under the agent it branched from", () => {
       ["beta", 0],
     ],
   );
+});
+
+function teamAgent(id: string, label: string, extra: Partial<ConsoleAgent> = {}): ConsoleAgent {
+  return {
+    agent_id: id,
+    member_id: id,
+    identity: `agent:${id}`,
+    label,
+    kind: "mob_agent",
+    role: "analyst",
+    group: "Team",
+    ...extra,
+  };
+}
+
+const teamGrouping: ConsoleAgentListConfig = { group_by: ["group"] };
+
+function sortedRows(
+  agents: ConsoleAgent[],
+  options: {
+    grouping?: ConsoleAgentListConfig;
+    flat?: boolean;
+    sortBy?: "manual" | "name" | "activity";
+    order?: string[];
+    activity?: Record<string, number>;
+    pinnedAgentIds?: Set<string>;
+  } = {},
+) {
+  const order = {
+    sortBy: options.sortBy ?? "manual",
+    rank: new Map((options.order ?? []).map((key, index) => [key, index] as const)),
+    lastActivity: (agent: ConsoleAgent) => options.activity?.[agent.member_id],
+  };
+  const grouping = options.grouping ?? teamGrouping;
+  const grouped = __sidebarTest.groupSidebarAgents(agents, grouping, { flat: options.flat, order });
+  const sectionNames = options.flat
+    ? (grouped.has(__sidebarTest.FLAT_SECTION_NAME) ? [__sidebarTest.FLAT_SECTION_NAME] : [])
+    : __sidebarTest.orderedSectionNames(grouped, grouping);
+  return __sidebarTest.buildSidebarVirtualRows({
+    sectionNames,
+    grouped,
+    grouping,
+    collapsedSections: new Set(),
+    collapsedSubgroups: new Set(),
+    pinnedAgentIds: options.pinnedAgentIds,
+    flat: options.flat,
+    order,
+  });
+}
+
+function agentRowIds(rows: ReturnType<typeof sortedRows>): string[] {
+  return rows.flatMap((row) => row.kind === "agent" ? [row.row.agent.member_id] : []);
+}
+
+test("sidebar manual order with nothing stored keeps today's default order exactly", () => {
+  const agents = [
+    opsAgent({ id: "coord", label: "Coordinator", group: "coordinators", scope: "cto", role: "coordinator", identity: "coord:main" }),
+    opsAgent({ id: "initiative-liveops", label: "LiveOps Initiative", group: "initiatives", scope: "liveops", role: "initiative" }),
+    opsAgent({ id: "initiative-cto", label: "CTO Initiative", group: "initiatives", scope: "cto", role: "initiative", identity: "initiative:cto" }),
+    opsAgent({ id: "initiative-cto-2", label: "Agent 10", group: "initiatives", scope: "cto", role: "initiative" }),
+    opsAgent({ id: "initiative-cto-3", label: "Agent 2", group: "initiatives", scope: "cto", role: "initiative" }),
+    opsAgent({ id: "worker-liveops", label: "LiveOps Worker", group: "workers", scope: "liveops", role: "worker" }),
+  ];
+  const grouped = __sidebarTest.groupSidebarAgents(agents, opsGrouping);
+  const legacy = __sidebarTest.buildSidebarVirtualRows({
+    sectionNames: __sidebarTest.orderedSectionNames(grouped, opsGrouping),
+    grouped,
+    grouping: opsGrouping,
+    collapsedSections: new Set(),
+    collapsedSubgroups: new Set(),
+    pinnedAgentIds: new Set(["initiative:cto"]),
+  });
+  const manual = sortedRows(agents, { grouping: opsGrouping, pinnedAgentIds: new Set(["initiative:cto"]) });
+
+  assert.deepEqual(manual.map((row) => row.key), legacy.map((row) => row.key));
+});
+
+test("sidebar manual order puts stored agents first in stored order and new agents after them", () => {
+  const agents = [
+    teamAgent("a", "Alpha"),
+    teamAgent("b", "Bravo"),
+    teamAgent("c", "Charlie"),
+    teamAgent("d", "Delta"),
+  ];
+
+  assert.deepEqual(agentRowIds(sortedRows(agents)), ["a", "b", "c", "d"]);
+  assert.deepEqual(agentRowIds(sortedRows(agents, { order: ["agent:c", "agent:gone", "agent:a"] })), ["c", "a", "b", "d"]);
+  assert.deepEqual(
+    agentRowIds(sortedRows([...agents, teamAgent("e", "Aardvark")], { order: ["agent:d", "agent:c", "agent:b", "agent:a"] })),
+    ["d", "c", "b", "a", "e"],
+    "a new agent goes to the end of its container",
+  );
+});
+
+test("sidebar manual order keys agents by durable identity, so a rename keeps its place", () => {
+  const renamed = [teamAgent("a", "Zulu"), teamAgent("b", "Bravo")];
+  assert.deepEqual(agentRowIds(sortedRows(renamed)), ["b", "a"], "by name Bravo comes first");
+  assert.deepEqual(agentRowIds(sortedRows(renamed, { order: ["agent:a", "agent:b"] })), ["a", "b"]);
+
+  const withoutIdentity = [teamAgent("a", "Alpha", { identity: undefined }), teamAgent("b", "Bravo")];
+  assert.equal(__sidebarTest.sidebarAgentOrderKey(withoutIdentity[0]!), "a");
+  assert.deepEqual(agentRowIds(sortedRows(withoutIdentity, { order: ["agent:b", "a"] })), ["b", "a"]);
+  assert.deepEqual(
+    agentRowIds(sortedRows([teamAgent("a", "Alpha"), teamAgent("b", "Bravo")], { order: ["agent:b", "a"] })),
+    ["b", "a"],
+    "a key stored before the agent had an identity still matches its member id",
+  );
+});
+
+test("sidebar agent moves change only the moved siblings and list every shown agent first", () => {
+  const present = ["agent:a", "agent:b", "agent:c", "agent:d", "agent:x", "agent:y"];
+  const first = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored: [],
+    present,
+    siblings: ["agent:a", "agent:b", "agent:c", "agent:d"],
+    dragged: "agent:d",
+    target: "agent:a",
+    where: "before",
+    inputSource: "pointer",
+  });
+  assert.deepEqual(first, ["agent:d", "agent:a", "agent:b", "agent:c", "agent:x", "agent:y"]);
+
+  const second = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored: first!,
+    present,
+    siblings: ["agent:x", "agent:y"],
+    dragged: "agent:y",
+    target: "agent:x",
+    where: "before",
+    inputSource: "keyboard",
+  });
+  assert.deepEqual(second, ["agent:d", "agent:a", "agent:b", "agent:c", "agent:y", "agent:x"]);
+
+  const keepsAbsent = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored: ["agent:gone", "agent:b", "agent:a"],
+    present: ["agent:a", "agent:b"],
+    siblings: ["agent:b", "agent:a"],
+    dragged: "agent:a",
+    target: "agent:b",
+    where: "before",
+    inputSource: "pointer",
+  });
+  assert.deepEqual(keepsAbsent, ["agent:gone", "agent:a", "agent:b"]);
+
+  for (const unchanged of [
+    { dragged: "agent:a", target: "agent:b", where: "before" as const },
+    { dragged: "agent:a", target: "agent:a", where: "after" as const },
+    { dragged: "agent:x", target: "agent:a", where: "before" as const },
+  ]) {
+    assert.equal(__sidebarTest.sidebarAgentOrderAfterMove({
+      stored: [],
+      present,
+      siblings: ["agent:a", "agent:b"],
+      inputSource: "pointer",
+      ...unchanged,
+    }), null);
+  }
+});
+
+test("sidebar agent rows share a container only with their siblings", () => {
+  const planner = teamAgent("planner", "Planner");
+  const agents = [
+    planner,
+    teamAgent("worker-one", "Worker One", { labels: { spawned_by: "agent:planner" } }),
+    teamAgent("worker-two", "Worker Two", { labels: { spawned_by: "agent:planner" } }),
+    teamAgent("queue", "Queue"),
+  ];
+  const rows = sortedRows(agents);
+  const containerOf = (id: string) => {
+    const row = rows.find((candidate) => candidate.kind === "agent" && candidate.row.agent.member_id === id);
+    return row?.kind === "agent" ? row.container : null;
+  };
+
+  assert.deepEqual(agentRowIds(rows), ["planner", "worker-one", "worker-two", "queue"]);
+  assert.equal(containerOf("planner"), containerOf("queue"));
+  assert.equal(containerOf("worker-one"), containerOf("worker-two"));
+  assert.notEqual(containerOf("planner"), containerOf("worker-one"));
+  assert.equal(containerOf("worker-one"), __sidebarTest.sidebarAgentContainer("Team", null, "planner"));
+
+  assert.deepEqual(
+    agentRowIds(sortedRows(agents, { order: ["agent:queue", "agent:planner"] })),
+    ["queue", "planner", "worker-one", "worker-two"],
+    "a parent carries its subtree",
+  );
+  assert.deepEqual(
+    agentRowIds(sortedRows(agents, { order: ["agent:worker-two", "agent:worker-one"] })),
+    ["planner", "worker-two", "worker-one", "queue"],
+    "children reorder under their parent",
+  );
+  const plannerIndex = rows.findIndex((row) => row.kind === "agent" && row.row.agent.member_id === "planner");
+  const queueIndex = rows.findIndex((row) => row.kind === "agent" && row.row.agent.member_id === "queue");
+  assert.equal(__sidebarTest.agentSubtreeEnd(rows, plannerIndex), queueIndex - 1);
+  assert.equal(__sidebarTest.agentSubtreeEnd(rows, queueIndex), queueIndex);
+});
+
+test("sidebar subgroups and pins keep separate containers", () => {
+  const agents = [
+    opsAgent({ id: "cto-a", label: "CTO A", group: "initiatives", scope: "cto", role: "initiative", identity: "initiative:cto-a" }),
+    opsAgent({ id: "cto-b", label: "CTO B", group: "initiatives", scope: "cto", role: "initiative" }),
+    opsAgent({ id: "ops-a", label: "Ops A", group: "initiatives", scope: "liveops", role: "initiative" }),
+  ];
+  const rows = sortedRows(agents, {
+    grouping: { ...opsGrouping, collapse_single_subgroup: false },
+    pinnedAgentIds: new Set(["initiative:cto-a"]),
+  });
+  const containers = new Map(rows.flatMap((row) => row.kind === "agent" ? [[row.key, row.container] as const] : []));
+
+  assert.equal(containers.get("agent:Pinned:member:cto-a"), __sidebarTest.sidebarAgentContainer("Pinned", null, null));
+  assert.equal(containers.get("agent:member:cto-b"), __sidebarTest.sidebarAgentContainer("initiatives", "cto", null));
+  assert.equal(containers.get("agent:member:ops-a"), __sidebarTest.sidebarAgentContainer("initiatives", "liveops", null));
+});
+
+test("sidebar Pinned rows follow the manual order across categories", () => {
+  const agents = [
+    teamAgent("a", "Alpha", { group: "First" }),
+    teamAgent("b", "Bravo", { group: "Second" }),
+  ];
+  const pinnedAgentIds = new Set(["agent:a", "agent:b"]);
+  const pinnedIds = (rows: ReturnType<typeof sortedRows>) => rows.flatMap((row) =>
+    row.kind === "agent" && row.bucket === "Pinned" ? [row.row.agent.member_id] : []);
+
+  assert.deepEqual(pinnedIds(sortedRows(agents, { pinnedAgentIds })), ["a", "b"]);
+  assert.deepEqual(pinnedIds(sortedRows(agents, { pinnedAgentIds, order: ["agent:b", "agent:a"] })), ["b", "a"]);
+});
+
+test("sidebar Group None lists every agent in one list, keeping Pinned on top and the nesting", () => {
+  const agents = [
+    teamAgent("a1", "Alpha", { group: "First" }),
+    teamAgent("b1", "Bravo", { group: "Second" }),
+    teamAgent("b2", "Bravo helper", { group: "Second", labels: { spawned_by: "agent:b1" } }),
+    teamAgent("p", "Pinned one", { group: "First" }),
+  ];
+  const grouping: ConsoleAgentListConfig = { group_by: ["group"], subgroup_by: ["role"], collapse_single_subgroup: false };
+
+  const flat = sortedRows(agents, { grouping, flat: true });
+  assert.deepEqual(flat.filter((row) => row.kind !== "agent").map((row) => row.kind), []);
+  assert.deepEqual(agentRowIds(flat), ["a1", "b1", "b2", "p"]);
+  const child = flat.find((row) => row.kind === "agent" && row.row.agent.member_id === "b2");
+  assert.equal(child?.kind === "agent" && child.row.depth, 1);
+
+  assert.deepEqual(agentRowIds(sortedRows(agents, { grouping, flat: true, order: ["agent:b1", "agent:a1"] })), ["b1", "b2", "a1", "p"]);
+
+  const withPins = sortedRows(agents, { grouping, flat: true, pinnedAgentIds: new Set(["agent:p"]) });
+  assert.deepEqual(
+    withPins.filter((row) => row.kind === "section").map((row) => row.kind === "section" ? [row.bucket, row.reorderable] : []),
+    [["Pinned", false], [__sidebarTest.FLAT_SECTION_NAME, false]],
+  );
+  assert.deepEqual(agentRowIds(withPins), ["p", "a1", "b1", "b2"]);
+  assert.equal(withPins.some((row) => row.kind === "subgroup"), false);
+});
+
+test("sidebar name sort is numeric and case-insensitive and ignores the host-first rule", () => {
+  const agents = [
+    teamAgent("ten", "Agent 10"),
+    teamAgent("two", "agent 2"),
+    teamAgent("one", "Agent 1"),
+    teamAgent("commander", "Zed commander"),
+    teamAgent("same-b", "Same"),
+    teamAgent("same-a", "same"),
+  ];
+
+  assert.equal(agentRowIds(sortedRows(agents))[0], "commander", "the default order puts the host first");
+  assert.deepEqual(agentRowIds(sortedRows(agents, { sortBy: "name" })), ["one", "two", "ten", "same-a", "same-b", "commander"]);
+});
+
+test("sidebar last activity sort puts the newest first and unknown last", () => {
+  const agents = [
+    teamAgent("a", "Alpha"),
+    teamAgent("b", "Bravo"),
+    teamAgent("c", "Charlie"),
+    teamAgent("d", "Delta"),
+  ];
+
+  assert.deepEqual(
+    agentRowIds(sortedRows(agents, { sortBy: "activity", activity: { a: 100, b: 300, d: 300 } })),
+    ["b", "d", "a", "c"],
+  );
+});
+
+test("sidebar last activity merges the roster's time with newer frames this console saw", () => {
+  const frames = [
+    { id: "f1", event: "text_delta", identity: "agent:a", timestampMs: 250 },
+    { id: "f2", event: "text_delta", identity: "agent:a", timestampMs: 150 },
+    { id: "f3", event: "text_delta", identity: "agent:b", timestampMs: 90 },
+    { id: "f4", event: "text_delta", timestampMs: 999 },
+  ] satisfies ConsoleFrame[];
+  const times = __sidebarTest.newestFrameTimes(frames);
+
+  assert.deepEqual(Array.from(times.entries()).sort(), [["agent:a", 250], ["agent:b", 90]]);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("a", "Alpha", { last_activity_ms: 100 }), times), 250);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("b", "Bravo", { last_activity_ms: 500 }), times), 500);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("c", "Charlie", { last_activity_ms: 40 }), times), 40);
+  assert.equal(__sidebarTest.agentLastActivity(teamAgent("d", "Delta"), times), undefined);
+});
+
+test("sidebar row detail is a human line: role or group, then status in words or last activity", () => {
+  const now = 10 * 60 * 60 * 1000;
+  const minutes = (count: number) => count * 60 * 1000;
+  const detail = (agent: ConsoleAgent, lastActivity?: number) => __sidebarTest.agentDetailText(agent, lastActivity, now);
+
+  assert.equal(detail(teamAgent("w", "Worker", { role: "investigation-worker", response_phase: "generating" })), "Investigation worker · working");
+  assert.equal(detail(teamAgent("r", "Router", { role: "router", response_phase: null }), now - minutes(3)), "Router · active 3 min ago");
+  assert.equal(detail(teamAgent("r", "Router", { role: "router", response_phase: null })), "Router · idle");
+  assert.equal(detail(teamAgent("t", "Tool", { role: "router", response_phase: "tool-executing" })), "Router · using a tool");
+  assert.equal(detail(teamAgent("x", "Gone", { role: undefined, group: "Delivery", state: "retired" })), "Delivery · retired");
+  assert.equal(detail(teamAgent("q", "Quiet", { role: undefined, group: undefined })), "");
+  assert.equal(detail(teamAgent("u", "Unknown", { role: undefined, group: undefined }), now - minutes(125)), "Active 2 h ago");
+  assert.equal(detail(teamAgent("n", "Raw", { identity: "agent:raw-identity" })).includes("agent:raw-identity"), false);
+
+  assert.equal(__sidebarTest.relativeActivityText(0), "just now");
+  assert.equal(__sidebarTest.relativeActivityText(59_000), "just now");
+  assert.equal(__sidebarTest.relativeActivityText(60_000), "1 min ago");
+  assert.equal(__sidebarTest.relativeActivityText(minutes(60 * 3)), "3 h ago");
+  assert.equal(__sidebarTest.relativeActivityText(minutes(60 * 49)), "2 d ago");
+  assert.equal(__sidebarTest.relativeActivityText(-5_000), "just now");
+});
+
+test("sidebar pins move to the per-user key and read the configuration key only while it is absent", () => {
+  const storage = new MemoryStorage();
+  const userKey = "meta-console-sidebar-agent-pins:principal-a";
+  const configurationKey = "meta-console-sidebar-pins:runtime-a:hash-1";
+  storage.setItem(configurationKey, JSON.stringify(["agent:kept"]));
+
+  assert.deepEqual([...readSidebarPins(storage, userKey, configurationKey, ["agent:default"])], ["agent:kept"]);
+  assert.deepEqual(JSON.parse(storage.getItem(userKey) || "null"), ["agent:kept"]);
+
+  storage.setItem(configurationKey, JSON.stringify(["agent:later"]));
+  storage.setItem(userKey, JSON.stringify([]));
+  assert.deepEqual([...readSidebarPins(storage, userKey, configurationKey, ["agent:default"])], [], "an empty per-user set wins");
+
+  const fresh = new MemoryStorage();
+  assert.deepEqual([...readSidebarPins(fresh, userKey, configurationKey, ["agent:default"])], ["agent:default"]);
+  assert.equal(fresh.getItem(userKey), null, "defaults are not written");
 });

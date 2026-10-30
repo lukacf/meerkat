@@ -1,26 +1,39 @@
 import { ApprovalAttention } from "../../../packages/console-components/src/conversation/approval-card";
+import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import React from "react";
 import {
+  DEFAULT_CONSOLE_SIDEBAR_VIEW,
   SECTION_COLLAPSE_STORAGE_PREFIX,
+  SIDEBAR_AGENT_ORDER_STORAGE_PREFIX,
   SIDEBAR_PINS_STORAGE_PREFIX,
   SIDEBAR_SECTION_ORDER_STORAGE_PREFIX,
   SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX,
+  SIDEBAR_VIEW_STORAGE_PREFIX,
   SUBGROUP_COLLAPSE_STORAGE_PREFIX,
   applyConsoleNavigationReorderIntent,
   applyConsoleSidebarOrder as applySidebarOrder,
+  capConsoleSidebarAgentOrder,
+  listConsoleSidebarAgentOrder,
+  mergeConsoleSidebarSiblingOrder,
   normalizeConsoleNavigationModel,
+  normalizeConsoleSidebarGroupBy,
+  normalizeConsoleSidebarSortBy,
   pruneStaleSidebarStorage,
+  readConsoleSidebarView,
   readSidebarStringList,
   readSidebarStringSet,
   safeConsoleHref,
   sidebarStorageKey,
+  writeConsoleSidebarView,
   writeSidebarStringList,
   writeSidebarStringSet,
   type ConsoleNavigationModel,
   type ConsoleNavigationNode,
   type ConsoleSidebarDropPosition,
+  type ConsoleSidebarSortBy,
   type ConsoleSidebarStorageLike,
+  type ConsoleSidebarViewPreferences,
 } from "@console-core";
 import type {
   ConsoleAgent,
@@ -60,6 +73,12 @@ interface SidebarProps {
   onOpenCustomPanel?: (id: string) => void;
   grouping?: ConsoleAgentListConfig;
   storageNamespace?: string;
+  /**
+   * The principal-aware scope of the per-user preferences: the manual agent
+   * order and the roster view. Unlike `storageNamespace`, it does not change
+   * when the agent-list configuration does. Defaults to `storageNamespace`.
+   */
+  preferenceScope?: string;
   pinnedAgentIds?: Set<string>;
   approvals?: PendingApprovalSnapshot;
   onOpenApproval?: (pendingId?: string) => void;
@@ -131,10 +150,29 @@ type SidebarVirtualRow =
   | { kind: "section"; key: string; bucket: string; count: number; collapsed: boolean; pinned?: boolean; reorderable: boolean }
   | { kind: "empty"; key: string; bucket: string; sectionConfig: ReturnType<typeof sectionConfigFor> }
   | { kind: "subgroup"; key: string; bucket: string; label: string; count: number; collapsed: boolean; storageKey: string; reorderable: boolean }
-  | { kind: "agent"; key: string; bucket: string; row: AgentRow };
+  /** `container` names the row's siblings: rows that share it can trade places. */
+  | { kind: "agent"; key: string; bucket: string; row: AgentRow; container: string };
 
 type SidebarNavigationModel = ConsoleNavigationModel<SidebarVirtualRow>;
 type SidebarNavigationNode = ConsoleNavigationNode<SidebarVirtualRow>;
+
+type SidebarOrderKind = "section" | "subgroup" | "agent";
+
+/** What a reorder moves: a section, a subgroup within `bucket`, or an agent among the rows of `container`. */
+interface SidebarOrderItem {
+  kind: SidebarOrderKind;
+  id: string;
+  bucket?: string;
+  container?: string;
+}
+
+interface SidebarDragOver {
+  kind: SidebarOrderKind;
+  id: string;
+  where: SidebarDropPosition;
+  /** The row that draws the drop line: after an agent, its last visible descendant. */
+  indicatorId: string;
+}
 
 interface SidebarDragPreview {
   x: number;
@@ -142,10 +180,17 @@ interface SidebarDragPreview {
   width: number;
 }
 
-interface PendingOrderFocus {
-  kind: "section" | "subgroup";
-  id: string;
-  bucket?: string;
+type PendingOrderFocus = SidebarOrderItem;
+
+/**
+ * How agents are ordered among their siblings: the stored manual order, by
+ * name, or by last activity. `rank` holds each agent's place in the manual
+ * order; `lastActivity` answers an agent's newest activity time, if known.
+ */
+interface SidebarSortContext {
+  sortBy: ConsoleSidebarSortBy;
+  rank: ReadonlyMap<string, number>;
+  lastActivity: (agent: ConsoleAgent) => number | undefined;
 }
 
 const SIDEBAR_ROW_HEIGHT = {
@@ -158,6 +203,14 @@ const SIDEBAR_ROW_HEIGHT = {
 const SIDEBAR_OVERSCAN_PX = 360;
 const PINNED_SECTION_NAME = "Pinned";
 const PINNED_SECTION_KEY = "section:__meta_pinned";
+/** The roster's one section when it is not grouped by category. */
+const FLAT_SECTION_NAME = "All agents";
+const FLAT_SECTION_KEY = "section:__meta_all_agents";
+/** A drag within this distance of the list's top or bottom edge scrolls the list. */
+const SIDEBAR_DRAG_EDGE_PX = 36;
+const SIDEBAR_DRAG_EDGE_MAX_STEP_PX = 14;
+const AGENT_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+const EMPTY_ACTIVITY: ReadonlyMap<string, number> = new Map();
 
 function localSidebarStorage(): ConsoleSidebarStorageLike | null {
   if (typeof window === "undefined") return null;
@@ -166,6 +219,25 @@ function localSidebarStorage(): ConsoleSidebarStorageLike | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The user's pinned agents: the per-user key; else, once, the pins kept
+ * under the agent-list configuration namespace before pins moved, copied to
+ * the per-user key; else the configured defaults.
+ */
+export function readSidebarPins(
+  storage: ConsoleSidebarStorageLike | null | undefined,
+  userKey: string,
+  configurationKey: string,
+  defaults: Iterable<string>,
+): Set<string> {
+  const stored = readSidebarStringSet(storage, userKey);
+  if (stored) return stored;
+  const earlier = readSidebarStringSet(storage, configurationKey);
+  if (!earlier) return new Set(defaults);
+  writeSidebarStringSet(storage, userKey, earlier);
+  return earlier;
 }
 
 function isWorkerish(a: ConsoleAgent): boolean {
@@ -324,6 +396,20 @@ export const __sidebarTest = {
   pruneStaleSidebarStorage,
   safeConsoleHref,
   deriveStateAttr,
+  sidebarAgentOrderKey,
+  sidebarAgentContainer,
+  sidebarAgentOrderAfterMove,
+  agentSubtreeEnd,
+  compareAgentNames,
+  compareBySidebarSort,
+  newestFrameTimes,
+  agentLastActivity,
+  agentStatusText,
+  agentDetailText,
+  relativeActivityText,
+  FLAT_SECTION_NAME,
+  SIDEBAR_AGENT_ORDER_STORAGE_PREFIX,
+  SIDEBAR_VIEW_STORAGE_PREFIX,
   SIDEBAR_PINS_STORAGE_PREFIX,
   SIDEBAR_SECTION_ORDER_STORAGE_PREFIX,
   SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX,
@@ -500,13 +586,15 @@ function depthForAgent(a: ConsoleAgent, parentById: Map<string, string>): number
   return depth;
 }
 
-function compareRows(host: ConsoleAgent | null, orderSubgroups = false) {
+function compareRows(host: ConsoleAgent | null, orderSubgroups = false, order?: SidebarSortContext) {
   return (a: AgentRow, b: AgentRow): number => {
     if (orderSubgroups && a.subgroup !== b.subgroup) {
       if (!a.subgroup) return 1;
       if (!b.subgroup) return -1;
       return a.subgroup.localeCompare(b.subgroup);
     }
+    const chosen = order ? compareBySidebarSort(order, a.agent, b.agent) : 0;
+    if (chosen !== 0) return chosen;
     if (host) {
       if (a.agent.member_id === host.member_id) return -1;
       if (b.agent.member_id === host.member_id) return 1;
@@ -516,7 +604,133 @@ function compareRows(host: ConsoleAgent | null, orderSubgroups = false) {
   };
 }
 
-function orderRowsPreorder(rows: AgentRow[], parentById: Map<string, string>, host: ConsoleAgent | null, orderSubgroups = false): AgentRow[] {
+/** The key a manual order (like a pin) stores for an agent: its durable identity first. */
+function sidebarAgentOrderKey(agent: ConsoleAgent): string {
+  return sidebarAgentPinId(agent);
+}
+
+function compareAgentNames(a: ConsoleAgent, b: ConsoleAgent): number {
+  const byName = AGENT_NAME_COLLATOR.compare(a.label, b.label);
+  if (byName !== 0) return byName;
+  const aKey = sidebarAgentOrderKey(a);
+  const bKey = sidebarAgentOrderKey(b);
+  return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+}
+
+function manualRank(order: SidebarSortContext, agent: ConsoleAgent): number | undefined {
+  return order.rank.get(sidebarAgentOrderKey(agent)) ?? order.rank.get(agent.member_id);
+}
+
+/**
+ * Compares two sibling agents under the chosen sort. Manual: agents in the
+ * stored order come first, in that order, and two agents outside it compare
+ * equal so the default rule places them (with nothing stored the roster
+ * keeps its default order). Name: numeric, case-insensitive collation, then
+ * the agent key. Last activity: newest first, unknown last, then by name.
+ */
+function compareBySidebarSort(order: SidebarSortContext, a: ConsoleAgent, b: ConsoleAgent): number {
+  if (order.sortBy === "name") return compareAgentNames(a, b);
+  if (order.sortBy === "activity") {
+    const aAt = order.lastActivity(a);
+    const bAt = order.lastActivity(b);
+    if (aAt !== bAt) {
+      if (aAt === undefined) return 1;
+      if (bAt === undefined) return -1;
+      return bAt - aAt;
+    }
+    return compareAgentNames(a, b);
+  }
+  const aRank = manualRank(order, a);
+  const bRank = manualRank(order, b);
+  if (aRank === bRank) return 0;
+  if (aRank === undefined) return 1;
+  if (bRank === undefined) return -1;
+  return aRank - bRank;
+}
+
+/** The newest frame time this console saw for each identity. */
+function newestFrameTimes(frames: readonly ConsoleFrame[]): Map<string, number> {
+  const newest = new Map<string, number>();
+  for (const frame of frames) {
+    const identity = frame.identity;
+    const at = frame.timestampMs;
+    if (!identity || typeof at !== "number" || !Number.isFinite(at)) continue;
+    const known = newest.get(identity);
+    if (known === undefined || at > known) newest.set(identity, at);
+  }
+  return newest;
+}
+
+/**
+ * An agent's newest known activity: the roster's `last_activity_ms`, or a
+ * newer frame this console saw since the roster was read.
+ */
+function agentLastActivity(agent: ConsoleAgent, frameTimes: ReadonlyMap<string, number>): number | undefined {
+  const fromFrames = frameTimes.get(agent.identity || agent.member_id);
+  const fromRoster = agent.last_activity_ms;
+  if (fromRoster === undefined) return fromFrames;
+  if (fromFrames === undefined) return fromRoster;
+  return Math.max(fromRoster, fromFrames);
+}
+
+function relativeActivityText(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+function humanizeAgentKind(value: string | undefined): string {
+  return (value || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+
+/** What the agent is doing, in words, or when it was last active. */
+function agentStatusText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
+  const state = (agent.state || "").toLowerCase();
+  if (state === "retired" || state === "stopped") return "retired";
+  if (state === "retiring") return "retiring";
+  if (state === "needs_repair") return "needs repair";
+  if (state === "broken") return "broken";
+  if (agent.labels?.console_degraded === "true" || state.includes("degrade")) return "degraded";
+  if (agent.response_phase === "generating") return "working";
+  if (agent.response_phase === "tool-executing") return "using a tool";
+  if (agent.response_phase === "waiting") return "waiting";
+  if (lastActivityMs !== undefined) return `active ${relativeActivityText(nowMs - lastActivityMs)}`;
+  if (agent.response_phase === null) return "idle";
+  return "";
+}
+
+/**
+ * The row's second line, for people: what the agent is (its role, else its
+ * group) and its status in words or how long ago it was last active. The
+ * identity is not shown here; the row's tooltip and copy action carry it.
+ */
+function agentDetailParts(
+  agent: ConsoleAgent,
+  lastActivityMs: number | undefined,
+  nowMs: number,
+): { kind: string; status: string } {
+  const capitalize = (text: string) => text ? text[0]!.toUpperCase() + text.slice(1) : "";
+  const kind = humanizeAgentKind(agent.role || agent.group);
+  const status = agentStatusText(agent, lastActivityMs, nowMs);
+  return kind ? { kind: capitalize(kind), status } : { kind: "", status: capitalize(status) };
+}
+
+function agentDetailText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
+  const { kind, status } = agentDetailParts(agent, lastActivityMs, nowMs);
+  return [kind, status].filter(Boolean).join(" · ");
+}
+
+function orderRowsPreorder(
+  rows: AgentRow[],
+  parentById: Map<string, string>,
+  host: ConsoleAgent | null,
+  orderSubgroups = false,
+  order?: SidebarSortContext,
+): AgentRow[] {
   const byParent = new Map<string, AgentRow[]>();
   const rowById = new Map(rows.map((row) => [row.agent.member_id, row]));
   const roots: AgentRow[] = [];
@@ -529,7 +743,7 @@ function orderRowsPreorder(rows: AgentRow[], parentById: Map<string, string>, ho
       roots.push(row);
     }
   }
-  const sortRows = compareRows(host, orderSubgroups);
+  const sortRows = compareRows(host, orderSubgroups, order);
   roots.sort(sortRows);
   for (const children of byParent.values()) children.sort(sortRows);
 
@@ -542,7 +756,11 @@ function orderRowsPreorder(rows: AgentRow[], parentById: Map<string, string>, ho
   return ordered;
 }
 
-function orderRowsPreorderByIndex(rows: AgentRow[], orderIndex: Map<string, number>): AgentRow[] {
+function orderRowsPreorderByIndex(
+  rows: AgentRow[],
+  orderIndex: Map<string, number>,
+  order?: SidebarSortContext,
+): AgentRow[] {
   const byParent = new Map<string, AgentRow[]>();
   const rowById = new Map(rows.map((row) => [row.agent.member_id, row]));
   const roots: AgentRow[] = [];
@@ -556,6 +774,8 @@ function orderRowsPreorderByIndex(rows: AgentRow[], orderIndex: Map<string, numb
     }
   }
   const sortByExistingOrder = (a: AgentRow, b: AgentRow) => {
+    const chosen = order ? compareBySidebarSort(order, a.agent, b.agent) : 0;
+    if (chosen !== 0) return chosen;
     return (orderIndex.get(a.agent.member_id) ?? Number.MAX_SAFE_INTEGER)
       - (orderIndex.get(b.agent.member_id) ?? Number.MAX_SAFE_INTEGER);
   };
@@ -571,22 +791,41 @@ function orderRowsPreorderByIndex(rows: AgentRow[], orderIndex: Map<string, numb
   return ordered;
 }
 
-function groupSidebarAgents(filtered: ConsoleAgent[], config?: ConsoleAgentListConfig): Map<string, AgentRow[]> {
-  const g = new Map<string, AgentRow[]>();
-  const host = filtered.find(isCommanderLike);
+interface SidebarGroupingOptions {
+  /** One list instead of categories: every agent in one section, no subgroups. */
+  flat?: boolean;
+  order?: SidebarSortContext;
+}
+
+/** The roster's agents placed in their sections and under their parents, not yet ordered. */
+interface SidebarClassification {
+  rowsByBucket: Map<string, AgentRow[]>;
+  parentById: Map<string, string>;
+  host: ConsoleAgent | null;
+  orderSubgroups: boolean;
+}
+
+function classifySidebarAgents(
+  filtered: ConsoleAgent[],
+  config?: ConsoleAgentListConfig,
+  flat = false,
+): SidebarClassification {
+  const rowsByBucket = new Map<string, AgentRow[]>();
+  const host = filtered.find(isCommanderLike) || null;
   const byId = new Map(filtered.map((a) => [a.member_id, a]));
   const parentById = new Map<string, string>();
   for (const a of filtered) {
-    const parent = findSpawnHost(a, filtered, host || null);
+    const parent = findSpawnHost(a, filtered, host);
     if (parent) parentById.set(a.member_id, parent.member_id);
   }
   for (const a of filtered) {
     const childOfHost = parentById.has(a.member_id);
-    const configuredGroup = configuredAgentGroup(a, config, parentById, byId);
-    const key = configuredGroup || bucketForAgent(a, parentById, byId);
-    const subgroup = configuredAgentSubgroup(a, config, parentById, byId);
-    if (!g.has(key)) g.set(key, []);
-    g.get(key)!.push({
+    const key = flat
+      ? FLAT_SECTION_NAME
+      : configuredAgentGroup(a, config, parentById, byId) || bucketForAgent(a, parentById, byId);
+    const subgroup = flat ? null : configuredAgentSubgroup(a, config, parentById, byId);
+    if (!rowsByBucket.has(key)) rowsByBucket.set(key, []);
+    rowsByBucket.get(key)!.push({
       agent: a,
       childOfHost,
       depth: depthForAgent(a, parentById),
@@ -594,10 +833,33 @@ function groupSidebarAgents(filtered: ConsoleAgent[], config?: ConsoleAgentListC
       subgroup,
     });
   }
-  for (const [key, rows] of g.entries()) {
-    g.set(key, orderRowsPreorder(rows, parentById, host || null, configuredSelectors(config, "subgroup_by").length > 0));
+  return {
+    rowsByBucket,
+    parentById,
+    host,
+    orderSubgroups: !flat && configuredSelectors(config, "subgroup_by").length > 0,
+  };
+}
+
+/**
+ * Orders each section's rows as a preorder tree under the chosen sort. Kept
+ * apart from the classification, which walks the whole roster for every
+ * agent, so a re-sort (a new last activity, a manual move) stays cheap.
+ */
+function orderSidebarGroups(classified: SidebarClassification, order?: SidebarSortContext): Map<string, AgentRow[]> {
+  const grouped = new Map<string, AgentRow[]>();
+  for (const [key, rows] of classified.rowsByBucket.entries()) {
+    grouped.set(key, orderRowsPreorder(rows, classified.parentById, classified.host, classified.orderSubgroups, order));
   }
-  return g;
+  return grouped;
+}
+
+function groupSidebarAgents(
+  filtered: ConsoleAgent[],
+  config?: ConsoleAgentListConfig,
+  options: SidebarGroupingOptions = {},
+): Map<string, AgentRow[]> {
+  return orderSidebarGroups(classifySidebarAgents(filtered, config, options.flat === true), options.order);
 }
 
 function orderedSectionNames(grouped: Map<string, AgentRow[]>, config?: ConsoleAgentListConfig): string[] {
@@ -684,6 +946,28 @@ function reorderSidebarOrderWithNavigationModel(
     inputSource,
   });
   return result.model.order.orderedNodeIds.filter((id) => allowed.has(id));
+}
+
+/**
+ * The stored manual order after moving `dragged` before or after `target`
+ * among `siblings` (the keys of one container, in shown order). Every shown
+ * agent (`present`, in shown order) is listed first, so the move changes the
+ * order of the moved siblings only, in every view. `null` when nothing moves.
+ */
+function sidebarAgentOrderAfterMove(args: {
+  stored: readonly string[];
+  present: readonly string[];
+  siblings: readonly string[];
+  dragged: string;
+  target: string;
+  where: SidebarDropPosition;
+  inputSource: "keyboard" | "pointer";
+}): string[] | null {
+  const siblings = [...args.siblings];
+  const moved = reorderSidebarOrderWithNavigationModel(siblings, args.dragged, args.target, args.where, args.inputSource);
+  if (moved.length !== siblings.length || moved.every((key, index) => key === siblings[index])) return null;
+  const listed = listConsoleSidebarAgentOrder(args.stored, args.present);
+  return capConsoleSidebarAgentOrder(mergeConsoleSidebarSiblingOrder(listed, moved), new Set(args.present));
 }
 
 function collectPinnedRows(rows: AgentRow[], pinnedAgentIds: Set<string> | undefined): Set<string> {
@@ -790,6 +1074,11 @@ function sidebarFamilyPinIdsByMemberId(grouped: Map<string, AgentRow[]>): Map<st
   return familyById;
 }
 
+/** The siblings an agent row can trade places with: same section, subgroup and parent. */
+function sidebarAgentContainer(bucket: string, subgroup: string | null, parentMemberId: string | null): string {
+  return JSON.stringify([bucket, subgroup, parentMemberId]);
+}
+
 function buildSidebarVirtualRows(args: {
   sectionNames: string[];
   grouped: Map<string, AgentRow[]>;
@@ -800,9 +1089,13 @@ function buildSidebarVirtualRows(args: {
   sectionOrder?: string[];
   subgroupOrder?: string[];
   searchActive?: boolean;
+  /** One list ([`groupSidebarAgents`] with `flat`): no category or subgroup headers. */
+  flat?: boolean;
+  order?: SidebarSortContext;
 }): SidebarVirtualRow[] {
   const rows: SidebarVirtualRow[] = [];
-  const orderedSections = applySidebarOrder(args.sectionNames, args.sectionOrder);
+  const flat = args.flat === true;
+  const orderedSections = flat ? args.sectionNames : applySidebarOrder(args.sectionNames, args.sectionOrder);
   const baseRows = orderedSections.flatMap((bucket) => args.grouped.get(bucket) || []);
   const baseOrderIndex = new Map(baseRows.map((row, index) => [row.agent.member_id, index] as const));
   const pinnedRowIds = collectPinnedRows(baseRows, args.pinnedAgentIds);
@@ -810,6 +1103,7 @@ function buildSidebarVirtualRows(args: {
     const pinnedRows = orderRowsPreorderByIndex(
       baseRows.filter((row) => pinnedRowIds.has(row.agent.member_id)),
       baseOrderIndex,
+      args.order,
     );
     const collapsedPinned = args.searchActive ? false : args.collapsedSections.has(PINNED_SECTION_NAME);
     rows.push({
@@ -823,43 +1117,65 @@ function buildSidebarVirtualRows(args: {
     });
     if (!collapsedPinned) {
       for (const row of pinnedRows) {
+        const parent = row.parentMemberId && pinnedRowIds.has(row.parentMemberId) ? row.parentMemberId : null;
         rows.push({
           kind: "agent",
           key: `agent:${PINNED_SECTION_NAME}:${row.agent.member_id}`,
           bucket: PINNED_SECTION_NAME,
           row,
+          container: sidebarAgentContainer(PINNED_SECTION_NAME, null, parent),
         });
       }
     }
   }
 
+  const orderSubgroups = !flat && configuredSelectors(args.grouping, "subgroup_by").length > 0;
   for (const bucket of orderedSections) {
     const list = (args.grouped.get(bucket) || []).filter((row) => !pinnedRowIds.has(row.agent.member_id));
-    const sectionConfig = sectionConfigFor(bucket, args.grouping);
+    const sectionConfig = flat ? null : sectionConfigFor(bucket, args.grouping);
     if (list.length === 0 && !sectionConfig) continue;
-    const collapsedSection = args.searchActive ? false : args.collapsedSections.has(bucket);
-    rows.push({
-      kind: "section",
-      key: `section:${bucket}`,
-      bucket,
-      count: list.length,
-      collapsed: collapsedSection,
-      reorderable: true,
-    });
-    if (collapsedSection) continue;
-    if (list.length === 0) {
+    if (flat) {
+      // A flat roster has no category headers; its one header only
+      // separates it from the Pinned section above.
+      let collapsedFlat = false;
+      if (pinnedRowIds.size > 0) {
+        collapsedFlat = args.searchActive ? false : args.collapsedSections.has(FLAT_SECTION_NAME);
+        rows.push({
+          kind: "section",
+          key: FLAT_SECTION_KEY,
+          bucket: FLAT_SECTION_NAME,
+          count: list.length,
+          collapsed: collapsedFlat,
+          reorderable: false,
+        });
+      }
+      if (collapsedFlat) continue;
+    } else {
+      const collapsedSection = args.searchActive ? false : args.collapsedSections.has(bucket);
       rows.push({
-        kind: "empty",
-        key: `empty:${bucket}`,
+        kind: "section",
+        key: `section:${bucket}`,
         bucket,
-        sectionConfig,
+        count: list.length,
+        collapsed: collapsedSection,
+        reorderable: true,
       });
-      continue;
+      if (collapsedSection) continue;
+      if (list.length === 0) {
+        rows.push({
+          kind: "empty",
+          key: `empty:${bucket}`,
+          bucket,
+          sectionConfig,
+        });
+        continue;
+      }
     }
 
     const orderedList = orderRowsBySubgroupOrder(list, bucket, args.subgroupOrder);
+    const listIds = new Set(orderedList.map((row) => row.agent.member_id));
     const subgroups = new Set(orderedList.map((row) => row.subgroup).filter((value): value is string => Boolean(value)));
-    const showSubgroups = configuredSelectors(args.grouping, "subgroup_by").length > 0
+    const showSubgroups = orderSubgroups
       && subgroups.size > (args.grouping?.collapse_single_subgroup === false ? 0 : 1);
     const subgroupCounts = new Map<string, number>();
     for (const row of orderedList) {
@@ -890,11 +1206,13 @@ function buildSidebarVirtualRows(args: {
         });
       }
       if (currentSubgroupCollapsed) continue;
+      const parent = row.parentMemberId && listIds.has(row.parentMemberId) ? row.parentMemberId : null;
       rows.push({
         kind: "agent",
         key: `agent:${row.agent.member_id}`,
         bucket,
         row,
+        container: sidebarAgentContainer(bucket, orderSubgroups ? row.subgroup ?? null : null, parent),
       });
     }
   }
@@ -1024,11 +1342,38 @@ function virtualRowHeight(row: SidebarVirtualRow): number {
   return SIDEBAR_ROW_HEIGHT[row.kind];
 }
 
+/** The index of the last row of the agent row at `index` and its visible descendants. */
+function agentSubtreeEnd(rows: SidebarVirtualRow[], index: number): number {
+  const start = rows[index];
+  if (!start || start.kind !== "agent") return index;
+  const inSubtree = new Set([start.row.agent.member_id]);
+  let end = index;
+  for (let next = index + 1; next < rows.length; next += 1) {
+    const row = rows[next]!;
+    if (row.kind !== "agent" || row.bucket !== start.bucket) break;
+    const parent = row.row.parentMemberId;
+    if (!parent || !inSubtree.has(parent)) break;
+    inSubtree.add(row.row.agent.member_id);
+    end = next;
+  }
+  return end;
+}
+
+function agentOrderRowIndex(rows: SidebarVirtualRow[], item: SidebarOrderItem): number {
+  return rows.findIndex((row) => row.kind === "agent"
+    && row.container === item.container
+    && sidebarAgentOrderKey(row.row.agent) === item.id);
+}
+
 function sidebarDragPreviewRows(
   rows: SidebarVirtualRow[],
-  item: { kind: "section" | "subgroup"; id: string; bucket?: string } | null,
+  item: SidebarOrderItem | null,
 ): SidebarVirtualRow[] {
   if (!item) return [];
+  if (item.kind === "agent") {
+    const start = agentOrderRowIndex(rows, item);
+    return start < 0 ? [] : rows.slice(start, agentSubtreeEnd(rows, start) + 1);
+  }
   const start = rows.findIndex((row) => {
     if (item.kind === "section") return row.kind === "section" && row.bucket === item.id;
     return row.kind === "subgroup" && row.storageKey === item.id && row.bucket === item.bucket;
@@ -1086,7 +1431,7 @@ function renderSidebarDragPreviewRows(rows: SidebarVirtualRow[]): React.JSX.Elem
         <span className="agent__dot" />
         <span className="sidebar__drag-preview-agent-body">
           <span className="agent__name">{row.row.agent.label}</span>
-          <span className="agent__id">{row.row.agent.identity || row.row.agent.member_id}</span>
+          <span className="agent__detail">{humanizeAgentKind(row.row.agent.role || row.row.agent.group)}</span>
         </span>
       </div>
     );
@@ -1133,6 +1478,11 @@ function pendingOrderFocusMatchesRow(pending: PendingOrderFocus, row: SidebarVir
   if (pending.kind === "section") {
     return row.kind === "section" && row.bucket === pending.id;
   }
+  if (pending.kind === "agent") {
+    return row.kind === "agent"
+      && row.container === pending.container
+      && sidebarAgentOrderKey(row.row.agent) === pending.id;
+  }
   return row.kind === "subgroup"
     && row.storageKey === pending.id
     && row.bucket === pending.bucket;
@@ -1142,6 +1492,7 @@ function pendingOrderFocusMatchesElement(pending: PendingOrderFocus, element: HT
   if (element.dataset.sidebarOrderKind !== pending.kind) return false;
   if (element.dataset.sidebarOrderId !== pending.id) return false;
   if (pending.kind === "subgroup" && element.dataset.sidebarOrderBucket !== pending.bucket) return false;
+  if (pending.kind === "agent" && element.dataset.sidebarOrderContainer !== pending.container) return false;
   return true;
 }
 
@@ -1167,22 +1518,54 @@ function useMeasuredHeight<T extends HTMLElement>(): [React.RefObject<T>, number
   return [ref, height];
 }
 
-function renderAgentRow(
-  row: AgentRow,
-  selectedMemberId: string,
-  recentActivity: ConsoleFrame[],
-  grouping: ConsoleAgentListConfig | undefined,
-  pinnedAgentIds: Set<string> | undefined,
-  onSelect: (agent: ConsoleAgent) => void,
-  onTogglePinnedAgent: ((agent: ConsoleAgent, familyPinIds?: Set<string>) => void) | undefined,
-  familyPinIds?: Set<string>,
-): React.JSX.Element {
+/** An agent row's part in manual ordering: its container, and the handlers when it can move. */
+interface AgentRowReorder {
+  container: string;
+  /** Manual sort, no search or filter, and a sibling to trade places with. */
+  enabled: boolean;
+  dragging: boolean;
+  dragOver?: SidebarDropPosition;
+  onGripPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
+  /** Handles Alt+ArrowUp and Alt+ArrowDown; returns whether it did. */
+  onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => boolean;
+}
+
+interface AgentRowRender {
+  row: AgentRow;
+  selectedMemberId: string;
+  recentActivity: ConsoleFrame[];
+  grouping: ConsoleAgentListConfig | undefined;
+  pinnedAgentIds: Set<string> | undefined;
+  onSelect: (agent: ConsoleAgent) => void;
+  onTogglePinnedAgent: ((agent: ConsoleAgent, familyPinIds?: Set<string>) => void) | undefined;
+  familyPinIds?: Set<string>;
+  lastActivityMs?: number;
+  nowMs: number;
+  reorder?: AgentRowReorder;
+}
+
+function renderAgentRow({
+  row,
+  selectedMemberId,
+  recentActivity,
+  grouping,
+  pinnedAgentIds,
+  onSelect,
+  onTogglePinnedAgent,
+  familyPinIds,
+  lastActivityMs,
+  nowMs,
+  reorder,
+}: AgentRowRender): React.JSX.Element {
   const { agent, childOfHost, depth } = row;
   const stateAttr = deriveStateAttr(agent);
-  const pulse = pulseSamples(recentActivity, agent.identity || agent.member_id);
+  const identity = agent.identity || agent.member_id;
+  const pulse = pulseSamples(recentActivity, identity);
   const inbox = inboxCount(agent);
   const badges = configuredAgentBadges(agent, grouping);
   const pinned = isAgentPinned(agent, pinnedAgentIds);
+  const detail = agentDetailParts(agent, lastActivityMs, nowMs);
+  const movable = reorder?.enabled === true;
   return (
     <div
       className={`agent ${childOfHost ? "agent--child" : ""} ${agent.member_id === selectedMemberId ? "is-active" : ""}`}
@@ -1191,8 +1574,18 @@ function renderAgentRow(
       data-side-chat={agent.side_chat_of ? "true" : undefined}
       data-depth={childOfHost ? String(Math.min(depth, 3)) : undefined}
       data-testid={`sidebar-agent:${agent.member_id}`}
+      data-sidebar-order-kind={movable ? "agent" : undefined}
+      data-sidebar-order-id={movable ? sidebarAgentOrderKey(agent) : undefined}
+      data-sidebar-order-container={movable ? reorder?.container : undefined}
+      data-drag-over={reorder?.dragOver}
+      data-dragging={reorder?.dragging ? "true" : undefined}
+      aria-keyshortcuts={movable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+      title={`Identity: ${identity}`}
       onClick={() => onSelect(agent)}
       onKeyDown={(event) => {
+        // Keys on the row's own buttons (pin, copy) stay theirs.
+        if (event.target !== event.currentTarget) return;
+        if (reorder?.onKeyDown(event)) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onSelect(agent);
@@ -1201,10 +1594,32 @@ function renderAgentRow(
       role="button"
       tabIndex={0}
     >
+      {movable ? (
+        <span
+          className="agent__grip"
+          aria-hidden="true"
+          title="Drag to reorder. Alt+Up and Alt+Down move the focused agent."
+          data-testid={`sidebar-agent-grip:${agent.member_id}`}
+          onPointerDown={reorder?.onGripPointerDown}
+          onClick={(event) => event.stopPropagation()}
+        />
+      ) : null}
+      {reorder?.dragOver ? <span className="agent__drop-line" data-where={reorder.dragOver} aria-hidden="true" /> : null}
       <span className="agent__dot" />
       <span className="agent__body">
         <span className="agent__name">{agent.label}</span>
-        <span className="agent__id">{agent.identity || agent.member_id}</span>
+        {detail.kind || detail.status ? (
+          // The kind gives way first, so the status always shows in a narrow roster.
+          <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
+            {detail.kind ? (
+              <span className="agent__detail-kind">
+                {detail.kind}
+                {detail.status ? <span className="agent__detail-separator"> · </span> : null}
+              </span>
+            ) : null}
+            {detail.status ? <span className="agent__detail-status">{detail.status}</span> : null}
+          </span>
+        ) : null}
         {badges.length > 0 || agent.side_chat_of ? (
           <span className="agent__badges">
             {agent.side_chat_of ? (
@@ -1232,6 +1647,17 @@ function renderAgentRow(
         ) : null}
       </span>
       <span className="agent__actions">
+        <span
+          className="agent__copy"
+          data-testid={`sidebar-agent-copy-identity:${agent.member_id}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <CopyButton
+            text={identity}
+            label={`Copy the identity of ${agent.label}`}
+            copiedLabel="Identity copied"
+          />
+        </span>
         {onTogglePinnedAgent ? (
           <button
             type="button"
@@ -1282,6 +1708,7 @@ export const Sidebar = React.memo(function Sidebar({
   onOpenCustomPanel,
   grouping,
   storageNamespace,
+  preferenceScope,
   pinnedAgentIds,
   onSelect,
   onTogglePinnedAgent,
@@ -1293,23 +1720,23 @@ export const Sidebar = React.memo(function Sidebar({
   countRender("Sidebar");
   const [q, setQ] = React.useState("");
   const [activityFilter, setActivityFilter] = React.useState<"all" | "working" | "quiet" | "unknown">("all");
-  const [draggingOrder, setDraggingOrder] = React.useState<{ kind: "section" | "subgroup"; id: string; bucket?: string } | null>(null);
-  const [dragOverOrder, setDragOverOrder] = React.useState<{ kind: "section" | "subgroup"; id: string; where: SidebarDropPosition } | null>(null);
+  const [draggingOrder, setDraggingOrder] = React.useState<SidebarOrderItem | null>(null);
+  const [dragOverOrder, setDragOverOrder] = React.useState<SidebarDragOver | null>(null);
   const [dragPreview, setDragPreview] = React.useState<SidebarDragPreview | null>(null);
   const [orderAnnouncement, setOrderAnnouncement] = React.useState("");
   const pendingOrderFocusRef = React.useRef<PendingOrderFocus | null>(null);
-  const draggingOrderRef = React.useRef<{ kind: "section" | "subgroup"; id: string; bucket?: string } | null>(null);
-  const pointerDragRef = React.useRef<{
-    kind: "section" | "subgroup";
-    id: string;
-    bucket?: string;
+  const draggingOrderRef = React.useRef<SidebarOrderItem | null>(null);
+  const pointerDragRef = React.useRef<(SidebarOrderItem & {
     startX: number;
     startY: number;
+    lastX: number;
+    lastY: number;
     previewWidth: number;
     moved: boolean;
     over: { id: string; bucket?: string; where: SidebarDropPosition } | null;
-  } | null>(null);
+  }) | null>(null);
   const suppressOrderClickRef = React.useRef(false);
+  const virtualRowsRef = React.useRef<SidebarVirtualRow[]>([]);
   React.useEffect(() => {
     draggingOrderRef.current = draggingOrder;
   }, [draggingOrder]);
@@ -1320,6 +1747,81 @@ export const Sidebar = React.memo(function Sidebar({
     const allowed = new Set(visibleControls);
     return configured.filter((kind) => allowed.has(kind));
   }, [visibleControls]);
+
+  // Per-user preferences: the roster view and the manual agent order. Their
+  // keys take the principal scope, so an agent-list configuration edit
+  // leaves them as they are.
+  const preferenceNamespace = preferenceScope ?? storageNamespace;
+  const viewStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_VIEW_STORAGE_PREFIX, preferenceNamespace),
+    [preferenceNamespace],
+  );
+  const agentOrderStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_AGENT_ORDER_STORAGE_PREFIX, preferenceNamespace),
+    [preferenceNamespace],
+  );
+  const [view, setView] = React.useState<ConsoleSidebarViewPreferences>(
+    () => readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW },
+  );
+  React.useEffect(() => {
+    setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
+  }, [viewStorageKey]);
+  const [agentOrder, setAgentOrder] = React.useState<string[]>(
+    () => readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || [],
+  );
+  React.useEffect(() => {
+    setAgentOrder(readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []);
+  }, [agentOrderStorageKey]);
+  // Another tab of this console reordered agents or changed the view.
+  React.useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === agentOrderStorageKey) {
+        setAgentOrder(readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []);
+      } else if (event.key === viewStorageKey) {
+        setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [agentOrderStorageKey, viewStorageKey]);
+  const updateView = React.useCallback((patch: Partial<ConsoleSidebarViewPreferences>) => {
+    setView((current) => {
+      const next = { ...current, ...patch };
+      writeConsoleSidebarView(localSidebarStorage(), viewStorageKey, next);
+      return next;
+    });
+  }, [viewStorageKey]);
+
+  // The clock behind "active 3 min ago"; frames re-render the roster too.
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (collapsed || typeof window === "undefined") return undefined;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [collapsed]);
+  const frameTimes = React.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
+  const liveActivity = React.useMemo(() => {
+    const byMember = new Map<string, number>();
+    for (const agent of agents) {
+      const at = agentLastActivity(agent, frameTimes);
+      if (at !== undefined) byMember.set(agent.member_id, at);
+    }
+    return byMember;
+  }, [agents, frameTimes]);
+  // Sorting by last activity holds still while a drag is in progress.
+  const heldActivityRef = React.useRef(liveActivity);
+  if (!draggingOrder) heldActivityRef.current = liveActivity;
+  const sortActivity = view.sortBy !== "activity"
+    ? EMPTY_ACTIVITY
+    : draggingOrder ? heldActivityRef.current : liveActivity;
+  const sortContext = React.useMemo<SidebarSortContext>(() => ({
+    sortBy: view.sortBy,
+    rank: new Map(agentOrder.map((key, index) => [key, index] as const)),
+    lastActivity: (agent) => sortActivity.get(agent.member_id),
+  }), [agentOrder, sortActivity, view.sortBy]);
+  const flat = view.groupBy === "none";
+  const searchActive = Boolean(q) || activityFilter !== "all";
 
   const filtered = React.useMemo(() => {
     const needle = q.toLowerCase();
@@ -1333,11 +1835,18 @@ export const Sidebar = React.memo(function Sidebar({
     });
   }, [agents, q, activityFilter]);
 
-  const grouped = React.useMemo(() => {
-    return groupSidebarAgents(filtered, grouping);
-  }, [filtered, grouping]);
+  const classified = React.useMemo(
+    () => classifySidebarAgents(filtered, grouping, flat),
+    [filtered, flat, grouping],
+  );
+  const grouped = React.useMemo(() => orderSidebarGroups(classified, sortContext), [classified, sortContext]);
   const familyPinIdsByMemberId = React.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
-  const sectionNames = React.useMemo(() => orderedSectionNames(grouped, grouping), [grouped, grouping]);
+  const sectionNames = React.useMemo(
+    () => flat
+      ? (grouped.has(FLAT_SECTION_NAME) ? [FLAT_SECTION_NAME] : [])
+      : orderedSectionNames(grouped, grouping),
+    [flat, grouped, grouping],
+  );
   const defaultCollapsedKey = React.useMemo(
     () => JSON.stringify((grouping?.sections || []).map((section) => [section.name, section.collapsed === true])),
     [grouping?.sections],
@@ -1441,6 +1950,48 @@ export const Sidebar = React.memo(function Sidebar({
     });
     setOrderAnnouncement(`Moved subgroup ${sidebarSubgroupStorageLabel(draggedId)} ${where} ${sidebarSubgroupStorageLabel(target)}.`);
   }, [subgroupIdsForBucket, subgroupOrderStorageKey]);
+  // Every shown agent's key, in shown order: a move lists them all first,
+  // so it changes the order of the moved agents only, in every view.
+  const presentAgentKeys = React.useMemo(() => {
+    const sections = flat ? sectionNames : applySidebarOrder(sectionNames, sectionOrder);
+    return sections.flatMap((bucket) => grouped.get(bucket) || []).map((row) => sidebarAgentOrderKey(row.agent));
+  }, [flat, grouped, sectionNames, sectionOrder]);
+  // Why agents cannot be reordered right now, or null when they can.
+  const agentReorderBlocked = view.sortBy !== "manual"
+    ? "Choose Sort: Manual to reorder agents."
+    : searchActive
+      ? "Clear the search and the activity filter to reorder agents."
+      : null;
+  const completeAgentDrop = React.useCallback((
+    target: string,
+    where: SidebarDropPosition,
+    draggedId: string,
+    container: string,
+    inputSource: "keyboard" | "pointer",
+  ) => {
+    if (!draggedId || draggedId === target) return;
+    const siblings = virtualRowsRef.current.filter(
+      (row): row is Extract<SidebarVirtualRow, { kind: "agent" }> => row.kind === "agent" && row.container === container,
+    );
+    const next = sidebarAgentOrderAfterMove({
+      stored: agentOrder,
+      present: presentAgentKeys,
+      siblings: siblings.map((row) => sidebarAgentOrderKey(row.row.agent)),
+      dragged: draggedId,
+      target,
+      where,
+      inputSource,
+    });
+    if (!next) return;
+    writeSidebarStringList(localSidebarStorage(), agentOrderStorageKey, next);
+    setAgentOrder(next);
+    if (inputSource === "keyboard") {
+      pendingOrderFocusRef.current = { kind: "agent", id: draggedId, container };
+    }
+    const labelOf = (key: string) =>
+      siblings.find((row) => sidebarAgentOrderKey(row.row.agent) === key)?.row.agent.label || key;
+    setOrderAnnouncement(`Moved ${labelOf(draggedId)} ${where === "before" ? "above" : "below"} ${labelOf(target)}.`);
+  }, [agentOrder, agentOrderStorageKey, presentAgentKeys]);
   const handleSectionOrderKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLElement>, bucket: string) => {
     if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
     const ordered = applySidebarOrder(sectionNames, sectionOrder);
@@ -1459,9 +2010,34 @@ export const Sidebar = React.memo(function Sidebar({
     event.preventDefault();
     completeSubgroupDrop(target, bucket, event.key === "ArrowUp" ? "before" : "after", storageKey, bucket, "keyboard");
   }, [completeSubgroupDrop, subgroupIdsForBucket, subgroupOrder]);
+  const handleAgentOrderKeyDown = React.useCallback((
+    event: React.KeyboardEvent<HTMLElement>,
+    row: Extract<SidebarVirtualRow, { kind: "agent" }>,
+  ): boolean => {
+    if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return false;
+    event.preventDefault();
+    if (agentReorderBlocked) {
+      setOrderAnnouncement(agentReorderBlocked);
+      return true;
+    }
+    const key = sidebarAgentOrderKey(row.row.agent);
+    const siblings = virtualRowsRef.current
+      .filter((candidate): candidate is Extract<SidebarVirtualRow, { kind: "agent" }> =>
+        candidate.kind === "agent" && candidate.container === row.container)
+      .map((candidate) => sidebarAgentOrderKey(candidate.row.agent));
+    const index = siblings.indexOf(key);
+    const up = event.key === "ArrowUp";
+    const target = index < 0 ? undefined : up ? siblings[index - 1] : siblings[index + 1];
+    if (!target) {
+      setOrderAnnouncement(`${row.row.agent.label} is already ${up ? "first" : "last"}.`);
+      return true;
+    }
+    completeAgentDrop(target, up ? "before" : "after", key, row.container, "keyboard");
+    return true;
+  }, [agentReorderBlocked, completeAgentDrop]);
   const beginPointerOrderDrag = React.useCallback((
     event: React.PointerEvent<HTMLElement>,
-    item: { kind: "section" | "subgroup"; id: string; bucket?: string },
+    item: SidebarOrderItem,
   ) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -1469,6 +2045,8 @@ export const Sidebar = React.memo(function Sidebar({
       ...item,
       startX: event.clientX,
       startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
       previewWidth: event.currentTarget.closest(".sidebar")?.getBoundingClientRect().width || event.currentTarget.getBoundingClientRect().width,
       moved: false,
       over: null,
@@ -1476,9 +2054,46 @@ export const Sidebar = React.memo(function Sidebar({
     setDraggingOrder(item);
     draggingOrderRef.current = item;
   }, []);
+  // The drop target under the pointer: a row of the dragged kind (for an
+  // agent, of its container), above or below its middle.
+  const updatePointerOrderTarget = React.useCallback((clientX: number, clientY: number) => {
+    const drag = pointerDragRef.current;
+    if (!drag) return;
+    const target = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-sidebar-order-kind]");
+    const kind = target?.dataset.sidebarOrderKind as SidebarOrderKind | undefined;
+    const id = target?.dataset.sidebarOrderId;
+    const bucket = target?.dataset.sidebarOrderBucket;
+    const container = target?.dataset.sidebarOrderContainer;
+    if (
+      !target || !kind || !id || kind !== drag.kind || id === drag.id
+      || (kind === "subgroup" && bucket !== drag.bucket)
+      || (kind === "agent" && container !== drag.container)
+    ) {
+      drag.over = null;
+      setDragOverOrder(null);
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    const where: SidebarDropPosition = clientY > rect.top + rect.height / 2 ? "after" : "before";
+    drag.over = { id, bucket, where };
+    let indicatorId = id;
+    if (kind === "agent") {
+      // "After" an agent means after its whole subtree, so its last
+      // visible descendant draws the line.
+      const rows = virtualRowsRef.current;
+      const index = agentOrderRowIndex(rows, { kind, id, container });
+      const indicatorRow = index < 0 ? undefined : rows[where === "after" ? agentSubtreeEnd(rows, index) : index];
+      indicatorId = indicatorRow?.key || id;
+    }
+    setDragOverOrder({ kind, id, where, indicatorId });
+  }, []);
   const movePointerOrderDrag = React.useCallback((event: Pick<PointerEvent | React.PointerEvent<HTMLElement>, "clientX" | "clientY" | "preventDefault">) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
     if (!drag.moved && Math.max(Math.abs(event.clientX - drag.startX), Math.abs(event.clientY - drag.startY)) < 4) return;
     drag.moved = true;
     event.preventDefault();
@@ -1487,27 +2102,8 @@ export const Sidebar = React.memo(function Sidebar({
       y: event.clientY,
       width: drag.previewWidth,
     });
-    const target = document
-      .elementFromPoint(event.clientX, event.clientY)
-      ?.closest<HTMLElement>("[data-sidebar-order-kind]");
-    if (!target) {
-      drag.over = null;
-      setDragOverOrder(null);
-      return;
-    }
-    const kind = target.dataset.sidebarOrderKind as "section" | "subgroup" | undefined;
-    const id = target.dataset.sidebarOrderId;
-    const bucket = target.dataset.sidebarOrderBucket;
-    if (!kind || !id || kind !== drag.kind || id === drag.id || (kind === "subgroup" && bucket !== drag.bucket)) {
-      drag.over = null;
-      setDragOverOrder(null);
-      return;
-    }
-    const rect = target.getBoundingClientRect();
-    const where: SidebarDropPosition = event.clientY > rect.top + rect.height / 2 ? "after" : "before";
-    drag.over = { id, bucket, where };
-    setDragOverOrder({ kind, id, where });
-  }, []);
+    updatePointerOrderTarget(event.clientX, event.clientY);
+  }, [updatePointerOrderTarget]);
   const finishPointerOrderDrag = React.useCallback(() => {
     const drag = pointerDragRef.current;
     if (!drag) return;
@@ -1515,8 +2111,12 @@ export const Sidebar = React.memo(function Sidebar({
     if (drag.moved && drag.over) {
       if (drag.kind === "section") {
         completeSectionDrop(drag.over.id, drag.over.where, drag.id, "pointer");
-      } else if (drag.over.bucket) {
-        completeSubgroupDrop(drag.over.id, drag.over.bucket, drag.over.where, drag.id, drag.bucket, "pointer");
+      } else if (drag.kind === "subgroup") {
+        if (drag.over.bucket) {
+          completeSubgroupDrop(drag.over.id, drag.over.bucket, drag.over.where, drag.id, drag.bucket, "pointer");
+        }
+      } else if (drag.container) {
+        completeAgentDrop(drag.over.id, drag.over.where, drag.id, drag.container, "pointer");
       }
       suppressOrderClickRef.current = true;
       window.setTimeout(() => {
@@ -1527,7 +2127,7 @@ export const Sidebar = React.memo(function Sidebar({
     setDraggingOrder(null);
     setDragOverOrder(null);
     setDragPreview(null);
-  }, [completeSectionDrop, completeSubgroupDrop]);
+  }, [completeAgentDrop, completeSectionDrop, completeSubgroupDrop]);
   React.useEffect(() => {
     if (!draggingOrder) return undefined;
     const onMove = (event: PointerEvent) => movePointerOrderDrag(event);
@@ -1551,20 +2151,63 @@ export const Sidebar = React.memo(function Sidebar({
       pinnedAgentIds,
       sectionOrder,
       subgroupOrder,
-      searchActive: Boolean(q) || activityFilter !== "all",
+      searchActive,
+      flat,
+      order: sortContext,
     });
-  }, [sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, q, activityFilter]);
+  }, [sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, searchActive, flat, sortContext]);
   const virtualRows = React.useMemo<SidebarVirtualRow[]>(
     () => sidebarNavigationRows(sidebarNavigationModel),
     [sidebarNavigationModel],
   );
+  virtualRowsRef.current = virtualRows;
+  const agentSiblingCounts = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of virtualRows) {
+      if (row.kind === "agent") counts.set(row.container, (counts.get(row.container) || 0) + 1);
+    }
+    return counts;
+  }, [virtualRows]);
   const virtualOffsets = React.useMemo(() => sidebarVirtualOffsets(virtualRows), [virtualRows]);
   const [listRef, listHeight] = useMeasuredHeight<HTMLDivElement>();
   const [scrollTop, setScrollTop] = React.useState(0);
   React.useEffect(() => {
     setScrollTop(0);
     if (listRef.current) listRef.current.scrollTop = 0;
-  }, [q, activityFilter, grouping, listRef]);
+  }, [q, activityFilter, grouping, view.groupBy, view.sortBy, listRef]);
+  // A drag near the list's top or bottom edge scrolls the list, so a row
+  // can move past what is on screen.
+  React.useEffect(() => {
+    if (!draggingOrder || typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return undefined;
+    let frame = 0;
+    const step = () => {
+      const drag = pointerDragRef.current;
+      const list = listRef.current;
+      if (drag?.moved && list) {
+        const rect = list.getBoundingClientRect();
+        const fromTop = drag.lastY - rect.top;
+        const fromBottom = rect.bottom - drag.lastY;
+        const inside = drag.lastX >= rect.left && drag.lastX <= rect.right;
+        let delta = 0;
+        if (inside && fromTop < SIDEBAR_DRAG_EDGE_PX) {
+          delta = -Math.ceil(((SIDEBAR_DRAG_EDGE_PX - Math.max(0, fromTop)) / SIDEBAR_DRAG_EDGE_PX) * SIDEBAR_DRAG_EDGE_MAX_STEP_PX);
+        } else if (inside && fromBottom < SIDEBAR_DRAG_EDGE_PX) {
+          delta = Math.ceil(((SIDEBAR_DRAG_EDGE_PX - Math.max(0, fromBottom)) / SIDEBAR_DRAG_EDGE_PX) * SIDEBAR_DRAG_EDGE_MAX_STEP_PX);
+        }
+        if (delta !== 0) {
+          const before = list.scrollTop;
+          list.scrollTop = Math.max(0, Math.min(list.scrollHeight - list.clientHeight, before + delta));
+          if (list.scrollTop !== before) {
+            setScrollTop(list.scrollTop);
+            updatePointerOrderTarget(drag.lastX, drag.lastY);
+          }
+        }
+      }
+      frame = window.requestAnimationFrame(step);
+    };
+    frame = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(frame);
+  }, [draggingOrder, listRef, updatePointerOrderTarget]);
   const visibleRange = React.useMemo(() => sidebarVisibleRange({
     rowCount: virtualRows.length,
     offsets: virtualOffsets.offsets,
@@ -1617,6 +2260,11 @@ export const Sidebar = React.memo(function Sidebar({
     () => sidebarDragPreviewRows(virtualRows, draggingOrder),
     [virtualRows, draggingOrder],
   );
+  // A click that ends a drag does not open the agent it ended on.
+  const selectUnlessDropped = React.useCallback((agent: ConsoleAgent) => {
+    if (suppressOrderClickRef.current) return;
+    onSelect(agent);
+  }, [onSelect]);
 
   if (collapsed) {
     return (
@@ -1670,6 +2318,31 @@ export const Sidebar = React.memo(function Sidebar({
               {filter[0].toUpperCase() + filter.slice(1)}
             </button>
           ))}
+        </div>
+        <div className="sidebar__view" role="group" aria-label="Roster view">
+          <label className="sidebar__view-control">
+            <span>Group</span>
+            <select
+              value={view.groupBy}
+              data-testid="sidebar-view-group"
+              onChange={(event) => updateView({ groupBy: normalizeConsoleSidebarGroupBy(event.target.value) })}
+            >
+              <option value="category">Category</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          <label className="sidebar__view-control">
+            <span>Sort</span>
+            <select
+              value={view.sortBy}
+              data-testid="sidebar-view-sort"
+              onChange={(event) => updateView({ sortBy: normalizeConsoleSidebarSortBy(event.target.value) })}
+            >
+              <option value="manual">Manual</option>
+              <option value="name">Name</option>
+              <option value="activity">Last activity</option>
+            </select>
+          </label>
         </div>
       </div>
 
@@ -1778,6 +2451,7 @@ export const Sidebar = React.memo(function Sidebar({
                       type="button"
                       className={`sidebar__sec-head sidebar__sec-head--button ${row.reorderable ? "sidebar__order-target" : ""}`}
                       aria-expanded={!row.collapsed}
+                      aria-keyshortcuts={row.reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
                       data-sidebar-order-kind={row.reorderable ? "section" : undefined}
                       data-sidebar-order-id={row.reorderable ? row.bucket : undefined}
                       data-reorderable={row.reorderable ? "true" : undefined}
@@ -1812,6 +2486,7 @@ export const Sidebar = React.memo(function Sidebar({
                     data-collapsed={row.collapsed ? "true" : undefined}
                     data-drag-over={dragOverOrder?.kind === "subgroup" && dragOverOrder.id === row.storageKey ? dragOverOrder.where : undefined}
                     aria-expanded={!row.collapsed}
+                    aria-keyshortcuts={row.reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
                     data-sidebar-order-kind={row.reorderable ? "subgroup" : undefined}
                     data-sidebar-order-id={row.reorderable ? row.storageKey : undefined}
                     data-sidebar-order-bucket={row.reorderable ? row.bucket : undefined}
@@ -1835,16 +2510,34 @@ export const Sidebar = React.memo(function Sidebar({
                     <span className="sidebar__sec-count">{row.count}</span>
                   </button>
                 ) : (
-                  renderAgentRow(
-                    row.row,
+                  renderAgentRow({
+                    row: row.row,
                     selectedMemberId,
                     recentActivity,
                     grouping,
                     pinnedAgentIds,
-                    onSelect,
+                    onSelect: selectUnlessDropped,
                     onTogglePinnedAgent,
-                    familyPinIdsByMemberId.get(row.row.agent.member_id),
-                  )
+                    familyPinIds: familyPinIdsByMemberId.get(row.row.agent.member_id),
+                    lastActivityMs: liveActivity.get(row.row.agent.member_id),
+                    nowMs,
+                    reorder: {
+                      container: row.container,
+                      enabled: agentReorderBlocked === null && (agentSiblingCounts.get(row.container) || 0) > 1,
+                      dragging: draggingOrder?.kind === "agent"
+                        && draggingOrder.container === row.container
+                        && draggingOrder.id === sidebarAgentOrderKey(row.row.agent),
+                      dragOver: dragOverOrder?.kind === "agent" && dragOverOrder.indicatorId === row.key
+                        ? dragOverOrder.where
+                        : undefined,
+                      onGripPointerDown: (event) => beginPointerOrderDrag(event, {
+                        kind: "agent",
+                        id: sidebarAgentOrderKey(row.row.agent),
+                        container: row.container,
+                      }),
+                      onKeyDown: (event) => handleAgentOrderKeyDown(event, row),
+                    },
+                  })
                 )}
               </div>
             );

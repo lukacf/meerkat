@@ -89,6 +89,9 @@ export interface ConsoleAgent extends SidebarWatchFields {
    * human's branch of that agent's conversation (`meta/fork_member`),
    * as the runtime's roster records the fork. */
   side_chat_of?: string;
+  /** The agent's newest console activity, in milliseconds since the epoch,
+   * as the console's frame log recorded it. Advisory: absent means unknown. */
+  last_activity_ms?: number;
   unobserved?: IdentityStatusRow["unobserved"];
 }
 
@@ -111,6 +114,7 @@ export interface ConsoleExperienceAgentSnapshotRow extends Partial<IdentityStatu
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
   side_chat_of?: string;
+  last_activity_ms?: number;
 }
 
 export interface ConsoleSidebarButtonConfig {

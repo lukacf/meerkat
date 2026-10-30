@@ -71,6 +71,11 @@ function normalizeModelCapabilities(entry: unknown): { image_input: boolean } {
   return { image_input: caps.image_input === true };
 }
 
+/** A roster row's advisory last activity time; anything but a non-negative finite number reads as unknown. */
+export function normalizeLastActivityMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 export function normalizeAgents(
   experience: ConsoleExperience | null,
   modules: unknown[]
@@ -155,6 +160,9 @@ export function normalizeAgents(
         ...(entry.affordances !== undefined && { affordances: entry.affordances }),
         ...(typeof entry.side_chat_of === "string" && entry.side_chat_of.trim()
           ? { side_chat_of: entry.side_chat_of.trim() }
+          : {}),
+        ...(normalizeLastActivityMs(entry.last_activity_ms) !== undefined
+          ? { last_activity_ms: normalizeLastActivityMs(entry.last_activity_ms) }
           : {}),
         model_capabilities: modelCapabilities,
         ...watchFields,

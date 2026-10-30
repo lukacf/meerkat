@@ -59,6 +59,36 @@ describe("Roster activity filters", () => {
 
 });
 
+describe("Roster order under activity", () => {
+  const open = { ...props, grouping: { group_by: ["group"] }, preferenceScope: "activity-order" };
+  const names = ["Quiet reviewer", "Working reviewer", "Unknown reviewer"];
+
+  it("keeps the manual order through phase changes and re-sorts by last activity only when chosen", () => {
+    localStorage.setItem("meta-console-sidebar-agent-order:activity-order", JSON.stringify(names));
+    const view = render(<Sidebar {...open} />);
+    expect(rows(view.container)).toEqual(names);
+
+    view.rerender(<Sidebar {...open} agents={[
+      agent("Working reviewer", null), agent("Quiet reviewer", "generating"), agent("Unknown reviewer", "waiting"),
+    ]} />);
+    expect(rows(view.container)).toEqual(names);
+
+    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "activity" } });
+    const timed = [
+      { ...agent("Quiet reviewer", null), last_activity_ms: 10 },
+      { ...agent("Working reviewer", "generating"), last_activity_ms: 20 },
+      { ...agent("Unknown reviewer"), last_activity_ms: 30 },
+    ];
+    view.rerender(<Sidebar {...open} agents={timed} />);
+    expect(rows(view.container)).toEqual(["Unknown reviewer", "Working reviewer", "Quiet reviewer"]);
+
+    view.rerender(<Sidebar {...open} agents={timed} recentActivity={[
+      { id: "quiet-frame", event: "text_delta", identity: "Quiet reviewer", timestampMs: 40 },
+    ]} />);
+    expect(rows(view.container)).toEqual(["Quiet reviewer", "Unknown reviewer", "Working reviewer"]);
+  });
+});
+
 describe("approval attention availability", () => {
   it.each(["forbidden", "unsupported"] as const)("does not turn %s approval access into an operator task", (status) => {
     const view = render(<Sidebar {...props} approvals={{ scopeKey: "scope", status, requests: [], decisions: {}, readOnly: true }} />);

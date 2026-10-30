@@ -2,7 +2,7 @@ import { ConsoleMcpAppsProvider, type ConsoleMcpAppsHost } from "@console-compon
 import { createNativeMcpAppsHost } from "./mcp-apps/native-host";
 import { useConsolePanels, createConsolePanelService, bindConsolePanelService } from "./lib/custom-panels";
 import { ConsolePanelsProvider, ConsoleCustomPanel } from "@console-components";
-import { consoleCustomPanelTarget, type ConsolePanelDefinition, type ConsolePanelContext, type ConsolePanelService } from "@console-core";
+import { SIDEBAR_AGENT_PINS_STORAGE_PREFIX, consoleCustomPanelTarget, type ConsolePanelDefinition, type ConsolePanelContext, type ConsolePanelService } from "@console-core";
 import { withConsoleSendStorageLock } from "./lib/send-storage-lock";
 import {
   framesAfterIdleWatermark,
@@ -215,7 +215,7 @@ import {
   Sidebar as DesignSidebar,
   normalizeNavKind,
   pruneStaleSidebarStorage,
-  readSidebarStringSet,
+  readSidebarPins,
   sidebarAgentPinId,
   sidebarPinnedFamilyPinIds,
   sidebarStorageKey,
@@ -1038,6 +1038,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => sidebarStorageKey(SIDEBAR_PINS_STORAGE_PREFIX, sidebarStorageNamespace),
     [sidebarStorageNamespace],
   );
+  // Per-user sidebar preferences (pins, the manual agent order, the roster
+  // view) take the principal-aware scope the dock layout uses, so an
+  // agent-list configuration edit leaves them as they are.
+  const sidebarPreferenceScope = React.useMemo(
+    () => encodeURIComponent(persistentSendScope || sidebarStorageScope),
+    [persistentSendScope, sidebarStorageScope],
+  );
+  const sidebarAgentPinsStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
+    [sidebarPreferenceScope],
+  );
   React.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
   }, [sidebarStorageScope, sidebarStorageNamespace]);
@@ -1090,13 +1101,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [experience?.console_config?.agent_list?.default_pinned_agent_ids],
   );
   React.useEffect(() => {
-    const defaults = new Set(experience?.console_config?.agent_list?.default_pinned_agent_ids || []);
-    const stored = readSidebarStringSet(
+    // Pins moved from the agent-list configuration namespace to the
+    // per-user scope; the earlier key is read once, while the new one is
+    // absent, so current pins carry over.
+    setPinnedAgentIds(readSidebarPins(
       browserLocalStorage(),
+      sidebarAgentPinsStorageKey,
       sidebarPinsStorageKey,
-    );
-    setPinnedAgentIds(stored ?? defaults);
-  }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarPinsStorageKey]);
+      experience?.console_config?.agent_list?.default_pinned_agent_ids || [],
+    ));
+  }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
 
   const togglePinnedAgent = React.useCallback((agent: ConsoleAgent, renderedFamilyPinIds?: Set<string>) => {
     const pinId = sidebarAgentPinId(agent);
@@ -1116,12 +1130,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       writeSidebarStringSet(
         browserLocalStorage(),
-        sidebarPinsStorageKey,
+        sidebarAgentPinsStorageKey,
         next,
       );
       return next;
     });
-  }, [agents, sidebarPinsStorageKey]);
+  }, [agents, sidebarAgentPinsStorageKey]);
 
   // --- Render trigger ---
   const [, setRenderTick] = React.useState(0);
@@ -5864,6 +5878,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenCustomPanel={openCustomPanel}
           grouping={experience?.console_config?.agent_list}
           storageNamespace={sidebarStorageNamespace}
+          preferenceScope={sidebarPreferenceScope}
           pinnedAgentIds={pinnedAgentIds}
           onSelect={selectSidebarAgent}
           onTogglePinnedAgent={togglePinnedAgent}

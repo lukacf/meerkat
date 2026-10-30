@@ -717,7 +717,7 @@ mod api_key_tests {
     use super::*;
     use meerkat_auth_core::auth_store::{
         FileLockCoordinator, FileTokenStore, PersistedTokens, ProviderAuthPersistence, TokenKey,
-        TokenStore, TokenStoreError,
+        TokenStore, TokenStoreError, TokenStoreObservation,
     };
     use nix::{
         pty::openpty,
@@ -761,6 +761,14 @@ mod api_key_tests {
     impl TokenStore for HeldStore {
         async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
             self.inner.load(key).await
+        }
+        // Readiness reads status only through observe_status. The trait
+        // default reports NotObserved, so keep the audited file backend's answer.
+        async fn observe_status(
+            &self,
+            key: &TokenKey,
+        ) -> Result<TokenStoreObservation, TokenStoreError> {
+            self.inner.observe_status(key).await
         }
         async fn save(
             &self,

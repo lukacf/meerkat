@@ -853,6 +853,39 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 machine_anchor(
+                    "mob_rotation_target_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/actor/dormant_seat.rs",
+                    "MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "BeginMemberRotationSameSessionRunning",
+                            "CommitMemberRotationSameSessionRunning",
+                            "CommitMemberRotationSameSessionStopped",
+                            "CommitMemberRotationSameSessionKickoffRunning",
+                            "CommitMemberRotationSameSessionKickoffStopped",
+                            "RecoverMemberRotationIntentFreshSessionRunning",
+                            "RecoverMemberRotationIntentSameSessionRunning",
+                            "RecoverMemberRotationIntentDestroyingRunning",
+                        ])
+                        .invariants(&[
+                            "rotation_target_recorded_with_its_intent",
+                            "same_session_rotation_keeps_its_binding",
+                        ]),
+                ),
+                machine_anchor(
+                    "mob_scoped_release_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/actor/member_wake.rs",
+                    "MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing",
+                    CoverageClaims::none().transitions(&[
+                        "ClassifyMemberReleaseStaleRunning",
+                        "ClassifyMemberReleaseStaleStopped",
+                        "ClassifyMemberReleaseStaleCompleted",
+                        "ClassifyMemberReleaseStaleDestroyed",
+                    ]),
+                ),
+                machine_anchor(
                     "mob_flow_fault_topology_escalation_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/flow.rs",

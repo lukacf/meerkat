@@ -364,6 +364,7 @@ mod remote_flow_ticket;
 mod remote_turn_reconciler;
 mod retirement_settlement;
 mod roster_authority;
+mod rotation_intent;
 #[cfg(feature = "runtime-adapter")]
 mod run_drain;
 pub(crate) mod scope_gate;
@@ -568,6 +569,8 @@ pub use retirement_settlement::{
     RetirementStage, ShutdownOptions, ShutdownOptionsError,
 };
 use roster_authority::{RosterAuthority, RosterMutator};
+pub(crate) use rotation_intent::RotationSuccessor;
+pub use rotation_intent::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;

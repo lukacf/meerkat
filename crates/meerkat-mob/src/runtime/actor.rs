@@ -9327,6 +9327,12 @@ pub(super) struct MobActor {
     /// stays owned here until a typed re-drive (explicit or on resume) or a
     /// Shutdown report accounts for it; it is never dropped.
     pub(super) stuck_retirements: BTreeMap<AgentIdentity, retirement_io::StuckRetirement>,
+    /// The rotation each pending rotation intent of MobMachine stands for, by
+    /// identity: the one its retirement's start row records (recovered at a
+    /// start), or the one a durably started rotation left when it settled
+    /// stuck. A re-drive of the identity's retirement plans the rotation's
+    /// next incarnation again from it; the rotation's terminal spends it.
+    pub(super) rotation_records: BTreeMap<AgentIdentity, super::MemberRotationRecord>,
     /// Per-member outcomes of the Shutdown in progress.
     pub(super) shutdown_report: super::MobShutdownReport,
     /// Caller-owned bound of the Shutdown in progress (`ShutdownOptions`).
@@ -29441,10 +29447,11 @@ impl MobActor {
                 }
                 MobCommand::ReleaseMember {
                     agent_identity,
+                    scope,
                     reply_tx,
                 } => {
                     self.inline_step_watchdog.set_step("release_member");
-                    Box::pin(self.handle_release_member(agent_identity, reply_tx)).await;
+                    Box::pin(self.handle_release_member(agent_identity, scope, reply_tx)).await;
                 }
                 MobCommand::StartupMemberRecovered { cause, outcome } => {
                     self.inline_step_watchdog
@@ -29851,11 +29858,17 @@ impl MobActor {
                     agent_identity,
                     initial_message,
                     successor_spec,
+                    same_session,
                     reply_tx,
                 } => {
                     let respawn_identity = agent_identity.clone();
                     match boxed_arm_future(|| {
-                        self.handle_respawn(agent_identity, initial_message, successor_spec)
+                        self.handle_respawn(
+                            agent_identity,
+                            initial_message,
+                            successor_spec,
+                            same_session,
+                        )
                     })
                     .await
                     {
@@ -50164,6 +50177,7 @@ impl MobActor {
                 journal_kind,
                 session_id_for_route.clone(),
                 false,
+                None,
             )
             .await?;
         }
@@ -50599,6 +50613,7 @@ impl MobActor {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
+        same_session: Option<Box<super::MemberRespawn>>,
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
@@ -50608,6 +50623,46 @@ impl MobActor {
         self.reattempt_deferred_member_custody(&agent_identity)
             .await
             .map_err(MobRespawnError::from)?;
+        // A same-session successor (`respawn_member`, and the respawn of an
+        // identity entry's member, whose successor keeps its session): one
+        // machine step that never leaves the identity unseated, finished by
+        // the restarted mob itself after a crash. A worker's respawn keeps
+        // its fresh session below.
+        let entry_member = self
+            .dsl_authority
+            .state()
+            .identity_entry_origins
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
+        if same_session.is_some() || (entry_member && successor_spec.is_none()) {
+            let request = match same_session {
+                Some(request) => *request,
+                None => super::MemberRespawn {
+                    initial_message,
+                    ..super::MemberRespawn::default()
+                },
+            };
+            let rotation = Box::pin(self.plan_member_respawn(&agent_identity, &request))
+                .await
+                .map_err(MobRespawnError::from)?;
+            let (reply, result) = oneshot::channel();
+            Box::pin(self.start_member_respawn(rotation, reply)).await;
+            return Ok(RespawnProgress::DeferredRetirement { result });
+        }
+        if entry_member {
+            // An entry's successor keeps its session, which a successor spec
+            // (a fresh life) cannot: refused before anything is retired.
+            let mode = self
+                .roster
+                .read()
+                .await
+                .get(&agent_identity)
+                .map(|entry| entry.runtime_mode)
+                .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+            return Err(MobRespawnError::from(MobError::UnsupportedForMode {
+                mode,
+                reason: "an identity entry's successor keeps its session: a successor spec, which seats a fresh life, cannot respawn it".to_string(),
+            }));
+        }
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
             boxed_arm_future(|| async {
@@ -63626,6 +63681,7 @@ impl MobActor {
         journal_kind: mob_dsl::MobLifecycleJournalKind,
         session_id: Option<mob_dsl::SessionId>,
         preserve_machine_topology: bool,
+        rotation: Option<super::MemberRotationRecord>,
     ) -> Result<(), MobError> {
         let parse_session = |session_id: mob_dsl::SessionId| {
             SessionId::parse(&session_id.0).map_err(|error| {
@@ -63709,6 +63765,7 @@ impl MobActor {
             session_id,
             retiring_peer_endpoint,
             preserve_machine_topology,
+            rotation: rotation.map(Box::new),
         };
         let append = self
             .events

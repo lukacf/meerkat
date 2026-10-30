@@ -30,6 +30,10 @@ enum SeatPlanMode {
     /// Dormant, owing the kickoff its spec owes, the identity seated now or
     /// not.
     Rotation,
+    /// A same-session rotation's next incarnation (`respawn_member`): seated
+    /// Dormant on the member's own session (the spec resumes it), owing a
+    /// kickoff only for an initial message. The identity is seated.
+    SameSession,
 }
 
 /// A rotation's next incarnation (`rotate_member`): its seat material,
@@ -38,6 +42,53 @@ enum SeatPlanMode {
 pub(super) struct MemberRotation {
     pub(super) candidate: Box<DormantSeatCandidate>,
     pub(super) endpoint: Option<TrustedPeerDescriptor>,
+    /// Where the next incarnation is seated: a new session (a reset, a
+    /// deletion), or the member's own session, which the retirement keeps
+    /// (a same-session successor).
+    pub(super) target: crate::runtime::RotationTarget,
+    /// The spawner the next incarnation keeps: a same-session successor keeps
+    /// the member's. A fresh life names none.
+    pub(super) spawned_by: Option<AgentIdentity>,
+    /// The role the kept session was last built under, when a same-session
+    /// successor takes another one (a declared role migration): the
+    /// session's next build declares it and restamps the session.
+    pub(super) resume_from_role: Option<ProfileName>,
+}
+
+impl MemberRotation {
+    /// The rotation as its retirement's start row records it: enough for a
+    /// restarted mob to plan the same next incarnation again.
+    pub(super) fn record(&self) -> crate::runtime::MemberRotationRecord {
+        let candidate = &self.candidate;
+        crate::runtime::MemberRotationRecord {
+            target: self.target,
+            session_id: candidate.session_id.clone(),
+            peer_endpoint: self.endpoint.clone(),
+            successor: crate::runtime::RotationSuccessor {
+                generation: candidate.generation,
+                profile: candidate.profile_name.clone(),
+                runtime_mode: candidate.runtime_mode,
+                labels: candidate.labels.clone(),
+                continuity_intent: candidate.continuity_intent.clone(),
+                effective_profile_override: candidate.effective_profile_override.clone(),
+                effective_model_override: candidate.effective_model_override.clone(),
+                definition_wiring: candidate.definition_wiring,
+                kickoff_prompt: candidate.kickoff_prompt.clone(),
+                objective_id: candidate
+                    .kickoff_owed
+                    .then_some(candidate.kickoff_objective_id),
+                seat_build_inputs: Some(candidate.seat_build.inputs.clone())
+                    .filter(|inputs| !inputs.is_empty()),
+                spawned_by: self.spawned_by.clone(),
+                resume_from_role: self.resume_from_role.clone(),
+            },
+        }
+    }
+
+    /// Whether the rotation keeps the member's session.
+    pub(super) fn keeps_session(&self) -> bool {
+        self.target == crate::runtime::RotationTarget::SameSession
+    }
 }
 
 /// One seated identity of a chunk, waiting for its plan and its outcome.
@@ -176,8 +227,17 @@ impl MobActor {
             )));
         }
         let launch = match &spec.launch_mode {
-            crate::launch::MemberLaunchMode::Fresh => DormantSeatLaunch::Fresh,
-            crate::launch::MemberLaunchMode::Resume { .. } if mode == SeatPlanMode::Seat => {
+            crate::launch::MemberLaunchMode::Fresh if mode != SeatPlanMode::SameSession => {
+                DormantSeatLaunch::Fresh
+            }
+            crate::launch::MemberLaunchMode::Fresh => {
+                return Err(MobError::Internal(format!(
+                    "the same-session rotation of '{agent_identity}' seats the member's own session: its spec must resume it"
+                )));
+            }
+            crate::launch::MemberLaunchMode::Resume { .. }
+                if mode == SeatPlanMode::Seat || mode == SeatPlanMode::SameSession =>
+            {
                 DormantSeatLaunch::Resume
             }
             crate::launch::MemberLaunchMode::Resume { .. } => {
@@ -348,9 +408,16 @@ impl MobActor {
         // same step, which wakes the next incarnation once and runs exactly
         // once; the rotation of an identity that is not seated is a seat. A
         // resume owes none.
-        let kickoff_owed = launch == DormantSeatLaunch::Fresh
-            && (runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                || spec.initial_message.is_some());
+        // A same-session successor resumes its session: it owes a kickoff only
+        // for an initial message, which runs once on the kept session.
+        let kickoff_owed = match mode {
+            SeatPlanMode::SameSession => spec.initial_message.is_some(),
+            SeatPlanMode::Seat | SeatPlanMode::Rotation => {
+                launch == DormantSeatLaunch::Fresh
+                    && (runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                        || spec.initial_message.is_some())
+            }
+        };
         if kickoff_owed && (mode == SeatPlanMode::Seat || !seated_now) {
             spec.fresh_session_id = Some(fresh_seat_session_id(
                 &self.definition.id,
@@ -907,8 +974,11 @@ impl MobActor {
                 rotation: Box::new(MemberRotation {
                     candidate,
                     endpoint,
+                    target: crate::runtime::RotationTarget::FreshSession,
+                    spawned_by: None,
+                    resume_from_role: None,
                 }),
-                reply,
+                reply: super::retirement_io::RotationReply::Session(reply),
             },
             redrive,
         ))
@@ -930,12 +1000,35 @@ impl MobActor {
         entry: &RosterEntry,
         rotation: &MemberRotation,
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        Ok(
+            Self::apply_member_rotation_transitions(authority, entry, rotation)?
+                .into_iter()
+                .flat_map(mob_dsl::MobMachineTransition::into_effects)
+                .collect(),
+        )
+    }
+
+    /// [`Self::apply_member_rotation_begin`], answering the transitions. The
+    /// first one is the rotation's start when the intent is not recorded yet:
+    /// a FreshSession `BeginMemberRotation` records it on the retirement its
+    /// `Retire` started, and a SameSession one starts the retirement itself
+    /// (its transition journals the retirement's start). A recorded intent
+    /// of the same rotation (a re-drive, or a rotation recovered at a start)
+    /// is kept; any other one refuses this rotation, retryable.
+    pub(super) fn apply_member_rotation_transitions(
+        authority: &mut mob_dsl::MobMachinePreparedAuthority,
+        entry: &RosterEntry,
+        rotation: &MemberRotation,
+    ) -> Result<Vec<mob_dsl::MobMachineTransition>, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let next_session = mob_dsl::SessionId::from_domain(&rotation.candidate.session_id);
+        let target = rotation.target.to_machine();
         let state = authority.state();
         let mut inputs = Vec::with_capacity(2);
         match state.member_rotation_session_ids.get(&dsl_identity) {
-            Some(recorded) if recorded == &next_session => {}
+            Some(recorded)
+                if recorded == &next_session
+                    && state.member_rotation_targets.get(&dsl_identity) == Some(&target) => {}
             Some(_) => {
                 return Err(MobError::LifecycleOperationPending {
                     intent: format!("rotation of member {}", entry.agent_identity),
@@ -947,12 +1040,19 @@ impl MobActor {
                 fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
                 generation: mob_dsl::Generation::from_domain(entry.generation),
                 session_id: next_session,
-                peer_endpoint: rotation
-                    .endpoint
-                    .as_ref()
-                    .map(mob_dsl::MemberPeerEndpoint::from),
-                // An archived session was answered at preparation, typed.
+                // A same-session successor keeps the member's own endpoint.
+                peer_endpoint: if rotation.keeps_session() {
+                    None
+                } else {
+                    rotation
+                        .endpoint
+                        .as_ref()
+                        .map(mob_dsl::MemberPeerEndpoint::from)
+                },
+                // An archived session was answered at preparation (a fresh
+                // seat's) or at the plan (the member's own), typed.
                 session_archived: false,
+                target,
             }),
         }
         // Under the rotation's intent the granting arm records the
@@ -973,10 +1073,7 @@ impl MobActor {
             &rotation.candidate.authorized,
             "begin_member_rotation",
         )?;
-        Ok(transitions
-            .into_iter()
-            .flat_map(mob_dsl::MobMachineTransition::into_effects)
-            .collect())
+        Ok(transitions)
     }
 
     /// [`Self::apply_member_rotation_begin`] on its own, for a rotation
@@ -993,6 +1090,277 @@ impl MobActor {
             authority,
             effects,
             phase_changed: false,
+        })
+    }
+
+    /// Plan a same-session successor of `agent_identity`
+    /// (`respawn_member`, and `respawn` of an identity entry's member): its
+    /// next incarnation, seated Dormant at the next generation on the
+    /// member's own session, with the member's labels, overrides, wiring
+    /// exemption, continuity and spawner, and the profile and runtime mode
+    /// `request` names or the member's own. Refused typed, before anything
+    /// starts, for a member a same-session successor cannot serve: a placed
+    /// member (its member host owns its materialization), a member bound to
+    /// no session (a peer-only member), a member on a service that keeps no
+    /// durable sessions (its session ends with its runtime), and a member
+    /// whose session is lost or archived. A member whose retirement started
+    /// is planned only when that retirement is this very rotation (a
+    /// re-drive of the same successor).
+    pub(super) async fn plan_member_respawn(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        request: &crate::runtime::MemberRespawn,
+    ) -> Result<MemberRotation, MobError> {
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(agent_identity)
+            .cloned()
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        let mode = entry.runtime_mode;
+        let unsupported = |reason: &str| MobError::UnsupportedForMode {
+            mode,
+            reason: reason.to_string(),
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        if super::super::member_runtime_is_host_owned(self.dsl_authority.state(), agent_identity) {
+            return Err(unsupported(
+                "a placed member's materialization is owned by its member host: it has no same-session successor",
+            ));
+        }
+        // The successor's predecessor runtime is released and its session
+        // kept: only a runtime-backed member's can be.
+        #[cfg(feature = "runtime-adapter")]
+        let runtime_backed = self.runtime_adapter.is_some();
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_backed = false;
+        if !runtime_backed {
+            return Err(unsupported(
+                "a same-session successor releases the member's runtime and keeps its session: it needs a runtime-backed member",
+            ));
+        }
+        // A fork's lineage (its source, its fork job) and a forked
+        // participant attachment belong to the incarnation that holds them.
+        if entry.fork_source.is_some() || entry.fork_job.is_some() {
+            return Err(unsupported(
+                "a fork-derived member has no same-session successor: respawn it",
+            ));
+        }
+        if self
+            .runtime_metadata
+            .list_forked_participant_member_associations(&self.definition.id)
+            .await?
+            .iter()
+            .any(|record| &record.agent_identity == agent_identity)
+        {
+            return Err(unsupported(
+                "a member holding a forked participant attachment has no same-session successor",
+            ));
+        }
+        let state = self.dsl_authority.state();
+        let bound = state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .map(|session| SessionId::parse(&session.0))
+            .transpose()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "'{agent_identity}' holds an invalid session binding: {error}"
+                ))
+            })?;
+        let Some(session_id) =
+            bound.filter(|bound| entry.member_ref.bridge_session_id() == Some(bound))
+        else {
+            return Err(unsupported(
+                "a member bound to no session of its own has no same-session successor",
+            ));
+        };
+        let retiring = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .and_then(|runtime_id| state.member_state_markers.get(runtime_id))
+            == Some(&mob_dsl::MobMemberState::Retiring);
+        let same_session_intent = state.member_rotation_targets.get(&dsl_identity)
+            == Some(&mob_dsl::RotationTarget::SameSession);
+        if retiring && !same_session_intent {
+            return Err(MobError::LifecycleOperationPending {
+                intent: format!("retirement member {agent_identity}"),
+            });
+        }
+        if !self.session_service.supports_persistent_sessions() {
+            return Err(unsupported(
+                "a same-session successor keeps the member's session, which a service that keeps no durable sessions ends with its runtime",
+            ));
+        }
+        // A seat session no build created yet stays unborn: the successor's
+        // first wake creates it. Any other session must be there to keep.
+        let unborn =
+            super::super::boot_plan::domain_member_seat_session_unborn(state, agent_identity);
+        if !unborn
+            && !super::member_session_present(self.session_service.as_ref(), &session_id).await?
+        {
+            return Err(unsupported(
+                "the member's session is lost or archived: a same-session successor cannot keep it",
+            ));
+        }
+        let role = request
+            .profile
+            .clone()
+            .unwrap_or_else(|| entry.role.clone());
+        // The next incarnation declares the role its kept session was last
+        // built under, when it takes another one (a declared role migration,
+        // or an earlier one no build applied yet): the session's next build
+        // restamps it. A session no build created has none.
+        let resume_from_role = if unborn {
+            None
+        } else {
+            super::super::fork_build::stored_member_role(self.session_service.as_ref(), &session_id)
+                .await?
+                .filter(|stored| stored != &role)
+        };
+        let mut spec =
+            super::super::handle::SpawnMemberSpec::new(role.clone(), agent_identity.clone());
+        spec.runtime_mode = Some(request.runtime_mode.unwrap_or(entry.runtime_mode));
+        spec.labels = Some(entry.labels.clone());
+        // The member's own overrides apply to its own role; a declared role
+        // migration resolves the new role from the definition.
+        if role == entry.role {
+            spec.override_profile = entry.effective_profile_override.clone();
+            spec.model_override = entry.effective_model_override.clone();
+        }
+        spec.definition_wiring = entry.definition_wiring;
+        spec.continuity_intent = self
+            .roster
+            .read()
+            .await
+            .spawn_continuity_intent(agent_identity)
+            .cloned()
+            .unwrap_or_default();
+        spec.initial_message = request.initial_message.clone();
+        spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: session_id,
+            resume_from_role: None,
+        };
+        let DormantSeatPlanEntry::Seat(mut candidate) = self
+            .plan_dormant_seat(spec, SeatPlanMode::SameSession, None)
+            .await?
+        else {
+            return Err(MobError::Internal(format!(
+                "the same-session successor of '{agent_identity}' planned no seat"
+            )));
+        };
+        candidate.session_unborn = unborn;
+        Ok(MemberRotation {
+            candidate,
+            endpoint: None,
+            target: crate::runtime::RotationTarget::SameSession,
+            spawned_by: entry.spawned_by,
+            resume_from_role,
+        })
+    }
+
+    /// Start a same-session successor ([`Self::plan_member_respawn`]): the
+    /// member's retirement, whose start records the rotation
+    /// (`BeginMemberRotation`, target SameSession) and whose terminal seats
+    /// the next incarnation on the kept session (`CommitMemberRotation`).
+    /// The caller is answered with the successor's receipt once the
+    /// retirement settles. A stuck retirement of the identity is re-driven.
+    pub(super) async fn start_member_respawn(
+        &mut self,
+        rotation: MemberRotation,
+        reply: oneshot::Sender<
+            Result<
+                super::super::handle::MemberRespawnReceipt,
+                super::super::handle::MobRespawnError,
+            >,
+        >,
+    ) {
+        let identity = rotation.candidate.agent_identity.clone();
+        let redrive = self.stuck_retirements.contains_key(&identity);
+        Box::pin(self.start_retirement(
+            identity,
+            Instant::now() + super::super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
+            None,
+            super::retirement_io::RetirementReply::Rotate {
+                rotation: Box::new(rotation),
+                reply: super::retirement_io::RotationReply::Respawn(reply),
+            },
+            redrive,
+        ))
+        .await;
+    }
+
+    /// The rotation a recovered retirement start row records, planned again
+    /// for its re-drive: the same next incarnation (generation and session)
+    /// the row recorded, whose profile authority the re-drive grants again
+    /// under the recovered intent. A plan that names another incarnation
+    /// refuses the re-drive, which stays owned and reported.
+    pub(super) async fn rotation_from_record(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        record: &crate::runtime::MemberRotationRecord,
+    ) -> Result<MemberRotation, MobError> {
+        let successor = &record.successor;
+        let mut spec = super::super::handle::SpawnMemberSpec::new(
+            successor.profile.clone(),
+            agent_identity.clone(),
+        );
+        spec.runtime_mode = Some(successor.runtime_mode);
+        spec.labels = Some(successor.labels.clone());
+        spec.override_profile = successor.effective_profile_override.clone();
+        spec.model_override = successor.effective_model_override.clone();
+        spec.definition_wiring = successor.definition_wiring;
+        spec.continuity_intent = successor.continuity_intent.clone();
+        spec.initial_message = successor.kickoff_prompt.clone();
+        spec.objective_id = successor.objective_id;
+        if let Some(inputs) = &successor.seat_build_inputs {
+            SeatBuild {
+                inputs: inputs.clone(),
+                local: SeatLocalBuildInputs::default(),
+            }
+            .apply_to(&mut spec);
+        }
+        let mode = match record.target {
+            crate::runtime::RotationTarget::FreshSession => SeatPlanMode::Rotation,
+            crate::runtime::RotationTarget::SameSession => {
+                spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
+                    bridge_session_id: record.session_id.clone(),
+                    resume_from_role: None,
+                };
+                SeatPlanMode::SameSession
+            }
+        };
+        let DormantSeatPlanEntry::Seat(mut candidate) =
+            self.plan_dormant_seat(spec, mode, None).await?
+        else {
+            return Err(MobError::Internal(format!(
+                "the recovered rotation of '{agent_identity}' planned no seat"
+            )));
+        };
+        if candidate.generation != successor.generation || candidate.session_id != record.session_id
+        {
+            return Err(MobError::Internal(format!(
+                "the recovered rotation of '{agent_identity}' recorded generation {} on session {}, and its re-drive plans generation {} on session {}",
+                successor.generation, record.session_id, candidate.generation, candidate.session_id,
+            )));
+        }
+        candidate.session_unborn = match record.target {
+            // A fresh rotation's next session is created by its first wake.
+            crate::runtime::RotationTarget::FreshSession => true,
+            crate::runtime::RotationTarget::SameSession => {
+                super::super::boot_plan::domain_member_seat_session_unborn(
+                    self.dsl_authority.state(),
+                    agent_identity,
+                )
+            }
+        };
+        Ok(MemberRotation {
+            candidate,
+            endpoint: record.peer_endpoint.clone(),
+            target: record.target,
+            spawned_by: successor.spawned_by.clone(),
+            resume_from_role: successor.resume_from_role.clone(),
         })
     }
 
@@ -1047,12 +1415,15 @@ impl MobActor {
         }
     }
 
-    /// The rotation's archive terminal: the current incarnation retired
-    /// and the next one seated Dormant on the recorded session and endpoint,
-    /// in one transition. The next incarnation holds none of its
-    /// predecessor's edges and is wired to the edges its definition declares
-    /// in the same step (see `seat_wiring`). Its `MemberRetired`,
-    /// `MemberSpawned` and `MembersWired` rows go to the journal in one
+    /// The rotation's terminal: the current incarnation retired and the
+    /// next one seated Dormant in one transition. A FreshSession rotation
+    /// seats it on the recorded session and endpoint: the next incarnation
+    /// holds none of its predecessor's edges and is wired to the edges its
+    /// definition declares in the same step (see `seat_wiring`). A
+    /// SameSession rotation seats it on the member's own session, which the
+    /// retirement kept, with the member's endpoint and wiring edges. The
+    /// `MemberRetired` and `MemberSpawned` rows (and a FreshSession
+    /// rotation's `MembersWired` rows) go to the journal in one
     /// `append_batch` before the commit, so the identity is never a
     /// non-member, nor a member without its declared edges. The roster takes
     /// the next incarnation at once.
@@ -1167,13 +1538,31 @@ impl MobActor {
         } else {
             None
         };
-        // The next incarnation's boot verdict, in the same step. Its session
-        // is new and empty, so it holds no runtime work; a kickoff it owes
+        // The next incarnation's boot verdict, in the same step. A fresh
+        // rotation's session is new and empty, so it holds no runtime work;
+        // a same-session successor's session may hold the work its
+        // predecessor's release kept (its carried queued inputs), which one
+        // runtime obligation scan of the identity reads. A kickoff it owes
         // makes the verdict Wake. A stopped mob plans it at its lift.
         if authority.state().lifecycle_phase == mob_dsl::MobPhase::Running {
+            #[cfg(feature = "runtime-adapter")]
+            let obligations = if rotation.keeps_session() {
+                super::super::boot_plan::scan_boot_obligations_among(
+                    self.runtime_adapter.as_ref(),
+                    authority.state(),
+                    Some(&BTreeSet::from([dsl_identity.clone()])),
+                    &self.definition.id,
+                    self.incarnation.incarnation(),
+                )
+                .await?
+            } else {
+                super::super::boot_plan::BootObligations::none()
+            };
+            #[cfg(not(feature = "runtime-adapter"))]
+            let obligations = super::super::boot_plan::BootObligations::none();
             let plan = super::super::boot_plan::boot_materialization_input(
                 &dsl_identity,
-                &super::super::boot_plan::BootObligations::none(),
+                &obligations,
                 &self.member_residency.host_required,
                 &BTreeSet::new(),
             );
@@ -1207,33 +1596,77 @@ impl MobActor {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // CommitMemberRotation ends every edge of the retired incarnation;
-        // the next one is wired to the edges its definition declares, as a
-        // spawn of it would be, in this same step and append.
+        // CommitMemberRotation ends every edge of the retired incarnation of
+        // a fresh rotation; its next one is wired to the edges its definition
+        // declares, as a spawn of it would be, in this same step and append.
+        // A same-session successor keeps the member's edges, and its
+        // endpoint, as they are.
         let mut wired_rows = Vec::new();
-        let declared_edges = self
-            .stage_seated_declared_edges(
-                &mut authority,
-                &[(identity.clone(), rotation.endpoint.clone())],
-                &mut effects,
-                &mut wired_rows,
+        let declared_edges = if rotation.keeps_session() {
+            None
+        } else {
+            Some(
+                self.stage_seated_declared_edges(
+                    &mut authority,
+                    &[(identity.clone(), rotation.endpoint.clone())],
+                    &mut effects,
+                    &mut wired_rows,
+                )
+                .await?,
             )
-            .await?;
+        };
+        // The kept session of a same-session successor stays unborn exactly
+        // when no build created it yet (MobMachine's fact): its first wake
+        // creates it with what its seat rows journaled. A fresh rotation's
+        // next session is unborn.
+        let seat_session_unborn = !rotation.keeps_session()
+            || super::super::boot_plan::domain_member_seat_session_unborn(
+                authority.state(),
+                identity,
+            );
         let prepared = PreparedDslInput {
             authority,
             effects,
-            phase_changed: phase_changed || declared_edges.phase_changed,
+            phase_changed: phase_changed
+                || declared_edges
+                    .as_ref()
+                    .is_some_and(|staged| staged.phase_changed),
         };
         // The next incarnation is the same member's runtime successor, as a
         // respawn's is: it keeps the creation the retiring incarnation's own
         // session recorded (the same creation id, Successor provenance). The
-        // rotation spec's origin names a fresh member, which it is not.
-        let creation = self
-            .roster
-            .read()
-            .await
-            .successor_creation_witness(entry)
-            .successor_record(&candidate.session_id);
+        // rotation spec's origin names a fresh member, which it is not. A
+        // same-session successor's session keeps the creation it recorded.
+        let creation = if rotation.keeps_session() {
+            match self
+                .roster
+                .read()
+                .await
+                .member_creation_for_session(&candidate.session_id)
+            {
+                Ok(Some(previous)) if previous.member_binding.member == identity.as_str() => {
+                    previous.creation
+                }
+                _ => crate::MemberCreationRecord {
+                    creation_id: Some(crate::MemberCreationId::new()),
+                    provenance: crate::MemberCreationProvenance::Unproven,
+                },
+            }
+        } else {
+            self.roster
+                .read()
+                .await
+                .successor_creation_witness(entry)
+                .successor_record(&candidate.session_id)
+        };
+        // A same-session successor keeps the member's endpoint, which its row
+        // records again for replay; a fresh rotation's row records the next
+        // session's.
+        let endpoint = if rotation.keeps_session() {
+            self.machine_member_peer_spec_for(identity, "same-session successor endpoint")?
+        } else {
+            rotation.endpoint.clone()
+        };
         let mut spawned = crate::event::MemberSpawnedEvent::new(
             identity.clone(),
             next_generation,
@@ -1244,14 +1677,16 @@ impl MobActor {
         .with_bridge_member_ref(Some(MemberRef::Session {
             session_id: candidate.session_id.clone(),
         }))
-        .with_member_peer_endpoint(rotation.endpoint.clone())
+        .with_member_peer_endpoint(endpoint)
         .with_kickoff_prompt(candidate.kickoff_prompt.clone())
-        // The next incarnation's session is unborn (CommitMemberRotation
+        // A fresh rotation's next session is unborn (CommitMemberRotation
         // records it so): its first wake creates it, applying what the
-        // rotation's spec named.
-        .with_seat_session_unborn(true)
+        // rotation's spec named. A same-session successor names no build
+        // inputs of its own.
+        .with_seat_session_unborn(seat_session_unborn)
         .with_seat_build_inputs(
-            Some(candidate.seat_build.inputs.clone()).filter(|inputs| !inputs.is_empty()),
+            Some(candidate.seat_build.inputs.clone())
+                .filter(|inputs| !inputs.is_empty() && !rotation.keeps_session()),
         );
         spawned.creation = creation;
         spawned.runtime_mode = candidate.runtime_mode;
@@ -1260,6 +1695,9 @@ impl MobActor {
         spawned.effective_profile_override = candidate.effective_profile_override.clone();
         spawned.effective_model_override = candidate.effective_model_override.clone();
         spawned.definition_wiring = candidate.definition_wiring;
+        // The successor keeps its spawner; a fresh life names none.
+        spawned.spawned_by = rotation.spawned_by.clone();
+        let spawned = spawned.with_resume_from_role(rotation.resume_from_role.clone());
         // Durable: the rotation keeps the identity's standing, and the next
         // incarnation's row records the identity entry MobMachine holds for
         // it, so replay (which ends the entry with the retired incarnation)
@@ -1335,7 +1773,9 @@ impl MobActor {
         // The next incarnation's declared edges are committed with it: the
         // live ends trust its recorded endpoint now, and any edge with a
         // placed or peer-only end takes the single-edge wire path.
-        Box::pin(self.realize_staged_declared_edges(declared_edges)).await;
+        if let Some(declared_edges) = declared_edges {
+            Box::pin(self.realize_staged_declared_edges(declared_edges)).await;
+        }
         Ok(())
     }
 }

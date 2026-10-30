@@ -392,6 +392,7 @@ pub use runtime::{
 pub use runtime::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook,
 };
+pub use runtime::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

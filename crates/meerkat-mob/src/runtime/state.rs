@@ -849,6 +849,11 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
+        /// A same-session successor's request
+        /// ([`super::handle::MobHandle::respawn_member`]): the member's next
+        /// incarnation keeps its session. `None` is `respawn`, which an
+        /// identity entry's member takes on its own session too.
+        same_session: Option<Box<super::MemberRespawn>>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
         >,
@@ -985,10 +990,14 @@ pub(super) enum MobCommand {
         edge: super::actor::member_wake::MemberWiringEdge,
     },
     /// Release a live member's materialization, keeping it seated
-    /// ([`super::handle::MobHandle::release_member`]).
+    /// ([`super::handle::MobHandle::release_member`]). With a scope
+    /// ([`super::handle::MobHandle::release_member_at_scope`]) only the
+    /// scope's incarnation is released: MobMachine answers any other one
+    /// Stale, and nothing is released.
     ReleaseMember {
         agent_identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        scope: Option<Box<super::MemberDeliveryScope>>,
+        reply_tx: oneshot::Sender<Result<super::ReleaseOutcome, MobError>>,
     },
     /// Internal re-entry carrying the settled recovery, and the readiness
     /// step, of one member a Running start left out (a stopped registration

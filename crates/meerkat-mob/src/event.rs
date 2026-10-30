@@ -221,7 +221,10 @@ impl<'de> Deserialize<'de> for MemberRef {
 // may also carry the internal `identity_entry` origin of an identity entry's
 // member (the binding row of a legacy adoption carries it on the unchanged
 // session); a reader that predates it ignores it, so the member reads as an
-// ordinary member there.
+// ordinary member there. A stored `MemberRetirementStarted` may also carry the
+// internal `rotation` record of the rotation the retirement carries out; a
+// reader that predates it ignores it and replays the retirement as a plain
+// one.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -534,6 +537,15 @@ pub enum MobEventKind {
         /// has not committed yet. Ordinary retire/destroy leaves this false.
         #[serde(skip, default)]
         preserve_machine_topology: bool,
+        /// The rotation this retirement carries out (a reset, a deletion, a
+        /// same-session successor): its target, its next session and
+        /// endpoint, and what its next incarnation is seated with. Replay
+        /// records the rotation again, so the restarted mob finishes it with
+        /// no host record. Stored only by the internal event codec; a reader
+        /// that predates it ignores it and replays the retirement as a plain
+        /// one, and journals written before it decode it as absent.
+        #[serde(skip, default)]
+        rotation: Option<Box<crate::runtime::MemberRotationRecord>>,
     },
     /// A peer-only member runtime has acknowledged retirement, while
     /// supervisor revocation and terminal member archival are still pending.
@@ -1155,6 +1167,16 @@ pub struct MemberSpawnedEvent {
     /// decode it as absent.
     #[serde(skip, default)]
     pub(crate) identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The role the session this row seats its member on was last built
+    /// under, when the member takes another role there: a same-session
+    /// successor's declared role migration
+    /// ([`crate::runtime::MemberRespawn::profile`]). The session's next
+    /// build declares it (`MemberLaunchMode::Resume::resume_from_role`) and
+    /// restamps the session to the member's role. Stored only by the
+    /// internal event codec; a reader that predates it ignores it, and
+    /// journals written before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) resume_from_role: Option<ProfileName>,
 }
 
 impl MemberSpawnedEvent {
@@ -1191,7 +1213,17 @@ impl MemberSpawnedEvent {
             seat_session_unborn: false,
             seat_build_inputs: None,
             identity_entry: None,
+            resume_from_role: None,
         }
+    }
+
+    pub(crate) fn with_resume_from_role(mut self, resume_from_role: Option<ProfileName>) -> Self {
+        self.resume_from_role = resume_from_role;
+        self
+    }
+
+    pub(crate) fn resume_from_role(&self) -> Option<&ProfileName> {
+        self.resume_from_role.as_ref()
     }
 
     pub(crate) fn with_identity_entry(
@@ -1410,7 +1442,7 @@ impl MemberSessionBindingRecoveredEvent {
     }
 }
 
-fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
+pub(crate) fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
     matches!(intent, crate::runtime::SpawnContinuityIntent::Ephemeral)
 }
 
@@ -1455,6 +1487,14 @@ impl MobEventKind {
                     unborn: false,
                 })
             }
+            _ => None,
+        }
+    }
+
+    /// The rotation a retirement start row records, if any.
+    pub(crate) fn retirement_rotation(&self) -> Option<&crate::runtime::MemberRotationRecord> {
+        match self {
+            Self::MemberRetirementStarted { rotation, .. } => rotation.as_deref(),
             _ => None,
         }
     }
@@ -1602,6 +1642,21 @@ impl MobEventKind {
             )),
         }
     }
+
+    pub(crate) fn set_retirement_rotation(
+        &mut self,
+        record: crate::runtime::MemberRotationRecord,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::MemberRetirementStarted { rotation, .. } => {
+                *rotation = Some(Box::new(record));
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored rotation belongs only to MemberRetirementStarted",
+            )),
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -1720,6 +1775,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             Value::String(identity_entry.as_stored().to_string()),
         );
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(resume_from_role) = member_spawned.resume_from_role()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "resume_from_role".to_string(),
+            serde_json::to_value(resume_from_role)?,
+        );
+    }
     if let Some((agent_identity, generation, agent_runtime_id, fence_token)) =
         event.kind.respawn_topology_abandoned_correlation()
     {
@@ -1771,6 +1835,11 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             "preserve_machine_topology".to_string(),
             serde_json::to_value(true)?,
         );
+    }
+    if let Some(rotation) = event.kind.retirement_rotation()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("rotation".to_string(), serde_json::to_value(rotation)?);
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -1919,6 +1988,18 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<String>)
         .transpose()?
         .and_then(|token| crate::runtime::IdentityEntryOrigin::from_stored(&token));
+    let spawned_resume_from_role = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("resume_from_role")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<ProfileName>)
+        .transpose()?;
     let recovered_bridge_session_id = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2005,6 +2086,20 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or(false);
+    // A rotation record this build cannot read replays as no record: the
+    // retirement then replays as a plain one, as a reader that predates the
+    // record replays it.
+    let retirement_rotation = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_retirement_started") {
+                kind.remove("rotation")
+            } else {
+                None
+            }
+        })
+        .and_then(crate::runtime::MemberRotationRecord::from_stored);
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2066,6 +2161,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
             recovered.identity_entry = Some(identity_entry);
         }
     }
+    if let Some(resume_from_role) = spawned_resume_from_role
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.resume_from_role = Some(resume_from_role);
+    }
     if let Some((agent_runtime_id, fence_token)) = respawn_topology_abandoned_private {
         event
             .kind
@@ -2080,6 +2180,9 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         event
             .kind
             .set_preserve_machine_topology(preserve_machine_topology)?;
+    }
+    if let Some(rotation) = retirement_rotation {
+        event.kind.set_retirement_rotation(rotation)?;
     }
     Ok(event)
 }
@@ -2821,6 +2924,104 @@ mod tests {
         }
     }
 
+    /// The rotation a retirement carries out rides its start row as an
+    /// internal field: the stored row carries it, the public payload never
+    /// does, a reader that predates it parses the row, and a row without it
+    /// or with a record this build cannot read decodes as a plain start.
+    #[test]
+    fn stored_rotation_record_roundtrips_on_the_retirement_start_and_stays_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("rotating-identity");
+        let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let record = crate::runtime::MemberRotationRecord {
+            target: crate::runtime::RotationTarget::SameSession,
+            session_id: sid.clone(),
+            peer_endpoint: None,
+            successor: crate::runtime::RotationSuccessor {
+                generation: Generation::new(2),
+                profile: ProfileName::from("worker"),
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                labels: BTreeMap::from([("team".to_string(), "blue".to_string())]),
+                continuity_intent: crate::runtime::SpawnContinuityIntent::DurableIdentity {
+                    continuity_key: identity.as_str().to_string(),
+                },
+                effective_profile_override: None,
+                effective_model_override: None,
+                definition_wiring: crate::DefinitionWiring::Applies,
+                kickoff_prompt: Some("pick up where you left off".into()),
+                objective_id: None,
+                seat_build_inputs: None,
+                spawned_by: Some(AgentIdentity::from("spawner")),
+                resume_from_role: Some(ProfileName::from("lead")),
+            },
+        };
+        let mut kind = MobEventKind::MemberRetirementStarted {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id,
+            generation: Generation::new(1),
+            role: ProfileName::from("worker"),
+            releasing: None,
+            session_id: Some(sid.clone()),
+            retiring_peer_endpoint: None,
+            preserve_machine_topology: false,
+            rotation: None,
+        };
+        kind.set_retirement_rotation(record.clone())
+            .expect("a retirement start carries a rotation");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind,
+        };
+        let public = serde_json::to_value(&event).expect("public event payload");
+        assert!(
+            public["kind"].get("rotation").is_none(),
+            "the public event never carries the rotation"
+        );
+        let encoded = encode_stored_mob_event(&event).expect("encode");
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"]["rotation"]["target"],
+            serde_json::json!("same_session"),
+            "the stored row carries the rotation"
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode").kind;
+        assert_eq!(decoded.retirement_rotation(), Some(&record));
+
+        // A reader that predates the field parses the row and ignores it.
+        let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
+            .expect("a payload with the unknown key still parses");
+        assert_eq!(older_reader.cursor, 1);
+
+        for (replacement, label) in [
+            (None, "a row written before the field"),
+            (
+                Some(serde_json::json!({ "target": "a_later_target" })),
+                "a record a later release wrote",
+            ),
+        ] {
+            let mut variant = stored.clone();
+            let kind = variant
+                .get_mut("event")
+                .and_then(|event| event.get_mut("kind"))
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("stored kind object");
+            kind.remove("rotation");
+            if let Some(record) = replacement {
+                kind.insert("rotation".to_string(), record);
+            }
+            let bytes = serde_json::to_vec(&variant).expect("encode variant");
+            let decoded = decode_stored_mob_event(&bytes)
+                .expect("decode variant")
+                .kind;
+            assert!(
+                decoded.retirement_rotation().is_none(),
+                "{label} decodes as a plain retirement start"
+            );
+        }
+    }
+
     #[test]
     fn test_stored_v9_member_spawned_without_peer_endpoint_decodes_to_none() {
         let sid = SessionId::from_uuid(Uuid::nil());
@@ -3419,6 +3620,7 @@ mod tests {
                 .expect("retiring peer endpoint"),
             ),
             preserve_machine_topology: true,
+            rotation: None,
         };
         let public_value = serde_json::to_value(&event).expect("serialize retirement-start event");
         let public_json = serde_json::to_string(&public_value).expect("render retirement-start");

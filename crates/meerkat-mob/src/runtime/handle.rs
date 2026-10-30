@@ -8749,6 +8749,7 @@ impl MobHandle {
                         agent_identity,
                         initial_message,
                         successor_spec,
+                        same_session: None,
                         reply_tx,
                     })
                     .await?;
@@ -9672,15 +9673,21 @@ impl MobHandle {
     /// [`Self::seat_dormant_members`] does. Refused typed unless the mob is
     /// Running; a refused rotation retires nothing.
     ///
-    /// The rotation's intent lives in this process until its terminal step.
-    /// A host that may crash between the call and its answer must record its
-    /// own intent durably, and on its next start pass the identity to
-    /// [`super::MobBuilder::with_host_pending_members`] and call this again
-    /// with the same spec: the restarted mob does not finish the interrupted
-    /// retirement as a plain one while the identity is host-pending, and the
-    /// re-issued rotation re-seats it on the same name-based session (the
-    /// same generation always names the same session). A host that does not
-    /// may find the identity retired, not rotated, after such a crash. Needs
+    /// The rotation is durable from its start: the retirement's start row
+    /// records it (its next session and endpoint, and what its next
+    /// incarnation is seated with), so a mob restarted after a crash at any
+    /// point records the rotation again and finishes it itself, on the same
+    /// name-based session (the same generation always names the same
+    /// session). No host record is needed. A host that keeps one passes the
+    /// identity host-pending ([`super::MobBuilder::with_host_pending_members`])
+    /// and calls this again after the restart: the restarted mob leaves that
+    /// rotation to the call, which finishes it once. While the rotation
+    /// stands, a call with the same spec re-drives it (a stuck one included)
+    /// and answers its session; a call that names another next session, and
+    /// a call for a member whose retirement started without a rotation
+    /// (unless the member is host-pending), are refused retryable
+    /// ([`MobError::LifecycleOperationPending`]) before anything starts. A
+    /// call made after the rotation finished rotates the member again. Needs
     /// the members' comms transport, as [`Self::seat_dormant_members`] does.
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
         use super::dormant_seat::DormantSeatCommitEntry;
@@ -14269,9 +14276,18 @@ impl MobHandle {
     /// [`MobError::RespawnPredecessorRestrictionsUnavailable`] before
     /// anything is retired, and the member keeps running.
     ///
-    /// This is a helper convenience over primitive mob behavior, not a
-    /// machine-owned primitive. Returns a receipt on full success, or a
-    /// structured error on failure. No rollback is attempted after retire.
+    /// The member of an identity entry is respawned on its own session, as
+    /// [`Self::respawn_member`] respawns it (with `initial_message` as its
+    /// initial message): one machine step that never leaves the identity
+    /// unseated, which a restarted mob finishes itself after a crash. Its
+    /// successor keeps its session and so the restrictions the session
+    /// records. Such a member is refused typed when a same-session successor
+    /// cannot serve it (see [`Self::respawn_member`]).
+    ///
+    /// A worker member's respawn is a helper convenience over primitive mob
+    /// behavior, not a machine-owned primitive: its successor gets a new
+    /// session. Returns a receipt on full success, or a structured error on
+    /// failure. No rollback is attempted after retire.
     pub async fn respawn(
         &self,
         identity: AgentIdentity,
@@ -14312,6 +14328,10 @@ impl MobHandle {
     /// that means to widen retires the member and spawns a new one. A refusal
     /// ([`MobError::RespawnPredecessorRestrictionsUnavailable`]) comes before
     /// anything is retired and keeps the member.
+    ///
+    /// The member of an identity entry is refused
+    /// ([`MobError::UnsupportedForMode`]) before anything starts: its respawn
+    /// keeps its session ([`Self::respawn_member`], [`Self::respawn`]).
     pub async fn respawn_with_successor_spec(
         &self,
         successor_spec: SpawnMemberSpec,
@@ -14330,6 +14350,66 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             ))),
         }
+    }
+
+    /// Respawn `identity`'s member on its own session: its current
+    /// incarnation is retired and its next one is seated Dormant at the next
+    /// generation on the SAME session, in one MobMachine step whose two
+    /// journal rows are appended in one batch, so the identity is never a
+    /// non-member. The retirement's start row records the rotation, so a
+    /// crash at any point is finished by the restarted mob itself, with no
+    /// host record.
+    ///
+    /// The next incarnation keeps the member's conversation (its session),
+    /// comms identity and endpoint, wiring edges, labels, spawner, wiring
+    /// exemption and continuity, and the profile and runtime mode the member
+    /// has unless `request` names others (a declared role migration, a
+    /// runtime-mode restamp). The member's own profile and model overrides
+    /// apply to its own profile only. Its in-flight turn is cancelled. Its
+    /// session's queued inputs are handed to the next incarnation: when the
+    /// session commits each round, the eligible ones (durable prompts not
+    /// bound to an objective) are kept and run on the next incarnation's
+    /// first wake, which the handover owes, and their waiters are answered
+    /// [`super::BoundedTurnFailure::RequeuedAcrossStop`]; every other input
+    /// ends stopped, typed. An initial message runs once as the next
+    /// incarnation's first turn on the kept session. With `request.wake`,
+    /// the next incarnation is woken before the call answers
+    /// ([`Self::ensure_member_live`]); a wake that fails is answered after
+    /// the successor is seated, and the member stays seated Dormant.
+    ///
+    /// Refused typed ([`MobError::UnsupportedForMode`]) before anything
+    /// starts for a member a same-session successor cannot serve: a placed
+    /// member, a member bound to no session of its own, a member that is not
+    /// runtime-backed or whose service keeps no durable sessions, a member
+    /// whose session is lost or archived, a fork-derived member, and a
+    /// member holding a forked participant attachment. A member whose
+    /// retirement is in flight is refused retryable
+    /// ([`MobError::LifecycleOperationPending`]); a call that finds this
+    /// rotation itself stuck re-drives it.
+    pub async fn respawn_member(
+        &self,
+        identity: AgentIdentity,
+        request: super::MemberRespawn,
+    ) -> Result<MemberRespawnReceipt, MobError> {
+        let wake = request.wake;
+        let agent_identity = identity.clone();
+        let receipt = self
+            .send_actor_command(move |reply_tx| MobCommand::Respawn {
+                agent_identity,
+                initial_message: None,
+                successor_spec: None,
+                same_session: Some(Box::new(request)),
+                reply_tx,
+            })
+            .await?
+            .map_err(|error| match error {
+                MobRespawnError::Mob(error) => error,
+                other => MobError::Internal(other.to_string()),
+            })?;
+        if wake {
+            self.ensure_member_live(&identity).await?;
+        }
+        Ok(receipt)
     }
 
     /// Retire all roster members concurrently in a single actor command.
@@ -20307,6 +20387,39 @@ impl MobHandle {
         let agent_identity = identity.clone();
         self.send_actor_command(move |reply_tx| MobCommand::ReleaseMember {
             agent_identity,
+            scope: None,
+            reply_tx,
+        })
+        .await?
+        .map(|_| ())
+    }
+
+    /// [`Self::release_member`] for exactly the member incarnation `scope`
+    /// names: MobMachine checks the scope (its runtime id and fence, on its
+    /// session) in the same actor step that classifies the release, and the
+    /// registration closed is the one current at that step. A scope that is
+    /// not current (another incarnation of the identity, another session, a
+    /// member that is gone, or another incarnation of this mob) answers
+    /// [`super::ReleaseOutcome::Stale`] and releases nothing; a current one
+    /// answers [`super::ReleaseOutcome::Released`] once its materialization
+    /// is released (or when nothing of it is materialized). The refusals of
+    /// [`Self::release_member`] apply to a current scope.
+    pub async fn release_member_at_scope(
+        &self,
+        scope: &super::MemberDeliveryScope,
+    ) -> Result<super::ReleaseOutcome, MobError> {
+        // A scope from another incarnation of this mob names no member of
+        // this one.
+        match self.require_scope_incarnation(scope).await {
+            Ok(()) => {}
+            Err(MobError::IncarnationMismatch { .. }) => return Ok(super::ReleaseOutcome::Stale),
+            Err(error) => return Err(error),
+        }
+        let agent_identity = scope.agent_identity().clone();
+        let scope = Box::new(scope.clone());
+        self.send_actor_command(move |reply_tx| MobCommand::ReleaseMember {
+            agent_identity,
+            scope: Some(scope),
             reply_tx,
         })
         .await?

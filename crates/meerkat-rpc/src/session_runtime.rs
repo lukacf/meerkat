@@ -2937,6 +2937,13 @@ pub struct SessionRuntime {
     /// in the service. The first `start_turn` call promotes them through
     /// `staged_sessions.begin_promotion()`.
     staged_sessions: Arc<StagedSessionRegistry>,
+    /// The runtime this runtime was built on: the host's. A staged session's
+    /// first turn and a recovered session's next turn are applied by the
+    /// runtime loop, on Core's private serving runtime, and their actor is
+    /// created from that apply. It is created on this runtime instead, so
+    /// every turn of the session runs on the host's workers. `None` when
+    /// built outside a Tokio runtime.
+    host_runtime: Option<tokio::runtime::Handle>,
     /// Event streams opened while a deferred session is still staged. The
     /// first materializing turn fans out events here, then bridges the stream
     /// to the live session service after promotion.
@@ -4115,6 +4122,7 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
+            host_runtime: tokio::runtime::Handle::try_current().ok(),
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -4291,6 +4299,7 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
+            host_runtime: tokio::runtime::Handle::try_current().ok(),
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -5445,6 +5454,12 @@ impl SessionRuntime {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         let pre_turn_hook = self.pending_promotion_pre_turn_hook_callback();
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
+        // The promotion task, and the actor it creates, run on the host's
+        // runtime, not on the runtime loop's that applies this turn.
+        let _host_runtime = self
+            .host_runtime
+            .as_ref()
+            .map(tokio::runtime::Handle::enter);
         meerkat::session_runtime::staged_promotion::spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
             Arc::clone(&self.staged_sessions),
@@ -5478,6 +5493,12 @@ impl SessionRuntime {
     ) -> ServiceApplyRuntimeTurnResultReceiver {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
+        // The recovery task, and the actor it creates, run on the host's
+        // runtime, not on the runtime loop's that applies this turn.
+        let _host_runtime = self
+            .host_runtime
+            .as_ref()
+            .map(tokio::runtime::Handle::enter);
         meerkat::session_runtime::staged_promotion::spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
             Arc::clone(&self.runtime_adapter),

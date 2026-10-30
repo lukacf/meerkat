@@ -41184,6 +41184,7 @@ impl MobActor {
                             agent_identity: identity.clone(),
                             generation,
                             role: profile_name.clone(),
+                            session_archived: false,
                         },
                     })
                     .await
@@ -53188,7 +53189,11 @@ impl MobActor {
                 if is_peer_only { None } else { session_id },
                 "dispose_member_archive_completed",
             )?;
-            self.append_retire_event_for_entry(&ctx.entry).await?;
+            self.append_retire_event_for_entry(
+                &ctx.entry,
+                !is_peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+            )
+            .await?;
         }
         if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
             // MemberRetired may already be durable while the live admission
@@ -53851,7 +53856,12 @@ impl MobActor {
             .retire_event_exists(&ctx.entry.agent_identity, ctx.entry.generation)
             .await?
         {
-            self.append_retire_event_for_entry(&ctx.entry).await?;
+            let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+            self.append_retire_event_for_entry(
+                &ctx.entry,
+                !peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+            )
+            .await?;
         }
         if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
             return Err(self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
@@ -63961,11 +63971,20 @@ impl MobActor {
         Ok(index.contains(&key))
     }
 
-    async fn append_retire_event_for_entry(&mut self, entry: &RosterEntry) -> Result<(), MobError> {
+    /// Append the terminal `MemberRetired` row of `entry`'s retirement.
+    /// `session_archived` records that the retirement archived the member's
+    /// session (its disposal was Archived): replay records an identity
+    /// entry's archived session from it, as the live terminal does.
+    async fn append_retire_event_for_entry(
+        &mut self,
+        entry: &RosterEntry,
+        session_archived: bool,
+    ) -> Result<(), MobError> {
         let desired = MobEventKind::MemberRetired {
             agent_identity: entry.agent_identity.clone(),
             generation: entry.generation,
             role: entry.role.clone(),
+            session_archived,
         };
         let append = self
             .events

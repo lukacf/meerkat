@@ -99,6 +99,7 @@ fn representative_mob_event_kinds_project_with_kind_label() {
         agent_identity: identity.clone(),
         generation: Generation::new(1),
         role: ProfileName::from("worker"),
+        session_archived: false,
     });
     assert_eq!(m.kind, "member_retired");
     assert_eq!(m.agent_identity.as_deref(), Some("worker-1"));

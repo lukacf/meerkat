@@ -590,6 +590,14 @@ pub enum MobEventKind {
         generation: Generation,
         /// Profile name of the retired member.
         role: ProfileName,
+        /// Whether the retirement archived the member's session (its
+        /// disposal was Archived). Replay records an identity entry's
+        /// archived session only then, as the live end of the retirement
+        /// does. Stored only by the internal event codec; a reader that
+        /// predates it ignores it, and a journal written before it decodes it
+        /// as false.
+        #[serde(skip, default)]
+        session_archived: bool,
     },
     /// A respawn attempt terminally abandoned the topology preserved for the
     /// retired incarnation.
@@ -1714,6 +1722,35 @@ impl MobEventKind {
             )),
         }
     }
+
+    /// Whether a `MemberRetired` row records that its retirement archived
+    /// the member's session.
+    pub(crate) fn retired_session_archived(&self) -> bool {
+        matches!(
+            self,
+            Self::MemberRetired {
+                session_archived: true,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn set_retired_session_archived(
+        &mut self,
+        archived: bool,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::MemberRetired {
+                session_archived, ..
+            } => {
+                *session_archived = archived;
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored session_archived belongs only to MemberRetired",
+            )),
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -1914,6 +1951,11 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             "history_unavailable".to_string(),
             serde_json::to_value(history_unavailable)?,
         );
+    }
+    if event.kind.retired_session_archived()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("session_archived".to_string(), Value::Bool(true));
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -2201,6 +2243,21 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(serde_json::from_value::<crate::runtime::HistoryUnavailable>)
         .transpose()?;
+    // A row written before the key, or by a reader that predates it, decodes
+    // as a retirement that archived nothing.
+    let retired_session_archived = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_retired") {
+                kind.remove("session_archived")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<bool>)
+        .transpose()?
+        .unwrap_or(false);
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2292,6 +2349,9 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.history_unavailable = Some(history_unavailable);
+    }
+    if retired_session_archived {
+        event.kind.set_retired_session_archived(true)?;
     }
     Ok(event)
 }
@@ -3223,6 +3283,59 @@ mod tests {
         assert_eq!(decoded.retirement_cause(), None);
     }
 
+    /// Whether a retirement archived its member's session rides the
+    /// terminal row as an internal field: the stored row carries it, the
+    /// public payload never does, a reader that predates it parses the row,
+    /// and a row without it decodes as a retirement that archived nothing.
+    #[test]
+    fn stored_retired_session_archived_roundtrips_and_stays_internal() {
+        let identity = AgentIdentity::from("archived-identity");
+        let row = |session_archived: bool| MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberRetired {
+                agent_identity: identity.clone(),
+                generation: Generation::new(0),
+                role: ProfileName::from("worker"),
+                session_archived,
+            },
+        };
+        let archived = row(true);
+        let public = serde_json::to_value(&archived).expect("public event payload");
+        assert!(
+            public["kind"].get("session_archived").is_none(),
+            "the public event never carries the field"
+        );
+        let encoded = encode_stored_mob_event(&archived).expect("encode");
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(stored["event"]["kind"]["session_archived"], json!(true));
+        assert!(
+            decode_stored_mob_event(&encoded)
+                .expect("decode")
+                .kind
+                .retired_session_archived()
+        );
+        let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
+            .expect("a payload with the unknown key still parses");
+        assert!(!older_reader.kind.retired_session_archived());
+
+        let plain = encode_stored_mob_event(&row(false)).expect("encode");
+        let plain_stored: serde_json::Value = serde_json::from_slice(&plain).expect("parse");
+        assert!(
+            plain_stored["event"]["kind"]
+                .get("session_archived")
+                .is_none(),
+            "a retirement that archived nothing writes no key"
+        );
+        assert!(
+            !decode_stored_mob_event(&plain)
+                .expect("decode")
+                .kind
+                .retired_session_archived()
+        );
+    }
+
     #[test]
     fn test_stored_v9_member_spawned_without_peer_endpoint_decodes_to_none() {
         let sid = SessionId::from_uuid(Uuid::nil());
@@ -3988,6 +4101,7 @@ mod tests {
             agent_identity: AgentIdentity::from("researcher"),
             generation: Generation::new(2),
             role: ProfileName::from("worker"),
+            session_archived: false,
         });
     }
 

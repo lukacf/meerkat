@@ -1064,6 +1064,12 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             })),
             cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
         },
+        MobEventKind::MemberRetired {
+            agent_identity: identity.clone(),
+            generation,
+            role: ProfileName::from("worker"),
+            session_archived: true,
+        },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,
             generation,

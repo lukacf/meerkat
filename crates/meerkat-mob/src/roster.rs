@@ -1108,6 +1108,7 @@ mod tests {
             agent_identity: AgentIdentity::from(agent_identity),
             generation: Generation::INITIAL,
             role: ProfileName::from(role),
+            session_archived: false,
         }
     }
 
@@ -2194,6 +2195,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation: Generation::INITIAL,
                 role: ProfileName::from("worker"),
+                session_archived: false,
             },
         ));
         assert!(

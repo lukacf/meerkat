@@ -4505,6 +4505,7 @@ fn seed_mob_authority_sync_from_events(
             MobEventKind::MemberRetired {
                 agent_identity,
                 generation,
+                session_archived,
                 ..
             } => {
                 let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
@@ -4531,6 +4532,7 @@ fn seed_mob_authority_sync_from_events(
                         generation: mob_dsl::Generation::from_domain(*generation),
                         preserve_machine_topology,
                         preservation_started,
+                        session_archived: *session_archived,
                     },
                     "recover_member_retired",
                 )?;
@@ -14411,6 +14413,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
             event(3, spawned(Generation::new(1), durable.clone())),
@@ -15892,6 +15895,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation,
                 role: ProfileName::from("worker"),
+                session_archived: false,
             },
         }
     }
@@ -17235,6 +17239,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -17355,6 +17360,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -18399,6 +18405,7 @@ mod tests {
                     agent_identity: retiring,
                     generation,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
         ]
@@ -19016,6 +19023,7 @@ mod tests {
                         agent_identity: retiring.clone(),
                         generation: generation_zero,
                         role: ProfileName::from("worker"),
+                        session_archived: false,
                     },
                 ),
             ];

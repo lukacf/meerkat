@@ -6508,6 +6508,7 @@ impl MobActor {
                         agent_identity: identity,
                         generation: continuation.entry.generation,
                         role: continuation.entry.role.clone(),
+                        session_archived: false,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, true)));
                 }
@@ -6769,6 +6770,7 @@ impl MobActor {
                             ),
                             preserve_machine_topology: false,
                             preservation_started: false,
+                            session_archived: false,
                         },
                         "rollback_resumed_spawn_membership",
                     )

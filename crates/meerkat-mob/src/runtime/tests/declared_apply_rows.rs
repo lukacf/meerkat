@@ -1491,6 +1491,68 @@ async fn a_retired_identity_that_stays_listed_is_seated_again_on_its_session() {
 /// restamp and no new life. The host keeps the facets it declares, and its
 /// next build of the member applies them.
 ///
+/// A retirement that only released a host-owned session archives nothing,
+/// live or replayed: the identity's next seat is the same after a restart
+/// as without one, a fresh session, never the other host's live session.
+/// The live end records an archived session only for an Archived disposal,
+/// and the terminal row's replay-only `session_archived` lets the replay
+/// apply the same condition.
+///
+/// RED: let the replay record the session whatever the disposal (the replay
+/// before this fix, which the row did not tell): after the restart the
+/// identity holds an archived record of the host's session, and the apply
+/// seats it there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_owned_retirement_records_no_archived_session_live_or_replayed() {
+    let mut mob = ApplyMob::new("apply-host-owned-retirement").await;
+    let roster = || DeclaredRoster::complete([declared("hosted-session")]);
+    let seated = mob.apply(roster()).await;
+    let (session, _) = seated_on(&seated, "hosted-session").expect("the identity is seated");
+    mob.wake("hosted-session").await;
+    // The member's durable session belongs to another host: its retirement
+    // releases the runtime only.
+    mob.service.set_archive_authority_unknown(&session).await;
+    mob.service.set_archive_not_found(&session).await;
+    tokio::time::timeout(STEP, mob.handle.retire(id("hosted-session")))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert_eq!(
+        mob.standing("hosted-session"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the listed entry outlives the retirement"
+    );
+    assert_eq!(
+        mob.archived_record("hosted-session"),
+        None,
+        "a host-owned session is not archived here"
+    );
+
+    mob.restart().await;
+    assert_eq!(
+        mob.standing("hosted-session"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the replay restores the entry unseated"
+    );
+    assert_eq!(
+        mob.archived_record("hosted-session"),
+        None,
+        "the replay records no archived session either"
+    );
+    let listed = mob.apply(roster()).await;
+    let fresh = fresh_seat_session_id(
+        mob.handle.mob_id(),
+        mob.handle.incarnation(),
+        &id("hosted-session"),
+        Generation::new(1),
+    );
+    assert_eq!(
+        seated_on(&listed, "hosted-session"),
+        Some((fresh, None)),
+        "seated as without the restart, on a fresh session: {listed:?}"
+    );
+}
+
 /// Guard: `DeclareIdentityEntry` takes no facet, so no verdict reads one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_descriptive_facet_change_is_never_a_new_life() {

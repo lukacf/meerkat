@@ -6527,6 +6527,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("pre-activation retirement final must settle spawn execution");
         assert!(
@@ -6560,6 +6561,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("absent-runtime retirement final must settle spawn execution");
         assert!(
@@ -6601,6 +6603,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("recover exact generation-zero final");
 
@@ -6630,6 +6633,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("duplicate retirement final should converge idempotently");
         assert!(
@@ -6741,6 +6745,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("duplicate retired-generation final should remain idempotent");
         assert_eq!(
@@ -6879,6 +6884,7 @@ mod tests {
                     generation: Generation(1),
                     preserve_machine_topology: false,
                     preservation_started: false,
+                    session_archived: true,
                 })
                 .is_err(),
             "a Retired record with another generation must not settle the current runtime"
@@ -6918,6 +6924,7 @@ mod tests {
                 generation: Generation(0),
                 preserve_machine_topology: false,
                 preservation_started: false,
+                session_archived: true,
             })
             .expect("a delayed final of an older generation prunes its runtime");
         assert!(!authority.state().live_runtime_ids.contains(&runtime));

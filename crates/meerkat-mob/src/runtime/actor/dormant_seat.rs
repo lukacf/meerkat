@@ -1834,6 +1834,7 @@ impl MobActor {
                     agent_identity: identity.clone(),
                     generation: entry.generation,
                     role: entry.role.clone(),
+                    session_archived: disposal == mob_dsl::MemberSessionDisposal::Archived,
                 },
             },
             NewMobEvent {

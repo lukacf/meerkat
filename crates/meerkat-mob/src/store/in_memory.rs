@@ -5194,6 +5194,7 @@ mod tests {
                     agent_identity: AgentIdentity::from("worker-1"),
                     generation: Generation::new(1),
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             })
             .await

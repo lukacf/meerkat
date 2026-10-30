@@ -2130,7 +2130,7 @@ async fn a_requeue_stop_keeps_an_approved_consents_notice_and_its_consent() {
             .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
                 &registration,
                 meerkat_runtime::UnregisterQueuedInputs::Requeue {
-                    max_age: Duration::from_secs(600),
+                    max_age: Duration::from_mins(10),
                 },
             )
             .await

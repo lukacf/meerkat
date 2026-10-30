@@ -287,7 +287,7 @@ async fn granted_family_is_visible_until_its_deadline_and_hidden_after() {
         );
 
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         assert_eq!(grant.status, ToolGrantStatus::Active);
@@ -333,7 +333,7 @@ async fn dispatch_after_the_deadline_is_refused_although_the_boundary_showed_the
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -396,7 +396,7 @@ async fn expired_grant_stays_expired_across_restart_and_clock_rollback() {
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         clock.set(grant.expires_at_ms + 5);
@@ -446,7 +446,7 @@ async fn live_grant_keeps_its_deadline_across_restart() {
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -500,7 +500,7 @@ async fn listing_an_unserved_session_settles_due_grants_without_registering_it()
         let session_id = SessionId::new();
         let wakes = watch_wakes(&session_id);
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         assert_eq!(
@@ -621,7 +621,7 @@ async fn revoke_through_another_service_instance_is_refused_at_the_next_dispatch
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -675,7 +675,7 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
         let store = durable.open();
 
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         assert_eq!(stored(&*store, &grant).await, grant);
@@ -812,7 +812,7 @@ async fn an_unreadable_row_admits_nothing_and_blocks_no_readable_grant() {
         let subject = ToolGrantSubject::session(session_id.clone());
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
         let unreadable_id = ToolGrantId::mint();
@@ -883,7 +883,7 @@ async fn an_unreadable_audit_row_is_reported_and_the_rest_of_the_page_served() {
             .await
             .unwrap();
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
             .await
             .unwrap();
 
@@ -926,7 +926,7 @@ async fn settling_arms_no_deadline_for_a_revoked_grant() {
         // Granted and revoked while no runtime serves the session, so nothing
         // is armed yet.
         let revoked = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(600)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(10)))
             .await
             .unwrap();
         machine
@@ -953,7 +953,7 @@ async fn settling_arms_no_deadline_for_a_revoked_grant() {
         );
 
         let live = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_secs(300)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(5)))
             .await
             .unwrap();
         machine.tool_grant_deadlines().disarm(&session_id);
@@ -974,7 +974,7 @@ async fn grant_store_failure_closes_the_gate() {
     let session_id = SessionId::new();
     let served = serve(&machine, &session_id).await;
     machine
-        .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+        .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
         .await
         .unwrap();
     served.boundary().await.unwrap();

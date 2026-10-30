@@ -6022,7 +6022,7 @@ mod scoped_tool_grants {
                 },
                 issuer: ToolGrantIssuer::Operator { caller: None },
                 reason: None,
-                window: ToolGrantWindow::For(std::time::Duration::from_secs(600)),
+                window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
             })
             .await
             .expect("grant");

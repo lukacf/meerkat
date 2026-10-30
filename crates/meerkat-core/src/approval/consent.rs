@@ -4482,7 +4482,7 @@ mod tests {
                 validity: (expires_at_ms != 0).then(|| crate::authorization::OperationValidity {
                     not_before_ms: 0,
                     expires_at_ms,
-                    deadline: crate::time_compat::Instant::now() + Duration::from_secs(3600),
+                    deadline: crate::time_compat::Instant::now() + Duration::from_hours(1),
                 }),
             });
             if take_one(&self.0.republish_after_prepare) {
@@ -5946,7 +5946,7 @@ mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .expect("deadline chain"),
         );

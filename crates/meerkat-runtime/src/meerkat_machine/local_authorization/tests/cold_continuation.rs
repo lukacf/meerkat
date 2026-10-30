@@ -5441,7 +5441,7 @@ async fn a_requeue_stop_keeps_a_governed_consent_notice_that_runs_and_spends_its
             .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
                 &registration,
                 crate::UnregisterQueuedInputs::Requeue {
-                    max_age: Duration::from_secs(600),
+                    max_age: Duration::from_mins(10),
                 },
             )
             .await

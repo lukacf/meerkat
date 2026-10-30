@@ -95,6 +95,16 @@ them.
   placeholder text must match the new form; the prompt still contains
   `CONTEXT COMPACTION`.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`, `meerkat-rpc`:
+  the turns of runtime-backed mob members, and of a staged RPC session whose
+  actor a governed admission materializes, now run on the host's runtime
+  (the runtime of the task that provisions the member or admits the input)
+  instead of Core's process-wide `meerkat-machine-cleanup` runtime. Their
+  agent loop, model streaming, tool calls and whatever those tools spawn
+  use the host's worker threads and the stack it gives them, so an embedder
+  must size its worker stacks for the tools it composes (see Upgrade notes
+  and Fixed).
+
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds kept governed work that waits
   for its host to supply its controller client again (see Fixed).
@@ -372,14 +382,14 @@ them.
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
 
-- `meerkat-mob`: a runtime-backed member's session actor is materialized on
-  the runtime of the task that provisions the member (the mob actor's,
-  which is the host's), so the member's turns, its tool calls and whatever
-  those spawn run there, on the host's workers and with their stack.
-  Before, the actor was materialized from the owned create tail on the
-  process-wide `meerkat-machine-cleanup` runtime, and its session task, and
-  with it every turn of the member, ran on that runtime's two workers: a
-  member tool that blocked its thread stalled every session's cleanup in
+- `meerkat-mob`, `meerkat-rpc`: a runtime-backed member's session actor is
+  materialized on the runtime of the task that provisions the member (the
+  mob actor's, which is the host's), so the member's turns, its tool calls
+  and whatever those spawn run there, on the host's workers and with their
+  stack. Before, the actor was materialized from the owned create tail on
+  the process-wide `meerkat-machine-cleanup` runtime, and its session task,
+  and with it every turn of the member, ran on that runtime's two workers:
+  a member tool that blocked its thread stalled every session's cleanup in
   the process, and member work that needed more stack than those threads
   had aborted the process with a stack overflow on
   `meerkat-machine-cleanup`. The create tail itself stays on the cleanup
@@ -387,8 +397,12 @@ them.
   without an answer, because its runtime shut down or it panicked, fails
   the create and is cleaned up like any failed create. The recovery of an
   attached member's actor materializes on its caller's runtime the same
-  way. Size the workers of the runtime a mob runs on for its members'
-  turns, as for the turns of the sessions the host creates directly.
+  way, and so does the actor of a staged RPC session that a governed
+  admission materializes: the admission stays on the cleanup runtime, and a
+  materialization that ends without an answer is reported as a failed one.
+  No session actor is materialized on the cleanup runtime any more. Size
+  the workers of the runtime a mob runs on for its members' turns, as for
+  the turns of the sessions the host creates directly (see Upgrade notes).
 
 - `meerkat-runtime`: an admitted governed resume of retained work (for
   example a consent notice) that a graceful requeue stop kept, or that a
@@ -507,6 +521,21 @@ them.
   the reload proceeds (see Breaking). The committed input stays durably
   admitted and pending in the cold successor, and a resubmission with the
   same idempotency key is deduplicated against it.
+
+### Upgrade notes
+
+- Size the worker stacks of the runtime your mobs and governed RPC
+  connections run on for the tools you compose: the turns of mob members,
+  and of staged RPC sessions that a governed admission materializes, now
+  run on that runtime, as the turns of the sessions you create directly
+  through a session service already did, and a tool's frames sit on top of
+  the turn's (see Breaking). Core's own host binaries run their workers on
+  8 MiB, and `RKAT_WORKER_STACK_BYTES` sets that size for them (and for an
+  embedding that runs its main future through
+  `meerkat_runtime::host_stack::run_host`). A Tokio runtime built with
+  default settings gives its workers 2 MiB; an embedder that builds its own
+  runtime sets the size with that runtime's builder
+  (`tokio::runtime::Builder::thread_stack_size`).
 
 ### Known limitations
 

@@ -684,102 +684,47 @@ svg[data-svg="fit"],
 .bad  { color: var(--crit); }
 
 /* ── Roster ─────────────────────────────────────────────────── */
-.roster__body {
-  flex: 1; display: grid; grid-template-columns: 1fr 320px;
-  min-height: 0;
+/* Built from the panel kit (cc-panel, cc-row, cc-split); only the agent
+   detail header and the peer chips are roster-specific. */
+.roster__split { flex: 1 1 auto; min-height: 0; }
+.roster__rows { border-top: 0; }
+.roster__detail { padding: 16px 0 24px; min-width: 0; }
+.roster__detail-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 var(--_cc-panel-pad-x);
+  min-width: 0;
 }
-.roster__table {
-  overflow-y: auto;
-  border-right: 1px solid var(--line);
-  font-size: 12px;
+.roster__detail-name { flex: 1 1 auto; min-width: 0; }
+.roster__detail-name h3 {
+  margin: 0;
+  font-family: var(--disp); font-size: 14px; font-weight: 600; letter-spacing: -0.008em;
+  color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.roster__row {
-  display: grid;
-  grid-template-columns: 2fr 1.1fr 1fr 1fr 0.7fr;
-  gap: 12px;
-  padding: 10px 16px;
-  align-items: center;
-  border-bottom: 1px solid var(--line);
+.roster__detail-role {
+  margin-top: 1px;
+  font-size: var(--_cc-panel-fs-meta); color: var(--ink-meta);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roster__actions {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px var(--_cc-panel-pad-x) 0;
+}
+.roster__peers { gap: 6px; }
+.roster__peer {
+  display: inline-flex; align-items: center;
+  max-width: 100%; min-width: 0;
+  height: 24px; padding: 0 8px 0 3px;
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  background: transparent; color: var(--ink);
+  font: inherit; font-size: 12px;
   cursor: pointer;
 }
-.roster__row:hover { background: var(--bg-elev-2); }
-.roster__row.is-selected {
-  background: var(--bg-sunken);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-.roster__row--head {
-  position: sticky; top: 0;
-  font-family: var(--disp); font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.1em;
-  color: var(--ink-dim); font-weight: 600;
-  background: var(--bg-elev-1);
-  cursor: default;
-}
-.roster__row--head:hover { background: var(--bg-elev-1); }
-.roster__name { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.roster__name > span:last-child { min-width: 0; overflow: hidden; }
-.roster__name > span:last-child > div:first-child {
-  font-weight: 500; color: var(--ink);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.roster__id { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); }
-.roster__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
-[data-cc-variant="terminal"] .roster__dot { border-radius: 0; }
-.roster__row[data-state="degraded"] .roster__dot { background: var(--warn); }
-.roster__row[data-state="retired"]  .roster__dot { background: var(--ink-faint); }
-/* Machine-owned liveness (meerkat 0.7.29+): health overrides the lifecycle
-   tint on the dot — wedged/degraded is the operator signal. */
-.roster__row[data-health="degraded"] .roster__dot { background: var(--warn); }
-.roster__row[data-health="wedged"]   .roster__dot { background: var(--crit); }
-.roster__state[data-health="degraded"] { color: var(--warn); background: color-mix(in oklch, var(--warn) 12%, transparent); }
-.roster__state[data-health="wedged"]   { color: var(--crit); background: color-mix(in oklch, var(--crit) 12%, transparent); }
-.roster__state[data-health="healthy"]  { color: var(--ok); background: color-mix(in oklch, var(--ok) 10%, transparent); }
-.roster__state {
-  font-family: var(--mono); font-size: 10.5px;
-  padding: 1px 6px; border-radius: 10px;
-  background: var(--bg-sunken); color: var(--ink-dim);
-  text-transform: lowercase;
-  display: inline-block;
-}
-[data-cc-variant="terminal"] .roster__state { border-radius: 0; }
-.roster__row[data-state="active"]   .roster__state { color: var(--ok);   background: color-mix(in oklch, var(--ok) 10%, transparent); }
-.roster__row[data-state="degraded"] .roster__state { color: var(--warn); background: color-mix(in oklch, var(--warn) 12%, transparent); }
-.roster__row[data-state="retired"]  .roster__state { color: var(--ink-faint); }
-
-.roster__detail {
-  padding: 18px 20px;
-  overflow-y: auto;
-  display: flex; flex-direction: column; gap: 16px;
-}
-.rd__head { display: flex; flex-direction: column; gap: 6px; }
-.rd__title { font-family: var(--disp); font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
-.rd__id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); }
-.rd__tags { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
-.chip {
-  font-size: 10px; font-family: var(--mono);
-  padding: 1px 6px; border-radius: 10px;
-  background: var(--bg-sunken); color: var(--ink-dim);
-}
-[data-cc-variant="terminal"] .chip { border-radius: 0; }
-.rd__grid {
-  display: grid; grid-template-columns: auto 1fr;
-  gap: 6px 14px; margin: 0; font-size: 12px;
-}
-.rd__grid dt { color: var(--ink-dim); font-family: var(--disp); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
-.rd__grid dd { margin: 0; color: var(--ink); }
-.rd__peers { display: flex; flex-wrap: wrap; gap: 4px; }
-.rd__actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.rd__actions button {
-  padding: 6px 12px; font-size: 11.5px;
-  font-family: var(--disp); font-weight: 500;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  color: var(--ink-muted);
-}
-.rd__actions button:hover { background: var(--bg-elev-2); color: var(--ink); }
-.rd__actions .danger {
-  color: var(--crit);
-  border-color: color-mix(in oklch, var(--crit) 30%, var(--line));
-}
+.roster__peer:hover { border-color: var(--line-strong); background: var(--bg-elev-2); }
+.roster__peer:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.roster__peer.is-static { padding-left: 8px; color: var(--ink-muted); cursor: default; }
+.roster__peer.is-static:hover { border-color: var(--line); background: transparent; }
+.roster__tech { padding: 4px var(--_cc-panel-pad-x) 0; }
 
 /* ── Routing ─────────────────────────────────────────────────── */
 .routing__body {

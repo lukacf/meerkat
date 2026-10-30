@@ -353,7 +353,7 @@ export function sidebarPinnedFamilyPinIds(agent: ConsoleAgent, agents: ConsoleAg
   return ids;
 }
 
-function bucketOf(a: ConsoleAgent): Bucket {
+export function bucketOf(a: ConsoleAgent): Bucket {
   const g = (a.group || "").toLowerCase();
   const p = (a.role || a.kind || "").toLowerCase();
   if (g.includes("coordinator") || p.includes("coord") || p.includes("triage") || p.includes("router") || p.includes("commander")) return "Coordinators";

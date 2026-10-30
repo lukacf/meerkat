@@ -142,7 +142,9 @@ export function SegmentedControl<Id extends string>({
 }: {
   options: ReadonlyArray<SegmentOption<Id>>;
   value: Id;
-  onChange: (id: Id) => void;
+  // NoInfer: the id type comes from value and options, so a state setter
+  // (which also accepts an updater function) can be passed directly.
+  onChange: (id: NoInfer<Id>) => void;
   ariaLabel: string;
   className?: string;
   testId?: string;

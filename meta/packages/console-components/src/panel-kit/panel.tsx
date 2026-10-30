@@ -111,7 +111,7 @@ export function PanelTabs<Id extends string>({
 }: {
   tabs: ReadonlyArray<PanelTab<Id>>;
   active: Id;
-  onSelect: (id: Id) => void;
+  onSelect: (id: NoInfer<Id>) => void;
   ariaLabel?: string;
   className?: string;
   tabClassName?: string;

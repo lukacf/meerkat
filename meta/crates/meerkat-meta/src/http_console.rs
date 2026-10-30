@@ -9738,6 +9738,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await
@@ -9750,6 +9751,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await
@@ -9762,6 +9764,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await
@@ -9774,6 +9777,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await
@@ -9786,6 +9790,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await
@@ -9798,6 +9803,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 identity_runtime.as_ref(),
                 console_aggregator.as_ref(),
                 authenticated_principal,
+                access_view,
                 governance,
             )
             .await

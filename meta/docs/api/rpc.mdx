@@ -2632,7 +2632,8 @@ minute (`every_seconds` of at least 60). An update keeps each of `content`,
 | `trigger` | `object` | When it sends |
 | `phase` | `string` | `active` or `paused` |
 | `revision` | `integer` | Its revision; every write moves it on |
-| `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller |
+| `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller, and when withheld |
+| `sender_hidden` | `boolean` | `true` when `sender` is withheld: the caller may view the agent but not send to it |
 | `defined_at_utc` | `string` | When its sender defined it |
 | `created_at_utc`, `updated_at_utc` | `string` | When it was created and last changed |
 | `next_due_at_utc` | `string \| null` | Its next planned send while it is active |
@@ -2648,9 +2649,9 @@ caller (a verified signed-in human, another authenticated principal, or the
 open Console's shared account), with the provider and issuer its token
 verified under, and the subject only for a verified human. A pause or a
 delete leaves the sender as it is. A resume records its caller while the
-schedule is still paused, so no send goes out as the earlier sender. The
-list shows each schedule's sender principal to everyone who may view the
-agent.
+schedule is still paused, so no send goes out as the earlier sender. Only
+a caller who may send to the agent sees who its schedules send as: a caller
+who may only view it gets `sender: null` and `sender_hidden: true`.
 
 **Each fire is a console send by its sender.** At each due time the Console
 first admits the recorded sender as it admits a live request by it, under

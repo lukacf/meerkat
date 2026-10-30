@@ -141,9 +141,10 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
       item({ schedule_id: "sch_3", content: 7 }),
       "not a schedule",
       item({ schedule_id: "sch_4", name: "", sender: null, next_due_at_utc: null, phase: "paused", trigger: { type: "cron", expression: "* * * * *" } }),
+      item({ schedule_id: "sch_5", sender: "erin@example.test", sender_hidden: true }),
     ],
   });
-  assert.deepEqual(listed.map((entry) => entry.scheduleId), ["sch_1", "sch_4"]);
+  assert.deepEqual(listed.map((entry) => entry.scheduleId), ["sch_1", "sch_4", "sch_5"]);
   assert.deepEqual(listed[0], {
     scheduleId: "sch_1",
     identity: "alpha",
@@ -153,6 +154,7 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
     phase: "active",
     revision: 3,
     sender: "console:shared",
+    senderHidden: false,
     definedAt: "2030-01-01T08:00:00Z",
     createdAt: "2030-01-01T08:00:00Z",
     updatedAt: "2030-01-01T08:30:00Z",
@@ -163,6 +165,9 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
   assert.equal(listed[1].nextDueAt, null);
   assert.equal(listed[1].trigger, null);
   assert.equal(listed[1].phase, "paused");
+  assert.equal(listed[1].senderHidden, false);
+  assert.equal(listed[2].senderHidden, true);
+  assert.equal(listed[2].sender, null, "a withheld sender is never shown");
 });
 
 test("a schedule's timing reads in words", () => {

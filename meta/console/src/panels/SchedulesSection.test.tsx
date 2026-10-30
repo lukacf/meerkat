@@ -115,9 +115,10 @@ describe("SchedulesSection", () => {
     const { run, state } = gateway([
       item(),
       item({ schedule_id: "sch_2", name: null, phase: "paused", sender: null, next_due_at_utc: null }),
+      item({ schedule_id: "sch_3", sender: null, sender_hidden: true }),
     ]);
     const view = render(section(run, false, { note: "You may view this agent but not message it." }));
-    await waitFor(() => expect(present(view, "schedule:sch_2")).toBe(true));
+    await waitFor(() => expect(present(view, "schedule:sch_3")).toBe(true));
 
     expect(view.getByTestId("schedule-when:sch_1").textContent).toBe("Every 2 hours from 2030-01-01T09:00:00Z");
     expect(view.getByTestId("schedule-next:sch_1").textContent).toBe("Next: 2030-01-01T11:00:00Z");
@@ -125,6 +126,7 @@ describe("SchedulesSection", () => {
     expect(view.getByTestId("schedule-phase:sch_2").textContent).toBe("Paused");
     expect(view.getByTestId("schedule:sch_2").textContent).toContain("Untitled schedule");
     expect(view.getByTestId("schedule-sender:sch_2").textContent).toBe("Sends as this console");
+    expect(present(view, "schedule-sender:sch_3")).toBe(false);
     expect(present(view, "schedule-next:sch_2")).toBe(false);
     expect(view.getByTestId("schedules-note:alpha").textContent).toBe("You may view this agent but not message it.");
     for (const control of [

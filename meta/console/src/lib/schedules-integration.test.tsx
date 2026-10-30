@@ -174,7 +174,8 @@ describe("console schedules", () => {
       trigger: { type: "once", due_at_utc: "2030-01-01T09:00:00Z" },
       phase: "active",
       revision: 1,
-      sender: "someone",
+      sender: null,
+      sender_hidden: true,
       next_due_at_utc: "2030-01-01T09:00:00Z",
     }];
     const view = render(<ConsoleApp baseUrl="" transport={harness} />);
@@ -184,6 +185,7 @@ describe("console schedules", () => {
     expect(present(view, "schedule-edit:sch_9")).toBe(false);
     expect(present(view, "schedule-pause:sch_9")).toBe(false);
     expect(present(view, "schedule-delete:sch_9")).toBe(false);
+    expect(present(view, "schedule-sender:sch_9")).toBe(false);
     view.unmount();
   }, 30_000);
 

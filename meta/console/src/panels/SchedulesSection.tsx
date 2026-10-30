@@ -291,9 +291,11 @@ export function SchedulesSection({
             {schedule.nextDueAt ? `Next: ${formatTime(schedule.nextDueAt)}` : "Next: none planned"}
           </p>
         ) : null}
-        <p className="console-schedules__meta" data-testid={`schedule-sender:${id}`}>
-          {schedule.sender ? `Sends as ${schedule.sender}` : "Sends as this console"}
-        </p>
+        {schedule.senderHidden ? null : (
+          <p className="console-schedules__meta" data-testid={`schedule-sender:${id}`}>
+            {schedule.sender ? `Sends as ${schedule.sender}` : "Sends as this console"}
+          </p>
+        )}
         {editing.canChange ? (
           <div className="console-panel__actions">
             <button

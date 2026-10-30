@@ -11,7 +11,8 @@
 //! schedule fires as. The handler judges what the access table cannot: that
 //! the schedule is a console schedule of that agent, and that the agent
 //! takes the Console's sends. An update and a resume write at the revision
-//! they read, so neither reverts a change made meanwhile.
+//! they read, so neither reverts a change made meanwhile. Who a schedule
+//! sends as is shown only to a caller who may send to its agent.
 //!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
 //! Console's admission of the schedule's sender, then the very send
@@ -76,6 +77,7 @@ pub(super) async fn handle(
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
     aggregator: Option<&MetaConsoleAggregator>,
     principal: Option<&str>,
+    access_view: Option<&AccessView>,
     governance: &ConsoleSendGovernance,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
@@ -84,6 +86,7 @@ pub(super) async fn handle(
         aggregator,
         params: &request.params,
         principal,
+        access_view,
         governance,
     };
     let answered = match runtime.console_schedules().attached() {
@@ -103,7 +106,19 @@ struct ScheduleCall<'a> {
     aggregator: Option<&'a MetaConsoleAggregator>,
     params: &'a Value,
     principal: Option<&'a str>,
+    /// The caller's access snapshot, when an access controller is wired.
+    access_view: Option<&'a AccessView>,
     governance: &'a ConsoleSendGovernance,
+}
+
+impl ScheduleCall<'_> {
+    /// Whether the caller may send to `identity`, and so may see who its
+    /// schedules send as: a caller who may only view the agent does not.
+    fn may_send_to(&self, identity: &str) -> bool {
+        self.access_view
+            .filter(|view| view.enforced())
+            .is_none_or(|view| view.allows_agent(ACTION_AGENT_SEND, identity))
+    }
 }
 
 async fn answer(
@@ -132,6 +147,7 @@ async fn list(
     let target = known_target(call, identity)
         .await?
         .map_or_else(|| identity.to_string(), |target| target.identity);
+    let shows_sender = call.may_send_to(identity);
     let all = schedules.service.list().await.map_err(schedule_error)?;
     let mut theirs = all
         .iter()
@@ -143,7 +159,7 @@ async fn list(
     theirs.sort_by_key(|(schedule, _)| schedule.config.created_at_utc);
     let mut items = Vec::with_capacity(theirs.len());
     for (schedule, send) in theirs {
-        items.push(schedule_item(&schedules.service, schedule, &send).await);
+        items.push(schedule_item(&schedules.service, schedule, &send, shows_sender).await);
     }
     Ok(json!({ "identity": target, "schedules": items }))
 }
@@ -175,7 +191,7 @@ async fn create(
         })
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send).await)
+    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
 }
 
 /// A changed schedule is the changer's send: the update records the caller
@@ -210,7 +226,7 @@ async fn update(
         },
     )
     .await?;
-    Ok(schedule_item(&schedules.service, &schedule, &send).await)
+    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
 }
 
 async fn pause(
@@ -225,7 +241,7 @@ async fn pause(
         .pause(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send).await)
+    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
 }
 
 /// A resumed schedule is the resumer's send: the resume records the caller
@@ -261,7 +277,7 @@ async fn resume(
         .resume(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send).await)
+    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
 }
 
 async fn delete(
@@ -398,11 +414,14 @@ async fn console_schedule(
     Ok((schedule, send))
 }
 
-/// One console schedule as the methods answer it.
+/// One console schedule as the methods answer it. Who it sends as is shown
+/// only when `shows_sender`: to a caller who may send to its agent (every
+/// write's caller does; a list caller may only view the agent).
 async fn schedule_item(
     service: &ScheduleService,
     schedule: &Schedule,
     send: &ConsoleScheduledSend,
+    shows_sender: bool,
 ) -> Value {
     let next_due_at_utc = if schedule.phase == SchedulePhase::Active {
         service
@@ -432,7 +451,8 @@ async fn schedule_item(
         "trigger": schedule.trigger,
         "phase": schedule.phase,
         "revision": schedule.revision.0,
-        "sender": send.sender.principal(),
+        "sender": if shows_sender { send.sender.principal() } else { None },
+        "sender_hidden": !shows_sender,
         "defined_at_utc": defined_at_utc,
         "created_at_utc": schedule.config.created_at_utc,
         "updated_at_utc": schedule.config.updated_at_utc,

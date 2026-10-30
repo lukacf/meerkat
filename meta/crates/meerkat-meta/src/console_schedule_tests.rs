@@ -959,6 +959,66 @@ async fn schedule_methods_judge_view_and_send_on_the_agent() -> TestResult {
     Ok(())
 }
 
+/// Only a caller who may send to the agent sees who its schedules send as:
+/// a viewer who holds `agent.view` alone reads the list with the sender
+/// withheld, while the sender's own writes and lists show it.
+#[tokio::test]
+async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-sender-exposure",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let controller = enforced(vec![
+        grant("viewer-views-alpha", VIEWER, &[ACTION_AGENT_VIEW], "alpha"),
+        grant(
+            "erin-drives-alpha",
+            ERIN,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+    ])?;
+    let erin = Caller::human(ERIN).under(&controller);
+    let created = call(
+        &fixture,
+        erin,
+        "meta/schedule/create",
+        create_params("alpha"),
+    )
+    .await;
+    assert_eq!(created["result"]["sender"], json!(ERIN), "{created:#?}");
+    assert_eq!(created["result"]["sender_hidden"], json!(false));
+
+    let viewed = call(
+        &fixture,
+        Caller::human(VIEWER).under(&controller),
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    let item = &viewed["result"]["schedules"][0];
+    assert!(item["sender"].is_null(), "{viewed:#?}");
+    assert_eq!(item["sender_hidden"], json!(true), "{viewed:#?}");
+    assert_eq!(
+        item["content"],
+        json!("Post the morning summary."),
+        "the rest of the schedule is listed"
+    );
+
+    let managed = call(
+        &fixture,
+        erin,
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    let item = &managed["result"]["schedules"][0];
+    assert_eq!(item["sender"], json!(ERIN), "{managed:#?}");
+    assert_eq!(item["sender_hidden"], json!(false));
+    fixture.stop().await;
+    Ok(())
+}
+
 /// The handler judges what the access table cannot: the agent must be one
 /// this console knows and sends to, and a schedule id must name a console
 /// schedule of that agent; anything else is answered alike, not found.

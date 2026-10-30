@@ -67,8 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateway's durable schedule store). The list needs `agent.view` on the
   agent and every write `agent.send`, under the console send's own gate for
   the caller, signed in or not; a read-only console and a viewer without
-  `agent.send` see the list read-only. Each fire is a console send by the
-  caller who last created, edited or resumed the schedule, judged when it
+  `agent.send` see the list read-only, without who each schedule sends as
+  (`sender_hidden`). Each fire is a console send by the caller who last
+  created, edited or resumed the schedule, judged when it
   fires: the Console admits that caller as it admits a live request by it
   (sign-in where required, the allowlist and provider policy, the trusted
   issuer, and Console sessions not revoked since the schedule was defined,

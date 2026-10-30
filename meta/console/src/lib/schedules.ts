@@ -124,8 +124,10 @@ export interface ConsoleSchedule {
   /** `active` or `paused`; any other phase is shown as it is. */
   phase: string;
   revision: number | null;
-  /** The principal the schedule sends as; null for an anonymous console. */
+  /** The principal the schedule sends as; null for an anonymous console, or when withheld. */
   sender: string | null;
+  /** Whether the gateway withheld the sender: the viewer may not message the agent. */
+  senderHidden: boolean;
   definedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -209,7 +211,8 @@ export function parseConsoleSchedule(value: unknown): ConsoleSchedule | null {
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString(item.phase) ?? "unknown",
     revision: wholeNumber(item.revision),
-    sender: nonEmptyString(item.sender),
+    sender: item.sender_hidden === true ? null : nonEmptyString(item.sender),
+    senderHidden: item.sender_hidden === true,
     definedAt: nonEmptyString(item.defined_at_utc),
     createdAt: nonEmptyString(item.created_at_utc),
     updatedAt: nonEmptyString(item.updated_at_utc),

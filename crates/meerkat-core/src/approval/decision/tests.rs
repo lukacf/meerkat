@@ -755,3 +755,61 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         );
     }
 }
+
+/// The pinned JSON of the human evidence of
+/// `the_evidence_encoding_and_its_digest_are_pinned`, recorded with the time
+/// the decision event's ingress observed it (7).
+const HUMAN_OBSERVED_EVIDENCE_JSON: &str = concat!(
+    r#"{"kind":"human","#,
+    r#""decider":"principal:[\"human\",\"example.org\",\"alice\"]","#,
+    r#""principal":{"kind":"human","id":"alice","#,
+    r#""qualification":{"kind":"qualified","trust_domain_id":"example.org"}},"#,
+    r#""assurance":"person_authenticated","#,
+    r#""authentication_scope":"login-1","#,
+    r#""ingress":"web","#,
+    r#""event_ref":"event-1","#,
+    r#""observed_at_ms":7,"#,
+    r#""approver_id":"team:owners","#,
+    r#""presented_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""presentation":{"#,
+    r#""audience":{"kind":"approver","approver_id":"team:owners"},"#,
+    r#""subject_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""parts_shown":[{"index":0,"count":1,"#,
+    r#""part_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"}],"#,
+    r#""channel_ref":"channel-1","#,
+    r#""message_ref":"message-1","#,
+    r#""at_ms":5},"#,
+    r#""approve":true,"#,
+    r#""reason":"looks right"}"#,
+);
+const HUMAN_OBSERVED_EVIDENCE_DIGEST: &str =
+    "sha256:17355bf023b24670e47d692b6103f4456397ad2aa8d561921a4dd8c84c0020b2";
+
+/// A human decision's evidence records when its ingress observed the
+/// decision event, under the same evidence domain: its pinned bytes decode
+/// and encode back unchanged. Evidence recorded before it carried that time
+/// decodes without it and keeps its bytes and its digest, so a decided row
+/// written then stays readable; being decided, it needs no ordering check.
+#[test]
+fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() {
+    for (json, digest) in [
+        (HUMAN_OBSERVED_EVIDENCE_JSON, HUMAN_OBSERVED_EVIDENCE_DIGEST),
+        (HUMAN_EVIDENCE_JSON, HUMAN_EVIDENCE_DIGEST),
+    ] {
+        let evidence: DecisionEvidence =
+            serde_json::from_str(json).expect("the pinned bytes decode");
+        assert_eq!(
+            serde_json::to_string(&evidence).expect("encode"),
+            json,
+            "the evidence encodes back to its pinned bytes"
+        );
+        assert_eq!(
+            evidence.digest().expect("digest").as_str(),
+            digest,
+            "the evidence keeps its pinned digest"
+        );
+    }
+}

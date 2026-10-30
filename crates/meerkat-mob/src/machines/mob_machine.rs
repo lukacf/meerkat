@@ -12782,6 +12782,10 @@ mod tests {
                 .contains_key(&worker.identity),
             "no refused adoption records an entry"
         );
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
         assert_eq!(
             adopt_legacy(&mut authority, &worker.identity, Generation(0), true),

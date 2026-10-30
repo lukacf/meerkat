@@ -62,7 +62,9 @@ them.
   gains `IdentityMemberRejected`; and `MobMachineRuntimeInternalReason`
   (meerkat-mob) gains `IdentityEntryAuthority`; each appended last. The enums
   `IdentityEntryOrigin`, `LegacyIdentityEntryAdoptionKind` and
-  `AgentLaneMemberAdmissionKind` are new. The kernel
+  `AgentLaneMemberAdmissionKind` are new (the machine's `IdentityEntryOrigin`;
+  the entry reads answer with `meerkat_mob::IdentityEntryOrigin`, its public
+  projection, see Added). The kernel
   `generated::mob::TransitionId` gains, appended last,
   `ProbeMemberAdmissionIdentityMemberRunning`,
   `ProbeMemberAdmissionIdentityMemberStopped`,
@@ -156,36 +158,51 @@ them.
 
 ### Added
 
-- `meerkat-mob`: identity entries. A Rust host can tell its own durable
-  identities from worker members: a spawn or a dormant seat whose
-  `SpawnMemberSpec::entry_custody` is set (builder
+- `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
+  its own durable identities from worker members: a spawn or a dormant seat
+  whose `SpawnMemberSpec::entry_custody` is set (builder
   `SpawnMemberSpec::with_entry_custody`) seats the member of an identity
   entry, a MobMachine fact recorded in the step that seats it. No spawn or
   seat without entry custody takes an entry's name: it is refused before
   anything is created with the new `MobError::IdentityMember` (structured
-  kind `identity_member`). The worker reconcile (`MobHandle::reconcile`,
-  `MobHandle::ensure_member`) never spawns or retires an entry. The agent
-  lane (the member tools' handle) does not act on an entry as a member: its
-  retire, respawn, rotation, release, reload, cancellation, run-start
-  release and wiring commands addressed to an entry are refused
-  `MobError::IdentityMember`, and its requests carry no entry custody. A
-  respawn keeps the entry, a rotation keeps the identity's standing, and
-  every retirement ends the entry; only a local member is an entry. The
-  member's `MemberSpawned` row records the entry, so a restart restores it
-  from the journal alone; an older release reads the row as an ordinary
-  member's. `MobHandle::adopt_legacy_identity_entry` adopts, once, a member a
-  host seated before identity entries existed (its spawn row carries the
+  kind `identity_member`; `spawn_many`, whose failure causes are a closed
+  set, reports it with the cause `invalid_transition`). A seat with entry
+  custody of a name a worker holds is refused
+  `MobError::MemberAlreadyExists`. The worker reconcile
+  (`MobHandle::reconcile`, `MobHandle::ensure_member`) never spawns or
+  retires an entry, and refuses a spec that carries entry custody with
+  `MobError::WiringError` before anything is created. The agent lane (the
+  member tools' handle) does not act on an entry as a member: its retire,
+  respawn, rotation, release, reload, cancellation (`cancel_all_work`
+  included), run-start release and wiring commands addressed to an entry
+  are refused `MobError::IdentityMember` before anything runs, its requests
+  carry no entry custody, and the legacy adoption below is refused there
+  (`MobError::ScopeDenied`). The new `CommandAuthority::principal_for_agent`
+  applies the agent lane's rules on top of a principal's grants, for a
+  surface whose tools an agent calls: the agent mob tools of
+  `meerkat-mob-mcp` (`mob_retire_member`, `mob_wire`, `mob_unwire` and the
+  others) now use it, so they refuse an entry too. A respawn keeps the
+  entry, a rotation keeps the identity's standing, and every retirement ends
+  the entry; only a local member is an entry. The member's `MemberSpawned`
+  row records the entry, so a restart restores it from the journal alone; an
+  older release reads the row as an ordinary member's.
+  `MobHandle::adopt_legacy_identity_entry` adopts, once, a member a host
+  seated before identity entries existed (its spawn row carries the
   durable-identity continuity marker or the legacy `agent_identity` label
-  naming its own id), journals the adoption and answers a typed
-  `LegacyIdentityEntryAdoption`. Reads that need no actor command and wake no
-  member: `MobHandle::identity_entry` (`IdentityEntryRead`),
+  naming its own id), journals the adoption (with the member's stored peer
+  endpoint when the machine holds one) and answers a typed
+  `LegacyIdentityEntryAdoption`; a member whose incarnation keeps changing
+  while its spawn row is read answers the retryable
+  `MobError::LifecycleOperationPending`. Reads that need no actor command
+  and wake no member: `MobHandle::identity_entry` (`IdentityEntryRead`),
   `MobHandle::identity_entries` (paged, `IdentityEntryPage`,
   `IDENTITY_ENTRY_PAGE_MAX`), `MobHandle::identity_census`
   (`IdentityCensus`), `MobHandle::member_lifecycle_events` (the journal's
   member lifecycle facts after a `MobJournalCursor`, `MemberLifecyclePage`)
-  and `MobHandle::members_holding_run_starts`. Behaviour is unchanged until a
-  host declares an entry. The option and the reads are Rust-only; the wire
-  contracts do not carry them.
+  and `MobHandle::members_holding_run_starts`. An entry read whose machine
+  facts are incomplete answers `MobError::Internal` rather than a default.
+  Behaviour is unchanged until a host declares an entry. The option and the
+  reads are Rust-only; the wire contracts do not carry them.
 
 - `meerkat-mob`: a spawn can exempt its member from the mob definition's
   wiring rules. `SpawnMemberSpec::definition_wiring` (builder

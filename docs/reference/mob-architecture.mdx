@@ -157,12 +157,21 @@ name.
   a duplicate (`MemberAlreadyExists`), and so is a seat with entry custody of
   a worker's name.
 - A worker reconcile (`reconcile`, `ensure_member`) never spawns or retires an
-  entry: an entry is neither desired nor stale for it.
+  entry: an entry is neither desired nor stale for it. It refuses a spec that
+  carries entry custody with `MobError::WiringError` before anything is
+  created; a host declares an entry with `spawn_spec` or
+  `seat_dormant_members`.
 - The agent lane (the handle the member tools act through) does not act on an
   entry as a member: its retire, respawn, rotation, release, reload,
-  cancellation, run-start release and wiring commands addressed to an entry
-  are refused `MobError::IdentityMember`, and its requests carry no entry
-  custody. The host acts on its own entries.
+  cancellation (`cancel_all_work` included), run-start release and wiring
+  commands addressed to an entry are refused `MobError::IdentityMember` before
+  anything runs, even beside a host retirement of the same member in flight,
+  and its requests carry no entry custody. It cannot adopt a legacy entry
+  (`MobError::ScopeDenied`). `CommandAuthority::principal_for_agent` applies
+  the same rules on top of a principal's grants, for a surface whose tools an
+  agent calls: the agent mob tools of `meerkat-mob-mcp` (`mob_retire_member`,
+  `mob_wire`, `mob_unwire` and the others) use it. The host acts on its own
+  entries.
 - A respawn of an entry's member seats the entry's member again, and a
   rotation (`rotate_member`) keeps the identity's standing. Every retirement
   ends the entry: in this release an entry is always seated.
@@ -174,12 +183,16 @@ durable-identity continuity marker or the legacy `agent_identity` label naming
 its own id. MobMachine decides the adoption from that observation of the
 member's current incarnation, read from the member binding history. The
 adoption is journaled on a session-binding row that carries the member's
-binding unchanged, a restart restores the entry from it, and the label is
-never read for the member again. The answer is a
+binding unchanged, with its stored peer endpoint when the machine holds one, a
+restart restores the entry from it, and the label is never read for the member
+again. The answer is a
 `LegacyIdentityEntryAdoption`: `Adopted`, `AlreadyAnEntry`, `NameHeldByWorker`
 (no marker), `NotAdoptable` (a placed member, one bound to no session, or a
 retiring one), `NotSeated` or `NonAuthoritative`. A mob that is not running
-refuses it, and it needs `ControlScope::Retire`.
+refuses it (an entry answers `AlreadyAnEntry` in any phase), and it needs
+`ControlScope::Retire`, checked before any answer. A member whose incarnation
+keeps changing while its binding history is read answers the retryable
+`MobError::LifecycleOperationPending`.
 
 The reads need no actor command and never wake a member:
 
@@ -195,9 +208,10 @@ All but the journal read answer from the machine state the actor last
 published, as `member_unmaterialized` does: the answer can be stale by the time
 the host acts on it, and it never says whether a member is materialized. The
 journal read is a store read. They need `ControlScope::List`, and the journal
-read `ControlScope::SubscribeEvents`. An entry's fields are internal to the
-stored event codec, so an older release reads an entry's rows as an ordinary
-member's.
+read `ControlScope::SubscribeEvents`. An entry read whose machine facts are
+incomplete answers `MobError::Internal` rather than a default. An entry's
+fields are internal to the stored event codec, so an older release reads an
+entry's rows as an ordinary member's.
 
 ### One-shot durable role migration
 

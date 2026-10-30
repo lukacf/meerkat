@@ -120,10 +120,18 @@ the boot plan is sealed). The admission probe answers an entry's name without
 custody `IdentityMemberRejected`, the worker reconcile helpers range over
 workers only, and the agent lane's member admission
 (`ResolveAgentLaneMemberAdmission`) is a pure verdict the actor's command
-admission realizes. No shell code records, removes or derives an entry: the
-handle's entry reads project the published machine state. The ci profile has
-no identities, so the hand-written audit
-`specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms.
+admission realizes. The handle's entry reads project the published machine
+state. Two shell steps still decide from the machine's entry facts until the
+machine owns them. A respawn reads the predecessor's entry from the published
+state and opens its successor's ladder with entry custody: between the
+predecessor's archive, which ends its entry, and the successor's commit, the
+identity is neither seated nor an entry. A seat with entry custody of a name a
+worker holds is refused `MemberAlreadyExists` over the published facts. No
+other shell code records, removes or derives an entry. The ci profile has no
+identities, so the hand-written audit
+`specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms in
+two runs: one records, refuses and replays entries, the other takes an entry
+through the dormant seat, the live retirement, the rotation and the destroy.
 
 ## Consumed Checkpoint Completion Recovery
 

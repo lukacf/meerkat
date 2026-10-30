@@ -634,7 +634,7 @@ Spawn defaults matter:
 | `tool_access_policy` | inherit |
 | `auto_wire_parent` | `false`; when `true`, a spawn made from a member's own turn into its own mob (the agent tool `mob_spawn_member`, or the member tools `spawn_member` and `spawn_many_members`) wires the new member to that member, and any other spawn wires nothing |
 | `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)) |
-| `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry: a host's own durable identity, which no worker reconcile spawns or retires, no spawn without entry custody takes, and the agent lane does not act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
+| `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry through a spawn or a dormant seat: a host's own durable identity, which no worker reconcile spawns or retires (`reconcile` and `ensure_member` refuse a spec with entry custody), no spawn without entry custody takes, and neither the agent lane nor the agent mob tools act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
 when a host wants explicit dispatch control.

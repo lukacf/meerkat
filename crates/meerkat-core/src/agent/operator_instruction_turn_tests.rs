@@ -470,3 +470,300 @@ async fn a_run_from_a_pending_tail_applies_the_entry_after_that_tail() {
     );
     assert_eq!(last_user_text(request).as_deref(), Some("pending question"));
 }
+
+/// Realms for the backend rows below: `chatgpt_realm`, whose OpenAI binding
+/// is the ChatGPT backend (its Responses wire carries exactly one leading
+/// System row, the session's prompt), and `public_realm`, whose OpenAI and
+/// Anthropic bindings are the public APIs.
+fn backend_realms_config() -> meerkat_core::Config {
+    let mut chatgpt =
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]);
+    chatgpt
+        .backend
+        .get_mut("default_openai")
+        .expect("OpenAI backend")
+        .backend_kind = "chatgpt_backend".to_string();
+    chatgpt
+        .auth
+        .get_mut("default_openai")
+        .expect("OpenAI auth")
+        .auth_method = "managed_chatgpt_oauth".to_string();
+    let mut config = meerkat_core::Config::default();
+    config.realm.insert("chatgpt_realm".to_string(), chatgpt);
+    config.realm.insert(
+        "public_realm".to_string(),
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[
+            ("openai", "test-key"),
+            ("anthropic", "test-key"),
+        ]),
+    );
+    config
+}
+
+fn configured_binding(realm: &str, binding: &str) -> meerkat_core::AuthBindingRef {
+    meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse(realm).unwrap(),
+        binding: meerkat_core::BindingId::parse(binding).unwrap(),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    }
+}
+
+fn chatgpt_binding() -> meerkat_core::AuthBindingRef {
+    configured_binding("chatgpt_realm", "default_openai")
+}
+
+fn llm_identity(
+    provider: meerkat_core::Provider,
+    model: &str,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding,
+    }
+}
+
+fn openai_identity(
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> meerkat_core::SessionLlmIdentity {
+    llm_identity(
+        meerkat_core::Provider::OpenAI,
+        crate::model_profile::test_catalog::OPENAI_MODEL,
+        auth_binding,
+    )
+}
+
+fn backend_test_registry(config: &meerkat_core::Config) -> meerkat_core::ModelRegistry {
+    meerkat_core::ModelRegistry::from_config(
+        config,
+        *crate::model_profile::test_catalog::TEST_CATALOG,
+    )
+    .unwrap()
+}
+
+/// The ChatGPT backend's wire carries exactly one leading System row, the
+/// session's prompt, so it carries no operator-instruction entry: a model
+/// served through that binding lowers none, whether a build resolves the
+/// lowering from the config or a model fallback activates the witness
+/// judged through that binding. A backend that carries more leading System
+/// rows keeps what the model row lowers (the test catalog's rows lower
+/// System rows only as a leading prefix).
+#[tokio::test]
+async fn a_chatgpt_backend_binding_lowers_no_operator_instruction_entry() {
+    let config = backend_realms_config();
+    let registry = backend_test_registry(&config);
+    let lowering = |identity: &meerkat_core::SessionLlmIdentity| {
+        registry.instruction_lowering_for_identity(&config, identity)
+    };
+    assert_eq!(
+        lowering(&openai_identity(Some(chatgpt_binding()))),
+        InstructionLowering::Unavailable,
+        "a build on the ChatGPT backend lowers no entry"
+    );
+    assert_eq!(
+        lowering(&openai_identity(Some(configured_binding(
+            "missing_realm",
+            "default_openai"
+        )))),
+        InstructionLowering::Unavailable,
+        "a binding the config does not resolve has an unknown backend, and an OpenAI \
+         backend may carry only one leading System row"
+    );
+    let env_default = meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("env_default").unwrap(),
+        binding: meerkat_core::BindingId::parse("default").unwrap(),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
+    };
+    for (identity, why) in [
+        (
+            openai_identity(Some(configured_binding("public_realm", "default_openai"))),
+            "the public API carries every leading System row",
+        ),
+        (
+            openai_identity(None),
+            "an identity that names no binding is served by the API-key backend",
+        ),
+        (
+            openai_identity(Some(env_default)),
+            "the env-var default names the API-key backend",
+        ),
+        (
+            llm_identity(
+                meerkat_core::Provider::Anthropic,
+                crate::model_profile::test_catalog::ANTHROPIC_MODEL,
+                Some(configured_binding("missing_realm", "default_anthropic")),
+            ),
+            "every Anthropic backend carries every leading System row",
+        ),
+    ] {
+        assert_eq!(
+            lowering(&identity),
+            InstructionLowering::LeadingPrefixOnly,
+            "{why}"
+        );
+    }
+
+    // A model fallback activates the target's witness, judged through the
+    // binding its client uses, and leaves the agent to derive the lowering
+    // from it: the two assignments of the fallback's publication.
+    let witness = registry
+        .profile_witness_for_identity(&config, &openai_identity(Some(chatgpt_binding())))
+        .expect("the test catalog row");
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::MidConversation),
+    )
+    .await;
+    agent.active_model_profile = Some(witness);
+    agent.operator_instruction_lowering = None;
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::Unavailable,
+        "the fallback target's witness states its backend's lowering"
+    );
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LoweringUnavailable)
+    );
+    assert!(entry_rows(agent.session().messages()).is_empty());
+}
+
+/// A conversed session whose durable identity is `identity`.
+fn conversed_session_served_by(identity: &meerkat_core::SessionLlmIdentity) -> Session {
+    let mut session = conversed_session();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            model_fallback: None,
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: identity.model.clone(),
+            max_tokens: 16_384,
+            structured_output_retries: 2,
+            provider: identity.provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: identity.auth_binding.clone(),
+            mob_member_binding: None,
+        })
+        .expect("test session metadata should serialize");
+    session
+}
+
+fn hot_swap(
+    agent: &mut TestAgent,
+    client: &Arc<RecordingClient>,
+    identity: meerkat_core::SessionLlmIdentity,
+) {
+    let request_policy = meerkat_core::SessionLlmRequestPolicy {
+        model: identity.model.clone(),
+        credential_identity: None,
+        provider_params: None,
+        provider_tool_defaults: None,
+        provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+    };
+    agent
+        .hot_swap_llm_identity(Arc::clone(client), identity, request_policy)
+        .expect("the hot swap commits");
+}
+
+/// A live model hot swap holds no config that resolves the new identity's
+/// binding to its backend. Onto the ChatGPT backend's binding, operator
+/// instructions lower nowhere until a build judges that binding: a pending
+/// target stays pending and no entry row is appended. An identity naming no
+/// binding is served by the API-key backend, and every Anthropic backend
+/// carries every leading System row: both keep the leading prefix a swap
+/// claims.
+#[tokio::test]
+async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions() {
+    let config = backend_realms_config();
+    let registry = Arc::new(backend_test_registry(&config));
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = AgentBuilder::new()
+        .resume_session(conversed_session_served_by(&openai_identity(Some(
+            configured_binding("public_realm", "default_openai"),
+        ))))
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_operator_instruction_lowering(InstructionLowering::LeadingPrefixOnly)
+        .build_standalone(Arc::clone(&client), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+
+    hot_swap(
+        &mut agent,
+        &client,
+        openai_identity(Some(chatgpt_binding())),
+    );
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::Unavailable,
+        "a hot swap onto the ChatGPT backend's binding claims no entry lowering"
+    );
+    let before = request_json(agent.session().messages());
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LoweringUnavailable)
+    );
+    assert_eq!(
+        request_json(agent.session().messages()),
+        before,
+        "no entry row is appended"
+    );
+    let state = agent
+        .session()
+        .instruction_target_state()
+        .unwrap()
+        .expect("the write is recorded");
+    assert!(
+        state.slots()[0].pending_body.is_some(),
+        "the target stays pending"
+    );
+
+    hot_swap(&mut agent, &client, openai_identity(None));
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::LeadingPrefixOnly,
+        "an identity naming no binding is served by the API-key backend"
+    );
+    hot_swap(
+        &mut agent,
+        &client,
+        llm_identity(
+            meerkat_core::Provider::Anthropic,
+            crate::model_profile::test_catalog::ANTHROPIC_MODEL,
+            Some(configured_binding("public_realm", "default_anthropic")),
+        ),
+    );
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::LeadingPrefixOnly,
+        "every Anthropic backend carries every leading System row"
+    );
+}

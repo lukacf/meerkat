@@ -124,6 +124,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_the_chatgpt_backend_refuses_additional_leading_system_messages() {
+        for kind in OpenAiBackendKind::ALL {
+            assert_eq!(
+                kind.admits_additional_leading_system_messages(),
+                *kind != OpenAiBackendKind::ChatGptBackend,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
     /// The operator GitHub token authenticates the Copilot backend and no
     /// other OpenAI backend.
     #[test]

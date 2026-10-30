@@ -14125,6 +14125,204 @@ mod tests {
         );
     }
 
+    /// Answers a request only after lowering it through the real ChatGPT
+    /// backend Responses request builder, as the OpenAI client does before
+    /// it sends one: a request that wire cannot carry fails the turn.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    struct ChatGptWireAnsweringClient {
+        wire: meerkat_openai::OpenAiClient,
+        bodies: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    impl ChatGptWireAnsweringClient {
+        fn new() -> Self {
+            Self {
+                wire: meerkat_openai::OpenAiClient::new("test-key".to_string())
+                    .with_chatgpt_backend_wire(),
+                bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn bodies(&self) -> Vec<serde_json::Value> {
+            self.bodies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for ChatGptWireAnsweringClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            self.wire.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
+        {
+            match self.wire.build_request_body(request) {
+                Err(error) => Box::pin(futures::stream::iter(vec![Err(error)])),
+                Ok(body) => {
+                    self.bodies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(body);
+                    Box::pin(futures::stream::iter(vec![
+                        Ok(LlmEvent::TextDelta {
+                            delta: "done".to_string(),
+                            meta: None,
+                        }),
+                        Ok(LlmEvent::UsageUpdate {
+                            usage: meerkat_core::TurnUsage::host_declared(
+                                Provider::OpenAI,
+                                &request.model,
+                                meerkat_core::Usage::default(),
+                            ),
+                        }),
+                        Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A session the factory builds on the ChatGPT backend: that wire
+    /// carries exactly one leading System row, the session's prompt, so the
+    /// build resolves no operator-instruction lowering. A recorded target
+    /// stays pending at the fresh session's first run and at the next one,
+    /// no entry row is written, and every request reaches the wire through
+    /// the real ChatGPT backend request builder.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn chatgpt_backend_session_keeps_the_target_pending_and_every_request_succeeds() {
+        const REALM: &str = "operator_instructions_chatgpt";
+        let mut config = Config::default();
+        let mut realm = inline_realm_section(&[("openai", "test-key")]);
+        realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert(REALM.to_string(), realm);
+        let client = Arc::new(ChatGptWireAnsweringClient::new());
+        let wire_client: Arc<dyn LlmClient> = client.clone();
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+        build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+        build.llm_client_override = Some(wire_client);
+        build.system_prompt =
+            crate::SystemPromptOverride::Set("You are a careful assistant.".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_web_search = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("a ChatGPT backend session builds");
+        assert_eq!(
+            agent.operator_instruction_lowering(),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the build resolves the backend's lowering, not the model row's"
+        );
+
+        agent
+            .session_mut()
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example")
+                        .expect("namespace"),
+                    key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .expect("the session records the target");
+        for input in ["first", "second"] {
+            assert_eq!(
+                agent
+                    .apply_run_start_operator_instructions(
+                        meerkat_core::InstructionRunStart::FreshRun,
+                        None,
+                    )
+                    .expect("the run start resolves"),
+                meerkat_core::RunStartInstructionOutcome::Deferred(
+                    meerkat_core::InstructionDeferReason::LoweringUnavailable
+                ),
+                "the target stays pending at the {input} run's start"
+            );
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text(input.to_string()))
+                .await
+                .expect("the request reaches the ChatGPT backend wire");
+        }
+
+        let bodies = client.bodies();
+        assert_eq!(bodies.len(), 2, "every request reached the wire");
+        for body in &bodies {
+            assert!(
+                !body.to_string().contains("Answer formally."),
+                "no instruction body reaches the wire: {body}"
+            );
+        }
+        assert!(
+            agent.session().messages().iter().all(|message| !matches!(
+                message,
+                meerkat_core::Message::System(system) if system.instruction_entry.is_some()
+            )),
+            "no entry row is written"
+        );
+        let state = agent
+            .session()
+            .instruction_target_state()
+            .expect("the target state reads")
+            .expect("the target is recorded");
+        assert_eq!(
+            state.slots()[0].pending_body.as_deref(),
+            Some("Answer formally."),
+            "the target stays pending"
+        );
+    }
+
     /// An inherited tool-visibility ceiling keeps the identity witnesses that
     /// back it through a model-call boundary, so the session's committed
     /// record still witnesses every inherited name and the session resumes.
@@ -15750,6 +15948,8 @@ mod tests {
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
     const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
+    const FALLBACK_REALM_CHATGPT_BOUND_LOWERING: &str = "fallback_chatgpt_bound_lowering";
+    const FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING: &str = "fallback_chatgpt_unbound_lowering";
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
@@ -16407,14 +16607,18 @@ mod tests {
     /// Run one sticky fallback from an Anthropic source onto `gpt-5.5`
     /// through realm `realm_name` (the caller's own), whose OpenAI binding is the private
     /// ChatGPT backend, and return the session's resolved capability surface
-    /// afterwards. `bound` names that binding on both the source and the
+    /// and the agent's operator-instruction lowering afterwards. `bound`
+    /// names that binding on both the source and the
     /// fallback target; otherwise neither names one, and the target is served
     /// by the binding its client resolution selects (the ChatGPT one).
     #[cfg(not(target_arch = "wasm32"))]
     async fn chatgpt_backend_sticky_fallback_capabilities(
         realm_name: &str,
         bound: bool,
-    ) -> meerkat_runtime::SessionLlmCapabilitySurface {
+    ) -> (
+        meerkat_runtime::SessionLlmCapabilitySurface,
+        meerkat_core::InstructionLowering,
+    ) {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
 
         let primary_model = "claude-sonnet-4-5";
@@ -16527,11 +16731,12 @@ mod tests {
             Some(backup_binding),
             "the fallback is served through the ChatGPT-backend binding"
         );
-        runtime
+        let capabilities = runtime
             .resolved_session_llm_capabilities(&session_id)
             .await
             .expect("resolved capability read")
-            .expect("the fallback records a resolved capability surface")
+            .expect("the fallback records a resolved capability surface");
+        (capabilities, agent.operator_instruction_lowering())
     }
 
     /// A sticky fallback onto a target that names the ChatGPT-backend binding
@@ -16542,7 +16747,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sticky_fallback_onto_a_chatgpt_binding_records_its_backend_capability() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_BOUND, true).await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
@@ -16557,7 +16762,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn unbound_fallback_target_is_judged_by_the_binding_it_resolves() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_UNBOUND, false)
                 .await;
         assert!(
@@ -16565,6 +16770,27 @@ mod tests {
             "the target resolves the ChatGPT-backend binding; the row's capability \
              must not stand for it"
         );
+    }
+
+    /// A sticky fallback onto the ChatGPT backend, through a binding the
+    /// target names or the one its client resolution selects, lowers no
+    /// operator-instruction entry afterwards: that wire carries exactly one
+    /// leading System row, the session's prompt. The activated witness,
+    /// judged through that binding, states it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sticky_fallback_onto_a_chatgpt_binding_lowers_no_operator_instruction_entry() {
+        for (realm, bound) in [
+            (FALLBACK_REALM_CHATGPT_BOUND_LOWERING, true),
+            (FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING, false),
+        ] {
+            let (_, lowering) = chatgpt_backend_sticky_fallback_capabilities(realm, bound).await;
+            assert_eq!(
+                lowering,
+                meerkat_core::InstructionLowering::Unavailable,
+                "a fallback onto the ChatGPT backend (target names its binding: {bound})"
+            );
+        }
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

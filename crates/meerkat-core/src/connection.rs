@@ -2767,6 +2767,35 @@ mod tests {
     }
 
     #[test]
+    fn only_a_chatgpt_backend_profile_refuses_additional_leading_system_messages() {
+        let backend = |provider, backend_kind: &str| BackendProfile {
+            id: "backend".to_string(),
+            provider,
+            backend_kind: backend_kind.to_string(),
+            base_url: None,
+            options: serde_json::Value::Null,
+            server: None,
+        };
+        assert!(
+            !backend(Provider::OpenAI, "chatgpt_backend")
+                .admits_additional_leading_system_messages()
+        );
+        for (provider, backend_kind) in [
+            (Provider::OpenAI, "openai_api"),
+            (Provider::OpenAI, "azure_openai"),
+            (Provider::OpenAI, "copilot"),
+            (Provider::OpenAI, "a_backend_this_version_does_not_know"),
+            (Provider::Anthropic, "anthropic_api"),
+            (Provider::Gemini, "google_genai"),
+        ] {
+            assert!(
+                backend(provider, backend_kind).admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
+    }
+
+    #[test]
     fn credential_source_spec_debug_redacts_inline_secret_and_command_values() {
         const SECRET: &str = "sk-live-secret-value";
         let specs = [

@@ -1384,3 +1384,123 @@ async fn a_run_start_fold_of_a_fully_revoked_target_leaves_no_entry_row() {
         "the compaction's record validates"
     );
 }
+
+/// The lowering a build resolves for the test catalog's OpenAI row served
+/// through a binding whose backend is the ChatGPT backend.
+fn chatgpt_backend_lowering() -> InstructionLowering {
+    let mut realm =
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]);
+    realm
+        .backend
+        .get_mut("default_openai")
+        .expect("OpenAI backend")
+        .backend_kind = "chatgpt_backend".to_string();
+    realm
+        .auth
+        .get_mut("default_openai")
+        .expect("OpenAI auth")
+        .auth_method = "managed_chatgpt_oauth".to_string();
+    let mut config = meerkat_core::Config::default();
+    config.realm.insert("chatgpt_realm".to_string(), realm);
+    let registry = meerkat_core::ModelRegistry::from_config(
+        &config,
+        *crate::model_profile::test_catalog::TEST_CATALOG,
+    )
+    .unwrap();
+    registry.instruction_lowering_for_identity(
+        &config,
+        &meerkat_core::SessionLlmIdentity {
+            model: crate::model_profile::test_catalog::OPENAI_MODEL.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(meerkat_core::AuthBindingRef {
+                realm: meerkat_core::RealmId::parse("chatgpt_realm").unwrap(),
+                binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+                profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
+            }),
+        },
+    )
+}
+
+/// What the ChatGPT backend's Responses wire carries of the System plane:
+/// one top-level instructions string, so at most one System row, at the
+/// head of the request. The OpenAI client refuses any other request there.
+fn carries_at_most_one_leading_system_row(request: &[Message]) -> bool {
+    request
+        .iter()
+        .skip(1)
+        .all(|message| !matches!(message, Message::System(_)))
+}
+
+/// A session served by the ChatGPT backend: its wire carries exactly one
+/// leading System row, the session's prompt, so no entry can be lowered
+/// there. A pending target stays pending with `lowering_unavailable` at a
+/// fresh session's first run (its transcript is still the prompt) and at a
+/// later run whose first request compacts (the fold takes what is in
+/// effect, nothing): no entry row and no snapshot is written, and every
+/// request keeps the one leading System row that wire carries.
+#[tokio::test]
+async fn chatgpt_backend_session_defers_every_entry_with_lowering_unavailable() {
+    let lowering = chatgpt_backend_lowering();
+    assert_eq!(lowering, InstructionLowering::Unavailable);
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(fresh_session(), &client, &compactor, lowering).await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+
+    assert_eq!(
+        apply_and_run(&mut agent, "first").await,
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LoweringUnavailable),
+        "the first run of a fresh session"
+    );
+    compactor.arm(1);
+    assert_eq!(
+        apply_and_run(&mut agent, "second").await,
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LoweringUnavailable),
+        "a run whose first request compacts"
+    );
+    assert_eq!(
+        compactor.rebuilds(),
+        1,
+        "the second run's first request compacts"
+    );
+
+    let requests = client.requests();
+    assert_eq!(requests.len(), 2, "every request reached the model");
+    for request in &requests {
+        assert!(
+            entry_identities(request).is_empty(),
+            "no entry reaches a request: {request:?}"
+        );
+        assert!(
+            carries_at_most_one_leading_system_row(request),
+            "the request keeps the one leading System row the wire carries: {request:?}"
+        );
+        assert!(!transcript_text(request).contains("Answer formally."));
+    }
+    assert!(
+        requests[1].iter().any(is_summary),
+        "the second request is the compacted one"
+    );
+    let messages = agent.session().messages().to_vec();
+    assert!(
+        entry_identities(&messages).is_empty(),
+        "no entry row and no snapshot is written"
+    );
+    let state = agent.session().instruction_target_state().unwrap().unwrap();
+    assert_eq!(
+        state.slots()[0].pending_body.as_deref(),
+        Some("Answer formally."),
+        "the target stays pending"
+    );
+    let effective = effective_operator_instructions(agent.session().id(), &messages).unwrap();
+    assert!(
+        effective.slot(&slot("tone")).is_none(),
+        "nothing is in effect"
+    );
+}

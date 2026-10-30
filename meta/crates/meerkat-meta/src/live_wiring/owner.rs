@@ -15,6 +15,8 @@
 //! exactly the sequence it would have used to close on its own. A close that
 //! fails leaves the previous owner in place and fails the newcomer closed;
 //! there is never a silent double owner.
+//!
+//! [`super::GatewayLiveContext`]: crate::live_wiring::GatewayLiveContext
 
 use std::collections::VecDeque;
 use std::future::Future;

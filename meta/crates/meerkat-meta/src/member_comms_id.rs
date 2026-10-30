@@ -616,11 +616,11 @@ pub(crate) fn runtime_plane_spawn_check(
 ///
 /// It checks every spawn source but the two in its allowlist, which rebuild
 /// or replay a member that already exists (see
-/// [`runtime_plane_spawn_check`]): fresh spawns, helpers, batch items, flow
+/// `runtime_plane_spawn_check`): fresh spawns, helpers, batch items, flow
 /// and policy members, fork launches, council seats and respawns are all
 /// checked. Core asks no spawn customizer when it seats a durable fork's
 /// child; Meta's session service refuses that fork instead
-/// ([`refuse_runtime_plane_fork_target`]). The resume it admits is how Core
+/// (`refuse_runtime_plane_fork_target`). The resume it admits is how Core
 /// rebuilds an existing durable member on restart or explicit resume, so a
 /// member created under such a name before this check existed still comes
 /// up; the console attributes none of its events to such a name, and the

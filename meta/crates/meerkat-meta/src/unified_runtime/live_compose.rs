@@ -6,7 +6,7 @@
 //! [`UnifiedRuntimeBuilder`](super::builder::UnifiedRuntimeBuilder), whose
 //! session service is erased at once, so until this seam existed console
 //! voice could only be composed by Meta's own binaries. The builder now
-//! records a [`LivePlan`] and retains the typed inputs; the runtime composes
+//! records a `LivePlan` and retains the typed inputs; the runtime composes
 //! the doors once, after it is shared, exactly the way `rpc_gateway` does:
 //! one `attach_live`, the console controller and the external handler over
 //! the same context, and the shared voice-path arbiter between them.

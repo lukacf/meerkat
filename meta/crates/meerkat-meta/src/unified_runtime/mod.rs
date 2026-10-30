@@ -292,7 +292,7 @@ pub type UnifiedRuntimeBootstrapPhaseObserver =
 /// tracked identity foreground operation owns the mob for its whole life.
 ///
 /// Dropping the last public owner without [`UnifiedRuntime::shutdown`] hands
-/// the runtime state to a retained teardown (see [`RetainedTeardown`]); the
+/// the runtime state to a retained teardown (see `RetainedTeardown`); the
 /// native lifecycle owner decides atomically whether the mob is idle and
 /// closes its admission, and only then does the existing awaited shutdown
 /// run. A composition with entered work keeps its lifetime.

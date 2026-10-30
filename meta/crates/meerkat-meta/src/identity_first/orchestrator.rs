@@ -448,13 +448,13 @@ async fn restore_registered_member(
 /// 1. Validate the roster, compute topology, and register every roster spec
 ///    (a host-adopted identity is a typed refusal in the report).
 /// 2. Make every registered identity a member of Core's mob without
-///    materializing it ([`IdentityRuntime::seat_identities`]): an identity
+///    materializing it (`IdentityRuntime::seat_identities`): an identity
 ///    Core holds needs nothing, and one it does not hold is seated Dormant,
 ///    its pending first-boot row carried out with it. Core materializes each
 ///    member on its first delivery, or at boot when its own obligation facts
 ///    say the member owes work. Meta wakes nothing.
 /// 3. A held pass creates its fresh members itself, held, through the
-///    identity's create ([`IdentityRuntime::embody_identity`]).
+///    identity's create (`IdentityRuntime::embody_identity`).
 /// 4. A refusal is a typed `Refused` outcome for that identity only; the
 ///    remaining identities go on.
 ///

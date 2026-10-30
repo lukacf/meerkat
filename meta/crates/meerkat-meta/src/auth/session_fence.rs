@@ -13,7 +13,7 @@
 //! `exp` for: such a token never expires, and only a fence ends it. A
 //! candidate launch's record writes nothing: it keeps those principals in
 //! its own process
-//! ([`ConsoleSessionFences::keep_non_expiring_notes_in_process`]), and a
+//! (`ConsoleSessionFences::keep_non_expiring_notes_in_process`), and a
 //! candidate revokes nothing.
 //!
 //! Fences are kept for as long as the record exists. A fence could only be

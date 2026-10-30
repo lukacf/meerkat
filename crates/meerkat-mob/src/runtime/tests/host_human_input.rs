@@ -5399,6 +5399,208 @@ async fn an_input_to_an_idle_member_after_its_host_runtime_stopped_waits_for_the
     );
 }
 
+/// A run that a requeue stop kept open, its input carrying a per-turn model
+/// override, is resumed by a host that holds the member's run starts, and
+/// that host's runtime stops before the hold is released; the process keeps
+/// running.
+///
+/// The runtime loop skips the pre-dequeue step for a resumed run, so the
+/// member executor's own check ahead of the turn is the one that meets the
+/// lost actor: without it the override's LLM reconfigure would fail there
+/// and the loop would record the resumed run as failed. With it, once
+/// another part of the process releases the hold, the loop stops serving the
+/// session within its bound, the registration waits for a reload, the run's
+/// input stays bound to the open run, and a third host resumes the run once
+/// and records no failed run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_run_after_its_host_runtime_stopped_waits_for_the_next_start() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let (_root, root_path) = stop_root();
+    // The first process runs the turn, with the override, to a committed
+    // round and keeps it open across a requeue stop.
+    let client = ScriptedClient::new(true);
+    let host =
+        open_stop_host_composed(&root_path, &client, Some("resumed-runtime-stop"), &[], true).await;
+    let mob_id = host.handle.mob_id().clone();
+    let (identity, session_id, entry) = spawn_stop_member(&host).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    client.block();
+    client.call_a_tool_next();
+    let requests_before = client.requests().len();
+    let running_key = delivery("resumed-runtime-stop-running");
+    let running = host
+        .handle
+        .start_host_human_input_with_options_bounded(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkSpec::new(HUMAN, WorkOrigin::External),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    OVERRIDE_MODEL,
+                )),
+                ..Default::default()
+            },
+            running_key.clone(),
+            deadline(),
+        )
+        .await
+        .expect("running human admission");
+    client.wait_for_requests(requests_before + 2).await;
+    let running_id = admitted_input_id(&host.runtime_store, &session_id, &running_key).await;
+    tokio::time::timeout(
+        WAIT,
+        host.handle
+            .shutdown_with_report(requeue_options(crate::RequeueMaxAge::DEFAULT)),
+    )
+    .await
+    .expect("the requeue stop finishes")
+    .expect("requeue stop");
+    let kept_across_stop = stop_answer(running, &session_id).await
+        == StopAnswer::RequeuedAcrossStop(running_id.clone());
+    drop(host);
+    await_supervisor_route_release(&mob_id).await;
+
+    // The second process holds the member's run starts, on a runtime of its
+    // own, with the member's actor live there.
+    let held_client = ScriptedClient::new(true);
+    let incarnation = CrashableMobIncarnation::new();
+    let (held, comms) = {
+        let root_path = root_path.clone();
+        let held_client = held_client.clone();
+        let identity = identity.clone();
+        let session_id = session_id.clone();
+        incarnation
+            .install(async move {
+                let held = open_stop_host_composed(
+                    &root_path,
+                    &held_client,
+                    None,
+                    std::slice::from_ref(&identity),
+                    true,
+                )
+                .await;
+                let mut parks = held.adapter.run_start_held_parks();
+                tokio::time::timeout(WAIT, parks.wait_for(|parks| *parks >= 1))
+                    .await
+                    .expect("the member's runtime loop parks on the hold")
+                    .expect("park signal");
+                tokio::time::timeout(WAIT, held.handle.ensure_member_live(&identity))
+                    .await
+                    .expect("the member's wake finishes")
+                    .expect("the held member's actor is live");
+                let comms = held
+                    .service
+                    .comms_runtime(&session_id)
+                    .await
+                    .map(|runtime| Arc::downgrade(&runtime));
+                (held, comms)
+            })
+            .await
+    };
+    let resumable_at_stop = held.adapter.resumable_run_id(&session_id).await.is_some();
+    let actor_at_stop = held
+        .service
+        .live_session_actor_registered(&session_id)
+        .await;
+
+    incarnation.crash().await;
+    let StopHost {
+        handle,
+        runtime_store,
+        adapter,
+        service,
+    } = held;
+    // Another part of the process releases the hold; the member's runtime
+    // loop resumes the kept run.
+    adapter
+        .release_run_starts(
+            &session_id,
+            meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+        )
+        .await
+        .expect("release the held run starts");
+    let loop_ended = tokio::time::timeout(WAIT, async {
+        while adapter
+            .session_has_live_executor_attachment(&session_id)
+            .await
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let reload_required = adapter
+        .durability_reload_required(&session_id)
+        .await
+        .is_some();
+    let running_phase = runtime_store
+        .load_input_state(&runtime_id, &running_id)
+        .await
+        .expect("runtime-owned input read")
+        .expect("the input keeps its durable row")
+        .seed
+        .phase;
+    let running_left_open = matches!(
+        running_phase,
+        InputLifecycleState::Staged
+            | InputLifecycleState::Applied
+            | InputLifecycleState::AppliedPendingConsumption
+    );
+    if let Some(runtime) = comms.and_then(|comms| comms.upgrade()) {
+        runtime.retire_inproc_route();
+    }
+    drop((handle, adapter, service, runtime_store));
+    await_supervisor_route_release(&mob_id).await;
+
+    // The third process resumes the run once.
+    let restarted_client = ScriptedClient::new(true);
+    let restarted = open_stop_host_composed(&root_path, &restarted_client, None, &[], true).await;
+    tokio::time::timeout(WAIT, restarted.handle.ensure_member_live(&identity))
+        .await
+        .expect("the member's wake finishes")
+        .expect("wake the member on the third host");
+    let consumed = tokio::time::timeout(WAIT, async {
+        loop {
+            let phase = restarted
+                .runtime_store
+                .load_input_state(&runtime_id, &running_id)
+                .await
+                .expect("runtime-owned input read")
+                .expect("the input keeps its durable row")
+                .seed
+                .phase;
+            if phase == InputLifecycleState::Consumed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    // The log is complete once the shutdown returns (see the crash row).
+    tokio::time::timeout(WAIT, restarted.handle.shutdown())
+        .await
+        .expect("mob shutdown finishes")
+        .expect("mob shutdown");
+    let run_failures = stop_events(&root_path, &session_id)
+        .await
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::RunFailed { .. }))
+        .count();
+    assert_eq!(
+        (
+            (kept_across_stop, resumable_at_stop, actor_at_stop),
+            (loop_ended, reload_required, running_left_open),
+            (consumed, run_failures),
+        ),
+        ((true, true, true), (true, true, true), (true, 0)),
+        "a resumed run after the host runtime stopped waits for the next start: the member \
+         executor's check leaves it to the next registration, and the third host resumes it once"
+    );
+}
+
 /// A plain Stop, without `StopOptions::leave_runs_running`, still cancels an
 /// autonomous member's in-flight turn at its next boundary and waits for it
 /// to end: the default Stop is unchanged. The Stop dispatches its cancel

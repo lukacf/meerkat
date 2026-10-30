@@ -172,7 +172,6 @@ pub use instruction_target::{
     SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
     SessionInstructionWrite,
 };
-pub(crate) use operator_instructions::is_operator_instruction_entry;
 pub use operator_instructions::{
     EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
     InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
@@ -180,6 +179,9 @@ pub use operator_instructions::{
     MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
     effective_operator_instructions, materialize_operator_instruction_messages,
     validate_operator_instruction_messages,
+};
+pub(crate) use operator_instructions::{
+    is_operator_instruction_entry, rows_besides_operator_instruction_entries,
 };
 pub use system_prompt_update::{
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
@@ -5536,9 +5538,15 @@ impl Session {
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
-        if messages.len() >= self.messages.len() || summary_count != 1 {
+        // The shrink rule counts the rows other than operator-instruction
+        // entries: the fold's snapshot and the entry rows it takes out are
+        // neutral, so the compactor's own rebuild must have taken rows out.
+        if operator_instructions::rows_besides_operator_instruction_entries(&messages)
+            >= operator_instructions::rows_besides_operator_instruction_entries(self.messages())
+            || summary_count != 1
+        {
             return Err(TranscriptEditError::InvalidTranscriptShape(
-                "validated compaction rewrite must shrink the transcript and carry exactly one CompactionSummary"
+                "validated compaction rewrite must shrink the transcript (operator instruction entries aside) and carry exactly one CompactionSummary"
                     .to_string(),
             ));
         }
@@ -9155,9 +9163,11 @@ impl Session {
             }
             // Only a run start appends an operator-instruction entry row, and
             // only the validated compaction fold takes entry rows out and
-            // inserts a snapshot.
-            if operator_instructions::operator_instruction_entry_rows(self.messages())
-                != operator_instructions::operator_instruction_entry_rows(&rewritten)
+            // inserts a snapshot. Entry rows are compared by identity and by
+            // their place among the conversation rows, not by offset: a
+            // keyed prompt update inserts its later version before them.
+            if operator_instructions::operator_instruction_entry_places(self.messages())
+                != operator_instructions::operator_instruction_entry_places(&rewritten)
             {
                 return Err(TranscriptEditError::InvalidTranscriptShape(
                     "same-session transcript rewrite cannot mint, alter, move, erase, or restore operator instruction entries"

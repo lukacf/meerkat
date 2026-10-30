@@ -269,11 +269,15 @@ fn validate_compaction_rebuild_with(
             "source offset {missing_offset} is neither retained nor discarded"
         )));
     }
-    if rebuilt.len() > messages.len() {
+    // The shrink rule counts the rows other than operator-instruction
+    // entries: the fold's snapshot is neutral in it, and so are the entry
+    // rows the fold takes out. A compactor's own rebuild keeps every entry
+    // row, so for it the count is its plain row count.
+    let source_rows = crate::session::rows_besides_operator_instruction_entries(messages);
+    let rebuilt_rows = crate::session::rows_besides_operator_instruction_entries(rebuilt);
+    if rebuilt_rows > source_rows {
         return Err(CompactionError::InvalidRebuild(format!(
-            "compaction must not grow the transcript from {} to {} messages",
-            messages.len(),
-            rebuilt.len()
+            "compaction must not grow the transcript from {source_rows} to {rebuilt_rows} messages (operator instruction entries aside)"
         )));
     }
 
@@ -851,7 +855,9 @@ pub(crate) struct CompactionInvocation<'a> {
     pub(crate) budget: Option<&'a crate::budget::Budget>,
     /// Exact model-facing projection. Superseded prompt versions remain in
     /// the durable `window` for rewrite validation but never enter forecasts
-    /// or the summarization request.
+    /// or the summarization request. Operator-instruction entry rows are in
+    /// it as the model reads them; no summarizer reads them
+    /// (`without_operator_instruction_entries`).
     pub(crate) model_messages: &'a [Message],
     /// Unmeasured dialogue must reach a generated summary or remain intact
     /// when a mechanical rebuild would discard its unsummarized details.
@@ -930,9 +936,15 @@ fn is_request_input_row(message: &Message) -> bool {
     }
 }
 
-/// `index` moved back over the input rows right before it.
+/// `index` moved back over the input rows right before it, and over the
+/// operator-instruction entry rows among them: a run start appends its entry
+/// after a pending tail or before the run's own input, so an entry belongs
+/// to the request rows of the run it starts.
 fn back_over_inputs(messages: &[Message], mut index: usize) -> usize {
-    while index > 0 && is_request_input_row(&messages[index - 1]) {
+    while index > 0
+        && (is_request_input_row(&messages[index - 1])
+            || crate::session::is_operator_instruction_entry(&messages[index - 1]))
+    {
         index -= 1;
     }
     index
@@ -950,7 +962,8 @@ fn first_run_response(messages: &[Message], run_id: &crate::lifecycle::RunId) ->
 
 /// The first row of the run `run_id` while it is in flight: the start of
 /// the input rows (request, injected context, typed appends, notices) before
-/// its first assistant row. The walk stops at a System row, a response, a
+/// its first assistant row, with the operator-instruction entry its run
+/// start applied. The walk stops at any other System row, a response, a
 /// tool-results row or a compaction summary. `None` before the run's first
 /// assistant row exists, so a run's first boundary compacts as it always
 /// did. Derived from the transcript at each boundary (assistant rows carry
@@ -1527,6 +1540,25 @@ where
     }
 }
 
+/// `messages` without its operator-instruction entry rows: what a
+/// summarizer reads. Borrowed when it holds none.
+fn without_operator_instruction_entries(messages: &[Message]) -> std::borrow::Cow<'_, [Message]> {
+    if messages
+        .iter()
+        .any(crate::session::is_operator_instruction_entry)
+    {
+        std::borrow::Cow::Owned(
+            messages
+                .iter()
+                .filter(|message| !crate::session::is_operator_instruction_entry(message))
+                .cloned()
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(messages)
+    }
+}
+
 async fn compact_history<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
@@ -1565,6 +1597,14 @@ where
     let estimated = estimate_tokens(projection)?;
     let message_count = projection.len();
     let mut event_stream_open = true;
+    // No summarizer reads an operator-instruction entry row, a delta or a
+    // snapshot: a summary is a user row, so a body it paraphrased would
+    // outlive the entry that superseded or revoked it. The fold carries what
+    // is in effect into its snapshot instead. Taken out once, here, before
+    // the host curator and the compactor's own preparation, which a host
+    // implements and cannot be relied on to do it; the counts above keep the
+    // rows the model reads.
+    let summarizer_input = without_operator_instruction_entries(model_messages);
 
     // 1. Emit CompactionStarted
     if event_stream_open
@@ -1592,7 +1632,7 @@ where
     let mut summary_usage_identity_dispute = None;
     let (summary_text, summary_usage, summary_source) = if let Some(curator) = curator {
         let curator_window = CompactionWindow {
-            messages: model_messages,
+            messages: &summarizer_input,
             last_input_tokens,
             session_boundary_index,
         };
@@ -1634,7 +1674,7 @@ where
         let crate::compact::SummarizationSource {
             messages: mut compaction_messages,
             bound: source_bound,
-        } = compactor.prepare_for_summarization(model_messages, summarization_budget);
+        } = compactor.prepare_for_summarization(&summarizer_input, summarization_budget);
         compaction_messages.push(Message::User(crate::types::UserMessage::text(
             compaction_prompt.to_string(),
         )));

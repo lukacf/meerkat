@@ -8,7 +8,10 @@ use super::graph::{
     TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
     TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
 };
-use crate::session::operator_instructions::operator_instruction_entry_rows;
+use crate::session::operator_instructions::{
+    is_operator_instruction_entry, operator_instruction_entry_places,
+    operator_instruction_entry_rows, rows_besides_operator_instruction_entries,
+};
 use crate::session::{
     InstructionEntryKind, TranscriptEditError, TranscriptRewriteSemantic,
     transcript_messages_digest,
@@ -169,23 +172,31 @@ fn validate_instruction_activation_revision_transition(
 /// takes every one out and leaves at most one snapshot, the last row of the
 /// rewritten transcript's leading System prefix, whose entry sequence follows
 /// every entry its origin session wrote before it. Any other rewrite keeps
-/// every entry row exactly, at its offset.
+/// every entry row exactly, at its place among the conversation rows (not at
+/// its offset: a keyed prompt update inserts a System row before it).
 fn validate_operator_instruction_entry_transition(
     commit: &TranscriptRewriteCommit,
     parent_body: &TranscriptRevisionBody,
     revision_body: &TranscriptRevisionBody,
 ) -> Result<(), TranscriptEditError> {
-    let parent_entries = operator_instruction_entry_rows(&parent_body.messages);
-    let revision_entries = operator_instruction_entry_rows(&revision_body.messages);
     if commit.selection.semantic() != TranscriptRewriteSemantic::Compaction {
-        if parent_entries != revision_entries {
+        if operator_instruction_entry_places(&parent_body.messages)
+            != operator_instruction_entry_places(&revision_body.messages)
+        {
             return Err(TranscriptEditError::HistoryStateMalformed(
                 "transcript rewrite changed an operator instruction entry".to_string(),
             ));
         }
         return Ok(());
     }
+    let parent_entries = operator_instruction_entry_rows(&parent_body.messages);
+    let revision_entries = operator_instruction_entry_rows(&revision_body.messages);
     let folded = match revision_entries.as_slice() {
+        // No snapshot: the folded set was empty. The rows the fold took out
+        // cannot tell otherwise. A fold at a run's first request folds the
+        // recorded target, which may revoke every slot those rows had in
+        // effect, and a fork child's fold takes out the rows it copied from
+        // another session, whose set is not its own.
         [] => return Ok(()),
         [(index, Message::System(system))] => system
             .instruction_entry
@@ -433,11 +444,12 @@ fn validate_transcript_rewrite_record_with_digest(
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
-        if start != 0
-            || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
-            || summary_count != 1
-        {
+        // The shrink rule counts the rows other than operator-instruction
+        // entries: the fold's snapshot and the entry rows it takes out are
+        // neutral, so the compactor's own rebuild must have taken rows out.
+        let shrinks = rows_besides_operator_instruction_entries(&revision_body.messages)
+            < rows_besides_operator_instruction_entries(&parent_body.messages);
+        if start != 0 || end != commit.messages_before || !shrinks || summary_count != 1 {
             return Err(TranscriptEditError::HistoryStateMalformed(
                 "typed compaction rewrite must shrink the full transcript and carry exactly one CompactionSummary"
                     .to_string(),
@@ -852,9 +864,19 @@ pub(super) fn validate_transcript_revision_edge(
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
+        // The fold's one snapshot is neutral in the shrink rule. The
+        // parent's rows are not at hand here, so they all count; the record
+        // validation, which holds both bodies, counts the rows other than
+        // operator-instruction entries on both sides.
+        let snapshot = usize::from(
+            edge.rewrite()
+                .replacement()
+                .iter()
+                .any(is_operator_instruction_entry),
+        );
         if start != 0
             || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
+            || commit.messages_after.saturating_sub(snapshot) >= commit.messages_before
             || summaries != 1
         {
             return Err(TranscriptEditError::HistoryStateMalformed(

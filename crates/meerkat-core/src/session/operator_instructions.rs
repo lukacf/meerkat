@@ -718,6 +718,40 @@ pub(crate) fn operator_instruction_entry_rows(messages: &[Message]) -> Vec<(usiz
         .collect()
 }
 
+/// Every operator-instruction entry row with its place in the conversation:
+/// the number of rows before it that are not System rows. A row carries its
+/// typed identity (origin session and entry sequence), so two of these
+/// lists are equal when the same entry rows stand at the same places among
+/// the conversation rows, whatever their offsets. A keyed system-prompt
+/// update inserts or adopts only System rows and leaves the list as it
+/// was; minting, altering or erasing an entry row, or moving one across a
+/// conversation row, changes it.
+pub(crate) fn operator_instruction_entry_places(messages: &[Message]) -> Vec<(usize, &Message)> {
+    let mut conversation_rows = 0;
+    let mut places = Vec::new();
+    for message in messages {
+        match message {
+            Message::System(_) if is_operator_instruction_entry(message) => {
+                places.push((conversation_rows, message));
+            }
+            Message::System(_) => {}
+            _ => conversation_rows += 1,
+        }
+    }
+    places
+}
+
+/// How many rows of `messages` are not operator-instruction entries: what
+/// the compaction shrink rule counts. A fold's snapshot and the entry rows
+/// it takes out are neutral in it, so a compaction makes progress only when
+/// the compactor's own rebuild takes rows out.
+pub(crate) fn rows_besides_operator_instruction_entries(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| !is_operator_instruction_entry(message))
+        .count()
+}
+
 fn entry_rows(
     messages: &[Message],
 ) -> impl Iterator<Item = (usize, &SystemMessage, &InstructionEntryIdentity)> {

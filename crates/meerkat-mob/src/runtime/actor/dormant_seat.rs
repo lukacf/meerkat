@@ -893,6 +893,7 @@ impl MobActor {
             // spec carried entry custody; CommitDormantSeat then records the
             // member an entry in the same step.
             entry_custody: candidate.entry_custody,
+            created_custody: false,
         };
         let seat = mob_dsl::MobMachineInput::CommitDormantSeat {
             agent_identity: dsl_identity,

@@ -3550,7 +3550,13 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
             NamedTypeBinding::string_enum(
                 "MemberAdmissionVerdictKind",
-                &["Admitted", "DuplicateRejected", "IdentityMemberRejected"],
+                &[
+                    "Admitted",
+                    "DuplicateRejected",
+                    "IdentityMemberRejected",
+                    "IdentityMemberOfAnotherOrigin",
+                    "IdentityNameReserved",
+                ],
             ),
             NamedTypeBinding::string_enum("StepOutputFaultKind", &["MalformedJson"]),
             NamedTypeBinding::string_enum("StepFaultDispositionKind", &["Retry", "Terminal"]),
@@ -4179,7 +4185,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             // Identity entries (0.9.8).
-            NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared"]),
+            NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared", "Created"]),
             // Rotation targets (0.9.8): a new session, or the member's own.
             NamedTypeBinding::string_enum("RotationTarget", &["FreshSession", "SameSession"]),
             // Why the machine refuses a fresh-life respawn (0.9.8).
@@ -4206,7 +4212,12 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // why an archived session record is let go.
             NamedTypeBinding::string_enum(
                 "UnseatedEntryCause",
-                &["SeatOwed", "HostedOnFirstUse", "HeldCreation"],
+                &[
+                    "SeatOwed",
+                    "HostedOnFirstUse",
+                    "HeldCreation",
+                    "TemplatePreparation",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "HostPreparationCause",
@@ -4233,6 +4244,9 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RefusedHostAdopted",
                     "RefusedNonAuthoritative",
                     "MobNotRunning",
+                    "RefusedNameOwnedByCreated",
+                    "RefusedNameTombstoned",
+                    "RefusedNameUnreadable",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4247,6 +4261,12 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "DeclaredApplyOpenVerdict",
                 &["Opened", "Busy", "MobNotRunning"],
+            ),
+            // Created identity entries (0.9.9): the presence a created
+            // entry's row records, as the boot's scan read it.
+            NamedTypeBinding::string_enum(
+                "RecoveredPresence",
+                &["Present", "PresentUnseated", "Tombstone", "Unreadable"],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),

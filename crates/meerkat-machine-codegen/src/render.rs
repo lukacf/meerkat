@@ -645,6 +645,38 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "CloseDeclaredApplyStopped",
             "CloseDeclaredApplyCompleted",
             "CloseDeclaredApplyDestroyed",
+            // Created identity entries (0.9.9): the admission probe of a
+            // custody of another origin and of a reserved name, the declared
+            // apply's refusals of a created, removed or unreadable name, the
+            // adoption's refusal of either, the agent lane's unreadable
+            // member, and the recovery of the identity store's created entry
+            // rows.
+            "ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning",
+            "ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped",
+            "ProbeMemberAdmissionIdentityMemberOfAnotherOriginCompleted",
+            "ProbeMemberAdmissionIdentityMemberOfAnotherOriginDestroyed",
+            "ProbeMemberAdmissionIdentityNameReservedRunning",
+            "ProbeMemberAdmissionIdentityNameReservedStopped",
+            "ProbeMemberAdmissionIdentityNameReservedCompleted",
+            "ProbeMemberAdmissionIdentityNameReservedDestroyed",
+            "DeclareIdentityEntryRefusedNameOwnedByCreated",
+            "DeclareIdentityEntryRefusedNameTombstoned",
+            "DeclareIdentityEntryRefusedNameUnreadable",
+            "AdoptLegacyIdentityEntryOtherCustody",
+            "ResolveAgentLaneMemberAdmissionUnreadableNameRunning",
+            "ResolveAgentLaneMemberAdmissionUnreadableNameStopped",
+            "ResolveAgentLaneMemberAdmissionUnreadableNameCompleted",
+            "ResolveAgentLaneMemberAdmissionUnreadableNameDestroyed",
+            "RecoverCreatedIdentityEntrySeatedRunning",
+            "RecoverCreatedIdentityEntrySeatedStopped",
+            "RecoverCreatedIdentityEntryRetiredRunning",
+            "RecoverCreatedIdentityEntryRetiredStopped",
+            "RecoverCreatedIdentityEntryPendingRunning",
+            "RecoverCreatedIdentityEntryPendingStopped",
+            "RecoverCreatedIdentityEntryTombstoneRunning",
+            "RecoverCreatedIdentityEntryTombstoneStopped",
+            "RecoverCreatedIdentityEntryUnreadableRunning",
+            "RecoverCreatedIdentityEntryUnreadableStopped",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

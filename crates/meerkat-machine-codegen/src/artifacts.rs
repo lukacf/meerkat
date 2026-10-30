@@ -11263,27 +11263,30 @@ impl<'a> MachineTlaCompiler<'a> {
         // `identity_to_runtime` is the bound-identity function (DOMAIN = the
         // currently-bound identities); `desired` is the target identity set.
         // Both range over workers only: an identity entry (DOMAIN of
-        // `identity_entry_origins`) is never spawned or retired by them.
+        // `identity_entry_origins`) is never spawned or retired by them, and
+        // neither is a reserved name (`identity_entry_tombstones`, never
+        // seated, is never spawned; `identity_entry_unreadable` is neither
+        // spawned nor retired).
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_desired) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_identity_entry_tombstones, arg_identity_entry_unreadable, arg_desired) ==",
             prefix("mob_machine_members_to_spawn")
         )
         .expect("write to string");
         pushln!(
             out,
-            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime /\\ member \\notin DOMAIN arg_identity_entry_origins }}"
+            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime /\\ member \\notin DOMAIN arg_identity_entry_origins /\\ member \\notin arg_identity_entry_tombstones /\\ member \\notin arg_identity_entry_unreadable }}"
         );
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_desired, arg_retire_stale) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_identity_entry_unreadable, arg_desired, arg_retire_stale) ==",
             prefix("mob_machine_members_to_retire")
         )
         .expect("write to string");
         pushln!(out, "    IF arg_retire_stale");
         pushln!(
             out,
-            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired /\\ member \\notin DOMAIN arg_identity_entry_origins }}"
+            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired /\\ member \\notin DOMAIN arg_identity_entry_origins /\\ member \\notin arg_identity_entry_unreadable }}"
         );
         pushln!(out, "    ELSE {{}}");
         // Placed-carrier cleanup is identity-exclusive and carries the exact

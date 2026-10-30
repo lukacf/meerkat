@@ -17732,6 +17732,7 @@ impl MobActor {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody,
+                created_custody: false,
             },
             "spawn_command_admission",
         )
@@ -17784,6 +17785,7 @@ impl MobActor {
             mob_dsl::MobMachineInput::ProbeMemberAdmission {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 entry_custody,
+                created_custody: false,
             },
             "probe_member_admission",
         )?;
@@ -17881,6 +17883,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::ProbeMemberAdmission {
                     agent_identity: dsl_identity,
                     entry_custody,
+                    created_custody: false,
                 },
             )
             .map_err(|error| {
@@ -18391,6 +18394,7 @@ impl MobActor {
             effective_model_override_present: false,
             // A policy auto-spawn is a worker: it never acts for an entry.
             entry_custody: false,
+            created_custody: false,
         };
         mob_dsl::MobMachineMutator::apply(&mut authority, begin_spawn)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
@@ -38676,6 +38680,7 @@ impl MobActor {
                 effective_profile_override_present: effective_profile_override.is_some(),
                 effective_model_override_present: effective_model_override.is_some(),
                 entry_custody,
+                created_custody: false,
             },
             "enqueue_spawn_remote_open",
         ) {
@@ -40686,6 +40691,7 @@ impl MobActor {
                     // The spawn acts for its name's identity entry exactly
                     // when its spec carried entry custody.
                     entry_custody: ctx.entry_custody,
+                    created_custody: false,
                 },
                 "finalize_spawn_admit_begin_spawn_exec",
             );
@@ -67232,6 +67238,7 @@ mod runtime_observation_tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("BeginSpawnExec should open the spawn-exec phase");

@@ -35,10 +35,12 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberWakeVerdictKind, PeerInputClass, PeerNoticeDisposition, PeerTransportKind,
     RuntimeEpochId,
 };
-// Identity entries: the schema's own types, one definition for both
+// Identity entries, and the presence of a created entry's row the boot's
+// scan recovers: the schema's own types, one definition for both
 // instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
+    RecoveredPresence,
 };
 // Rotation targets and the refusal reason of a fresh-life respawn: the
 // schema's own types, one definition for both instantiations of the machine.
@@ -2805,6 +2807,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody,
+                created_custody: false,
             },
         )
         .expect("BeginSpawnExec should open the spawn-exec phase");
@@ -5973,6 +5976,7 @@ mod tests {
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
                     entry_custody: false,
+                    created_custody: false,
                 },
             )
             .expect("begin peer-only spawn execution");
@@ -6735,6 +6739,7 @@ mod tests {
             effective_profile_override_present: false,
             effective_model_override_present: false,
             entry_custody: false,
+            created_custody: false,
         };
         assert!(
             MobMachineMutator::apply(&mut spawn_authority, begin(Generation(0))).is_err(),
@@ -7691,6 +7696,7 @@ mod tests {
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
                     entry_custody: false,
+                    created_custody: false,
                 },
             )
             .expect("open the spawn execution");
@@ -8222,6 +8228,7 @@ mod tests {
             effective_profile_override_present: true,
             effective_model_override_present: true,
             entry_custody: false,
+            created_custody: false,
         }
     }
 
@@ -11773,6 +11780,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("the seat opens the spawn ladder");
@@ -12239,6 +12247,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("the seat opens the spawn ladder");
@@ -12976,6 +12985,7 @@ mod tests {
             MobMachineInput::ProbeMemberAdmission {
                 agent_identity: identity.clone(),
                 entry_custody,
+                created_custody: false,
             },
         )
         .expect("the admission probe answers");
@@ -13607,6 +13617,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: true,
+                created_custody: false,
             },
         )
         .expect("the seat opens its ladder with entry custody");
@@ -14637,5 +14648,552 @@ mod tests {
                 .contains_key(&member.identity),
             "the end of the marked retirement ends the entry"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Created identity entries
+    // ---------------------------------------------------------------------
+
+    /// The boot's recovery of one created entry row.
+    fn recover_created(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        presence: RecoveredPresence,
+        last_session: Option<&SessionId>,
+    ) {
+        authority
+            .apply_signal(MobMachineSignal::RecoverCreatedIdentityEntry {
+                agent_identity: identity.clone(),
+                presence,
+                last_session: last_session.cloned(),
+            })
+            .expect("the recovery answers every created entry row");
+    }
+
+    /// The admission probe's verdict for a spawn of `identity` with the given
+    /// custodies.
+    fn probe(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        entry_custody: bool,
+        created_custody: bool,
+    ) -> MemberAdmissionVerdictKind {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ProbeMemberAdmission {
+                agent_identity: identity.clone(),
+                entry_custody,
+                created_custody,
+            },
+        )
+        .expect("the probe answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::MemberAdmissionProbed { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the probe emits its verdict")
+    }
+
+    /// Open `member`'s seat ladder at `generation` with the given custodies:
+    /// the profile authorization, then `BeginSpawnExec`, whose answer this
+    /// returns.
+    fn begin_seat_ladder(
+        authority: &mut MobMachineAuthority,
+        member: &SeatedMember,
+        generation: Generation,
+        entry_custody: bool,
+        created_custody: bool,
+    ) -> Result<(), String> {
+        let profile_material_digest = "created-seat-profile-digest".to_string();
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: member.identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_material_digest.clone(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .expect("the seat's profile is authorized");
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginSpawnExec {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable: false,
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                bridge_session_id: Some(member.session_id.clone()),
+                replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+                entry_custody,
+                created_custody,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    /// The boot's recovery of a created entry row decides from the row's
+    /// presence and the replayed facts: a Present row of a seated member
+    /// records it a Created entry; a Present row whose identity the replay
+    /// left without a member (an older build retired it) records it owed its
+    /// seat, with its member's last session as its revival record; a pending
+    /// row records it awaiting its host's preparation; a removed row records
+    /// its tombstone; and an unreadable row, or one the replay contradicts (a
+    /// Declared entry of the name, a member where the row says none),
+    /// reserves the name as unreadable and changes nothing else.
+    #[test]
+    fn a_created_entry_row_is_recovered_by_its_presence_and_the_replay() {
+        let (mut authority, member) = dormant_member_authority("created-seated");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&member.identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_unseated
+                .contains_key(&member.identity)
+        );
+
+        let mut authority = MobMachineAuthority::new();
+        let retired = AgentIdentity::from("created-retired");
+        let last_session = SessionId::from("created-retired-session");
+        recover_created(
+            &mut authority,
+            &retired,
+            RecoveredPresence::Present,
+            Some(&last_session),
+        );
+        let pending = AgentIdentity::from("created-pending");
+        recover_created(
+            &mut authority,
+            &pending,
+            RecoveredPresence::PresentUnseated,
+            None,
+        );
+        let removed = AgentIdentity::from("created-removed");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        let unreadable = AgentIdentity::from("created-unreadable");
+        recover_created(
+            &mut authority,
+            &unreadable,
+            RecoveredPresence::Unreadable,
+            None,
+        );
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&retired),
+            Some(&IdentityEntryOrigin::Created)
+        );
+        assert_eq!(
+            state.identity_entry_unseated.get(&retired),
+            Some(&UnseatedEntryCause::SeatOwed),
+            "a member an older build retired is owed its seat"
+        );
+        assert_eq!(
+            state.identity_entry_archived_sessions.get(&retired),
+            Some(&last_session),
+            "on the session its member was last bound to"
+        );
+        assert_eq!(
+            state.identity_entry_unseated.get(&pending),
+            Some(&UnseatedEntryCause::TemplatePreparation)
+        );
+        assert!(state.identity_entry_tombstones.contains(&removed));
+        assert!(!state.identity_entry_origins.contains_key(&removed));
+        assert!(state.identity_entry_unreadable.contains(&unreadable));
+        assert!(!state.identity_entry_origins.contains_key(&unreadable));
+
+        let (mut authority, member) = dormant_member_authority("declared-name");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the Declared entry");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&member.identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "a created row never takes a Declared entry"
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_unreadable
+                .contains(&member.identity),
+            "the contradicted name is reserved"
+        );
+
+        let (mut authority, member) = dormant_member_authority("pending-but-seated");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::PresentUnseated,
+            None,
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_unreadable
+                .contains(&member.identity)
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&member.identity)
+        );
+    }
+
+    /// Custody of one origin never takes an entry of another, and no spawn
+    /// takes a reserved name: the admission probe refuses entry custody for
+    /// a Created entry and created custody for anything but a Created entry
+    /// owed its seat (IdentityMemberOfAnotherOrigin), a spawn without
+    /// custody an entry's name (IdentityMemberRejected), and every spawn a
+    /// removed or unreadable name (IdentityNameReserved).
+    #[test]
+    fn custody_takes_only_the_entry_of_its_origin_and_no_spawn_a_reserved_name() {
+        let mut authority = MobMachineAuthority::new();
+        let created = AgentIdentity::from("created-owed");
+        recover_created(&mut authority, &created, RecoveredPresence::Present, None);
+        let removed = AgentIdentity::from("removed-name");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        let unreadable = AgentIdentity::from("unreadable-name");
+        recover_created(
+            &mut authority,
+            &unreadable,
+            RecoveredPresence::Unreadable,
+            None,
+        );
+        let declared = AgentIdentity::from("declared-owed");
+        assert_eq!(
+            declare(&mut authority, &declared, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let fresh = AgentIdentity::from("fresh-name");
+
+        for (identity, entry_custody, created_custody, verdict) in [
+            (
+                &created,
+                false,
+                false,
+                MemberAdmissionVerdictKind::IdentityMemberRejected,
+            ),
+            (
+                &created,
+                true,
+                false,
+                MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin,
+            ),
+            (&created, false, true, MemberAdmissionVerdictKind::Admitted),
+            (
+                &declared,
+                false,
+                true,
+                MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin,
+            ),
+            (&declared, true, false, MemberAdmissionVerdictKind::Admitted),
+            (&fresh, false, false, MemberAdmissionVerdictKind::Admitted),
+            (
+                &fresh,
+                false,
+                true,
+                MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin,
+            ),
+            (
+                &fresh,
+                true,
+                true,
+                MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin,
+            ),
+            (
+                &removed,
+                false,
+                false,
+                MemberAdmissionVerdictKind::IdentityNameReserved,
+            ),
+            (
+                &removed,
+                true,
+                false,
+                MemberAdmissionVerdictKind::IdentityNameReserved,
+            ),
+            (
+                &unreadable,
+                false,
+                true,
+                MemberAdmissionVerdictKind::IdentityNameReserved,
+            ),
+        ] {
+            assert_eq!(
+                probe(&mut authority, identity, entry_custody, created_custody),
+                verdict,
+                "{identity:?} with entry custody {entry_custody} and created custody {created_custody}"
+            );
+        }
+    }
+
+    /// A Created entry owed its seat is seated again under created custody:
+    /// the ladder takes its name only with that custody, the seat takes its
+    /// revival record, keeps the member a Created entry and consumes the
+    /// custody. A reserved name opens no ladder at all.
+    #[test]
+    fn a_created_entry_owed_its_seat_is_seated_again_under_created_custody() {
+        let mut authority = MobMachineAuthority::new();
+        let member = SeatedMember {
+            identity: AgentIdentity::from("created-reseat"),
+            runtime_id: AgentRuntimeId::from("created-reseat:0"),
+            session_id: SessionId::from("created-reseat-session"),
+            fence_token: FenceToken(9),
+        };
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            Some(&member.session_id),
+        );
+        assert!(
+            begin_seat_ladder(&mut authority, &member, Generation(0), false, false).is_err(),
+            "no spawn without custody takes the entry's name"
+        );
+        assert!(
+            begin_seat_ladder(&mut authority, &member, Generation(0), true, false).is_err(),
+            "entry custody never takes a Created entry"
+        );
+        begin_seat_ladder(&mut authority, &member, Generation(0), false, true)
+            .expect("created custody opens the ladder of the entry owed its seat");
+        assert!(
+            authority
+                .state()
+                .spawn_exec_created_custody
+                .contains(&member.identity)
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            seat_on(&member, Generation(0), &member.session_id, true, false),
+        )
+        .expect("the seat revives the entry on its record");
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&member.identity),
+            Some(&IdentityEntryOrigin::Created),
+            "the member stays a Created entry"
+        );
+        assert!(state.spawn_exec_created_custody.is_empty());
+        assert!(!state.identity_entry_unseated.contains_key(&member.identity));
+        assert!(
+            !state
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity)
+        );
+        assert_eq!(
+            state.identity_to_runtime.get(&member.identity),
+            Some(&member.runtime_id)
+        );
+
+        let mut authority = MobMachineAuthority::new();
+        let reserved = SeatedMember {
+            identity: AgentIdentity::from("reserved-reseat"),
+            runtime_id: AgentRuntimeId::from("reserved-reseat:0"),
+            session_id: SessionId::from("reserved-reseat-session"),
+            fence_token: FenceToken(10),
+        };
+        recover_created(
+            &mut authority,
+            &reserved.identity,
+            RecoveredPresence::Tombstone,
+            None,
+        );
+        assert!(
+            begin_seat_ladder(&mut authority, &reserved, Generation(0), false, false).is_err(),
+            "no spawn takes a removed entry's name"
+        );
+    }
+
+    /// The declared apply never declares over a Created, removed or
+    /// unreadable name: each is refused typed for that identity alone and
+    /// nothing is written, and the seal of a complete roster that leaves a
+    /// Created entry out never unlists it.
+    #[test]
+    fn the_declared_apply_refuses_a_created_removed_or_unreadable_name() {
+        let (mut authority, member) = dormant_member_authority("created-listed");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        let removed = AgentIdentity::from("removed-listed");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        let unreadable = AgentIdentity::from("unreadable-listed");
+        recover_created(
+            &mut authority,
+            &unreadable,
+            RecoveredPresence::Unreadable,
+            None,
+        );
+        let before = authority.state().clone();
+        for (identity, verdict) in [
+            (
+                &member.identity,
+                IdentityEntryVerdict::RefusedNameOwnedByCreated,
+            ),
+            (&removed, IdentityEntryVerdict::RefusedNameTombstoned),
+            (&unreadable, IdentityEntryVerdict::RefusedNameUnreadable),
+        ] {
+            assert_eq!(
+                declare(&mut authority, identity, Declaration::default()),
+                verdict,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(authority.state(), &before, "a refusal writes nothing");
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_retiring
+                .contains(&member.identity),
+            "the seal never unlists a Created entry"
+        );
+    }
+
+    /// No worker reconcile spawns a removed name or retires a member whose
+    /// name is unreadable, the agent lane refuses that member as an identity
+    /// member, and the legacy adoption adopts neither it nor a Created entry.
+    #[test]
+    fn the_reconcile_the_agent_lane_and_the_adoption_spare_reserved_and_created_names() {
+        let (mut authority, member) = dormant_member_authority("unreadable-member");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Unreadable,
+            None,
+        );
+        let removed = AgentIdentity::from("removed-desired");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::Reconcile {
+                desired: std::collections::BTreeSet::from([removed.clone()]),
+                retire_stale: true,
+            },
+        )
+        .expect("the reconcile answers");
+        assert!(
+            authority.state().members_to_spawn.is_empty(),
+            "a removed name is never spawned"
+        );
+        assert!(
+            authority.state().members_to_retire.is_empty(),
+            "a member whose name is unreadable is never retired"
+        );
+        let lane = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveAgentLaneMemberAdmission {
+                agent_identity: member.identity.clone(),
+            },
+        )
+        .expect("the agent lane's admission answers");
+        assert!(lane.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::AgentLaneMemberAdmissionResolved {
+                admission: AgentLaneMemberAdmissionKind::IdentityMember,
+                ..
+            }
+        )));
+        for identity in [&member.identity, &removed] {
+            let adoption = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::AdoptLegacyIdentityEntry {
+                    agent_identity: identity.clone(),
+                    generation: Generation(0),
+                    legacy_roster_member: true,
+                },
+            )
+            .expect("the adoption answers");
+            assert!(
+                adoption.effects().iter().any(|effect| matches!(
+                    effect,
+                    MobMachineEffect::LegacyIdentityEntryAdoptionResolved {
+                        verdict: LegacyIdentityEntryAdoptionKind::NotAdoptable,
+                        ..
+                    }
+                )),
+                "{identity:?}"
+            );
+        }
+
+        let (mut authority, created) = dormant_member_authority("created-adopted");
+        recover_created(
+            &mut authority,
+            &created.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        let adoption = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AdoptLegacyIdentityEntry {
+                agent_identity: created.identity.clone(),
+                generation: Generation(0),
+                legacy_roster_member: true,
+            },
+        )
+        .expect("the adoption answers");
+        assert!(adoption.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::LegacyIdentityEntryAdoptionResolved {
+                verdict: LegacyIdentityEntryAdoptionKind::NotAdoptable,
+                ..
+            }
+        )));
     }
 }

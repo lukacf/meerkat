@@ -109,6 +109,7 @@ fn begin_spawn_input(
         effective_profile_override_present: false,
         effective_model_override_present: false,
         entry_custody: false,
+        created_custody: false,
     }
 }
 

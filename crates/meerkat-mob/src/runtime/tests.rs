@@ -12611,6 +12611,7 @@ async fn seed_operator_execution_residency(handle: &MobHandle, member_session_id
             effective_profile_override_present: false,
             effective_model_override_present: false,
             entry_custody: false,
+            created_custody: false,
         },
     )
     .await;
@@ -76855,6 +76856,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             effective_profile_override_present: false,
             effective_model_override_present: false,
             entry_custody: false,
+            created_custody: false,
         },
     )
     .expect("begin spawn exec for stale local member");
@@ -93649,6 +93651,7 @@ async fn test_ensure_member_retain_converges_before_roster_projection() {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .await

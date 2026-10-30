@@ -90,9 +90,9 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// the spawn ladder that carries entry custody and the commits that consume
 /// it, the worker reconcile and ensure, the replay of an entry's row and of
 /// an unlisted retirement, the legacy adoption, the agent lane's member
-/// admission, and the declared apply (its verdicts, its seal and the release
-/// of an archived session record). They are written one arm per lifecycle
-/// phase as the residency arms are.
+/// admission, the declared apply (its verdicts, its seal and the release of
+/// an archived session record), and the recovery of a created entry's row.
+/// They are written one arm per lifecycle phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -107,6 +107,7 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "DeclareIdentityEntry",
     "SealDeclaredRoster",
     "ForgetArchivedSession",
+    "RecoverCreatedIdentityEntry",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -125,6 +126,10 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "SealDeclaredRosterMobNotRunning",
     "RecoverIdentityEntryRetiringMarked",
     "ForgetArchivedSession",
+    "ProbeMemberAdmissionIdentityNameReserved",
+    "DeclareIdentityEntryRefusedNameUnreadable",
+    "RecoverCreatedIdentityEntryRetired",
+    "RecoverCreatedIdentityEntryUnreadable",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

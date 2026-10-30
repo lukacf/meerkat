@@ -110,6 +110,7 @@ fn apply_local_spawn_ladder(authority: &mut MobMachineAuthority, identity_name: 
             effective_profile_override_present: false,
             effective_model_override_present: false,
             entry_custody: false,
+            created_custody: false,
         },
     )
     .expect("local BeginSpawnExec must open the spawn-exec window");

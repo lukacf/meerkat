@@ -2426,21 +2426,35 @@ fn an_escaped_rendering_of_an_unchanged_request_approves() {
             .any(|character| character != '\n' && is_hidden(character))
     );
 
-    // The card decodes the exact text the request carries.
+    // The card shows the escaped text, and decodes, for comparison only,
+    // the exact text the request carries.
     let card = rendering.card().expect("a card");
-    let texts: BTreeMap<&str, &Vec<String>> = card
+    let texts: BTreeMap<&str, &CardEntry> = card
         .blocks()
         .iter()
         .flat_map(CardBlock::entries)
-        .filter_map(|entry| match entry {
-            CardEntry::Text { label, lines } => Some((label.as_str(), lines)),
-            _ => None,
-        })
+        .filter(|entry| matches!(entry, CardEntry::Text { .. }))
+        .map(|entry| (entry.label(), entry))
         .collect();
     let spec = created_spec(&request, "team:helper");
-    assert_eq!(texts[labels::DISPLAY_NAME].join("\n"), spec.display_name);
-    assert_eq!(texts[labels::PURPOSE].join("\n"), spec.purpose);
-    assert_eq!(texts[labels::INSTRUCTIONS].join("\n"), spec.instructions);
+    assert_eq!(
+        texts[labels::DISPLAY_NAME].display_lines(),
+        [
+            "Display name (1 line):",
+            "> \\|\\|Approve me\\|\\| \\[now\\](https://example.invalid)"
+        ]
+    );
+    for (label, expected) in [
+        (labels::DISPLAY_NAME, &spec.display_name),
+        (labels::PURPOSE, &spec.purpose),
+        (labels::INSTRUCTIONS, &spec.instructions),
+    ] {
+        assert_eq!(
+            texts[label].decoded_text_not_for_display().as_ref(),
+            Some(expected),
+            "{label}"
+        );
+    }
 
     // A presenter escapes again for its channel. That transform is never a
     // digest input: the decide carries the subject digest of the canonical
@@ -2719,14 +2733,27 @@ fn the_structured_card_is_parsed_from_the_canonical_rendering_and_covers_every_p
         "header, two identities, consequences, host lines, two texts"
     );
 
-    // The blocks tile the rendering: every byte belongs to exactly one.
+    // The blocks tile the rendering: every byte belongs to exactly one, and
+    // a block's display lines are exactly its bytes.
     assert_eq!(blocks[0].bytes().start, 0);
     for pair in blocks.windows(2) {
         assert_eq!(pair[0].bytes().end, pair[1].bytes().start);
     }
     assert_eq!(blocks[6].bytes().end, rendering.as_str().len());
+    for (index, block) in blocks.iter().enumerate() {
+        let mut displayed = block.display_lines().join("\n");
+        displayed.push('\n');
+        if index + 1 < blocks.len() {
+            displayed.push('\n');
+        }
+        assert_eq!(
+            displayed,
+            rendering.as_str()[block.bytes()],
+            "block {index}"
+        );
+    }
 
-    // Labelled fields, decoded from the canonical text.
+    // Labelled fields, as the canonical text writes them.
     match blocks[0].heading() {
         Some(CardEntry::Field { label, value }) => {
             assert_eq!(label, labels::TITLE);
@@ -2737,7 +2764,11 @@ fn the_structured_card_is_parsed_from_the_canonical_rendering_and_covers_every_p
     match blocks[2].heading() {
         Some(CardEntry::Field { label, value }) => {
             assert_eq!(label, "Identity 2 of 2");
-            assert_eq!(value.quoted(), Some("team:scout"));
+            assert_eq!(value.quoted(), Some("\"team:scout\""));
+            assert_eq!(
+                value.decoded_not_for_display().as_deref(),
+                Some("team:scout")
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -2749,8 +2780,13 @@ fn the_structured_card_is_parsed_from_the_canonical_rendering_and_covers_every_p
             _ => None,
         })
         .expect("the tools");
-    let tools: Vec<&str> = tools.iter().filter_map(CardValue::quoted).collect();
-    assert_eq!(tools, ["notes_read", "search"]);
+    let shown: Vec<&str> = tools.iter().filter_map(CardValue::quoted).collect();
+    assert_eq!(shown, ["\"notes\\_read\"", "\"search\""]);
+    let decoded: Vec<String> = tools
+        .iter()
+        .filter_map(CardValue::decoded_not_for_display)
+        .collect();
+    assert_eq!(decoded, ["notes_read", "search"]);
 
     // Consequences as a list, and the host's lines in their own block.
     assert_eq!(
@@ -2760,22 +2796,35 @@ fn the_structured_card_is_parsed_from_the_canonical_rendering_and_covers_every_p
     match &blocks[4].entries()[0] {
         CardEntry::List { label, items } => {
             assert_eq!(label, labels::HOST_CONSEQUENCES);
-            let host: Vec<&str> = items.iter().filter_map(CardValue::quoted).collect();
-            assert_eq!(host, ["Can message <the core team>", "Reads private notes"]);
+            let host: Vec<String> = items.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                host,
+                [
+                    "\"Can message \\<the core team\\>\"",
+                    "\"Reads private notes\""
+                ]
+            );
         }
         other => panic!("{other:?}"),
     }
 
-    // Free text quoted line by line, decoded exactly.
+    // Free text quoted line by line, escaped as written; decoded exactly,
+    // for comparison only.
     let scout_text = blocks[6]
         .entries()
         .iter()
-        .find_map(|entry| match entry {
-            CardEntry::Text { label, lines } if label == labels::INSTRUCTIONS => Some(lines),
-            _ => None,
-        })
+        .find(|entry| entry.label() == labels::INSTRUCTIONS)
         .expect("the scout's instructions");
-    assert_eq!(scout_text.join("\n"), scout.instructions);
+    match scout_text {
+        CardEntry::Text { lines, .. } => {
+            assert_eq!(lines, &["Look around.", "", "Report \\[findings\\]."]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        scout_text.decoded_text_not_for_display().as_ref(),
+        Some(&scout.instructions)
+    );
 
     // The whole card covers every canonical part, for any part size.
     for size in [0, 1, 7, 64, 4096] {
@@ -2798,6 +2847,113 @@ fn the_structured_card_is_parsed_from_the_canonical_rendering_and_covers_every_p
         assert!(covered.len() < every.len(), "block {left_out}");
         assert!(!shows_every_part(rendering.as_str(), max, &covered));
     }
+}
+
+/// A displayed string shows no hidden character or line break, and every
+/// markup character in it is escaped.
+fn assert_displayed_escaped(shown: &str) {
+    assert!(!shown.contains('\n'), "a line break in {shown:?}");
+    assert!(
+        !shown.chars().any(is_hidden),
+        "a hidden character in {shown:?}"
+    );
+    let mut escaped = false;
+    for character in shown.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            assert!(!is_markup(character), "raw markup in {shown:?}");
+        }
+    }
+}
+
+#[test]
+fn the_card_never_shows_hidden_characters_line_breaks_or_markup_raw() {
+    let mut request = golden_create();
+    {
+        let spec = created_spec_mut(&mut request, "team:helper");
+        spec.display_name = "x\u{202E}y".to_owned();
+        spec.instructions = "a\u{E0041}b\u{200B}c".to_owned();
+        spec.descriptive_labels = BTreeMap::from([
+            (
+                "note".to_owned(),
+                "blue\u{2028}\u{2028}Host consequences (0):".to_owned(),
+            ),
+            ("multi".to_owned(), "a\nb".to_owned()),
+        ]);
+        spec.tools.insert("shell\u{202E}".to_owned());
+    }
+    request.consequences.insert(Consequence {
+        identity: "team:helper".to_owned(),
+        effect: ConsequenceEffect::ToolOutsideTemplate {
+            tool: "shell\u{202E}".to_owned(),
+        },
+    });
+    let hook = |_: &IdentityRequest| -> Result<Vec<ConsequenceLine>, HookRefusal> {
+        Ok(lines(&["<b>x</b> ||y||"]))
+    };
+    let rendering = render_v1(&request, Some(&hook)).expect("a rendering");
+    let card = rendering.card().expect("a card");
+
+    let mut displayed = Vec::new();
+    for entry in card.blocks().iter().flat_map(CardBlock::entries) {
+        match entry {
+            CardEntry::Field { value, .. } => displayed.push((value.to_string(), value.clone())),
+            CardEntry::List { items, .. } => {
+                displayed.extend(items.iter().map(|item| (item.to_string(), item.clone())));
+            }
+            CardEntry::Text { lines, .. } => {
+                for line in lines {
+                    assert_displayed_escaped(line);
+                }
+            }
+        }
+    }
+    assert!(displayed.len() > 10);
+    for (shown, value) in &displayed {
+        assert_displayed_escaped(shown);
+        for segment in value.segments() {
+            if let ValueSegment::Quoted(text) = segment {
+                assert!(
+                    text.len() >= 2 && text.starts_with('"') && text.ends_with('"'),
+                    "a quoted value keeps its quotes: {text}"
+                );
+            }
+        }
+    }
+
+    // Each planted value shows as its visible escape.
+    let shown: Vec<&str> = displayed.iter().map(|(shown, _)| shown.as_str()).collect();
+    for expected in [
+        "\"shell\\u{202E}\"",
+        "\"note\" = \"blue\\u{2028}\\u{2028}Host consequences (0):\"",
+        "\"multi\" = \"a\\u{000A}b\"",
+        "\"\\<b\\>x\\</b\\> \\|\\|y\\|\\|\"",
+    ] {
+        assert!(shown.contains(&expected), "{expected} in {shown:?}");
+    }
+    let text_lines: Vec<String> = card
+        .blocks()
+        .iter()
+        .flat_map(CardBlock::display_lines)
+        .collect();
+    assert!(text_lines.contains(&"> x\\u{202E}y".to_owned()));
+    assert!(text_lines.contains(&"> a\\u{E0041}b\\u{200B}c".to_owned()));
+
+    // The fake section is text inside a value, not a section of the card.
+    let host_sections = card
+        .blocks()
+        .iter()
+        .flat_map(CardBlock::entries)
+        .filter(|entry| entry.label() == labels::HOST_CONSEQUENCES)
+        .count();
+    assert_eq!(host_sections, 1);
+
+    // What the card displays is the canonical text, so its coverage is the
+    // coverage of what was displayed.
+    assert_eq!(card.covered_parts(None), rendering.canonical_parts(None));
 }
 
 #[test]

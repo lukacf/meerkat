@@ -4,9 +4,19 @@
 //! The card is parsed from the canonical rendering, never from the request
 //! JSON, so it can show nothing the subject digest does not cover. Parsing
 //! accepts exactly the `render_v1` layout and value encoding, and refuses
-//! anything else. Every byte of the rendering belongs to one block of the
-//! card, so a presenter that shows every block covers every canonical part,
-//! and one that leaves blocks out can tell which parts it did not cover.
+//! anything else.
+//!
+//! Every form the card offers for display is the canonical text itself:
+//! quoted values keep their quotes and escapes, and text lines keep their
+//! escapes, exactly as `render_v1` wrote them. So a hidden character, a line
+//! break or markup in a value shows as its visible escape, never raw. The
+//! value a segment or a text stands for is behind the separately named
+//! `*_not_for_display` accessors, for comparing with a request only.
+//!
+//! Every byte of the rendering belongs to one block of the card, and a
+//! block's display lines are exactly its bytes. So a presenter that
+//! displays every block covers every canonical part, and the coverage of a
+//! presentation that leaves blocks out counts only the blocks it displayed.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -16,14 +26,24 @@ use super::escape::{is_markup, unescape_line, unquote};
 use super::parts::{CanonicalPart, canonical_parts, part_ranges};
 use super::render::labels;
 
-/// One segment of a field's or a list item's value.
+/// One segment of a field's or a list item's value, exactly as `render_v1`
+/// wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ValueSegment {
     /// A word the renderer wrote: a keyword, a number or a digest.
     Word(String),
-    /// A quoted value, decoded.
+    /// A quoted value as the renderer wrote it: its quotes, its escaped
+    /// markup and its `\u{XXXX}` escapes. This is the form to display.
     Quoted(String),
+}
+
+impl ValueSegment {
+    /// The segment as the renderer wrote it: the form to display.
+    pub fn shown(&self) -> &str {
+        let (Self::Word(text) | Self::Quoted(text)) = self;
+        text
+    }
 }
 
 /// A field's or a list item's value: words and quoted values.
@@ -33,7 +53,7 @@ pub struct CardValue {
 }
 
 impl CardValue {
-    /// The value's segments.
+    /// The value's segments, as the renderer wrote them.
     pub fn segments(&self) -> &[ValueSegment] {
         &self.segments
     }
@@ -46,23 +66,33 @@ impl CardValue {
         }
     }
 
-    /// The value's one quoted value, decoded, when it is exactly one.
+    /// The value's one quoted segment as the renderer wrote it, with its
+    /// quotes and escapes, when it is exactly one: the form to display.
     pub fn quoted(&self) -> Option<&str> {
         match self.segments.as_slice() {
             [ValueSegment::Quoted(text)] => Some(text),
             _ => None,
         }
     }
+
+    /// The text the one quoted segment stands for, decoded: the exact value
+    /// the request carries. Not for display: decoding brings back the
+    /// hidden characters, line breaks and markup the rendering escaped. For
+    /// comparing with a request only.
+    pub fn decoded_not_for_display(&self) -> Option<String> {
+        self.quoted().and_then(unquote).map(|(decoded, _)| decoded)
+    }
 }
 
+/// The value as the renderer wrote it: quoted segments with their quotes
+/// and escapes.
 impl fmt::Display for CardValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, segment) in self.segments.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(" ")?;
             }
-            let (ValueSegment::Word(text) | ValueSegment::Quoted(text)) = segment;
-            formatter.write_str(text)?;
+            formatter.write_str(segment.shown())?;
         }
         Ok(())
     }
@@ -86,11 +116,12 @@ pub enum CardEntry {
         /// The items, in order.
         items: Vec<CardValue>,
     },
-    /// Labelled free text, decoded, line by line.
+    /// Labelled free text, line by line.
     Text {
         /// The label.
         label: String,
-        /// The lines.
+        /// The lines as the renderer wrote them, with their escapes: the
+        /// form to display. An empty line is empty.
         lines: Vec<String>,
     },
 }
@@ -103,6 +134,44 @@ impl CardEntry {
                 label
             }
         }
+    }
+
+    /// The entry's lines exactly as the renderer wrote them: what a
+    /// presenter displays.
+    pub fn display_lines(&self) -> Vec<String> {
+        match self {
+            Self::Field { label, value } => vec![format!("{label}: {value}")],
+            Self::List { label, items } => {
+                let mut lines = Vec::with_capacity(items.len() + 1);
+                lines.push(format!("{label} ({}):", items.len()));
+                lines.extend(items.iter().map(|item| format!("- {item}")));
+                lines
+            }
+            Self::Text { label, lines } => {
+                let mut shown = Vec::with_capacity(lines.len() + 1);
+                let unit = if lines.len() == 1 { "line" } else { "lines" };
+                shown.push(format!("{label} ({} {unit}):", lines.len()));
+                shown.extend(lines.iter().map(|line| {
+                    if line.is_empty() {
+                        ">".to_owned()
+                    } else {
+                        format!("> {line}")
+                    }
+                }));
+                shown
+            }
+        }
+    }
+
+    /// A text entry's text, decoded, its lines joined with line breaks: the
+    /// exact text the request carries. Not for display (see
+    /// `CardValue::decoded_not_for_display`). `None` for a field or a list.
+    pub fn decoded_text_not_for_display(&self) -> Option<String> {
+        let Self::Text { lines, .. } = self else {
+            return None;
+        };
+        let decoded: Option<Vec<String>> = lines.iter().map(|line| unescape_line(line)).collect();
+        decoded.map(|lines| lines.join("\n"))
     }
 }
 
@@ -129,6 +198,15 @@ impl CardBlock {
     /// included.
     pub fn bytes(&self) -> Range<usize> {
         self.bytes.clone()
+    }
+
+    /// The block's lines exactly as the renderer wrote them, without the
+    /// empty line after the block: what a presenter displays.
+    pub fn display_lines(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .flat_map(CardEntry::display_lines)
+            .collect()
     }
 }
 
@@ -244,9 +322,10 @@ impl StructuredCard {
         self.covered_parts_of(&every, max_part_bytes)
     }
 
-    /// The canonical parts a presentation of the blocks at `shown` covers,
-    /// for the part size `max_part_bytes`: those whose every byte belongs to
-    /// a shown block.
+    /// The canonical parts a presentation that displayed the blocks at
+    /// `shown` covers, for the part size `max_part_bytes`: those whose every
+    /// byte belongs to a displayed block. Blocks it did not display count
+    /// for nothing.
     pub fn covered_parts_of(
         &self,
         shown: &[usize],
@@ -320,8 +399,9 @@ fn parse_value(text: &str) -> Option<CardValue> {
     let mut rest = text;
     loop {
         if rest.starts_with('"') {
-            let (decoded, after) = unquote(rest)?;
-            segments.push(ValueSegment::Quoted(decoded));
+            let (_, after) = unquote(rest)?;
+            let shown = rest.get(..rest.len() - after.len())?;
+            segments.push(ValueSegment::Quoted(shown.to_owned()));
             rest = after;
         } else {
             let end = rest.find(' ').unwrap_or(rest.len());
@@ -343,6 +423,7 @@ fn parse_value(text: &str) -> Option<CardValue> {
 }
 
 /// One text line: `>` for an empty line, else `> ` and the escaped line.
+/// Returns the escaped line as written, once it decodes canonically.
 fn parse_text_line(line: &str) -> Option<String> {
     if line == ">" {
         return Some(String::new());
@@ -351,7 +432,8 @@ fn parse_text_line(line: &str) -> Option<String> {
     if escaped.is_empty() {
         return None;
     }
-    unescape_line(escaped)
+    unescape_line(escaped)?;
+    Some(escaped.to_owned())
 }
 
 /// The entry at `lines[index]`, and how many lines it takes.
@@ -396,13 +478,13 @@ fn parse_entry(lines: &[(usize, &str)], index: usize) -> Result<(CardEntry, usiz
         }
         let mut text = Vec::with_capacity(lines_count);
         for offset in 1..=lines_count {
-            let decoded = lines
+            let shown = lines
                 .get(index + offset)
                 .and_then(|&(_, text_line)| parse_text_line(text_line))
                 .ok_or_else(|| {
                     CardError::at(number + offset, "a text line that is not canonical")
                 })?;
-            text.push(decoded);
+            text.push(shown);
         }
         return Ok((
             CardEntry::Text {

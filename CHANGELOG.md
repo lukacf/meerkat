@@ -35,6 +35,79 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`: the
+  native work owner's `WorkAuthorization::owner_change_in_progress`
+  (`LocalWorkAuthorization`) also names a reservation of its publication's
+  writer held now that has not published: an owner change still being
+  prepared (a grant issuance before its acknowledged append publishes), a
+  held exclusion (`LocalGrantAuthority::try_with_owner_changes_excluded`) or
+  another operation's final entry, named by the odd sequence it would
+  publish at. `LocalAuthorizationPublication::change_in_progress` is
+  unchanged and still names published changes only. Every owner-change wait
+  (`OwnerChangeChurn`, Core's own and a host's) now lasts until such a
+  holder releases the writer, within the same bounds, where it answered
+  `None` or settled while the holder still held. The operation-time steps
+  and the host-facing entries that never wait answer as before.
+
+### Added
+
+- `meerkat-core`: `OwnerChangeChurn::wait_after_stale_read`, the bounded
+  wait for a host's pure observation of a work's own authorization
+  publication (one that reads owners and runs no effect) that is still
+  stale after its one rebuild (`PublicationError::Changed`,
+  `LineageResolutionRefusal::Changed`). Such a read can end stale after a
+  change it never saw in progress: one that waited for an owner's own lock
+  while another actor's change held it (a grant issuance holds the grant
+  owner's mutex across its acknowledged append) ends stale only once that
+  change published, often after it completed, and
+  `wait_for_settled_change` then answers `None`. The new wait waits for any
+  change in progress, an unpublished reservation of the writer included,
+  and with none in progress as it starts it pauses 1 ms first. `Settled`
+  means make the same observation once more, afresh; `NotSettled` means
+  stop and answer the read as stale, never as unavailable. Every settled
+  wait is one of the churn's three free rebuilds, within its one deadline
+  (2 s, clamped to the budget passed, such as
+  `ToolDispatchContext::remaining_tool_time`), armed at its first wait. Take
+  a fresh churn for each decision point, hold nothing across the wait, and
+  never wait around an effect. Dropping the wait cancels it with nothing to
+  release. Shell synchronization only: no machine input, owner fact, wire
+  type or error variant changes.
+
+### Fixed
+
+- `meerkat-core`: an owner-change wait (`OwnerChangeChurn`) no longer
+  settles at or past its deadline. Its loop read the change in progress
+  before it checked the deadline, so a change that completed during the
+  last sleep before the deadline settled the wait at the deadline, and a
+  later wait of a churn whose deadline had passed settled at once when the
+  change cleared between its first read and the next: each granted a free
+  rebuild past `OWNER_CHANGE_WAIT_BOUND` or the caller's budget. The loop
+  now checks the deadline before every read, so a read at or after it
+  answers `NotSettled`. Every Core wait that rebuilds after
+  `ReprepareRequired` (`wait_for_settled_change`) and the new
+  `wait_after_stale_read` share the loop.
+
+### Upgrade notes
+
+- No storage migration: this release changes no stored format. It opens
+  every 0.9.7 store as it is, and 0.9.7 reads everything it writes.
+
+- Pin the Core crates exactly at `=0.9.8`, as for every release. Meta 0.9.7
+  pins Core `=0.9.8`.
+
+- A host whose own pure observation of a work's publication answered a
+  stale read as unavailable, or stopped when `wait_for_settled_change`
+  answered `None`, can wait with `OwnerChangeChurn::wait_after_stale_read`
+  between attempts of that observation and keep the answer typed as stale
+  once the wait answers `NotSettled` (see Added). Nothing changes for a host
+  that does not.
+
+### Known limitations
+
+- None new.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

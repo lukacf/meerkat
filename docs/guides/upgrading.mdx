@@ -55,6 +55,60 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.8
+
+This section is for systems running 0.9.7. The full list of changes is in
+the CHANGELOG under `## [0.9.8]`. 0.9.8 is a patch release for hosts whose
+own pure observations of a work's authorization publication meet other
+actors' owner changes. It needs no storage migration: it changes no stored
+format, it opens every 0.9.7 store as it is, and 0.9.7 reads everything it
+writes. Back up the state root as the steps above say.
+
+### Breaking changes and what to do
+
+#### An unpublished hold of the publication's writer is a change in progress
+
+The native work owner's `WorkAuthorization::owner_change_in_progress`
+(`LocalWorkAuthorization`) also names a reservation of its publication's
+writer that has not published: an owner change still being prepared (a grant
+issuance before its acknowledged append publishes), a held exclusion
+(`LocalGrantAuthority::try_with_owner_changes_excluded`) or another
+operation's final entry. `LocalAuthorizationPublication::change_in_progress`
+still names published changes only. Every owner-change wait, Core's own and
+a host's, now lasts until such a holder releases the writer, within the same
+bounds (2 s, or the budget passed when less). The operation-time steps and the
+host-facing entries that never wait answer as before; Core's own waits may now
+wait, within the same bounds, for such a holder and rebuild where they answered
+at once.
+
+**Do:** nothing, unless your code reads the native work owner's
+`owner_change_in_progress` as "a published change is in progress": read
+`LocalAuthorizationPublication::change_in_progress` for that.
+
+### Wait after a stale read
+
+A host's pure observation of a work's own publication (one that reads owners
+and runs no effect) can stay stale after its one rebuild while another actor
+issues grants on the same publication: the read waits for the grant owner's
+lock during the issuance's append and ends stale only once the issuance
+published, often after it completed, so `wait_for_settled_change` answers
+`None`. The new `OwnerChangeChurn::wait_after_stale_read` waits for that
+case too; see
+[Survive owner changes in progress](/rust/native-authorization#survive-owner-changes-in-progress).
+
+**Do:** where such a read answered stale as unavailable, or stopped when
+`wait_for_settled_change` answered `None`, take a fresh churn for the check
+(`ToolDispatchContext::owner_change_churn` in a tool body), wait with
+`wait_after_stale_read` after each stale read, repeat only the observation,
+and keep the answer typed as stale once the wait answers `NotSettled`. Hold
+nothing across the wait and never repeat an effect.
+
+### Downgrading to 0.9.7
+
+Nothing stored changes, so 0.9.7 opens what 0.9.8 wrote. A downgrade brings
+back the 0.9.7 waits, which do not wait for an unpublished holder, and code
+that calls `wait_after_stale_read` does not build against 0.9.7.
+
 ## Upgrading to 0.9.7
 
 This section is for systems running 0.9.6. The full list of changes is in

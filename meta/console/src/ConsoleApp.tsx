@@ -131,6 +131,13 @@ import {
   sideChatSource,
   sideChatSourceMemberId,
 } from "./lib/side-chat";
+import {
+  NO_CONSOLE_SCHEDULES,
+  consoleScheduleEditing,
+  consoleScheduleOffer,
+  type ConsoleScheduleCommand,
+  type ConsoleScheduleOffer,
+} from "./lib/schedules";
 import { resolveConsoleReadOnlyOverride } from "./lib/read-only-override";
 import { Icon, SpriteSheet } from "./icon";
 import type {
@@ -192,6 +199,7 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
+import { SchedulesSection } from "./panels/SchedulesSection";
 import {
   WorkGraphPanel,
   createWorkGraphRefreshSequencer,
@@ -1000,6 +1008,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [sideChatsOffered, setSideChatsOffered] = React.useState(false);
   const [sideChatNotices, setSideChatNotices] = React.useState<Record<string, string>>({});
   const [forkingPanels, setForkingPanels] = React.useState<ReadonlySet<string>>(() => new Set());
+  // Console schedules: whether this gateway lists them and lets this
+  // console change them (`meta/schedule/*` in `meta/capabilities`).
+  const [scheduleOffer, setScheduleOffer] = React.useState<ConsoleScheduleOffer>(NO_CONSOLE_SCHEDULES);
   const [transportState, setTransportState] = React.useState<ConsoleTransportState>({
     phase: "connecting", stale: true, freshness: "unknown",
   });
@@ -1229,6 +1240,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       else delete updated[identity];
       return updated;
     });
+  }
+
+  async function runScheduleCommand(
+    identity: string,
+    command: ConsoleScheduleCommand,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    return executeHeadlessCommand(
+      CONSOLE_COMMAND_NAMES[command],
+      identityWorkbenchTarget(identity, "inspect"),
+      { ...params, identity },
+    );
   }
 
   async function inspectIdentityViaHeadless(identity: string): Promise<unknown> {
@@ -2675,6 +2698,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       active = false;
     };
   }, [consoleTransport, canSpawnMembers, sendScope]);
+  // An agent's details pane lists its schedules only where the gateway
+  // advertises `meta/schedule/list`, and offers changes only where it
+  // advertises every write; the gateway still judges each call.
+  React.useEffect(() => {
+    let active = true;
+    void Promise.resolve()
+      .then(() => consoleTransport.capabilities())
+      .then((capabilities) => {
+        if (active) setScheduleOffer(consoleScheduleOffer(capabilities.methods));
+      })
+      .catch(() => {
+        if (active) setScheduleOffer(NO_CONSOLE_SCHEDULES);
+      });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
   // Same-key resend of an uncertain send is safe only against a durable
   // dedupe store; older gateways (field absent) and in-memory stores are not.
   const resendUncertain = experience?.send_dedupe?.durable === true;
@@ -5488,6 +5528,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             <dd>{inspect.output_preview || "n/a"}</dd>
           </dl>
         )}
+        {scheduleOffer.list ? (
+          <SchedulesSection
+            key={target.identity}
+            identity={target.identity}
+            editing={consoleScheduleEditing({
+              offer: scheduleOffer,
+              readOnly: consoleReadOnly,
+              accessEnforcing,
+              agent,
+            })}
+            refreshToken={inspect}
+            run={(command, params) => runScheduleCommand(target.identity, command, params)}
+          />
+        ) : null}
       </div>
     );
   }

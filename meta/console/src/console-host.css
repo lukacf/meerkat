@@ -560,6 +560,49 @@ svg[data-svg="fit"],
 .console-panel__grid dt { color: var(--ink-muted); font-family: var(--disp); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .console-panel__grid dd { margin: 0; }
 
+/* Console schedules in an agent's details pane. */
+.console-schedules {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 20px; padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.console-schedules h4 { margin: 0; font-family: var(--disp); font-size: 13px; }
+.console-schedules__note,
+.console-schedules__empty,
+.console-schedules__hint { margin: 0; font-size: 12px; color: var(--ink-muted); }
+.console-schedules__error { margin: 0; font-size: 12px; color: var(--danger); }
+.console-schedules__item { display: flex; flex-direction: column; gap: 4px; }
+.console-schedules__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.console-schedules__phase { font-family: var(--disp); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-muted); }
+.console-schedules__item[data-phase="paused"] .console-schedules__phase { color: var(--danger); }
+.console-schedules__content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-schedules__meta { margin: 0; font-size: 11.5px; color: var(--ink-muted); }
+.console-schedules__item .console-panel__actions { margin-top: 4px; }
+.console-schedules__form {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+}
+.console-schedules__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-muted); }
+.console-schedules__field input,
+.console-schedules__field select,
+.console-schedules__field textarea {
+  font: inherit; font-size: 12.5px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 5px 8px;
+}
+.console-schedules__field textarea { resize: vertical; }
+.console-schedules__inline { display: flex; flex-wrap: wrap; gap: 10px; }
+.console-schedules__days {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin: 0; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: 12px; color: var(--ink-muted);
+}
+.console-schedules__days label { display: inline-flex; align-items: center; gap: 4px; }
+
 /* ══════════════════════════════════════════════════════════════
    Design-spec views: paste-in CSS from the Console.html mockup.
    All references use the bridged --bg / --ink / --accent / ...

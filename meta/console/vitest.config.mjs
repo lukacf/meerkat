@@ -105,6 +105,8 @@ export default defineConfig({
       "console/src/perf/typing-lag.bench.test.tsx",
       "console/src/lib/panel-refresh.test.tsx",
       "console/src/lib/side-chat-integration.test.tsx",
+      "console/src/lib/schedules-integration.test.tsx",
+      "console/src/panels/SchedulesSection.test.tsx",
       "console/src/lib/identity-log.test.ts",
       "console/src/lib/history-paging-notices.test.tsx",
       "packages/console-core/src/dock.test.ts",

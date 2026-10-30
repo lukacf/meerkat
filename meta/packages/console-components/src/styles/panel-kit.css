@@ -942,6 +942,30 @@ button.cc-tile:focus-visible,
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
 }
+/* A tile with links: its label is the button; the focus ring draws on the tile. */
+.cc-tile__hit {
+  display: inline-flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-tile__hit:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+@supports selector(:has(*)) {
+  .cc-tile__hit:focus-visible { outline: none; }
+  .cc-tile--split:has(.cc-tile__hit:focus-visible) {
+    outline: 2px solid var(--_cc-focus-ring);
+    outline-offset: 2px;
+  }
+}
 .cc-tile__head {
   display: flex;
   align-items: center;

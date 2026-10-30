@@ -482,7 +482,7 @@ describe("panel frame", () => {
 });
 
 describe("StatTile", () => {
-  it("stays a keyboard-reachable button when it also holds links", () => {
+  it("makes its label the button when it also holds links, with the links beside it", () => {
     const open = vi.fn();
     const link = vi.fn();
     const view = render(
@@ -491,16 +491,23 @@ describe("StatTile", () => {
       </StatTile>,
     );
     const tile = view.getByTestId("tile");
-    expect(tile.getAttribute("role")).toBe("button");
-    expect(tile.getAttribute("tabindex")).toBe("0");
-    fireEvent.click(tile);
-    fireEvent.keyDown(tile, { key: "Enter" });
-    fireEvent.keyDown(tile, { key: " " });
-    expect(open.mock.calls.length).toBe(3);
-    // A link inside the tile opens its record, not the tile's tab.
-    fireEvent.click(view.getByRole("button", { name: "Release train cutoff" }));
+    // No control inside a control: the tile is not a role="button".
+    expect(tile.getAttribute("role") === null).toBe(true);
+    expect(tile.getAttribute("tabindex") === null).toBe(true);
+    const button = view.getByRole("button", { name: "Trust rules" });
+    expect(button.tagName).toBe("BUTTON");
+    expect(button.classList.contains("cc-tile__hit")).toBe(true);
+    const described = (button.getAttribute("aria-describedby") || "").split(" ").map((id) => document.getElementById(id)?.textContent);
+    expect(described.includes("2 records break the trust rules")).toBe(true);
+    fireEvent.click(button);
+    fireEvent.click(tile.querySelector(".cc-tile__summary")!);
+    expect(open.mock.calls.length).toBe(2);
+    // A link beside the button opens its record, not the tile's tab.
+    const recordLink = view.getByRole("button", { name: "Release train cutoff" });
+    expect(recordLink.closest(".cc-tile__hit") === null).toBe(true);
+    fireEvent.click(recordLink);
     expect(link.mock.calls.length).toBe(1);
-    expect(open.mock.calls.length).toBe(3);
+    expect(open.mock.calls.length).toBe(2);
   });
 
   it("is a plain region without an action", () => {
@@ -510,7 +517,7 @@ describe("StatTile", () => {
     expect(tile.classList.contains("is-interactive")).toBe(false);
   });
 
-  it("leaves keys on a link inside to the link, and takes only Enter and Space itself", () => {
+  it("leaves keys on a link to the link and keeps its own tab stop on the label", () => {
     const open = vi.fn();
     const view = render(
       <StatTile label="Trust rules" summary="1 record breaks the trust rules" tone="crit" onActivate={open} testId="tile">
@@ -522,11 +529,10 @@ describe("StatTile", () => {
     expect(link.parentElement?.classList.contains("cc-tile__links")).toBe(true);
     fireEvent.keyDown(link, { key: "Enter" });
     fireEvent.keyDown(link, { key: " " });
-    fireEvent.keyDown(tile, { key: "a" });
+    fireEvent.keyDown(tile, { key: "Enter" });
     expect(open.mock.calls.length).toBe(0);
-    // The tile keeps Enter and Space from scrolling or submitting.
-    expect(fireEvent.keyDown(tile, { key: " " })).toBe(false);
-    expect(open.mock.calls.length).toBe(1);
+    // Two tab stops, the label and the link, and no others.
+    expect(tile.querySelectorAll("button, [tabindex]").length).toBe(2);
   });
 
   it("is a real button without links, with its tone, help and data attributes", () => {

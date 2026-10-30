@@ -1,4 +1,4 @@
-import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
+import { useId, type MouseEvent, type ReactNode } from "react";
 
 import { cx } from "./cx";
 import type { Tone } from "./tone";
@@ -7,7 +7,8 @@ import type { Tone } from "./tone";
  * A summary tile: micro-label, a status (usually a Chip), a one-line summary
  * and optional links. The tone draws a 2 px top rule. `muted` is the quiet
  * dashed one-line form for checks that cannot run. A tile that navigates is
- * a button.
+ * a button; one that also holds links is a container whose label is its
+ * button, with the links beside it (never a control inside a control).
  */
 export function StatTile({
   label,
@@ -36,6 +37,7 @@ export function StatTile({
   testId?: string;
   dataAttributes?: Record<`data-${string}`, string | undefined>;
 }) {
+  const partId = useId();
   const content = (
     <>
       <span className="cc-tile__head">
@@ -54,36 +56,33 @@ export function StatTile({
     );
   }
   if (onActivate) {
-    // A tile with links inside cannot be a <button>; it stays one for the
-    // keyboard and assistive tech (role, tab stop, Enter and Space). A click
-    // on a control inside belongs to that control.
-    const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-      if (event.target !== event.currentTarget) return;
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onActivate();
-      }
-    };
+    // A tile with links cannot be one <button>, and a role="button" holding
+    // links nests controls. The label is the tile's real button, described by
+    // the status, summary and links beside it; a click anywhere else on the
+    // tile (not on a link) opens it too.
     const onClick = (event: MouseEvent<HTMLDivElement>) => {
       const target = event.target as Element | null;
-      const control = target?.closest?.("a, button, input, select, textarea, summary, [role='button']");
-      if (control && control !== event.currentTarget) return;
+      if (target?.closest?.("a, button, input, select, textarea, summary, [role='button']")) return;
       onActivate();
     };
+    const describedBy = [status && `${partId}-status`, summary && `${partId}-summary`, `${partId}-links`].filter(Boolean).join(" ");
     return (
       <div
-        role="button"
-        tabIndex={0}
-        className={classes}
+        className={cx(classes, "cc-tile--split")}
         data-tone={tone}
         title={help}
         data-testid={testId}
         onClick={onClick}
-        onKeyDown={onKeyDown}
         {...dataAttributes}
       >
-        {content}
-        <div className="cc-tile__links">{children}</div>
+        <span className="cc-tile__head">
+          <button type="button" className="cc-tile__hit" aria-describedby={describedBy} onClick={onActivate}>
+            <span className="cc-tile__label">{label}</span>
+          </button>
+          {status ? <span className="cc-tile__status" id={`${partId}-status`}>{status}</span> : null}
+        </span>
+        {summary ? <span className="cc-tile__summary" id={`${partId}-summary`}>{summary}</span> : null}
+        <div className="cc-tile__links" id={`${partId}-links`}>{children}</div>
       </div>
     );
   }

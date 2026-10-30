@@ -870,7 +870,7 @@ impl SpiRuntimeStore {
         if guard.is_loaded() {
             return Ok(());
         }
-        let body = self.realm.load_body(&mut **guard).await.map_err(refuse)?;
+        let body = self.realm.load_body(guard).await.map_err(refuse)?;
         let mut rows = Vec::with_capacity(body.len());
         for ((key, value), sequence) in body.into_iter().zip(0_u64..) {
             if key != tool_grant_audit_entry_key(sequence) {

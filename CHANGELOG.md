@@ -219,11 +219,12 @@ them.
   wait) with `InMemoryDecisionStore`.
 
 - `meerkat-runtime`: `decision::DurableDecisionService` owns the rows. It
-  holds (a replay answers the held decision, another binding is refused),
-  presents, decides (the decider's eligibility checked at the commit; the
-  requester never decides; the first valid decision wins), reviews (allow,
-  deny, escalate to the human), withdraws, reads (recording an expiry it
-  observes), lists, and pages the owed and due indexes. `authorize_execution`
+  holds (a replay answers the held decision as a read does, another binding
+  is refused), presents, decides (the decider's eligibility checked at the
+  commit; the requester never decides; the first valid decision wins),
+  reviews (allow, deny, escalate to the human), withdraws, reads (recording
+  an expiry it observes), lists (projecting an expiry it does not record),
+  and pages the owed and due indexes as stored. `authorize_execution`
   mints a `DecisionExecutionPermit` (the held binding, the deadline, the
   decided consent) only for an approved decision before its deadline, and the
   owner settles it with `record_executed` (accepted at any time),

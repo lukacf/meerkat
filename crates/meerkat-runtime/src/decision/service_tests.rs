@@ -874,6 +874,57 @@ fn owed_and_due_read_only_their_pages() {
 }
 
 #[test]
+fn owed_lists_recorded_obligations_and_agrees_with_settle_notice() {
+    let (store, clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let receipt = ApprovalConsentDeliveryState::Failed {
+        reason: "the requester is unreachable".to_owned(),
+    };
+
+    // Past its deadline with no permit outstanding, the decision has not
+    // ended until its expiry is recorded: it is listed as stored, and no
+    // notice is owed yet.
+    clock.set(DEADLINE + 1);
+    store.clear();
+    let owed = service.owed(None, 10).expect("owed");
+    assert_eq!(
+        store.calls(),
+        vec!["owed"],
+        "one index page, nothing written"
+    );
+    assert_eq!(owed.decisions.len(), 1);
+    assert_eq!(owed.decisions[0].decision_id, decision_id);
+    assert_eq!(owed.decisions[0].state.phase, DecisionPhase::Approved);
+    assert_eq!(owed.decisions[0].state.notice, DecisionNotice::NotDue);
+    assert_eq!(
+        refusal(
+            &service
+                .settle_notice(&decision_id, &receipt)
+                .expect_err("no notice is owed before the end is recorded")
+        ),
+        DecisionRefusal::NotOwed
+    );
+
+    // A read records the expiry: from then on the notice is owed, listed,
+    // and settled by its receipt.
+    let expired = service
+        .get(&decision_id)
+        .expect("the read records the expiry");
+    assert_eq!(expired.state.phase, DecisionPhase::Expired);
+    assert_eq!(expired.state.notice, DecisionNotice::Owed);
+    assert_eq!(
+        service.owed(None, 10).expect("owed").decisions,
+        vec![expired]
+    );
+    let settled = service
+        .settle_notice(&decision_id, &receipt)
+        .expect("the owed notice settles");
+    assert_eq!(settled.state.notice, DecisionNotice::Failed);
+    assert!(service.owed(None, 10).expect("owed").decisions.is_empty());
+}
+
+#[test]
 fn a_torn_row_is_unreadable_and_never_executes() {
     let (store, _clock, service) = fixture();
     let rendering = rendering();
@@ -1121,6 +1172,26 @@ fn a_hold_replays_its_binding_and_refuses_another() {
                 .expect_err("a hold at its own deadline")
         ),
         DecisionRefusal::InvalidWindow
+    );
+}
+
+#[test]
+fn a_replayed_hold_past_its_deadline_answers_the_recorded_expiry() {
+    let (store, clock, service) = fixture();
+    let rendering = rendering();
+    let held = service.hold(hold_request(&rendering), true).expect("hold");
+    clock.set(DEADLINE);
+    let replayed = service
+        .hold(hold_request(&rendering), true)
+        .expect("the same binding again");
+    assert_eq!(replayed.state.phase, DecisionPhase::Expired);
+    assert_eq!(replayed.state.ended_at_ms, Some(DEADLINE));
+    assert_eq!(replayed.state.notice, DecisionNotice::Owed);
+    assert_eq!(replayed.revision, held.revision + 1);
+    assert_eq!(
+        store.stored(&held.decision_id),
+        replayed,
+        "the replay recorded the expiry it answers"
     );
 }
 

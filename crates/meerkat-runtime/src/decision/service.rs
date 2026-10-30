@@ -202,10 +202,12 @@ pub enum DecisionWithdrawer {
     Host,
 }
 
-/// One page of decisions, each projected at the clock reading of the read
-/// (a decision past its deadline reads as expired; the projection is not
-/// recorded), and the rows of the page this binary cannot read. It may gain
-/// fields.
+/// One page of decisions, and the rows of the page this binary cannot read.
+/// A listing ([`DurableDecisionService::list`]) projects each decision at
+/// the clock reading of the read (a decision past its deadline reads as
+/// expired; the projection is not recorded); the pages of work
+/// ([`DurableDecisionService::owed`], [`DurableDecisionService::due`]) answer
+/// each as stored. It may gain fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecisionListing {
@@ -554,6 +556,30 @@ fn unreadable(row: UnreadableDecision) -> DecisionError {
     }
 }
 
+/// Each row of `page` as stored, checked: a torn row is listed unreadable.
+/// Nothing is projected, so the listing shows exactly what the rows record.
+fn stored_listing(page: DecisionPage) -> DecisionListing {
+    let mut listing = DecisionListing {
+        next_after: page.next_after,
+        ..DecisionListing::default()
+    };
+    for row in page.rows {
+        match row {
+            DecisionRow::Unreadable(row) => listing.unreadable.push(row),
+            DecisionRow::Readable(row) => {
+                let stored_under = row.decision_id.as_str().to_owned();
+                match check_row(&stored_under, *row) {
+                    Ok(loaded) => listing.decisions.push(loaded.row),
+                    Err(error) => listing
+                        .unreadable
+                        .push(UnreadableDecision::new(stored_under, error.to_string())),
+                }
+            }
+        }
+    }
+    listing
+}
+
 /// The hold input of `descriptor`.
 fn hold_input(
     decision_id: &DecisionId,
@@ -731,10 +757,12 @@ impl DurableDecisionService {
     /// The decision's id derives from the kind and subject key; a hold of
     /// the same subject with another binding (or another deadline, approver,
     /// reviewer or notice route) is refused as
-    /// [`DecisionRefusal::HoldConflict`]. The subject digest is computed
-    /// from the rendering. The first hold creates the store's file; nothing
-    /// before it does. A requester that can be told the decision's end
-    /// (`notice_routable`) is owed one notice when the decision ends.
+    /// [`DecisionRefusal::HoldConflict`]. A replay answers the decision as a
+    /// read ([`Self::get`]) does: as it stands, with the expiry its deadline
+    /// shows recorded. The subject digest is computed from the rendering.
+    /// The first hold creates the store's file; nothing before it does. A
+    /// requester that can be told the decision's end (`notice_routable`) is
+    /// owed one notice when the decision ends.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `InvalidWindow`, `SelfReview` or
@@ -765,7 +793,10 @@ impl DurableDecisionService {
                             decision_id,
                             refusal,
                         }),
-                        None => Ok(loaded.row),
+                        // The machine replays a hold whatever the clock
+                        // reads; the answer observes the deadline as a read
+                        // does, so a replay past it answers the expiry.
+                        None => self.get(&decision_id),
                     };
                 }
                 None => {
@@ -998,12 +1029,18 @@ impl DurableDecisionService {
         self.project(page)
     }
 
-    /// One page of the decisions that owe work, after `after`: approved
-    /// decisions to execute (or settle), and ended ones owing their notice.
-    /// The page is the store's index page; nothing else is read.
+    /// One page of the decisions that owe work, after `after`, as stored:
+    /// approved decisions to execute (or settle), and ended ones owing their
+    /// notice. The page is the store's index page; nothing else is read, and
+    /// nothing is projected: it lists the obligations the rows record, the
+    /// ones [`Self::settle_notice`] and the execution calls act on. An
+    /// approved decision past its deadline with no permit outstanding is
+    /// listed as approved until its expiry is recorded (by [`Self::get`],
+    /// the deadline driver, or the refusal of its next authorization), and
+    /// its notice is owed from then on.
     ///
     /// # Errors
-    /// Store and clock failures.
+    /// Store failures.
     pub fn owed(
         &self,
         after: Option<&str>,
@@ -1013,7 +1050,7 @@ impl DurableDecisionService {
             .store()?
             .owed(after, limit.min(DECISION_PAGE_MAX))
             .map_err(read_error)?;
-        self.project(page)
+        Ok(stored_listing(page))
     }
 
     /// One page of the decisions due an expiry observation at the clock
@@ -1031,25 +1068,7 @@ impl DurableDecisionService {
         let page = store
             .due(now_ms, after, limit.min(DECISION_PAGE_MAX))
             .map_err(read_error)?;
-        let mut listing = DecisionListing {
-            next_after: page.next_after,
-            ..DecisionListing::default()
-        };
-        for row in page.rows {
-            match row {
-                DecisionRow::Unreadable(row) => listing.unreadable.push(row),
-                DecisionRow::Readable(row) => {
-                    let stored_under = row.decision_id.as_str().to_owned();
-                    match check_row(&stored_under, *row) {
-                        Ok(loaded) => listing.decisions.push(loaded.row),
-                        Err(error) => listing
-                            .unreadable
-                            .push(UnreadableDecision::new(stored_under, error.to_string())),
-                    }
-                }
-            }
-        }
-        Ok(listing)
+        Ok(stored_listing(page))
     }
 
     /// How many decisions match `filter`.
@@ -1198,7 +1217,10 @@ impl DurableDecisionService {
 
     /// Settle the owed requester notice of an ended decision with its
     /// delivery receipt: admitted, or failed terminally. The same receipt
-    /// again changes nothing.
+    /// again changes nothing. A notice is owed once the decision's end is
+    /// recorded, as [`Self::owed`] lists it: a decision whose deadline passed
+    /// owes its notice after its expiry is recorded ([`Self::get`] or the
+    /// deadline driver), not when a listing only projects it.
     ///
     /// # Errors
     /// [`DecisionError::NotAReceipt`] for an owed state;

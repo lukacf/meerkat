@@ -319,14 +319,41 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
     workgraph_available: bool,
     pending: &BTreeSet<String>,
 ) -> ConsoleRestJsonResponse {
+    match authorize_console_rest_json_route(decisions, fences, request) {
+        Ok(resolved_auth) => render_console_rest_json_route(
+            decisions,
+            fences,
+            request,
+            resolved_auth.as_ref(),
+            live_snapshot,
+            access,
+            memory_panel_available,
+            workgraph_available,
+            pending,
+        ),
+        Err(refused) => refused,
+    }
+}
+
+/// The route and credential checks of
+/// [`handle_console_rest_json_route_with_pending_rows`], alone: the caller's
+/// resolved authentication (`None` where the console does not require it
+/// and none was presented), or the response that refuses the request. A
+/// caller with reads that only a served request needs runs this first and
+/// then [`render_console_rest_json_route`] with its answer.
+pub(crate) fn authorize_console_rest_json_route(
+    decisions: &RuntimeDecisionState,
+    fences: &ConsoleSessionFences,
+    request: &ConsoleRestJsonRequest,
+) -> Result<Option<ConsoleAccessRequest>, ConsoleRestJsonResponse> {
     let (base_path, query_params) = split_path_and_query(&request.path);
     if request.method != "GET"
         || (base_path != CONSOLE_MODULES_ROUTE && base_path != CONSOLE_EXPERIENCE_ROUTE)
     {
-        return ConsoleRestJsonResponse {
+        return Err(ConsoleRestJsonResponse {
             status: 404,
             body: serde_json::json!({"error":"not_found"}),
-        };
+        });
     }
 
     let resolved_auth = match resolve_console_auth(decisions, request.auth.as_ref(), &query_params)
@@ -336,13 +363,13 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
         }) {
         Ok(auth) => auth,
         Err(error) => {
-            return ConsoleRestJsonResponse {
+            return Err(ConsoleRestJsonResponse {
                 status: 401,
                 body: serde_json::json!({
                     "error":"unauthorized",
                     "reason": console_auth_error_reason(&error),
                 }),
-            };
+            });
         }
     };
 
@@ -351,32 +378,49 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
             if let Err(error) =
                 enforce_console_route_access(&decisions.auth, &decisions.console, auth)
             {
-                return ConsoleRestJsonResponse {
+                return Err(ConsoleRestJsonResponse {
                     status: 401,
                     body: serde_json::json!({
                         "error":"unauthorized",
                         "reason": auth_error_reason(&error),
                     }),
-                };
+                });
             }
         }
         None if decisions.console.require_app_auth => {
-            return ConsoleRestJsonResponse {
+            return Err(ConsoleRestJsonResponse {
                 status: 401,
                 body: serde_json::json!({
                     "error":"unauthorized",
                     "reason":"missing_credentials",
                 }),
-            };
+            });
         }
         None => {}
     }
+    Ok(resolved_auth)
+}
 
+/// The response to a request [`authorize_console_rest_json_route`] accepted,
+/// given the authentication it resolved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_console_rest_json_route(
+    decisions: &RuntimeDecisionState,
+    fences: &ConsoleSessionFences,
+    request: &ConsoleRestJsonRequest,
+    resolved_auth: Option<&ConsoleAccessRequest>,
+    live_snapshot: Option<&ConsoleLiveSnapshot>,
+    access: Option<&AccessController>,
+    memory_panel_available: bool,
+    workgraph_available: bool,
+    pending: &BTreeSet<String>,
+) -> ConsoleRestJsonResponse {
+    let (base_path, query_params) = split_path_and_query(&request.path);
     // Subject for ABAC. When app auth is not required the auth resolver
     // returns None without looking at credentials; still identify callers
     // that *did* present a valid token so per-user grants apply on
     // auth-optional consoles. Invalid tokens fall back to anonymous.
-    let mut access_subject = resolved_auth.as_ref().map(|auth| auth.email.clone());
+    let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
     if access_subject.is_none()
         && access.is_some()
         && !decisions.console.require_app_auth
@@ -743,15 +787,16 @@ const PENDING_TOPOLOGY_WITHHELD_FIELDS: &[&str] =
 /// The sidebar row of an identity answered pending: its identity binding
 /// moved and the read model had not re-collected it by the refresh deadline.
 /// It carries only what the owners answer now (the identity runtime's
-/// session and the runtime machine's bounded run state), the identity and
-/// the typed marker: state "unknown", fail-closed affordances (no send, no
-/// retire; a respawn resolves its target live). Visibility and access
-/// already decided on the walked facts, so a policy that matches them still
-/// applies.
+/// session, the runtime machine's bounded run state and the console frame
+/// log's last activity), the identity and the typed marker: state
+/// "unknown", fail-closed affordances (no send, no retire; a respawn
+/// resolves its target live). Visibility and access already decided on the
+/// walked facts, so a policy that matches them still applies.
 fn pending_sidebar_record(
     member: &ConsoleMember,
     console_identity: &str,
     response_phase: Option<&Option<String>>,
+    last_activity_ms: Option<u64>,
     is_read_only: bool,
     is_aggregate_console: bool,
 ) -> Value {
@@ -781,6 +826,11 @@ fn pending_sidebar_record(
     });
     if let Some(phase) = response_phase {
         record["response_phase"] = serde_json::json!(phase);
+    }
+    // The console frame log answers this, not the read model, so a pending
+    // row keeps it.
+    if let Some(at) = last_activity_ms {
+        record["last_activity_ms"] = serde_json::json!(at);
     }
     record
 }
@@ -872,6 +922,7 @@ fn build_console_experience_contract(
                             member,
                             console_identity,
                             response_phases.get(console_identity).copied(),
+                            live_snapshot.last_activity_ms.get(console_identity).copied(),
                             is_read_only,
                             is_aggregate_console,
                         );
@@ -2440,8 +2491,9 @@ mod last_activity_tests {
 
     /// The experience renders each identity's last activity where it renders
     /// the identity's other facts: the sidebar row and the identity_status and
-    /// health rows. An identity without one carries none, which reads unknown,
-    /// and a pending row withholds it with its other facts.
+    /// health rows. An identity without one carries none, which reads unknown.
+    /// A pending row keeps it: the console frame log answers it, not the read
+    /// model whose facts a pending row withholds.
     #[test]
     fn experience_rows_carry_last_activity_and_leave_unknown_absent() {
         let snapshot = ConsoleLiveSnapshot::new(
@@ -2484,7 +2536,11 @@ mod last_activity_tests {
                 "{path}"
             );
             assert_eq!(last_activity("delivery"), Some(None), "{path}");
-            assert_eq!(last_activity("moved"), Some(None), "{path}");
+            assert_eq!(
+                last_activity("moved"),
+                Some(Some(Value::from(1_700_000_000_500_u64))),
+                "{path}"
+            );
         }
     }
 }

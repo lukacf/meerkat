@@ -144,9 +144,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `/console/experience` sidebar, `identity_status` and `health_overview` rows
   carry `last_activity_ms`, the newest time the console's frame log recorded
   the agent acting (a live runtime event, a console send or a tool
-  application). It is advisory (absent means unknown) and reading it wakes no
-  agent. `ConsoleLogStore` gains `latest_activity_times`, with a default that
-  reports none.
+  application, not a lifecycle record, an interaction failure or a memory
+  event), found among the agent's newest 512 frames. It is advisory (absent
+  means unknown) and reading it wakes no agent. `ConsoleLogStore` gains
+  `latest_activity_times`, with a default that reports none; a store that
+  wraps another must forward it.
 
 ### Changed
 

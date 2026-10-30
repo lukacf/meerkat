@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 
 import { cx } from "./cx";
 import type { Tone } from "./tone";
@@ -51,6 +51,40 @@ export function StatTile({
       <button type="button" className={classes} data-tone={tone} title={help} data-testid={testId} onClick={onActivate} {...dataAttributes}>
         {content}
       </button>
+    );
+  }
+  if (onActivate) {
+    // A tile with links inside cannot be a <button>; it stays one for the
+    // keyboard and assistive tech (role, tab stop, Enter and Space). A click
+    // on a control inside belongs to that control.
+    const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onActivate();
+      }
+    };
+    const onClick = (event: MouseEvent<HTMLDivElement>) => {
+      const target = event.target as Element | null;
+      const control = target?.closest?.("a, button, input, select, textarea, summary, [role='button']");
+      if (control && control !== event.currentTarget) return;
+      onActivate();
+    };
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        className={classes}
+        data-tone={tone}
+        title={help}
+        data-testid={testId}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
+        {...dataAttributes}
+      >
+        {content}
+        <div className="cc-tile__links">{children}</div>
+      </div>
     );
   }
   return (

@@ -16,6 +16,7 @@ import {
   SearchField,
   SegmentedControl,
   SelectField,
+  StatTile,
   StatusDot,
   StatusRow,
   TechnicalDetails,
@@ -335,6 +336,36 @@ describe("panel frame", () => {
     expect(alert.getAttribute("title")).toBe("Record refresh unavailable");
     expect(view.getAllByRole("alert").length).toBe(1);
     expect(view.getByText("Updated 2m ago").tagName).toBe("TIME");
+  });
+});
+
+describe("StatTile", () => {
+  it("stays a keyboard-reachable button when it also holds links", () => {
+    const open = vi.fn();
+    const link = vi.fn();
+    const view = render(
+      <StatTile label="Trust rules" summary="2 records break the trust rules" tone="crit" onActivate={open} testId="tile">
+        <button type="button" onClick={link}>Release train cutoff</button>
+      </StatTile>,
+    );
+    const tile = view.getByTestId("tile");
+    expect(tile.getAttribute("role")).toBe("button");
+    expect(tile.getAttribute("tabindex")).toBe("0");
+    fireEvent.click(tile);
+    fireEvent.keyDown(tile, { key: "Enter" });
+    fireEvent.keyDown(tile, { key: " " });
+    expect(open.mock.calls.length).toBe(3);
+    // A link inside the tile opens its record, not the tile's tab.
+    fireEvent.click(view.getByRole("button", { name: "Release train cutoff" }));
+    expect(link.mock.calls.length).toBe(1);
+    expect(open.mock.calls.length).toBe(3);
+  });
+
+  it("is a plain region without an action", () => {
+    const view = render(<StatTile label="Usefulness" summary="Fine" testId="tile" />);
+    const tile = view.getByTestId("tile");
+    expect(tile.getAttribute("role") === null).toBe(true);
+    expect(tile.classList.contains("is-interactive")).toBe(false);
   });
 });
 

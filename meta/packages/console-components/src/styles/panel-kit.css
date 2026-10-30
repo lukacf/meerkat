@@ -889,7 +889,8 @@ button.cc-tile,
 .cc-tile.is-interactive { cursor: pointer; }
 button.cc-tile:hover,
 .cc-tile.is-interactive:hover { border-color: var(--_cc-border-strong); }
-button.cc-tile:focus-visible {
+button.cc-tile:focus-visible,
+.cc-tile.is-interactive:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
 }

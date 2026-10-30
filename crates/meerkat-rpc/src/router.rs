@@ -7580,6 +7580,43 @@ mod tests {
                 serde_json::json!({"kind": "unknown_family", "family": "shel"})
             );
         }
+
+        /// A deferred create builds nothing, so a gate no grant could honour
+        /// is refused at its first turn: `turn/start` answers the same typed
+        /// invalid-params refusal an immediate create answers.
+        #[tokio::test]
+        async fn deferred_create_reports_a_refused_gate_at_its_first_turn_with_typed_data() {
+            let (router, _rx) = test_router().await;
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "initial_turn": "deferred",
+                    "grant_gated_tools": {"families": ["shel"]},
+                }),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("a deferred create answers its session id")
+                .to_string();
+
+            let refused = call(
+                &router,
+                "turn/start",
+                serde_json::json!({"session_id": session_id, "prompt": "first"}),
+            )
+            .await;
+            let failure = refused.error.as_ref().expect("a refused gate is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "tool_grant_gate_refused");
+            assert_eq!(
+                data["tool_grant_gate_refusal"],
+                serde_json::json!({"kind": "unknown_family", "family": "shel"})
+            );
+        }
     }
 
     async fn pending_runtime_approval(router: &MethodRouter) -> String {

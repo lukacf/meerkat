@@ -791,6 +791,39 @@ mod typed_context_append_tests {
             }
         ));
     }
+
+    /// A scoped tool grant gate the session's build refused crosses this
+    /// process's own bridge as an apply failure that keeps the typed refusal
+    /// as its reason, so the failed turn's error carries it. An apply failure
+    /// without the refusal's data carries no reason.
+    #[test]
+    fn a_refused_grant_gate_crosses_the_rpc_bridge_with_its_typed_reason() {
+        let refusal = meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+            family: "shel".to_string(),
+        };
+        let rpc_error = crate::session_runtime::session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+        let error = core_executor_error_from_rpc(rpc_error);
+        assert!(
+            matches!(error, CoreExecutorError::ApplyFailed { .. }),
+            "a refused gate is an apply failure of the turn's build: {error:?}"
+        );
+        let cause = error.apply_failure_cause();
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+        assert_eq!(
+            cause.reason(),
+            Some(&meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal })
+        );
+
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "store fault".to_string(),
+            data: None,
+        });
+        assert!(matches!(error, CoreExecutorError::ApplyFailed { .. }));
+        assert_eq!(error.apply_failure_cause().reason(), None);
+    }
 }
 
 /// The data key with which the session runtime hands its executor a run that
@@ -843,6 +876,14 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         .and_then(serde_json::Value::as_str)
         .and_then(CoreApplyFailureCauseKind::from_wire_str)
         .or((err.code == error::HOOK_DENIED).then_some(CoreApplyFailureCauseKind::HookDenied));
+    // A scoped tool grant gate the session's build refused crosses this
+    // bridge in the typed data `session_error_to_rpc` projected it into; the
+    // apply failure keeps it as its typed reason, so the failed turn's error
+    // carries the refusal.
+    let gate_refusal = err
+        .data
+        .as_ref()
+        .and_then(SessionError::tool_grant_gate_refusal_from_data);
     let message = err.message;
     let cause = match kind {
         Some(CoreApplyFailureCauseKind::ExecutorStopped) => {
@@ -854,6 +895,11 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         }
         Some(kind) => CoreApplyFailureCause::new(kind, message),
         None => CoreApplyFailureCause::runtime_turn(message),
+    };
+    let cause = match gate_refusal {
+        Some(refusal) => cause
+            .with_reason(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal }),
+        None => cause,
     };
     CoreExecutorError::apply_failed(cause)
 }

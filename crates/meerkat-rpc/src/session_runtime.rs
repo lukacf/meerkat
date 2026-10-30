@@ -15679,6 +15679,32 @@ fn turn_failure_rpc_code(turn_error: &meerkat_core::TurnErrorMetadata) -> i32 {
     }
 }
 
+/// The JSON-RPC answer of an abandoned turn. A turn whose session's build
+/// refused its scoped tool grant gate carries the typed refusal as its
+/// error's reason, and answers it exactly as the session error path does,
+/// through [`session_error_to_rpc`]: the invalid-params refusal with its typed
+/// data, never a turn failure. Any other turn answers its
+/// [`turn_failure_rpc_code`] with the typed turn error as `data.error`.
+fn abandoned_turn_rpc_error(
+    reason: String,
+    turn_error: meerkat_core::TurnErrorMetadata,
+) -> RpcError {
+    if let Some(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal }) =
+        &turn_error.reason
+    {
+        return session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+    }
+    RpcError {
+        code: turn_failure_rpc_code(&turn_error),
+        message: format!("turn abandoned: {reason}"),
+        data: Some(serde_json::json!({
+            "error": turn_error,
+        })),
+    }
+}
+
 fn completion_outcome_to_rpc_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     session_id: &SessionId,
@@ -15738,23 +15764,11 @@ fn completion_outcome_to_rpc_result(
         CompletionOutcome::Abandoned {
             reason,
             error: turn_error,
-        } => Err(RpcError {
-            code: turn_failure_rpc_code(&turn_error),
-            message: format!("turn abandoned: {reason}"),
-            data: Some(serde_json::json!({
-                "error": turn_error,
-            })),
-        }),
+        } => Err(abandoned_turn_rpc_error(reason, turn_error)),
         CompletionOutcome::AbandonedWithError {
             reason,
             error: turn_error,
-        } => Err(RpcError {
-            code: turn_failure_rpc_code(&turn_error),
-            message: format!("turn abandoned: {reason}"),
-            data: Some(serde_json::json!({
-                "error": turn_error,
-            })),
-        }),
+        } => Err(abandoned_turn_rpc_error(reason, turn_error)),
         CompletionOutcome::CompletedWithFinalizationFailure { error: turn_error } => {
             // Finalization (durable commit) failed: the run is not durably
             // terminal. Surface ONLY the typed error — never the (non-durable)
@@ -39912,6 +39926,50 @@ mod tests {
             terminated.data.expect("terminated data")["error"]["detail"],
             serde_json::json!("runtime stopped")
         );
+    }
+
+    /// A turn abandoned because its session's build refused the scoped tool
+    /// grant gate carries the typed refusal as its error's reason, and answers
+    /// exactly what the session error path answers for it: invalid params
+    /// with the typed refusal data, never an internal turn failure.
+    #[test]
+    fn an_abandoned_turn_carrying_a_refused_grant_gate_answers_the_typed_refusal() {
+        let session_id = SessionId::new();
+        let refusal = meerkat_core::tool_grant::GrantGateRefusal::FamilyNotMounted {
+            family: "comms".to_string(),
+        };
+        let session_error_answer = session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+        let mut turn_error = meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+            "agent error: scoped tool grant gate refused",
+        );
+        turn_error.reason =
+            Some(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal });
+
+        for outcome in [
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: "agent error: scoped tool grant gate refused".into(),
+                error: turn_error.clone(),
+            },
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: "agent error: scoped tool grant gate refused".into(),
+                error: turn_error,
+            },
+        ] {
+            let answer = completion_outcome_to_rpc_result(outcome, &session_id)
+                .expect_err("a refused gate is an RPC error");
+            assert_eq!(answer.code, error::INVALID_PARAMS, "{answer:?}");
+            assert_eq!(answer.message, session_error_answer.message);
+            assert_eq!(answer.data, session_error_answer.data);
+            assert_eq!(
+                answer.data.expect("typed refusal data"),
+                serde_json::json!({
+                    "kind": "tool_grant_gate_refused",
+                    "tool_grant_gate_refusal": {"kind": "family_not_mounted", "family": "comms"},
+                })
+            );
+        }
     }
 
     #[test]

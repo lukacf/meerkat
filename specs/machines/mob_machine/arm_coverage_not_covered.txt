@@ -188,7 +188,6 @@ ShutdownCompleted Shutdown outside Running; member_residency_audit drives Shutdo
 BeginCleanup* post-stop cleanup custody; no audit drives it
 FinishCleanup* post-stop cleanup custody; no audit drives it
 RecoverCompleted* completed-with-cleanup-custody replay; no audit drives it
-DestroyFromAny the forced destroy from any phase; member_lifecycle_audit and member_residency_audit drive DestroyMob behind its quiesce instead
 AdmitDestroyMemberRetire* member retirement inside the mob's own destroy while Stopped, and for placed, peer-only, runtime-ended or archived members; member_residency_audit's retire run drives the Running arms of a local member
 ObserveDestroy* member archives inside the mob's own destroy while Stopped, and for placed or already-cleared members; member_residency_audit's retire run drives the Running arms of a local member
 AdmitDestroyStorageFinalizing destroy storage finalization; no audit drives it

@@ -612,21 +612,35 @@ fi
 # MobMachine identity entries (an identity the host declared as its own,
 # as opposed to a worker member) are reached only with identities, which the
 # ci profile has none of. A hand-written audit over the same generated model
-# drives a replayed member and a member seated by the spawn ladder with or
-# without entry custody, the replay of entry rows, every legacy adoption arm,
-# the admission probe, the agent lane's member admission, the worker
-# reconcile and ensure, Stop and Resume, under every generated invariant (the
-# entry ones among them: every entry is seated and local, no worker
-# reconcile spawns or retires an entry, entry custody belongs to an open
-# ladder), three ENABLED-form invariants (exactly one probe, agent-lane and
-# adoption arm answers each input), the probe's refusal of an entry's name
-# and two action properties (an entry only by custody, an observed adoption
-# or a replayed row; no entry from an unobserved adoption). It runs with TLC
-# coverage, requires every listed arm to fire, a floor of distinct states
-# and its eleven witnesses reached, and --mutants refuses four seeded
-# defects: a reconcile that retires an entry, a probe that answers an
-# entry's name as a plain duplicate, an adoption without the observation and
-# the replay of an entry row on an unseated identity.
+# checks two runs over their whole reachable space. The entry run drives a
+# replayed member and a member seated by the spawn ladder with or without
+# entry custody, the replay of entry rows, every legacy adoption arm, the
+# admission probe, the agent lane's member admission, the worker reconcile
+# and ensure, Stop and Resume, under every generated invariant (the entry
+# ones among them: every entry is seated and local, no worker reconcile
+# spawns or retires an entry, entry custody belongs to an open ladder),
+# three ENABLED-form invariants (exactly one probe, agent-lane and adoption
+# arm answers each input), the probe's refusal of an entry's name and two
+# action properties (an entry only by custody, an observed adoption or a
+# replayed row; no entry from an unobserved adoption). The lifecycle run
+# takes the member residency audit's retire run with its member made an
+# entry (the replay of its row, or its reseat's ladder opened with entry
+# custody) through the dormant seat, the live and the archive-only
+# retirement to its archive terminal, the rotation and the mob's destroy
+# (DestroyMob and DestroyFromAny), under every generated invariant (every
+# unseat ends an entry; a destroyed mob holds no entry and no entry
+# custody), the retire run's own properties and three action properties (a
+# seat records an entry exactly when its ladder holds entry custody, a
+# rotation keeps the entry, an entry only by a custody seat or a replayed
+# row). Both run with TLC coverage and require every listed arm to fire, a
+# floor of distinct states and their twenty witnesses reached, and
+# --mutants refuses ten seeded defects: a reconcile that retires an entry, a
+# probe that answers an entry's name as a plain duplicate, an adoption
+# without the observation, the replay of an entry row on an unseated
+# identity, an archive and a destroy's member archive that keep the entry, a
+# DestroyMob that keeps the entries, a DestroyFromAny that keeps an open
+# ladder's entry custody, a rotation that drops the entry and a seat that
+# ignores its ladder's entry custody.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2

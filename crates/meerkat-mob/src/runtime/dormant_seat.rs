@@ -430,6 +430,12 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// The notice a fresh seat carries when the identity's archived session
     /// is gone from the store: its row records it.
     pub(in crate::runtime) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// The role a resume seat's session was last built under, when the seat
+    /// takes another one (a declared role migration, from the spec's
+    /// `MemberLaunchMode::Resume::resume_from_role`): its row records it,
+    /// so the session's next build, after a restart too, declares the
+    /// migration and restamps the session.
+    pub(in crate::runtime) resume_from_role: Option<ProfileName>,
     pub(in crate::runtime) runtime_mode: crate::MobRuntimeMode,
     pub(in crate::runtime) labels: BTreeMap<String, String>,
     pub(in crate::runtime) continuity_intent: super::SpawnContinuityIntent,

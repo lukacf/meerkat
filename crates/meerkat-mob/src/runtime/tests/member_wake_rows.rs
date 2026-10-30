@@ -3479,3 +3479,167 @@ async fn an_unlisted_identity_listed_again_wakes_on_its_archived_session_with_it
     );
     fixture.finish().await;
 }
+
+/// The declared apply on a durable store: an identity a complete roster
+/// unlisted, then lists again under another role, comes back under the new
+/// role on its archived session only with the migration declared. Listed
+/// again under the new role with none declared, it is held and not seated:
+/// its archived session was last built under its previous role, and that
+/// session's build would refuse the move. Listed with the migration from
+/// that role declared, it is seated Dormant on its archived session, and its
+/// first wake builds it under the new role, history kept.
+///
+/// RED: observe no resume session role in the declaration (the apply passes
+/// none): the first listing under the new role answers `Seated`, and the
+/// identity's first wake fails `MemberRoleMigrationRequired` (its archived
+/// session was built as a worker and nothing declares the move). Keep the
+/// observation but resume the session without the declared migration
+/// (`owed_seat` without `resume_from_role`): the second listing is seated,
+/// and its first wake fails the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relisted_identity_under_a_new_role_wakes_under_it_with_its_declared_migration() {
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, EntryStanding, HostPreparationCause,
+        IdentityEntryRead, UnlistedEntryOutcome, UnseatedEntryCause,
+    };
+
+    let fixture = WakeFixture::build(
+        "wake-declared-role-revival",
+        |_| {},
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity =
+        AgentIdentity::from(format!("declared-role-revival-{}", Uuid::new_v4().simple()));
+    let entry = |role: &str| DeclaredEntry::new(SpawnMemberSpec::new(role, identity.clone()));
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+
+    let seated = apply(DeclaredRoster::complete([entry("worker")])).await;
+    let session = match seated.entries.get(&identity) {
+        Some(DeclaredEntryOutcome::Seated {
+            session_id,
+            history_unavailable: None,
+        }) => session_id.clone(),
+        other => panic!("the identity is seated: {other:?}"),
+    };
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let before = token("declared-role-revival");
+    fixture
+        .host_turn(&identity, &before, HandlingMode::Queue)
+        .await;
+    assert_eq!(fixture.delivered_count(&identity, &before).await, 1);
+
+    let unlisted = apply(DeclaredRoster::complete(std::iter::empty::<DeclaredEntry>())).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&identity),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+
+    // Listed again under another role, with no migration declared: held,
+    // and not seated.
+    let held = apply(DeclaredRoster::complete([entry("lead")])).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { from, to })
+                if from.as_str() == "worker" && to.as_str() == "lead"
+        ),
+        "the identity is held for its undeclared role move: {held:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "nothing is seated"
+    );
+    match fixture
+        .handle
+        .identity_entry(&identity)
+        .expect("entry read")
+    {
+        IdentityEntryRead::Entry(view) => {
+            assert_eq!(
+                view.standing,
+                EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+            );
+            assert_eq!(
+                view.host_preparation,
+                Some(HostPreparationCause::RoleMigrationUndeclared)
+            );
+        }
+        other => panic!("the identity is an entry: {other:?}"),
+    }
+
+    // Listed with the migration from the role its session was built under.
+    let migrated = apply(
+        DeclaredRoster::complete([entry("lead")]).with_role_migration(identity.clone(), "worker"),
+    )
+    .await;
+    assert!(
+        matches!(
+            migrated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated {
+                session_id,
+                history_unavailable: None,
+            }) if session_id == &session
+        ),
+        "the identity is seated on its archived session: {migrated:?}"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the seat wakes nothing"
+    );
+    assert_eq!(
+        fixture.entry(&identity).await.role,
+        ProfileName::from("lead")
+    );
+
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member under its new role");
+    assert_eq!(fixture.session(&identity).await, session);
+    assert!(
+        fixture.transcript(&session).await.contains(&before),
+        "the identity keeps its history"
+    );
+    let after = token("declared-role-revival-after");
+    fixture
+        .host_turn(&identity, &after, HandlingMode::Queue)
+        .await;
+    assert_eq!(
+        fixture.delivered_count(&identity, &after).await,
+        1,
+        "the member runs under its new role"
+    );
+    fixture.finish().await;
+}

@@ -13332,6 +13332,9 @@ mod tests {
         migration_from: Option<&'a str>,
         intent_managed: bool,
         session_memory_only: bool,
+        /// The role the session an unseated identity's seat would resume
+        /// was last built under, as the shell observed it.
+        resume_role: Option<&'a str>,
     }
 
     impl Default for Declaration<'_> {
@@ -13344,6 +13347,7 @@ mod tests {
                 migration_from: None,
                 intent_managed: false,
                 session_memory_only: false,
+                resume_role: None,
             }
         }
     }
@@ -13358,6 +13362,7 @@ mod tests {
             declared_migration_from: declaration.migration_from.map(str::to_string),
             intent_managed: declaration.intent_managed,
             session_memory_only: declaration.session_memory_only,
+            resume_session_role: declaration.resume_role.map(str::to_string),
         }
     }
 
@@ -13837,6 +13842,97 @@ mod tests {
                 .member_session_bindings
                 .get(&member.identity),
             Some(&fresh_session)
+        );
+    }
+
+    /// An unseated identity whose seat would resume a session last built
+    /// under another role is owed its seat only with the migration from that
+    /// role declared. With none declared it is held: recorded an entry owed
+    /// its seat, with the role hold its host preparation owes, until an
+    /// apply declares the migration (or restores the role). A seat that
+    /// resumes no built session needs no migration.
+    #[test]
+    fn a_seat_resuming_a_session_built_under_another_role_needs_its_migration() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("moved-role-entry");
+        let moved = |migration_from: Option<&'static str>| Declaration {
+            profile: "lead",
+            resume_role: Some("test"),
+            migration_from,
+            ..Declaration::default()
+        };
+        assert_eq!(
+            declare(&mut authority, &identity, moved(None)),
+            IdentityEntryVerdict::RoleMigrationHeld,
+            "no migration is declared from the role the session was built under"
+        );
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+        assert_eq!(
+            state.identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::SeatOwed)
+        );
+        assert_eq!(
+            state.member_host_preparation_causes.get(&identity),
+            Some(&HostPreparationCause::RoleMigrationUndeclared)
+        );
+        assert_eq!(
+            declare(&mut authority, &identity, moved(Some("another"))),
+            IdentityEntryVerdict::RoleMigrationHeld,
+            "a migration declared from another role is no migration"
+        );
+        assert_eq!(
+            declare(&mut authority, &identity, moved(Some("test"))),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&identity),
+            "the declared migration ends the hold"
+        );
+
+        let restored = AgentIdentity::from("restored-role-entry");
+        assert_eq!(
+            declare(&mut authority, &restored, moved(None)),
+            IdentityEntryVerdict::RoleMigrationHeld
+        );
+        assert_eq!(
+            declare(
+                &mut authority,
+                &restored,
+                Declaration {
+                    resume_role: Some("test"),
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::SeatOwed,
+            "the role the session was built under, declared again"
+        );
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&restored),
+            "restoring the role ends the hold"
+        );
+
+        let fresh = AgentIdentity::from("fresh-role-entry");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &fresh,
+                Declaration {
+                    profile: "lead",
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::SeatOwed,
+            "a seat that resumes no built session needs no migration"
         );
     }
 

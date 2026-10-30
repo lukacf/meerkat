@@ -531,6 +531,7 @@ impl MobActor {
             // Decided by the preparation: a revival's archived session.
             session_archived: false,
             history_unavailable: spec.history_unavailable.clone(),
+            resume_from_role: spec.launch_mode.resume_from_role().cloned(),
             runtime_mode,
             labels: spec.labels.clone().unwrap_or_default(),
             continuity_intent,
@@ -2174,7 +2175,11 @@ impl SettledSeatChunk {
                     ))
                     // A fresh seat of an identity whose archived session is
                     // gone from the store records the notice.
-                    .with_history_unavailable(seat.candidate.history_unavailable.clone());
+                    .with_history_unavailable(seat.candidate.history_unavailable.clone())
+                    // A resume seat that takes another role than its session
+                    // was last built under records the declared migration,
+                    // which the session's next build declares.
+                    .with_resume_from_role(seat.candidate.resume_from_role.clone());
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

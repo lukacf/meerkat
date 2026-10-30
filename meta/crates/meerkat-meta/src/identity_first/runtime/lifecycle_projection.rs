@@ -2143,6 +2143,12 @@ impl IdentityRuntime {
             pause: Duration::from_millis(10),
         };
     }
+
+    /// Run the backlog lane once, as its task does at each sweep: whether it
+    /// reached its end. Rows that need its runs now run them so.
+    pub(crate) async fn run_lifecycle_backlog_once(&self) -> bool {
+        self.run_logged_lifecycle_lane(LaneKind::Backlog).await
+    }
 }
 
 #[cfg(test)]

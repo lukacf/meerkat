@@ -1,6 +1,7 @@
 //! HTTP routes for the admin console REST API.
 
 mod mcp_apps;
+pub(crate) mod schedules;
 mod shared_panels;
 pub use mcp_apps::ConsoleToolApplicationIngress;
 
@@ -2771,6 +2772,10 @@ mod console_experience_binding_tests;
 mod console_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_schedule_tests.rs"]
+mod console_schedule_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -3753,6 +3758,11 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/respawn"
             | "meta/reset"
             | "meta/delete_identity"
+            | "meta/schedule/create"
+            | "meta/schedule/update"
+            | "meta/schedule/pause"
+            | "meta/schedule/resume"
+            | "meta/schedule/delete"
             | "meta/agent_memory/remember"
             | "meta/agent_memory/update"
             | "meta/agent_memory/forget"
@@ -4273,6 +4283,16 @@ fn console_rpc_access_requirements(
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
+        // A console schedule is a deferred send to its agent, named by
+        // `identity`: listing them needs what viewing the agent needs, and
+        // every write what sending to it needs. That the schedule is that
+        // agent's is judged in the handler.
+        "meta/schedule/list" => one(ACTION_AGENT_VIEW, identity),
+        "meta/schedule/create"
+        | "meta/schedule/update"
+        | "meta/schedule/pause"
+        | "meta/schedule/resume"
+        | "meta/schedule/delete" => one(ACTION_AGENT_SEND, identity),
         crate::console_voice::VOICE_CONTEXT_STATUS_METHOD
         | crate::console_voice::VOICE_CAPTIONS_METHOD => one(ACTION_AGENT_VIEW, identity),
         crate::console_voice::VOICE_OPEN_METHOD
@@ -9086,6 +9106,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     methods.push("meta/fork_member");
                 }
             }
+            // Console schedules (`schedules`): listed where the runtime's
+            // schedule host attached its service; a write is a deferred send
+            // of the caller, offered where the console is writable and a
+            // firing host drains the store.
+            methods.extend(schedules::advertised_methods(runtime, can_mutate));
             if metadata_table.is_some() {
                 methods.extend_from_slice(&["meta/mob_labels/get", "meta/run_labels/get"]);
                 if can_mutate {
@@ -9620,6 +9645,81 @@ async fn handle_console_runtime_rpc_with_visibility(
             Some(crate::rpc::schedule_methods::schedule_tools_result()),
             None,
         ),
+        // Console schedules: deferred console sends to an agent (`schedules`).
+        // The access table judged the agent's grant; the handler judges the
+        // schedule and the agent.
+        "meta/schedule/list" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/create" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/update" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/pause" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/resume" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
+        "meta/schedule/delete" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            schedules::handle(
+                &request,
+                runtime,
+                identity_runtime.as_ref(),
+                console_aggregator.as_ref(),
+                authenticated_principal,
+                governance,
+            )
+            .await
+        })
+        .await,
         // Read-only state-directory diagnosis (registered as a read method:
         // allowed in read-only mode, admin-gated in
         // `console_rpc_access_requirements`).

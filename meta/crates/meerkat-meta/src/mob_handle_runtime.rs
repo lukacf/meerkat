@@ -9711,6 +9711,10 @@ pub struct MobRuntime {
     /// has read, shared by every clone (see
     /// [`crate::side_chat::SideChatLineageCache`]).
     side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
+    /// The schedule service the Console's schedule editor writes, once the
+    /// gateway's schedule host attached it, shared by every clone (see
+    /// [`crate::console_schedules::ConsoleSchedules`]).
+    console_schedules: crate::console_schedules::ConsoleSchedules,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -10618,6 +10622,7 @@ impl MobRuntime {
                 #[cfg(not(target_arch = "wasm32"))]
                 member_mcp_custody: spec.member_mcp_custody,
                 side_chat_lineages: Arc::default(),
+                console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             },
             pending_activation,
         ))
@@ -10671,6 +10676,7 @@ impl MobRuntime {
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
             side_chat_lineages: Arc::default(),
+            console_schedules: crate::console_schedules::ConsoleSchedules::default(),
         }
     }
 
@@ -10685,6 +10691,13 @@ impl MobRuntime {
     /// [`crate::side_chat::SideChatLineageCache`]).
     pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
         &self.side_chat_lineages
+    }
+
+    /// Where this runtime's console schedules live: the schedule service the
+    /// gateway's schedule host attached, if it attached one (see
+    /// [`crate::console_schedules::ConsoleSchedules`]).
+    pub(crate) fn console_schedules(&self) -> &crate::console_schedules::ConsoleSchedules {
+        &self.console_schedules
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's

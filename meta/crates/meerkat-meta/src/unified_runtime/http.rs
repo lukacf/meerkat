@@ -410,6 +410,22 @@ impl UnifiedRuntime {
             .console_projection
             .get_or_init(|| self.create_console_projection(visibility_policy.clone()));
         let view = projection.policy_view(visibility_policy.clone());
+        // A console schedule fires as a send through this Console's own send
+        // path (`crate::console_schedules`); the router built last installs
+        // it. Every part is the runtime's own non-owning back-edge.
+        self.console_schedule_doors().install(Arc::new(
+            crate::http_console::schedules::ConsoleSendDoor {
+                decisions: decisions.clone(),
+                runtime: self.mob_runtime().clone(),
+                aggregator: view.clone(),
+                access: self.access_controller().cloned(),
+                identity_runtime: self.identity_runtime_ref().cloned(),
+                console_events: self.console_events(),
+                governed_ingress: self.console_governed_ingress.clone(),
+                operator_resolver: self.console_operator_resolver(),
+                session_fences: self.console_session_fences().clone(),
+            },
+        ));
         // The router is returned to the host: it holds the public owners.
         console_json_router_with_runtime_events_and_policy(
             decisions,

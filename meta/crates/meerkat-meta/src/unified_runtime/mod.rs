@@ -510,6 +510,9 @@ pub struct UnifiedRuntimeCore {
     /// The trusted host's governance of Console sends, shared with every
     /// Console router this runtime builds.
     console_governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
+    /// The Console send path console schedule fires take, installed by the
+    /// console router build (`crate::console_schedules`).
+    console_schedule_doors: crate::console_schedules::ConsoleScheduleDoorSlot,
 
     // Meta-side label sidecar for mob- and run-scoped metadata
     metadata_table: Arc<RuntimeMetadataTable>,
@@ -922,6 +925,7 @@ impl UnifiedRuntime {
                 keyed_inject_slot: crate::runtime::keyed_inject::pending_keyed_inject_slot(),
                 console_operator_resolver: std::sync::RwLock::new(None),
                 console_governed_ingress: Default::default(),
+                console_schedule_doors: Default::default(),
                 metadata_table,
                 persistent_metadata,
             },
@@ -2067,6 +2071,15 @@ impl UnifiedRuntime {
         ingress: Arc<dyn crate::console_governed_ingress::ConsoleGovernedIngress>,
     ) {
         self.console_governed_ingress.install(ingress);
+    }
+
+    /// The Console send path console schedule fires take: the console router
+    /// build installs it, and the schedule host's console schedules runnable
+    /// reads it (see `crate::console_schedules`).
+    pub(crate) fn console_schedule_doors(
+        &self,
+    ) -> &crate::console_schedules::ConsoleScheduleDoorSlot {
+        &self.console_schedule_doors
     }
 
     pub fn console_operator_resolver(

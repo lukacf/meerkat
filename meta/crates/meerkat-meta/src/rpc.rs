@@ -2024,6 +2024,13 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/console/send",
     crate::console_voice::VOICE_OPEN_METHOD,
     "meta/console/recover_send",
+    // Console schedules: a deferred send's definition or its end, in the
+    // schedule store the authoritative launch drains.
+    "meta/schedule/create",
+    "meta/schedule/update",
+    "meta/schedule/pause",
+    "meta/schedule/resume",
+    "meta/schedule/delete",
     // Operator mutations.
     "meta/call_tool",
     "meta/routing/routes/add",

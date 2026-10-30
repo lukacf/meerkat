@@ -211,7 +211,8 @@ pub type HostRunnables = Vec<(HostRunnableName, Arc<dyn HostRunnable>)>;
 /// steward's and the SDK's callback runnables. Core hands each fire's
 /// [`HostRunnableInvocation`] to such a runnable unchanged, its delivery
 /// idempotency key included. `Err` on a duplicate name, as for the others,
-/// and on the steward's reserved name.
+/// on the steward's reserved name, and on the console schedules' reserved
+/// name (`meta.console.scheduled_send`) for a callback or host runnable.
 // The steward runnable name is a non-empty const, so its parse is infallible.
 #[allow(clippy::expect_used)]
 pub fn gateway_runnable_host_with(
@@ -231,6 +232,8 @@ pub fn gateway_runnable_host_with(
     }
     if let Some((bridge, names)) = callback_runnables {
         for name in names {
+            // The console schedules' runnable name is Meta's.
+            crate::console_schedules::refuse_reserved_runnable_name(&name)?;
             registry
                 .register(
                     name,
@@ -249,6 +252,7 @@ pub fn gateway_runnable_host_with(
                 "host runnable name '{name}' is reserved for the memory steward"
             ));
         }
+        crate::console_schedules::refuse_reserved_runnable_name(&name)?;
         registry
             .register(name, runnable)
             .map_err(|error| error.to_string())?;
@@ -1254,8 +1258,14 @@ fn attach_schedule_tools_with_store_and_binding(
         Arc::new(ScheduleToolDispatcher::new(service.clone())),
         mob_target_registry.clone(),
     );
+    // Console schedules are a person's deferred sends: agents' tools leave
+    // them alone (`crate::console_schedules`).
+    let console_gated = crate::console_schedules::ConsoleScheduleToolGate::new(
+        Arc::new(dispatcher),
+        service.clone(),
+    );
     let gated = FiringHostGatedScheduleTools {
-        inner: Arc::new(dispatcher),
+        inner: Arc::new(console_gated),
         binding: firing_host_binding.clone(),
     };
     meerkat::surface::set_default_schedule_tools(builder, Some(Arc::new(gated)));

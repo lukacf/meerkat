@@ -3301,10 +3301,11 @@ impl MachineCleanupTaskSpawner {
         }
 
         // Machine cleanup restores and reduces the same generated DSL state
-        // as the host runtime and runs session and mob work for the whole
-        // process, the turns of runtime-backed mob members and the host tools
-        // they call included, so its threads get the process-runtime stack:
-        // 16 MiB, or what the host stack knobs set (see `crate::host_stack`).
+        // as the host runtime and runs session and mob cleanup and custody
+        // work for the whole process (the turns of sessions and mob members
+        // run on the host's runtime), so its threads get the process-runtime
+        // stack: 16 MiB, or what the host stack knobs set (see
+        // `crate::host_stack`).
         let stack_bytes = crate::host_stack::process_runtime_stack_bytes().map_err(|error| {
             RuntimeDriverError::Internal(format!(
                 "failed to start machine cleanup runtime: {error}"

@@ -702,10 +702,16 @@ async fn public_operation_feedback_discloses_no_names_for_unavailable_or_foreign
         let error = public_operation_dispatch(&owner, session, job, json!(["read-item"]), None)
             .await
             .unwrap_err();
-        if mode == "foreign-session" {
-            assert!(matches!(&error, ToolError::AccessDenied { .. }));
-        } else {
-            assert!(matches!(&error, ToolError::Unavailable { .. }), "{mode}");
+        match mode {
+            "foreign-session" => assert!(matches!(&error, ToolError::AccessDenied { .. })),
+            // No current selection (retired owner or unknown job) is the shared
+            // select_public_job correction, which names only the job.
+            "retired" | "unknown-job" => assert!(
+                matches!(&error, ToolError::InvalidArguments { reason, .. }
+                    if reason.contains("This request has not entered access review.")),
+                "{mode}"
+            ),
+            _ => assert!(matches!(&error, ToolError::Unavailable { .. }), "{mode}"),
         }
         assert!(!error.to_string().contains("private_raw_name"), "{mode}");
         assert!(requests.try_recv().is_err());

@@ -396,19 +396,33 @@ describe("StatTile", () => {
 });
 
 describe("rows and controls", () => {
-  it("activates button rows and role=button rows with Enter and Space, not from their actions", () => {
+  // A control inside another control: a button or link in a button, or in
+  // an element that claims the button role.
+  const NESTED_CONTROLS = [
+    "button button", "button a", "button [role='button']",
+    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+  ].join(", ");
+
+  it("keeps a row's actions and extra content beside its button, never inside it", () => {
     const open = vi.fn();
-    const act1 = vi.fn();
+    const claim = vi.fn();
     const view = render(
       <div>
         <ListRow title="Coordinator" subtitle="Leads" onActivate={open} testId="plain" />
         <ListRow
           title="Research Analyst"
+          subtitle="Analyst"
+          meta={<span>2m ago</span>}
           onActivate={open}
           selected
+          ariaExpanded={false}
+          titleAttr="identity:analyst"
           testId="with-actions"
-          actions={<Button size="sm" onClick={act1}>Claim</Button>}
-        />
+          dataAttributes={{ "data-state": "working" }}
+          actions={<Button size="sm" onClick={claim}>Claim</Button>}
+        >
+          <span>Waiting on a review</span>
+        </ListRow>
       </div>,
     );
     const plain = view.getByTestId("plain");
@@ -417,16 +431,34 @@ describe("rows and controls", () => {
     expect(open.mock.calls.length).toBe(1);
 
     const row = view.getByTestId("with-actions");
-    expect(row.getAttribute("role")).toBe("button");
-    expect(row.getAttribute("tabindex")).toBe("0");
-    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.getAttribute("role") === null).toBe(true);
+    expect(row.getAttribute("tabindex") === null).toBe(true);
+    expect(row.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
     expect(row.classList.contains("is-selected")).toBe(true);
-    fireEvent.keyDown(row, { key: "Enter" });
-    fireEvent.keyDown(row, { key: " " });
-    expect(open.mock.calls.length).toBe(3);
-    fireEvent.click(view.getByRole("button", { name: "Claim" }));
-    expect(act1.mock.calls.length).toBe(1);
-    expect(open.mock.calls.length).toBe(3);
+    expect(row.getAttribute("data-state")).toBe("working");
+    // The title is the row's button: a real button, so Enter and Space work
+    // natively, named by the title and described by the rest of the row.
+    const hit = view.getByRole("button", { name: "Research Analyst" });
+    expect(hit.tagName).toBe("BUTTON");
+    expect(hit.getAttribute("type")).toBe("button");
+    expect(hit.classList.contains("cc-row__hit")).toBe(true);
+    expect(hit.getAttribute("aria-current")).toBe("true");
+    expect(hit.getAttribute("aria-expanded")).toBe("false");
+    expect(hit.querySelector(".cc-row__title")?.getAttribute("title")).toBe("identity:analyst");
+    const described = (hit.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+    expect(described).toEqual(["Analyst", "2m ago", "Waiting on a review"]);
+    const claimButton = view.getByRole("button", { name: "Claim" });
+    expect(hit.contains(claimButton)).toBe(false);
+
+    // The button, the row and its extra content open the row; an action
+    // does not.
+    fireEvent.click(hit);
+    fireEvent.click(row);
+    fireEvent.click(view.getByText("Waiting on a review"));
+    expect(open.mock.calls.length).toBe(4);
+    fireEvent.click(claimButton);
+    expect(claim.mock.calls.length).toBe(1);
+    expect(open.mock.calls.length).toBe(4);
   });
 
   it("keeps the button label as the button's own text and hides icons", () => {

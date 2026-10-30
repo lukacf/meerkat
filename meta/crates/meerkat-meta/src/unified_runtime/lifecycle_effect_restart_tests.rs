@@ -511,7 +511,7 @@ async fn eventually<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// B5: a reset's fresh life commits in Core, and the process is killed while
+/// A reset's fresh life commits in Core, and the process is killed while
 /// the session the reset retired is being distilled. The next start over the
 /// same state distills that session, once.
 ///
@@ -586,7 +586,7 @@ async fn a_kill_inside_a_reset_s_distillation_distills_the_retired_session_after
     let _ = boot.runtime.shutdown().await;
 }
 
-/// B5: a first-boot `Fresh` row (the row an offline `identity-reset` writes)
+/// A first-boot `Fresh` row (the row an offline `identity-reset` writes)
 /// gives a live identity its fresh life at the next start, as Core's
 /// rotation, and the session that rotation retires is distilled as an
 /// online reset's is.
@@ -647,7 +647,7 @@ async fn a_first_boot_fresh_row_distills_the_retired_session_like_an_online_rese
     let _ = boot.runtime.shutdown().await;
 }
 
-/// B11: the roster stops listing an identity, Core retires its member, and
+/// The roster stops listing an identity, Core retires its member, and
 /// the process is killed inside the host's retirement hook. The next start
 /// hands the retired incarnation to its hook, once, cause `unlisted`; the
 /// exit interview the unlisting queued before the hook stays queued once;
@@ -748,10 +748,9 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
     let _ = boot.runtime.shutdown().await;
 }
 
-/// B5 (exit interview): the roster stops listing an identity, Core retires
-/// its member, and the process is killed while the retired session is being
-/// distilled, before the exit interview is queued. The next start queues it,
-/// once.
+/// The roster stops listing an identity, Core retires its member, and the
+/// process is killed while the retired session is being distilled, before
+/// the exit interview is queued. The next start queues it, once.
 ///
 /// RED before lifecycle effects were projected from Core's journal: the exit
 /// interview was queued inline by the roster pass right after the

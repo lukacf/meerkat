@@ -477,9 +477,14 @@ pub enum ReviewOperationContextResolution {
 }
 
 /// An owner change in progress on a work's own authorization publication: a
-/// token for waiting until that change completes, never a permission. Equal
-/// tokens name the same change in progress; a different token is a later
-/// change.
+/// token for waiting until that change completes, never a permission. A
+/// published change is named by its own odd sequence: equal tokens name the
+/// same change in progress, and a different token is a later change. An
+/// owner may also name a hold that has not published (the native work owner
+/// names every reservation of its publication's writer: an owner change
+/// still being prepared, a held exclusion, another operation's final entry)
+/// by the odd sequence it would publish at, so consecutive unpublished holds
+/// share one token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnerChangeInProgress {
     instance: uuid::Uuid,
@@ -652,7 +657,10 @@ pub trait WorkAuthorization: Send + Sync {
     /// this work's own publication instance and nothing else. A wrapper of a
     /// run's work authorization forwards it. An owner without a publication
     /// answers `None`, and so does a poisoned publication, whose observations
-    /// stay unavailable; a refusal then takes its ordinary path.
+    /// stay unavailable; a refusal then takes its ordinary path. An owner may
+    /// also name a hold of its publication that has not published until it
+    /// ends (the native work owner names every reservation of its
+    /// publication's writer), so a wait lasts until the holder releases it.
     fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
         None
     }

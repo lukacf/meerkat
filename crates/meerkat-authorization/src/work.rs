@@ -514,10 +514,16 @@ impl LocalWorkAuthorization {
 }
 
 impl WorkAuthorization for LocalWorkAuthorization {
+    /// A published owner change in progress on this work's publication, or
+    /// else a reservation of its writer held now (an owner change being
+    /// prepared, a held exclusion or another operation's final entry): a
+    /// holder that a stale read or a refusal to rebuild may have met. A
+    /// waiting hint only; [`LocalAuthorizationPublication::change_in_progress`]
+    /// still names published changes alone.
     fn owner_change_in_progress(
         &self,
     ) -> Option<meerkat_core::authorization::OwnerChangeInProgress> {
-        self.publication.change_in_progress()
+        self.publication.change_or_reservation_in_progress()
     }
 
     fn run_if_current_within(

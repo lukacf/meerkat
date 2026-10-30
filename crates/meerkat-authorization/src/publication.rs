@@ -12,7 +12,7 @@
 //! freshness claim that this helper can repair.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const INVALID: u64 = u64::MAX;
@@ -21,6 +21,17 @@ struct PublicationInner {
     instance: uuid::Uuid,
     sequence: AtomicU64,
     writer: Mutex<()>,
+    /// Reservations of `writer` alive now, published or not. A waiting hint
+    /// only ([`LocalAuthorizationPublication::change_or_reservation_in_progress`]),
+    /// never read for a stamp, an observation or a decision. A guard counts
+    /// itself once it holds the writer and stops counting only after it
+    /// released the writer, so the count is never zero while a guard exists.
+    /// The writer is also held uncounted: briefly, between taking it and
+    /// building the guard, and by [`LocalAuthorizationPublication::retire`],
+    /// which never counts. A wait that reads no hold then answers as with no
+    /// change in progress; a wait after a stale read pauses one backoff step
+    /// and reads again, as one of its free rebuilds.
+    reservations: AtomicUsize,
 }
 
 /// Process-local ordering shared by all authorization-relevant fact owners.
@@ -53,6 +64,7 @@ impl LocalAuthorizationPublication {
                 instance: uuid::Uuid::new_v4(),
                 sequence: AtomicU64::new(0),
                 writer: Mutex::new(()),
+                reservations: AtomicUsize::new(0),
             }),
         }
     }
@@ -178,11 +190,14 @@ impl LocalAuthorizationPublication {
             self.inner.sequence.store(INVALID, Ordering::Release);
             return Err(PublicationError::Unavailable);
         }
+        // Counted while the writer is held; the guard stops counting only
+        // after it released the writer.
+        self.inner.reservations.fetch_add(1, Ordering::AcqRel);
         Ok(LocalPublicationGuard {
             inner: &self.inner,
             completed_sequence: previous + 2,
             published: false,
-            _writer: writer,
+            writer: Some(writer),
         })
     }
 
@@ -211,6 +226,37 @@ impl LocalAuthorizationPublication {
         let sequence = self.inner.sequence.load(Ordering::Acquire);
         (sequence != INVALID && !sequence.is_multiple_of(2)).then(|| {
             meerkat_core::authorization::OwnerChangeInProgress::new(self.inner.instance, sequence)
+        })
+    }
+
+    /// [`Self::change_in_progress`], or else a reservation of the writer
+    /// held now that has not published: an owner change still being
+    /// prepared (an issuance before its acknowledged append publishes), a
+    /// held exclusion (`try_with_owner_changes_excluded`) or another
+    /// operation's own final entry. The native work owner's waiting hint, so
+    /// that a wait for an owner change in progress also waits for the
+    /// holder's release. Such a reservation is named by the odd sequence it
+    /// would publish at, so consecutive unpublished reservations share one
+    /// token. A hint only, never a permission and never an observation:
+    /// `None` for a poisoned or exhausted publication.
+    pub(crate) fn change_or_reservation_in_progress(
+        &self,
+    ) -> Option<meerkat_core::authorization::OwnerChangeInProgress> {
+        let sequence = self.inner.sequence.load(Ordering::Acquire);
+        if sequence == INVALID {
+            return None;
+        }
+        if !sequence.is_multiple_of(2) {
+            return Some(meerkat_core::authorization::OwnerChangeInProgress::new(
+                self.inner.instance,
+                sequence,
+            ));
+        }
+        (self.inner.reservations.load(Ordering::Acquire) > 0).then(|| {
+            meerkat_core::authorization::OwnerChangeInProgress::new(
+                self.inner.instance,
+                sequence + 1,
+            )
         })
     }
 
@@ -257,7 +303,9 @@ pub struct LocalPublicationGuard<'a> {
     inner: &'a PublicationInner,
     completed_sequence: u64,
     published: bool,
-    _writer: MutexGuard<'a, ()>,
+    /// Held until this guard drops, then released before the reservation
+    /// stops being counted.
+    writer: Option<MutexGuard<'a, ()>>,
 }
 
 impl LocalPublicationGuard<'_> {
@@ -327,6 +375,11 @@ impl Drop for LocalPublicationGuard<'_> {
                 Ordering::Acquire,
             );
         }
+        // Release the writer, then stop counting this reservation: a waiter
+        // that reads no reservation in progress finds this one's writer
+        // released (a later reservation is counted once it holds the writer).
+        drop(self.writer.take());
+        self.inner.reservations.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -922,5 +975,59 @@ mod tests {
         );
         drop(later);
         assert_eq!(publication.change_in_progress(), None);
+    }
+
+    /// RED at v0.9.7: no reservation was named before it published.
+    #[test]
+    fn a_reservation_is_named_in_progress_until_released_and_only_a_published_one_otherwise() {
+        let publication = LocalAuthorizationPublication::new();
+        assert_eq!(publication.change_or_reservation_in_progress(), None);
+        let reservation = publication
+            .try_reserve_owner_change()
+            .expect("the writer is free");
+        let named = publication
+            .change_or_reservation_in_progress()
+            .expect("a reservation that has not published is named");
+        assert_eq!(
+            publication.change_in_progress(),
+            None,
+            "change_in_progress still names published changes only"
+        );
+        drop(reservation);
+        assert_eq!(
+            publication.change_or_reservation_in_progress(),
+            None,
+            "released: nothing in progress"
+        );
+
+        let mut change = publication
+            .reserve_owner_change()
+            .expect("the writer is free");
+        assert_eq!(
+            publication.change_or_reservation_in_progress(),
+            Some(named),
+            "named by the odd sequence it would publish at"
+        );
+        assert!(change.publish(), "a healthy reservation publishes");
+        assert_eq!(
+            publication.change_in_progress(),
+            Some(named),
+            "published: the same token"
+        );
+        assert_eq!(publication.change_or_reservation_in_progress(), Some(named));
+        drop(change);
+        assert_eq!(publication.change_or_reservation_in_progress(), None);
+
+        let held = publication
+            .try_reserve_owner_change()
+            .expect("the writer is free");
+        publication.poison();
+        assert_eq!(
+            publication.change_or_reservation_in_progress(),
+            None,
+            "a poisoned publication has nothing to wait for, even while held"
+        );
+        drop(held);
+        assert_eq!(publication.change_or_reservation_in_progress(), None);
     }
 }

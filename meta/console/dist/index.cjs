@@ -60924,7 +60924,10 @@ function WorkGraphGraphView({
                     event.stopPropagation();
                     onSelect?.(node2.itemId);
                   },
-                  onFocus: () => setFocusedId(node2.itemId),
+                  onFocus: () => {
+                    setFocusedId(node2.itemId);
+                    zoom.reveal({ x: node2.x, y: node2.y, w: node2.w, h: node2.h });
+                  },
                   onKeyDown: (event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();

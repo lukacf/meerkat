@@ -1360,7 +1360,7 @@ use meerkat_mob::{OperatorInstructionTarget, OperatorInstructionWrite};
 
 let receipt = handle
     .set_operator_instruction(OperatorInstructionWrite {
-        slot,                      // InstructionSlot { namespace, key }
+        slot: slot.clone(),        // InstructionSlot { namespace, key }
         revision,                  // strictly increasing per slot
         body: "Answer formally.".to_string(),
         content_sha256: None,      // checked against the body when given
@@ -1385,27 +1385,41 @@ through live sessions run in their own lane. An exact repeat answers as a
 duplicate; a lower revision, the same revision with other content, a body
 over 256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
 completed or destroyed mob are refused typed
-(`OperatorInstructionError::code`). Writes need the `AdminHost` scope and are
-never an agent tool.
+(`OperatorInstructionError::code`). A revoked slot keeps its record (its
+effect Absent), so it counts toward the 64 slots until a reset clears the
+records. Writes need the `AdminHost` scope and are never an agent tool.
 
 `MobHandle::operator_instruction_status` (scope `ReadHistory`) reads the
 records and, per member, its residency, its delivery state (`Current`,
 `Owed` with the last retryable failure, or `Blocked` with a reason), and per
 slot what the member should have, what its session recorded and the entry
-that put it in effect, with the reason a change is still pending. It reads
-committed session state and never wakes a member; a member whose session
-cannot be read is reported with the reason, and the page still answers.
+that put it in effect, with the reason a change is still pending (the
+session's next run start, a model that lowers System rows only in the
+leading prefix, or one that cannot carry them at all). It reads committed
+session state and never wakes a member; a member whose session cannot be
+read is reported with the reason, and the page still answers.
 
 A member's session target belongs to its mob: another mob's delivery to it
 is refused (`owned_by_other_mob`) until the owning mob releases it, which a
 mob does when a member whose session its host keeps retires and when the mob
-is destroyed. A reset clears the records and keeps the generation moving
+is destroyed. A destroy whose release does not land answers incomplete, with
+the member still seated, and its retry releases the target. A member seated
+over an existing session whose own host wrote its target (an attach) hands
+that target to the mob at the mob's first delivery: the mob's snapshot
+replaces what the host wrote, and from then on the host's own writes to the
+session are refused (`owned_by_mob`) until the mob releases it. A blocked member
+stays blocked until a write with a new revision of a slot that selects it, a
+new seat of the member, or a restart; an exact repeat of a write does not
+unblock it. A reset clears the records and keeps the generation moving
 forward, so a session never sees an older snapshot replace a newer one. A
 placed member is reported blocked (`member_host_unsupported`) until member
 hosts take deliveries. A mob that recorded operator instructions journals
 them at mob event schema 10, which a release before operator instructions
-refuses; `rkat storage doctor` lists such mobs
-(`operator-instruction-mob-events`).
+refuses for every mob on the host, not only that one: see
+[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8) before any
+downgrade. `rkat storage doctor` lists such mobs
+(`operator-instruction-mob-events`); it reads the mob databases on disk
+(`mobs/<name>.db` in each realm's state directory), not a host store.
 
 ### Shutdown, destroy and admission (Rust hosts)
 

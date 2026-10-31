@@ -721,7 +721,8 @@ them.
   `SetOperatorInstruction`, `RevokeOperatorInstruction`,
   `RecoverOperatorInstruction`, `RecoverOperatorInstructionGenerationHighwater`,
   `PrepareMemberInstructionDelivery`, `RecordMemberInstructionTarget`,
-  `RefuseMemberInstructionTarget` and `ResolveMemberInstructionRelease`, and
+  `RefuseMemberInstructionTarget` and `ResolveMemberInstructionRelease`
+  (`agent_identity`, `session_id`, `disposal`), and
   `MobMachineEffect` gains `OperatorInstructionCommitted`,
   `OperatorInstructionDuplicate`, `OperatorInstructionRefused`,
   `MemberInstructionDeliveryPrepared`, `MemberInstructionDeliveryDeferred`,
@@ -736,15 +737,19 @@ them.
   A mob journals these two kinds at mob event schema 10
   (`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`) and every
   other kind at 9, so a mob that never uses operator instructions keeps a
-  journal older releases read, and a release before operator instructions
+  journal older releases read. A release before operator instructions
   refuses the journal of a mob that recorded one, typed ("unsupported stored
-  mob event schema_version=10"), until a roll-forward. `rkat storage doctor`
+  mob event schema_version=10; expected 9"), and Core 0.9.7 and 0.9.8 stop
+  restoring a host's mobs at the first such journal, so no mob on that host
+  restores until the mob's database is gone or the host is rolled forward;
+  see Upgrade notes for the steps before a downgrade. `rkat storage doctor`
   lists such mob databases (Info finding `operator-instruction-mob-events`).
   `MobSessionService` gains `record_member_instruction_target`,
   `release_member_instruction_target` and `read_member_instructions`, each
   defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
   durable session owner must forward them for its mob's members to receive
-  instructions (Core's CLI and RPC wrappers forward them).
+  instructions (Core's CLI and RPC wrappers and Meta's wrappers forward
+  them).
 
 - `meerkat-workgraph`: `WorkEvidenceRef` gains the public field `withdraws`
   (`BTreeSet<String>`, the ids of earlier evidence on the same item that the
@@ -1447,9 +1452,17 @@ them.
   ephemeral one refuses `durability_unavailable`) records a live session's
   write through a task the service owns, so a caller that stops waiting never
   leaves it uncommitted, and a dormant session's store-only without waking
-  it. A mob member's snapshot is recorded, and released, only by the mob
-  runtime's sealed delivery (see the mob entry below); no session service
-  trait method takes one. History reads carry each entry's
+  it. Its read (`SessionInstructionRead`) also says how the session's model
+  lowers entries (`lowering`, resolved by the service's builder through the
+  new defaulted `SessionAgentBuilder::instruction_lowering_for_identity`;
+  `None` when the builder cannot tell). A mob member's snapshot is recorded,
+  and released, only by the mob runtime's sealed delivery (see the mob entry
+  below); no session service trait method takes one, and an xtask gate
+  (`runtime-authority-bypass`) refuses a call of the persistent service's
+  mob-only entry points outside the mob runtime's session service. A live
+  session's release goes through the new defaulted
+  `SessionAgent::release_instruction_target_control`, which a session agent
+  wrapper must forward. History reads carry each entry's
   identity as `WireInstructionEntryIdentity`, raw for a form the reader does
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
@@ -1479,20 +1492,32 @@ them.
   (`OperatorInstructionError::code`); writes need `AdminHost` and are never
   an agent tool. A session that another mob's target owns blocks the member
   (`owned_by_other_mob`) until that mob releases it; a mob releases a
-  retiring member's target when the member's host keeps the session, and on
-  destroy. A restart replays the records and the obligations, a delivery
-  wave's records are journaled, and a crash in the middle of a fan-out
-  delivers the remaining members once. `MobHandle::operator_instruction_status`
+  retiring member's target when the member's host keeps the session (the
+  release names the session the retirement disposes of, which MobMachine
+  checks against the member's binding or its pending retirement, within the
+  retirement's deadline), and on destroy, where a release that does not land
+  answers the destroy incomplete with the member still seated, so a retry
+  releases it. A member seated over an existing session whose own host holds
+  its target (an attach) hands the target to the mob at the mob's first
+  delivery: the session-document authority rebinds it, then records the
+  snapshot (`Session::adopt_instruction_target`). A blocked member is owed
+  again by a new revision of a slot that selects it, a seat or a restart. A
+  restart replays the records and the obligations, a delivery wave's records
+  are journaled, and a crash in the middle of a fan-out delivers the
+  remaining members once; a write whose journal row landed although its
+  append answered an error is committed, never dropped by the next write.
+  `MobHandle::operator_instruction_status`
   (`ReadHistory`) reads, without waking anyone, the records and per member
   its residency, its delivery state (`Current`, `Owed` with the last
   retryable failure, `Blocked` with its reason), per slot the member's
   desired view, its session's recorded target and the entry in effect with a
-  typed pending reason, an unreadable member's reason, and whether a live
+  typed pending reason (a model that cannot carry operator instructions is
+  `lowering_unavailable`), an unreadable member's reason, and whether a live
   channel is open on its session (operator instructions do not reach a live
   channel). A placed member is reported blocked (`member_host_unsupported`).
   A TLC audit (`specs/machines/mob_machine/operator_instruction_delivery_audit.sh`)
-  checks the owed computation, the seat and unseat facts and that no
-  delivery wakes a member.
+  checks the owed computation, the seat and unseat facts, the release of a
+  retiring member's session and that no delivery wakes a member.
 
 - `meerkat-workgraph`: typed evidence withdrawal. An evidence ref withdraws
   earlier evidence on the same item by listing the earlier ids in its new
@@ -1908,6 +1933,22 @@ them.
   unchanged.
 
 ### Upgrade notes
+
+- Operator instructions for a mob's members: a mob that recorded an
+  operator instruction journals rows at mob event schema 10, which Core 0.9.7
+  and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
+  9"). Their realm restore (the mob roots of the rkat CLI, RPC and MCP hosts)
+  stops at the first such mob database, so every mob on that host fails to
+  restore and every mob verb answers that error; a Meta gateway whose own mob
+  recorded an operator instruction does not resume its mob. Before any
+  downgrade to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9, then
+  destroy each mob listed under `operator-instruction-mob-events`, or move
+  its database (`mobs/<name>.db` in the realm's state directory, the path
+  the finding names) out of that directory, before the older binary starts. The doctor reads the mob databases on disk only: for a realm
+  on a host store, look in the host's store for mob events at schema 10. A
+  member session that recorded its snapshot is written at session envelope
+  5, which the older binary refuses session by session (the
+  `operator-instruction-envelope` finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
   older than scoped tool grants does not read: such a binary resumes a gated

@@ -101,10 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   not read, a failed reset or delete keeps what it recorded whatever the
   bridge answered, Core's typed refusal and a host's refusal of the member's
   route included: it answers that the rotation may have started, and the
-  identity's next roster compile carries the rotation out. Forward the
-  journal reads so a reset Core refused stays refused. A bridge whose head
-  read fails (rather than answering `Unsupported`) has the step refused,
-  retryable, before Core is asked.
+  identity's next roster compile carries the rotation out. A rotation the
+  host refuses for the member's route is asked again by each compile, which
+  answers `HostRejectedBuild` until a build passes. Forward the journal
+  reads so a reset Core or the host refused stays refused. A bridge whose
+  head read fails (rather than answering `Unsupported`) has the step
+  refused, retryable, before Core is asked.
 
 - A host's retirement hook or `after_create` that has not answered within 30
   seconds is called again, at most three times in all, then reported

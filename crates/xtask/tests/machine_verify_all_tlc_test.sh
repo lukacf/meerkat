@@ -1048,7 +1048,8 @@ run_machine_verify() {
 # measurements: its sixteen runs (a safety run over 9203 distinct states,
 # five witness runs and ten mutant runs, over a model that does not extend
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
-# 4-worker local run (2026-10-31);
+# 4-worker local run (2026-10-31); since session_document's ci.cfg bounds
+# the steps at 5, its safety run covers 2720 distinct states;
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

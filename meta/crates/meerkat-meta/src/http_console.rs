@@ -17363,6 +17363,125 @@ comms = true
         Ok(())
     }
 
+    /// A shared Console serves the realm-level Memory panel reads with the
+    /// per-row scope filter of a runtime's own console: through a registered
+    /// runtime's store, a caller holding the unscoped read grant with a deny
+    /// on one identity's memory gets none of that identity's rows.
+    #[tokio::test]
+    async fn aggregator_memory_panel_reads_withhold_a_denied_identity()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::AgentMemoryProvider as _;
+        use crate::memory::StewardStore as _;
+        use crate::memory::records::{InjectionLogEntry, InjectionSurface, MemoryAuthor};
+
+        let memory_dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(memory_dir.path())?;
+        for identity in ["router", "delivery"] {
+            let receipt = store
+                .remember_authored(
+                    &crate::MemoryScope::Identity {
+                        realm: "default".to_string(),
+                        identity: identity.to_string(),
+                    },
+                    crate::NewMemoryRecord {
+                        kind: crate::MemoryKind::Fact,
+                        title: format!("{identity} fact"),
+                        description: format!("{identity} fact description"),
+                        body: format!("{identity} fact body"),
+                        tags: Vec::new(),
+                        evidence: Vec::new(),
+                        verification: None,
+                    },
+                    MemoryAuthor::Operator,
+                )
+                .await?;
+            store
+                .log_injections(
+                    "default",
+                    &[InjectionLogEntry {
+                        record_id: receipt.memory_id,
+                        identity: identity.to_string(),
+                        session_key: None,
+                        surface: InjectionSurface::Build,
+                        at_ms: 1,
+                    }],
+                )
+                .await?;
+            store
+                .record_pending_harvest("default", identity, None, "retired")
+                .await?;
+        }
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = 'panel-row-filter'\n[profiles.worker]\nmodel = 'gpt-6-astra'\n",
+        )?;
+        let runtime = Arc::new(
+            crate::UnifiedRuntime::builder()
+                .definition(definition)
+                .default_llm_client(Arc::new(TestClient::default()))
+                .build()
+                .await?,
+        );
+        runtime.set_memory_panel_store(Arc::new(store));
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime(crate::console_aggregator::ConsoleRuntimeRegistration {
+            runtime_key: "repo".into(),
+            identity_namespace: "repo".into(),
+            runtime: runtime.clone(),
+            visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+        });
+        let controller = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["admin@example.test".into()],
+            rules: vec![
+                crate::access::AccessRule {
+                    id: "read-memory".into(),
+                    actions: vec![ACTION_AGENT_VIEW.into(), ACTION_AGENT_MEMORY_READ.into()],
+                    ..Default::default()
+                },
+                crate::access::AccessRule {
+                    id: "deny-delivery-memory".into(),
+                    effect: crate::access::AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_MEMORY_READ.into()],
+                    agents: vec!["delivery".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })?;
+        let view = controller.view_for_subject(Some("viewer@example.test"));
+        for (method, rows_key, identity_field) in [
+            ("meta/memory/panel/overview", "scopes", "scope_key"),
+            ("meta/memory/panel/injections", "injections", "identity"),
+            ("meta/memory/panel/harvests", "harvests", "identity"),
+        ] {
+            let response = handle_console_aggregator_rpc(
+                Some(aggregator.clone()),
+                rpc_request_with_params(method, json!({"runtime_key": "repo"})),
+                true,
+                true,
+                Some(&controller),
+                Some(&view),
+                &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            )
+            .await;
+            let rows = response["result"][rows_key]
+                .as_array()
+                .ok_or_else(|| format!("{method} answered no rows: {response}"))?;
+            assert!(
+                rows.iter()
+                    .any(|row| row[identity_field] == json!("router")),
+                "{method} keeps router's rows: {response}"
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| row[identity_field] != json!("delivery")),
+                "{method} left delivery's rows on the wire: {response}"
+            );
+        }
+        runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_only_aggregator_capabilities_omit_mutating_methods() {
         let response = handle_console_aggregator_rpc(

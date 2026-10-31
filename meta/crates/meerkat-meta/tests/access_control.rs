@@ -3516,6 +3516,330 @@ async fn memory_panel_quarantine_queue_filters_rows_per_scope() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// A caller holding the unscoped memory read grants: one rule with no
+/// resource selector for `agent.view` and the read action of every scope
+/// kind. Two denies then take scopes away: the "delivery" identity's memory
+/// and the operator scope. The realm-level panel reads gate their entry on
+/// the unscoped `agent.memory.read`, a check with no resource that neither
+/// deny matches, so every call is admitted; the rows of the denied scopes
+/// must still stay on the server.
+fn unscoped_memory_reader_denied_delivery_and_operator() -> AccessController {
+    AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![
+            AccessRule {
+                id: "read-every-scope".to_string(),
+                actions: vec![
+                    "agent.view".to_string(),
+                    "agent.memory.read".to_string(),
+                    "mob.memory.read".to_string(),
+                    "operator.memory.read".to_string(),
+                ],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "deny-delivery-memory".to_string(),
+                effect: meerkat_meta::AccessEffect::Deny,
+                actions: vec!["agent.memory.read".to_string()],
+                agents: vec!["delivery".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "deny-operator-memory".to_string(),
+                effect: meerkat_meta::AccessEffect::Deny,
+                actions: vec!["operator.memory.read".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller")
+}
+
+/// Rows for the realm-level panel reads on top of [`seeded_memory_store`],
+/// in the scopes [`unscoped_memory_reader_denied_delivery_and_operator`]
+/// denies and in scopes it may read: a mob and an operator proposal; ledger
+/// rows of delivery's own record, of the mob record injected into delivery,
+/// of the operator record injected into router, and of the mob record
+/// injected into router; pending harvests for router and delivery; and an
+/// open audit verdict on a record of each seeded scope, router's quarantined
+/// record included.
+async fn seed_realm_level_panel_rows(
+    store: &meerkat_meta::SqliteAgentMemoryStore,
+    router_tip: &str,
+    router_quarantined: &str,
+    delivery: &str,
+    mob: &str,
+    operator: &str,
+) {
+    use meerkat_meta::memory::records::{
+        InjectionLogEntry, InjectionSurface, MemoryAuthor, MemoryKind,
+    };
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    let proposal = |title: &str| NewMemoryRecord {
+        kind: MemoryKind::Fact,
+        title: title.to_string(),
+        description: format!("{title} description"),
+        body: format!("{title} body"),
+        tags: Vec::new(),
+        evidence: Vec::new(),
+        verification: None,
+    };
+    store
+        .propose(
+            &MemoryScope::Mob {
+                realm: "default".to_string(),
+                mob: "access-control-mob".to_string(),
+            },
+            proposal("Mob proposal"),
+            MemoryAuthor::Operator,
+        )
+        .await
+        .expect("mob proposal");
+    store
+        .propose(
+            &MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: "op-owner".to_string(),
+            },
+            proposal("Operator proposal"),
+            MemoryAuthor::Operator,
+        )
+        .await
+        .expect("operator proposal");
+
+    let injection = |record_id: &str, identity: &str, at_ms: u64| InjectionLogEntry {
+        record_id: record_id.to_string(),
+        identity: identity.to_string(),
+        session_key: Some(format!("sess-{identity}")),
+        surface: InjectionSurface::Turn,
+        at_ms,
+    };
+    store
+        .log_injections(
+            "default",
+            &[
+                injection(delivery, "delivery", 10),
+                injection(mob, "delivery", 11),
+                injection(operator, "router", 12),
+                injection(mob, "router", 13),
+            ],
+        )
+        .await
+        .expect("injection rows");
+
+    for identity in ["router", "delivery"] {
+        let session_key = format!("sess-{identity}");
+        store
+            .record_pending_harvest("default", identity, Some(session_key.as_str()), "retired")
+            .await
+            .expect("pending harvest");
+    }
+
+    store
+        .save_dream_audit_verdicts(
+            "default",
+            "run-audit-1",
+            [router_tip, router_quarantined, delivery, mob, operator]
+                .into_iter()
+                .map(|record_id| {
+                    (
+                        record_id.to_string(),
+                        "dead_weight".to_string(),
+                        format!("never used: {record_id}"),
+                    )
+                })
+                .collect(),
+        )
+        .await
+        .expect("audit verdicts");
+}
+
+/// The realm-level Memory panel reads (overview, proposals, the injection
+/// ledger, harvests and audit verdicts) admit a caller on the unscoped
+/// `agent.memory.read` and then keep every row to the rule the record
+/// listing applies. A caller denied one identity's memory and the operator
+/// scope gets no row of either, and no audit verdict on quarantined content
+/// without the review grant, while every scope it may read stays listed.
+#[tokio::test]
+async fn memory_panel_realm_level_reads_withhold_denied_scopes() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, tip_id, quarantined_id, delivery_id, mob_id, operator_id) =
+        seeded_memory_store(memory_dir.path()).await;
+    seed_realm_level_panel_rows(
+        &store,
+        &tip_id,
+        &quarantined_id,
+        &delivery_id,
+        &mob_id,
+        &operator_id,
+    )
+    .await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(unscoped_memory_reader_denied_delivery_and_operator());
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    // Every call is admitted: its entry gate is the unscoped read grant.
+    let mut rows: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+    for (method, key) in [
+        ("overview", "scopes"),
+        ("proposals", "proposals"),
+        ("injections", "injections"),
+        ("harvests", "harvests"),
+        ("audit_verdicts", "verdicts"),
+    ] {
+        let response = rpc(&app, &format!("meta/memory/panel/{method}"), json!({})).await;
+        assert_eq!(response["error"], Value::Null, "{method}: {response:#?}");
+        let answered = response["result"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{method} rows: {response:#?}"))
+            .clone();
+        rows.insert(method, answered);
+    }
+    let is = |row: &Value, field: &str, value: &str| row[field] == json!(value);
+    let listed = |method: &str, wanted: &dyn Fn(&Value) -> bool, what: &str| {
+        assert!(
+            rows[method].iter().any(wanted),
+            "{method} must keep {what}: {:#?}",
+            rows[method]
+        );
+    };
+
+    // What the caller may read stays listed, so the leak check below cannot
+    // pass on an empty answer.
+    for (kind, key) in [
+        ("identity", "router"),
+        ("mob", "access-control-mob"),
+        ("realm", ""),
+    ] {
+        listed(
+            "overview",
+            &|row: &Value| is(row, "scope_kind", kind) && is(row, "scope_key", key),
+            &format!("the {kind} scope '{key}'"),
+        );
+    }
+    listed(
+        "proposals",
+        &|row: &Value| is(row, "scope_kind", "mob") && is(row, "title", "Mob proposal"),
+        "the mob proposal",
+    );
+    for record_id in [&tip_id, &mob_id] {
+        listed(
+            "injections",
+            &|row: &Value| is(row, "record_id", record_id) && is(row, "identity", "router"),
+            &format!("{record_id} injected into router"),
+        );
+    }
+    listed(
+        "harvests",
+        &|row: &Value| is(row, "identity", "router"),
+        "router's harvest",
+    );
+    for record_id in [&tip_id, &mob_id] {
+        listed(
+            "audit_verdicts",
+            &|row: &Value| is(row, "record_id", record_id),
+            &format!("the verdict on {record_id}"),
+        );
+    }
+
+    let denied_records = [delivery_id.as_str(), operator_id.as_str()];
+    let mut leaks: Vec<String> = Vec::new();
+    for row in &rows["overview"] {
+        if is(row, "scope_kind", "operator")
+            || (is(row, "scope_kind", "identity") && is(row, "scope_key", "delivery"))
+        {
+            leaks.push(format!("overview: {row}"));
+        }
+    }
+    for row in &rows["proposals"] {
+        if is(row, "scope_kind", "operator") {
+            leaks.push(format!("proposals: {row}"));
+        }
+    }
+    for row in &rows["injections"] {
+        if is(row, "identity", "delivery")
+            || denied_records.iter().any(|id| is(row, "record_id", id))
+        {
+            leaks.push(format!("injections: {row}"));
+        }
+    }
+    for row in &rows["harvests"] {
+        if is(row, "identity", "delivery") {
+            leaks.push(format!("harvests: {row}"));
+        }
+    }
+    for row in &rows["audit_verdicts"] {
+        if denied_records.iter().any(|id| is(row, "record_id", id)) {
+            leaks.push(format!("audit_verdicts: {row}"));
+        }
+        if is(row, "record_id", &quarantined_id) {
+            leaks.push(format!(
+                "audit_verdicts (quarantined, no review grant): {row}"
+            ));
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "rows the caller may not read left the server:\n{}",
+        leaks.join("\n")
+    );
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A record's detail lists its injection-ledger usage only for identities
+/// whose memory the caller may read: the mob record went into router's and
+/// into delivery's context, and a caller denied delivery's memory reads the
+/// record with router's injection alone.
+#[tokio::test]
+async fn memory_panel_record_usage_withholds_denied_identities() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, tip_id, quarantined_id, delivery_id, mob_id, operator_id) =
+        seeded_memory_store(memory_dir.path()).await;
+    seed_realm_level_panel_rows(
+        &store,
+        &tip_id,
+        &quarantined_id,
+        &delivery_id,
+        &mob_id,
+        &operator_id,
+    )
+    .await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(unscoped_memory_reader_denied_delivery_and_operator());
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    let detail = rpc(
+        &app,
+        "meta/memory/panel/record",
+        json!({ "memory_id": mob_id }),
+    )
+    .await;
+    assert_eq!(detail["error"], Value::Null, "{detail:#?}");
+    let injections = detail["result"]["injections"]
+        .as_array()
+        .expect("injections");
+    assert!(
+        injections
+            .iter()
+            .any(|row| row["identity"] == json!("router")),
+        "router's injection of the record stays listed: {injections:#?}"
+    );
+    assert!(
+        injections
+            .iter()
+            .all(|row| row["identity"] != json!("delivery")),
+        "delivery's injection of the record left the server: {injections:#?}"
+    );
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// The operator half of quarantine review over the console: the decision
 /// composes EXISTING grants. The reviewer grant alone decides nothing; it
 /// must meet the per-row read grants and the identity's own write (release)

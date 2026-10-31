@@ -273,6 +273,53 @@ impl CoreTestMembers {
         );
     }
 
+    /// The second step of a host's legacy respawn of `identity`'s member
+    /// ([`Self::respawn`]), once the first retired its live incarnation
+    /// ([`Self::retire`]): the seat of the next incarnation onto `binding`
+    /// under `profile`, naming the one Core retired. Nothing happens while
+    /// Core holds a live member of the identity, or never held one.
+    pub(crate) fn respawn_seat(
+        &self,
+        identity: &AgentIdentity,
+        binding: &MemberRuntimeBinding,
+        profile: &meerkat_mob::ProfileName,
+    ) {
+        let generation = generation_of(&binding.agent_runtime_id);
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(retired) = members.get(identity).filter(|member| !member.live).cloned() else {
+            return;
+        };
+        self.ended
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((
+                identity.clone(),
+                TestMember {
+                    retiring: false,
+                    ..retired.clone()
+                },
+            ));
+        self.journal_fact(
+            MemberLifecycleFact::seated(member_id(identity), generation, profile.clone())
+                .with_session(binding.session_id.clone())
+                .with_seat_rotation(Some(meerkat_mob::SeatRotation::respawn_after(
+                    meerkat_mob::Generation::new(retired.generation),
+                ))),
+        );
+        members.insert(
+            identity.clone(),
+            TestMember {
+                runtime_id: binding.agent_runtime_id.clone(),
+                session_id: binding.session_id.clone(),
+                generation,
+                fence: retired.fence + 1,
+                profile: profile.clone(),
+                live: true,
+                retiring: false,
+            },
+        );
+    }
+
     /// The seat of a respawn of `identity`'s live member onto `binding`
     /// under `profile`, naming the incarnation it follows, with no
     /// retirement of that incarnation journaled before it: a journal that

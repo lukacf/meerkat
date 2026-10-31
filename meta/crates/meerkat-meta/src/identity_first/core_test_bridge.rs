@@ -116,6 +116,30 @@ pub(crate) fn respawn_live(
     Ok(agent_runtime_id)
 }
 
+/// The second step of [`respawn_live`], once Core retired `identity`'s live
+/// incarnation in the first ([`CoreTestMembers::respawn_seat`]): the seat
+/// onto `session` at `generation` under the role `profile`, naming the
+/// incarnation Core retired. Its runtime id is `rt:{identity}:{generation}`.
+pub(crate) fn respawn_seat_live(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+    profile: &meerkat_mob::ProfileName,
+    generation: u64,
+    session: Option<SessionId>,
+) -> Result<AgentRuntimeId, BridgeError> {
+    let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
+        .map_err(|error| BridgeError::Mob(error.to_string()))?;
+    core.respawn_seat(
+        identity,
+        &MemberRuntimeBinding {
+            agent_runtime_id: agent_runtime_id.clone(),
+            session_id: session,
+        },
+        profile,
+    );
+    Ok(agent_runtime_id)
+}
+
 /// [`respawn_live`] with no retirement of the live incarnation journaled
 /// before the seat ([`CoreTestMembers::respawn_unretired`]): a journal that
 /// breaks Core's rule.

@@ -20,7 +20,8 @@ use crate::identity_first::bridge::{
     ResumeSessionOutcome, SessionBridge,
 };
 use crate::identity_first::core_test_bridge::{
-    CoreReadsBridge, bind_live, register_live, respawn_live, respawn_live_unretired, rotate_live,
+    CoreReadsBridge, bind_live, register_live, respawn_live, respawn_live_unretired,
+    respawn_seat_live, rotate_live,
 };
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
@@ -6078,6 +6079,71 @@ async fn a_roster_unlisting_racing_a_host_respawn_owes_one_hook_and_one_distilla
         Some(SessionId::new()),
     )
     .expect("the host's legacy respawn");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the hook hears of the incarnation once, as unlisted"
+    );
+    assert_eq!(
+        reads.reads_of(&session),
+        1,
+        "the session the incarnation left is distilled once"
+    );
+}
+
+/// The roster's unlisting of alice records what it owes, and a host's
+/// legacy respawn of the same incarnation wins the race, its two steps on
+/// two pages: Core retires the incarnation, the projection runs the
+/// unlisting's side effects and removes its record, and only then does Core
+/// seat the next incarnation, naming the retired one. The hook still hears
+/// of the incarnation once, as unlisted, and its session is distilled once:
+/// the respawn's seat defers to the record its retirement read.
+///
+/// RED before the respawn's seat deferred to the Meta record its
+/// retirement read: the record was gone by the seat's page, so the seat
+/// owed a rotation's side effects as well, and the hook heard `rotated`
+/// after `unlisted`.
+#[tokio::test]
+async fn a_roster_unlisting_racing_a_host_respawn_across_pages_owes_one_hook() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    // The respawn's first step, and the page that holds it.
+    core.core.retire(&live);
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the retirement is the unlisting's"
+    );
+    // The respawn's second step, on a page of its own.
+    respawn_seat_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the respawn's seat");
     runtime.settle_lifecycle_projection().await;
     assert_eq!(
         heard_of(&seen, &alice),

@@ -1,4 +1,4 @@
-"""Consumer cancellation with real threads and King's delivered client parser.
+"""Consumer cancellation with real threads and the host-supplied client parser.
 
 Exchange/close are explicit fixtures. No credential, socket, native worker,
 installed launcher or state custody is asserted by these consumer tests.

@@ -1,8 +1,8 @@
-"""Async consumer of one root-selected King's restricted worker channel.
+"""Async consumer of one root-selected held launcher's restricted worker channel.
 
 Only the trusted launcher supplies the actual client for the selected job.
 This adapter cannot allocate a worker, choose its state or recover an owner
-from a PID, descriptor number or saved receipt. King retains those originals.
+from a PID, descriptor number or saved receipt. The held launcher retains those originals.
 """
 from __future__ import annotations
 

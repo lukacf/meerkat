@@ -69,7 +69,7 @@ exclusion. The stage's held-ready byte is not native `HELLO`, `ACTIVATE` or
 `HELLO` invocation as described below. Keep backing exclusion until original
 process, SDK I/O, history and resource cleanup have settled.
 
-The King bootstrap component at `04755a3edb0d673b11425ee0b10158f285598a05`
+The held launcher's bootstrap component
 implements the same-process startup-FD closure, with 12 distinct local Linux
 fixture controls. Its installed root-runtime selection and pre-spawn ownership
 composition remain unfinished. Those component controls do not qualify this
@@ -84,7 +84,7 @@ The exact compiled mapping selection is:
 | `catalog_id` | `forge.ghe-collections.v1` |
 | collection `family` | `official-github` |
 | collection `profile` | `enterprise-selected-reads` |
-| collection `agent` | `forge-ingestion` |
+| collection `agent` | `SOURCE_AGENT` in `src/protected_catalog.rs` |
 
 These are behavior selectors, not authenticated principals or installed
 receipts. Source/requirement IDs and original resources remain separate. The

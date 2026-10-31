@@ -1,4 +1,4 @@
-"""Forge's parent handle for an original King receiver preparation.
+"""Forge's parent handle for an original host-supplied receiver preparation.
 
 The trusted host supplies one preparation before any child exists. Allocation,
 credential drop, the actual Popen/pidfd and containment remain with that owner.

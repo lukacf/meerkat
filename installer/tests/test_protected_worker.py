@@ -1,7 +1,7 @@
 """Forge parent integration with explicit receiver/process/control fixtures.
 
 No native runtime, credential drop, installed host or process containment is
-exercised here. King owns those separate controls and the allocation itself.
+exercised here. The host owns those separate controls and the allocation itself.
 """
 import asyncio
 import copy
@@ -140,7 +140,7 @@ class Preparation:
 @pytest.fixture
 def preparation(monkeypatch):
     # Exact-type fixture injection is local to these tests. Production imports
-    # the delivered King's OriginalReceiverPreparation, never this substitute.
+    # the host-supplied OriginalReceiverPreparation, never this substitute.
     monkeypatch.setitem(sys.modules, "workspace_receiver_preparation",
                         SimpleNamespace(OriginalReceiverPreparation=Preparation))
     return Preparation()
@@ -181,7 +181,7 @@ async def test_both_services_use_original_receiver_without_export_or_legacy_spaw
     assert implementation.read_receipt(directory)["worker_stop_confirmed"] is True
     assert not owner.processes
     assert not (directory / "forge-agent-runtime.json").exists()
-    assert not (directory / "worker.log").exists(), "King owns the protected output drain"
+    assert not (directory / "worker.log").exists(), "The host owns the protected output drain"
 
 
 async def test_cancelled_spawn_keeps_preparation_until_original_child_and_cleanup_join(service, preparation):

@@ -1,6 +1,6 @@
 """Role consumer lifecycle with owner/native behavior explicitly fixture-backed.
 
-The private King owner classes must be supplied by the source composition lane.
+The private host owner classes must be supplied by the source composition lane.
 These controls never launch a native process or claim root credential custody.
 """
 import asyncio

@@ -103,7 +103,7 @@ L2Authorize ==
 L2Open(custody) ==
     BeginSpawnExecFresh(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, Some(Sess2), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, custody)
+                        None, None, None, None, FALSE, FALSE, custody, FALSE)
 L2Commit ==
     CommitSpawnMembershipFresh(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, Some(Sess2), None,
                                None, None, None, None, None, FALSE)
@@ -122,17 +122,19 @@ AdoptArm(id, g, observed) ==
     \/ AdoptLegacyIdentityEntryStaleObservation(id, g, observed)
     \/ AdoptLegacyIdentityEntryNotSeated(id, g, observed)
     \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed)
+    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, observed)
     \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed)
     \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)
 
-\* Every arm of the admission probe in the run's phases.
+\* Every arm of the admission probe in the run's phases (the run's spawns
+\* carry no created custody).
 ProbeArm(id, custody) ==
-    \/ ProbeMemberAdmissionDuplicateRunning(id, custody)
-    \/ ProbeMemberAdmissionAdmittedRunning(id, custody)
-    \/ ProbeMemberAdmissionIdentityMemberRunning(id, custody)
-    \/ ProbeMemberAdmissionDuplicateStopped(id, custody)
-    \/ ProbeMemberAdmissionAdmittedStopped(id, custody)
-    \/ ProbeMemberAdmissionIdentityMemberStopped(id, custody)
+    \/ ProbeMemberAdmissionDuplicateRunning(id, custody, FALSE)
+    \/ ProbeMemberAdmissionAdmittedRunning(id, custody, FALSE)
+    \/ ProbeMemberAdmissionIdentityMemberRunning(id, custody, FALSE)
+    \/ ProbeMemberAdmissionDuplicateStopped(id, custody, FALSE)
+    \/ ProbeMemberAdmissionAdmittedStopped(id, custody, FALSE)
+    \/ ProbeMemberAdmissionIdentityMemberStopped(id, custody, FALSE)
 
 \* Every arm of the agent lane's member admission in the run's phases.
 LaneArm(id) ==
@@ -191,15 +193,18 @@ Entries == DOMAIN identity_entry_origins
 NewEntries == DOMAIN identity_entry_origins' \ DOMAIN identity_entry_origins
 
 AuditProbeVerdicts(id, custody) ==
-    <<ENABLED ProbeMemberAdmissionDuplicateRunning(id, custody),
-      ENABLED ProbeMemberAdmissionAdmittedRunning(id, custody),
-      ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, custody),
-      ENABLED ProbeMemberAdmissionDuplicateStopped(id, custody),
-      ENABLED ProbeMemberAdmissionAdmittedStopped(id, custody),
-      ENABLED ProbeMemberAdmissionIdentityMemberStopped(id, custody)>>
+    <<ENABLED ProbeMemberAdmissionDuplicateRunning(id, custody, FALSE),
+      ENABLED ProbeMemberAdmissionAdmittedRunning(id, custody, FALSE),
+      ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, custody, FALSE),
+      ENABLED ProbeMemberAdmissionDuplicateStopped(id, custody, FALSE),
+      ENABLED ProbeMemberAdmissionAdmittedStopped(id, custody, FALSE),
+      ENABLED ProbeMemberAdmissionIdentityMemberStopped(id, custody, FALSE)>>
 
 \* The admission probe is total and its arms never overlap, in Running and
-\* Stopped, for every identity and both custody flags.
+\* Stopped, for every identity and both entry custody flags of a spawn with
+\* no created custody. (The run records no created entry and reserves no
+\* name, so the other-origin and reserved-name arms answer nothing here;
+\* created_identity_audit checks the probe with both custodies.)
 AuditProbeExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in AuditIds, custody \in BOOLEAN :
@@ -208,18 +213,20 @@ AuditProbeExactlyOne ==
 \* An entry's name probed without entry custody is refused as an entry's.
 AuditProbeRefusesEntryName ==
     phase = "Running" =>
-        \A id \in Entries : ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, FALSE)
+        \A id \in Entries : ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, FALSE, FALSE)
 
 AuditLaneVerdicts(id) ==
     <<ENABLED ResolveAgentLaneMemberAdmissionAdmittedRunning(id),
       ENABLED ResolveAgentLaneMemberAdmissionIdentityMemberRunning(id),
       ENABLED ResolveAgentLaneMemberAdmissionAdmittedStopped(id),
-      ENABLED ResolveAgentLaneMemberAdmissionIdentityMemberStopped(id)>>
+      ENABLED ResolveAgentLaneMemberAdmissionIdentityMemberStopped(id),
+      ENABLED ResolveAgentLaneMemberAdmissionUnreadableNameRunning(id),
+      ENABLED ResolveAgentLaneMemberAdmissionUnreadableNameStopped(id)>>
 
 \* The agent lane's member admission is total and its arms never overlap.
 AuditAgentLaneExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in AuditIds : Cardinality({i \in 1..4 : AuditLaneVerdicts(id)[i]}) = 1
+        \A id \in AuditIds : Cardinality({i \in 1..6 : AuditLaneVerdicts(id)[i]}) = 1
 
 AuditAdoptionVerdicts(id, g, observed) ==
     <<ENABLED AdoptLegacyIdentityEntryAdopted(id, g, observed),
@@ -228,6 +235,7 @@ AuditAdoptionVerdicts(id, g, observed) ==
       ENABLED AdoptLegacyIdentityEntryStaleObservation(id, g, observed),
       ENABLED AdoptLegacyIdentityEntryNotSeated(id, g, observed),
       ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed),
+      ENABLED AdoptLegacyIdentityEntryOtherCustody(id, g, observed),
       ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed),
       ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)>>
 
@@ -235,7 +243,7 @@ AuditAdoptionVerdicts(id, g, observed) ==
 AuditAdoptionExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in AuditIds, g \in AuditGenerations, observed \in BOOLEAN :
-            Cardinality({i \in 1..8 : AuditAdoptionVerdicts(id, g, observed)[i]}) = 1
+            Cardinality({i \in 1..9 : AuditAdoptionVerdicts(id, g, observed)[i]}) = 1
 
 \* An identity becomes an entry only by the declared apply (which records the
 \* entry with its unseated cause), the commit of a ladder that holds its
@@ -286,7 +294,7 @@ AuditWitnessUnseated ==
         /\ id \in DOMAIN identity_entry_unseated'
         /\ identity_entry_unseated'[id] = "SeatOwed"
 \* A seated entry's name is refused to a probe without custody (state goal).
-AuditWitnessProbeRefused == \E id \in Entries : phase = "Running" /\ ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, FALSE)
+AuditWitnessProbeRefused == \E id \in Entries : phase = "Running" /\ ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, FALSE, FALSE)
 \* The agent lane refuses an entry in a stopped mob (state goal).
 AuditWitnessLaneRefusedStopped == \E id \in Entries : ENABLED ResolveAgentLaneMemberAdmissionIdentityMemberStopped(id)
 \* Both members are entries, one by its ladder and one otherwise (state goal).

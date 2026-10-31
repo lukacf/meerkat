@@ -30,7 +30,7 @@ type State = SessionDocumentMachineState;
 type Transition = SessionDocumentMachineTransition;
 type TransitionError = SessionDocumentMachineTransitionError;
 
-const ARMS: [&str; 30] = [
+const ARMS: [&str; 35] = [
     "RecoverSessionInstructionState",
     "RecoverSessionInstructionTarget",
     "RecoverSessionInstructionEffective",
@@ -40,6 +40,9 @@ const ARMS: [&str; 30] = [
     "RecordInstructionTargetAlreadyRecorded",
     "RecordInstructionTargetOwnedBySession",
     "RecordInstructionTargetOwnedByOtherMob",
+    "RecordInstructionTargetAdopt",
+    "RecordInstructionTargetAdoptActiveBudgetExceeded",
+    "RecordInstructionTargetAdoptSlotLimitExceeded",
     "SetSessionInstructionNew",
     "SetSessionInstructionAdvance",
     "SetSessionInstructionActiveBudgetExceeded",
@@ -49,8 +52,10 @@ const ARMS: [&str; 30] = [
     "SetSessionInstructionOwnedByMob",
     "SetSessionInstructionSlotLimitExceeded",
     "SetSessionInstructionUnknownSlot",
+    "SetSessionInstructionMemberSession",
     "RebindInstructionOwner",
     "RebindInstructionOwnerUnowned",
+    "RebindInstructionOwnerMemberSession",
     "ReleaseInstructionTarget",
     "ReleaseInstructionTargetAlreadyUnowned",
     "ReleaseInstructionTargetOwnedByOtherMob",
@@ -250,6 +255,7 @@ fn record(mob: &str, generation: u64, slots: &Slots) -> Input {
         effect: slots.effect.clone(),
         digest: slots.digest.clone(),
         bytes: slots.bytes.clone(),
+        member_bound: false,
     }
 }
 
@@ -261,6 +267,7 @@ fn activate(slot: &str, revision: u64, digest: &str, body_bytes: u64) -> Input {
         effect: InstructionEffect::Active,
         digest: digest.to_string(),
         body_bytes,
+        member_bound: false,
     }
 }
 
@@ -272,6 +279,7 @@ fn revoke(slot: &str, revision: u64) -> Input {
         effect: InstructionEffect::Absent,
         digest: String::new(),
         body_bytes: 0,
+        member_bound: false,
     }
 }
 
@@ -280,7 +288,22 @@ fn rebind(owner: InstructionTargetOwner, mob: &str) -> Input {
         session_id: session(),
         owner,
         mob_id: mob.to_string(),
+        member_bound: false,
     }
+}
+
+/// The same record, session write or rebind on a mob member's session: its
+/// metadata names a mob member binding (a mob seated it).
+fn on_member_session(mut input: Input) -> Input {
+    match &mut input {
+        Input::RecordInstructionTarget { member_bound, .. }
+        | Input::SetSessionInstruction { member_bound, .. }
+        | Input::RebindInstructionOwner { member_bound, .. } => *member_bound = true,
+        other => {
+            panic!("only a record, a session write or a rebind reads the binding fact: {other:?}")
+        }
+    }
+    input
 }
 
 fn release(mob: &str) -> Input {
@@ -677,6 +700,127 @@ fn record_target_refuses_a_session_owned_target() {
         record("mob-a", 9, &Slots::empty()),
         &refused(InstructionWriteRefusal::OwnedBySession),
     );
+}
+
+/// An attach: a mob member's session whose own host wrote its target before
+/// the mob seated it hands that target to the mob at the mob's first
+/// snapshot, in one step: the mob owns the target, the snapshot replaces it
+/// at the snapshot's generation (the host's writes counted the target
+/// generation, which the takeover does not compare), and what the host had
+/// in effect is revoked at the next fresh run start unless the snapshot
+/// keeps it. Recording applies nothing.
+#[test]
+fn a_record_takes_over_a_member_sessions_own_target_in_one_step() {
+    let hosts = Slots::empty().active("style", 3, DIGEST_X, 7);
+    let mut authority = seeded(&Seed::session_owned(5, hosts.clone()).in_effect(1, hosts));
+    let snapshot = Slots::empty().active("tone", 1, DIGEST_Y, 4);
+    let transition = apply(
+        &mut authority,
+        on_member_session(record("mob-a", 1, &snapshot)),
+    );
+    assert_eq!(
+        transition.effects(),
+        recorded(1, InstructionWriteOutcome::Recorded).as_slice()
+    );
+    assert_eq!(owner(&authority), Some(InstructionTargetOwner::Mob));
+    assert_eq!(owner_mob(&authority).as_deref(), Some("mob-a"));
+    assert_eq!(generation(&authority), Some(1));
+    assert_eq!(target(&authority), snapshot);
+    assert_eq!(
+        effective(&authority),
+        Slots::empty().active("style", 3, DIGEST_X, 7),
+        "recording applies nothing"
+    );
+    let transition = apply(
+        &mut authority,
+        fresh_run(InstructionLowering::MidConversation, false),
+    );
+    assert!(
+        matches!(
+            transition.effects(),
+            [Effect::InstructionEntryAuthorized { .. }]
+        ),
+        "the next fresh run start applies the snapshot: {:?}",
+        transition.effects()
+    );
+    assert_eq!(
+        effective(&authority),
+        snapshot,
+        "the host's slot is revoked and the snapshot is in effect"
+    );
+}
+
+/// The takeover keeps the snapshot limits: over the slot limit or the active
+/// budget it changes nothing, and a session no mob seated keeps its host's
+/// target (`owned_by_session`).
+#[test]
+fn a_takeover_over_a_limit_or_on_a_session_no_mob_seated_changes_nothing() {
+    let mut authority = seeded(&Seed::session_owned(
+        2,
+        Slots::empty().active("style", 1, DIGEST_X, 7),
+    ));
+    assert_verdict_only(
+        &mut authority,
+        on_member_session(record("mob-a", 1, &Slots::many(65))),
+        &refused(InstructionWriteRefusal::SlotLimitExceeded),
+    );
+    assert_verdict_only(
+        &mut authority,
+        on_member_session(record(
+            "mob-a",
+            1,
+            &Slots::empty()
+                .active("a", 1, DIGEST_X, ACTIVE_BUDGET)
+                .active("b", 1, DIGEST_Y, 1),
+        )),
+        &refused(InstructionWriteRefusal::ActiveSetBudgetExceeded),
+    );
+    assert_verdict_only(
+        &mut authority,
+        record("mob-a", 1, &Slots::empty()),
+        &refused(InstructionWriteRefusal::OwnedBySession),
+    );
+}
+
+/// A mob member's session takes no write and no adoption of its own host,
+/// whatever its target holds and whether or not its mob recorded one yet: the
+/// host is refused `owned_by_mob` from the binding fact, and nothing
+/// changes, so the mob's first snapshot never replaces a write the host was
+/// told was recorded.
+#[test]
+fn a_member_sessions_own_host_writes_and_adoption_are_refused() {
+    let mut unowned = seeded(&Seed::empty());
+    for input in [activate("tone", 1, DIGEST_X, 1), revoke("tone", 1)] {
+        assert_verdict_only(
+            &mut unowned,
+            on_member_session(input),
+            &refused(InstructionWriteRefusal::OwnedByMob),
+        );
+    }
+    assert_verdict_only(
+        &mut unowned,
+        on_member_session(rebind(InstructionTargetOwner::Session, "")),
+        &refused(InstructionWriteRefusal::OwnedByMob),
+    );
+
+    // A target its host wrote before the mob seated the session takes no
+    // further host write either, not even an exact retry.
+    let mut written = seeded(&Seed::session_owned(
+        1,
+        Slots::empty().active("tone", 1, DIGEST_X, 1),
+    ));
+    for input in [
+        activate("tone", 1, DIGEST_X, 1),
+        activate("tone", 2, DIGEST_Y, 1),
+        activate("style", 1, DIGEST_Y, 1),
+        revoke("tone", 2),
+    ] {
+        assert_verdict_only(
+            &mut written,
+            on_member_session(input),
+            &refused(InstructionWriteRefusal::OwnedByMob),
+        );
+    }
 }
 
 #[test]
@@ -1263,6 +1407,37 @@ fn the_rebind_arms_check_ownership_in_a_named_guard() {
                 .iter()
                 .any(|declared| declared.name == guard),
             "{arm} must check ownership in its guard `{guard}`"
+        );
+    }
+}
+
+#[test]
+fn the_binding_fact_is_read_in_a_named_guard() {
+    // The instruction boundary audit's binding mutants drop exactly the
+    // session write's and the takeover's binding guard, so each arm that
+    // reads the binding fact keeps it in a guard of its own.
+    let schema = dsl_session_document_machine();
+    for (arm, guard) in [
+        ("SetSessionInstructionNew", "not_a_member_session"),
+        ("SetSessionInstructionMemberSession", "member_session"),
+        (
+            "RecordInstructionTargetOwnedBySession",
+            "not_a_member_session",
+        ),
+        ("RecordInstructionTargetAdopt", "member_session"),
+        ("RebindInstructionOwnerMemberSession", "member_session"),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == arm)
+            .unwrap_or_else(|| panic!("SessionDocumentMachine must declare {arm}"));
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|declared| declared.name == guard),
+            "{arm} must read the binding fact in its guard `{guard}`"
         );
     }
 }

@@ -19,7 +19,7 @@ use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberSessionDisposal, MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput,
     MobMachineMutator, MobMachineSignal, MobMachineState, MobMachineTransition,
     MobMachineTransitionError, MobPhase, OperatorInstructionRefusal,
-    PlacedCompletionLifecycleIntentKind, SessionId, SpawnPolicyRuntimeMode,
+    PlacedCompletionLifecycleIntentKind, SessionId, SpawnExecPhase, SpawnPolicyRuntimeMode,
     operator_instruction_target_applies,
 };
 
@@ -36,7 +36,7 @@ const OTHER_SLOT: &str = "[\"app.example\",\"style\"]";
 const BODY_LIMIT: u64 = 256 * 1024;
 const ACTIVE_BUDGET: u64 = 1024 * 1024;
 
-const ARMS: [&str; 30] = [
+const ARMS: [&str; 31] = [
     "SetOperatorInstructionBodyTooLarge",
     "SetOperatorInstructionSlotLimitExceeded",
     "SetOperatorInstructionNewOverBudget",
@@ -61,6 +61,7 @@ const ARMS: [&str; 30] = [
     "PrepareMemberInstructionDeliveryUnbound",
     "PrepareMemberInstructionDeliveryRetiring",
     "PrepareMemberInstructionDeliveryDeliver",
+    "PrepareMemberInstructionDeliverySpawning",
     "PrepareMemberInstructionDeliveryMobNotRunning",
     "RecordMemberInstructionTargetCurrent",
     "RecordMemberInstructionTargetSuperseded",
@@ -680,6 +681,52 @@ fn an_unborn_seat_is_owed_and_deferred_until_its_session_is_born() {
         transition.effects(),
         [Effect::MemberInstructionDeliveryPrepared { generation: 1, .. }]
     ));
+}
+
+/// A member between its membership commit and its activation (its spawn
+/// ladder at MembershipCommitted, where an attach's commit leaves it while
+/// the activation stages run) is owed and bound, but its delivery defers
+/// until CommitSpawnActivation settles the ladder: a failed activation rolls
+/// the member back, and a session the mob had delivered to would keep a
+/// target no member holds.
+#[test]
+fn a_member_whose_spawn_is_in_flight_defers_until_its_activation_commits() {
+    let mut authority = Authority::new();
+    signal(&mut authority, set(SLOT, 1, DIGEST_A, 10, Target::Mob));
+    seat(&mut authority, "attached", "alpha");
+    let mut state = authority.state().clone();
+    state
+        .spawn_exec_phase
+        .insert(identity("attached"), SpawnExecPhase::MembershipCommitted);
+    let mut authority = Authority::recover_from_state(state)
+        .unwrap_or_else(|error| panic!("a member between its commit and activation: {error}"));
+    assert_eq!(owed(&authority, "attached"), Some(1));
+    assert_verdict_only(
+        &mut authority,
+        prepare("attached"),
+        &[Effect::MemberInstructionDeliveryDeferred {
+            agent_identity: identity("attached"),
+            reason: MemberInstructionDeferReason::SpawnInFlight,
+        }],
+    );
+
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::CommitSpawnActivation {
+            agent_identity: identity("attached"),
+        },
+    )
+    .expect("the activation commits");
+    let transition = signal(&mut authority, prepare("attached"));
+    assert_eq!(
+        transition.effects(),
+        [Effect::MemberInstructionDeliveryPrepared {
+            agent_identity: identity("attached"),
+            session_id: session_of("attached"),
+            generation: 1,
+        }]
+        .as_slice()
+    );
 }
 
 /// Feedback closes an obligation only for the bound session at or above the

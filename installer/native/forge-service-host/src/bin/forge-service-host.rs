@@ -26,8 +26,12 @@ fn main() -> std::process::ExitCode {
     };
     let history = Arc::new(HistoricalStore::default());
     let catalog = Arc::new(ForgeGheCatalog::new(history.clone()));
+    // Core's host worker-stack budget (meerkat_runtime::host_stack::
+    // HOST_WORKER_STACK_BUDGET). Tokio's 2 MiB default does not hold debug
+    // builds of Core code.
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
         .build()
     else {
         return std::process::ExitCode::FAILURE;

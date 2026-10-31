@@ -255,30 +255,27 @@ this configuration change.
 
 ### Retained native qualification
 
-The manifest pins Connect `a3239bbaf1acd5ccae0f2d789006f8704153ad52` and uses the
-same Core development patch graph as that commit's native workspace. It stays
-separate from the pure serde-only GHE crate and the released Forge runtime.
-This revision includes the reviewed protected entry, bounded diagnostics and
-public original-pipe SDK adoption. Its Python and TypeScript report parsers
-accept repeated reads with distinct native observations while rejecting replay.
-The original SDK regression and SDK boundary suites pass; those results do not
-qualify the native adapter. The existing native validation lane remains the
-owner of compilation and platform-specific acceptance.
-The application selects Connect's default library feature set. The first
-portable consumer check failed in Connect because unconditional setup code
-referenced implementation types gated behind its `console` feature. The pinned
-successor contains the reviewed shared-reader and helper-API boundary correction,
-the native test import correction, and the unconditional `McpServerConfig` import
-required by default-library setup code. Forge retains its default library
-feature selection. On 2026-10-27, the owner's repository wrapper completed an
-offline, locked library check for this revision on `aarch64-apple-darwin`, with
-Rust 1.97.0 and only Connect's default features.
-That dependency check passed; it did not compile this Forge application or run
-its controls. The existing owner still must compile and validate the exact Forge
-candidate, Linux entry and installed composition.
-The owner's private candidate has a reviewed lockfile; this source crate has no
-committed lockfile or successful native build result. Formatting and manifest
-parsing do not typecheck the APIs or execute controls.
+The manifest pins Connect 0.9.5 (`bf183e2a5e9aaaf234723d6fb2b565c4b93cf9ca`) with
+its `console` feature, Core 0.9.8 from commit
+`a7a81ffc159c1ebdb57db5d6aecb6bc1a0d74084` and Meta 0.9.7 from commit
+`df3f8a653117414a9399a69e0567413ce0dd3aaf`. These are the sources, feature set
+and development profile of Connect's native-candidate gateway build. Every Core
+crate is patched to that one commit, so the graph has a single `meerkat-core`
+package and never selects the registry release of 0.9.8. Connect's
+native-candidate workspace names Core's machine code generator and Meta by local
+path, so the manifest supplies both from the same commits for the Connect
+source. The graph stays separate from the pure serde-only GHE crate and the
+released Forge runtime.
+
+The runtime's worker threads get Core's host worker-stack budget, 8 MiB
+(`meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET`). Tokio's 2 MiB default
+does not hold debug builds of Core code.
+
+The existing native validation lane remains the owner of compilation and
+platform-specific acceptance. It builds this exact source with those inputs at
+verified local paths and retains the resulting lock, metadata and build records.
+This source crate has no committed lockfile. Formatting and manifest parsing do
+not typecheck the APIs or execute controls.
 
 Fourteen native-crate controls cover invalid target selectors, configuration
 and account declaration refusal, operation ceilings, the compiled catalog and

@@ -36066,6 +36066,9 @@ impl MobActor {
             // session: its spawn row records the notice, as a dormant seat's
             // row does.
             history_unavailable,
+            // Read only by the dormant seat of a created entry owed its seat;
+            // a spawn ignores it.
+            created_custody: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -38356,6 +38359,9 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            // A placed spawn never acts for a created entry: only a dormant
+            // seat does.
+            created_custody: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -40003,6 +40009,8 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            // A policy auto-spawn is a worker's.
+            created_custody: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {

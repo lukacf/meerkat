@@ -17797,6 +17797,20 @@ impl MobActor {
         Self::member_admission_verdict_from_effects(&prepared.effects)
     }
 
+    /// The typed refusal of a spawn ladder's close for a name MobMachine
+    /// reserved after the ladder opened (`name_not_reserved` on the close
+    /// arms), as its admission answers the name (`IdentityNameReserved`):
+    /// `MobError::IdentityMember`. `None` for any other name.
+    fn reserved_name_refusal(&self, agent_identity: &AgentIdentity) -> Option<MobError> {
+        matches!(
+            self.member_admission_verdict(agent_identity, false, false),
+            Ok(mob_dsl::MemberAdmissionVerdictKind::IdentityNameReserved)
+        )
+        .then(|| MobError::IdentityMember {
+            member_id: agent_identity.clone(),
+        })
+    }
+
     /// The one member-admission verdict a `ProbeMemberAdmission` transition
     /// emitted.
     fn member_admission_verdict_from_effects(
@@ -40907,16 +40921,23 @@ impl MobActor {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                // A ladder whose name MobMachine reserved after it opened is
+                // refused its close: the refusal is the name's admission
+                // answer, typed, and the ladder is aborted below.
+                let reserved = self.reserved_name_refusal(agent_identity);
                 if let Some(remote) = ctx.remote.as_ref() {
                     // Guard refusal on the remote arm is proven pre-commit.
                     // Classify against machine-recorded facts, then release
                     // the exact host attempt and carrier before rolling back
                     // only trust installed by this admission attempt.
-                    let kind = if remote.ack.spec_digest_echo != remote.resolved_spec_digest {
+                    let kind = if reserved.is_some() {
+                        "name_reserved".to_string()
+                    } else if remote.ack.spec_digest_echo != remote.resolved_spec_digest {
                         "commit_refused_digest_echo".to_string()
                     } else {
                         "host_engine_version_changed".to_string()
                     };
+                    let error = reserved.unwrap_or(error);
                     let failure = boxed_arm_future(|| {
                         self.fail_remote_spawn_exec_after_recipient_trust(
                             agent_identity,
@@ -40948,7 +40969,7 @@ impl MobActor {
                 return Err(self.fold_spawn_exec_abort(
                     &dsl_identity,
                     agent_identity,
-                    error,
+                    reserved.unwrap_or(error),
                     "finalize_spawn_admit_commit_membership",
                 ));
             }

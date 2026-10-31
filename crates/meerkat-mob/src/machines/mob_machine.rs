@@ -15137,6 +15137,112 @@ mod tests {
         );
     }
 
+    /// A spawn ladder opened before its name is reserved seats no member
+    /// under it: the boot scan answers the name's row unreadable while the
+    /// ladder is open, the ladder's dormant seat is refused, the admission
+    /// probe answers the name reserved (the shell's typed refusal), and the
+    /// abort ends the ladder with the name still reserved and no member.
+    #[test]
+    fn a_ladder_opened_before_its_name_is_reserved_seats_no_member() {
+        let mut authority = MobMachineAuthority::new();
+        let member = SeatedMember {
+            identity: AgentIdentity::from("ladder-then-reserved"),
+            runtime_id: AgentRuntimeId::from("ladder-then-reserved:0"),
+            session_id: SessionId::from("ladder-then-reserved-session"),
+            fence_token: FenceToken(12),
+        };
+        begin_seat_ladder(&mut authority, &member, Generation(0), false, false)
+            .expect("a worker's ladder opens");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_unreadable
+                .contains(&member.identity)
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                seat_on(&member, Generation(0), &member.session_id, false, true),
+            )
+            .is_err(),
+            "the ladder's seat is refused under the reserved name"
+        );
+        assert_eq!(
+            probe(&mut authority, &member.identity, false, false),
+            MemberAdmissionVerdictKind::IdentityNameReserved
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AbortSpawnExec {
+                agent_identity: member.identity.clone(),
+            },
+        )
+        .expect("the refused ladder is aborted");
+        let state = authority.state();
+        assert!(!state.spawn_exec_phase.contains_key(&member.identity));
+        assert!(!state.identity_to_runtime.contains_key(&member.identity));
+        assert!(state.identity_entry_unreadable.contains(&member.identity));
+    }
+
+    /// A Created entry owed its seat without a revival record (its row named
+    /// no session the replay bound its member to) is seated under created
+    /// custody on the session the seat names, stays a Created entry, and
+    /// the seat consumes the custody.
+    #[test]
+    fn a_created_entry_owed_its_seat_without_a_record_is_seated_under_created_custody() {
+        let mut authority = MobMachineAuthority::new();
+        let member = SeatedMember {
+            identity: AgentIdentity::from("created-without-record"),
+            runtime_id: AgentRuntimeId::from("created-without-record:0"),
+            session_id: SessionId::from("created-without-record-session"),
+            fence_token: FenceToken(13),
+        };
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_unseated
+                .get(&member.identity),
+            Some(&UnseatedEntryCause::SeatOwed)
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity),
+            "the row named no revival record"
+        );
+        begin_seat_ladder(&mut authority, &member, Generation(0), false, true)
+            .expect("created custody opens the ladder of the entry owed its seat");
+        MobMachineMutator::apply(
+            &mut authority,
+            seat_on(&member, Generation(0), &member.session_id, false, true),
+        )
+        .expect("the seat takes the session it names");
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&member.identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+        assert!(!state.identity_entry_unseated.contains_key(&member.identity));
+        assert!(state.spawn_exec_created_custody.is_empty());
+        assert_eq!(
+            state.identity_to_runtime.get(&member.identity),
+            Some(&member.runtime_id)
+        );
+    }
+
     /// Custody of one origin never takes an entry of another, and no spawn
     /// takes a reserved name: the admission probe refuses entry custody for
     /// a Created entry and created custody for anything but a Created entry

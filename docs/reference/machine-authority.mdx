@@ -234,7 +234,11 @@ reserves the name of a member row whose origin token this build does not
 know the same way. A removed entry's name is never an entry or a member
 again; an unreadable name keeps what the replay recorded for it (a
 `Declared` entry, a member) and takes nothing new: the admission probe
-answers `IdentityNameReserved` (no spawn ladder opens), the worker reconcile helpers
+answers `IdentityNameReserved` (no spawn ladder opens, and every ladder
+close, the membership commits, the remote commit and the dormant seat,
+refuses a reserved name: a ladder opened before the reservation seats no
+member, and the shell aborts it with the name's admission answer,
+`MobError::IdentityMember`), the worker reconcile helpers
 skip it, the declared apply refuses it typed (`RefusedNameTombstoned`,
 `RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable` and the
 agent lane's admission `UnreadableName`. Custody of one origin never takes

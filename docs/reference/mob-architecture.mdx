@@ -239,7 +239,9 @@ never read as free. A member row whose stored origin this build does not know
 is kept as stored, and its name is reserved as unreadable rather than
 replayed as a worker's. No spawn or dormant seat starts under a reserved name,
 and a custody of one origin never takes an entry of the other: both are refused
-`MobError::IdentityMember` before anything is created. A worker reconcile
+`MobError::IdentityMember` before anything is created. A spawn already
+under way when its name is reserved is refused its seat with the same error
+and aborted: the name takes no member. A worker reconcile
 neither spawns nor retires a reserved name, the declared apply refuses a
 created, removed or unreadable name for that identity alone (see
 [The declared apply](#the-declared-apply)), the legacy adoption answers

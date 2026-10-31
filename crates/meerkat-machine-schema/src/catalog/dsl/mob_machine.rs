@@ -7338,6 +7338,13 @@ macro_rules! mob_catalog_machine_dsl {
             on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
+            // A ladder opened before its name was reserved (a removed created
+            // entry's, or one whose created entry row this build cannot read)
+            // seats no member under it: the shell aborts the ladder, typed.
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
             guard "ack_fields_absent" {
                 member_peer_endpoint == None
                 && spec_digest_echo == None
@@ -7474,6 +7481,13 @@ macro_rules! mob_catalog_machine_dsl {
             on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
+            // A ladder opened before its name was reserved (a removed created
+            // entry's, or one whose created entry row this build cannot read)
+            // seats no member under it: the shell aborts the ladder, typed.
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
             guard "ack_fields_absent" {
                 member_peer_endpoint == None
                 && spec_digest_echo == None
@@ -7600,6 +7614,13 @@ macro_rules! mob_catalog_machine_dsl {
             on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_materialize_pending" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MaterializePending) }
+            // A ladder opened before its name was reserved (a removed created
+            // entry's, or one whose created entry row this build cannot read)
+            // seats no member under it: the shell aborts the ladder, typed.
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
             guard "placement_present" { self.member_placement.contains_key(agent_identity) == true }
             guard "placed_not_exempt" { definition_wiring_exempt == false }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
@@ -26418,6 +26439,13 @@ macro_rules! mob_catalog_machine_dsl {
             // embodied. The caller states whether the spec owes one.
             guard "seat_owes_no_kickoff" { kickoff_owed == false }
             guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
+            // A ladder opened before its name was reserved (a removed created
+            // entry's, or one whose created entry row this build cannot read)
+            // seats no member under it: the shell aborts the ladder, typed.
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "generation_is_next" { Some(generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }

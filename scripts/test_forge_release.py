@@ -1908,5 +1908,83 @@ class RebindingTests(unittest.TestCase):
                 forge.verify_package_files(folder, VERSION, "linux-x86_64", SHA, RUN, ATTEMPT, "refs/heads/x")
 
 
+
+
+def with_native_programs(entry):
+    programs = {}
+    for role in ("collection", "provider"):
+        programs[role] = {"executable": f"native/{role}/program", "evidence": f"native/{role}/evidence.json"}
+        for kind, name in programs[role].items():
+            entry["files"][name] = pin((role + " " + kind).encode(), url=URL + role + "-" + kind)
+    entry["native_programs"] = programs
+    return entry
+
+
+class NativeProgramInputTests(unittest.TestCase):
+    def test_native_roles_are_explicit_separate_linux_inputs(self):
+        forge.validate_target("linux-x86_64", with_native_programs(target_inputs()))
+        for defect in ("mac", "unknown", "missing", "alias", "product", "guide", "empty"):
+            with self.subTest(defect=defect):
+                target = "macos-arm64" if defect == "mac" else "linux-x86_64"
+                entry = with_native_programs(target_inputs(target))
+                programs = entry["native_programs"]
+                if defect == "unknown":
+                    programs["unknown"] = programs["collection"]
+                elif defect == "missing":
+                    programs["collection"].pop("evidence")
+                elif defect == "alias":
+                    programs["provider"]["executable"] = programs["collection"]["executable"]
+                elif defect in {"guide", "product"}:
+                    programs["collection"]["executable"] = "guide/rpc_gateway" if defect == "guide" else "product/catalog.json"
+                elif defect == "empty":
+                    entry["native_programs"] = {}
+                with self.assertRaises(forge.ProtocolError):
+                    forge.validate_target(target, entry)
+
+    def test_package_command_passes_exact_native_pins_to_owner_packager(self):
+        from types import SimpleNamespace
+        value = inputs()
+        entry = with_native_programs(value["targets"]["linux-x86_64"])
+        artifact_type = forge.launchkit_module("runtime_candidates").ArtifactFile
+        exact_type = forge.launchkit_module("connect_installer_caller").ExactFile
+        packager = mock.Mock(return_value={"native_target": "linux-x86_64"})
+        modules = {
+            "runtime_candidates": SimpleNamespace(ArtifactFile=artifact_type),
+            "connect_installer_caller": SimpleNamespace(ExactFile=exact_type),
+            "bootstrap": SimpleNamespace(SelectedGuideRuntime=lambda **kwargs: SimpleNamespace(**kwargs)),
+            "packaged_runtime": SimpleNamespace(relocate_selection=lambda *_: object()),
+            "product_distribution": SimpleNamespace(package=packager)}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            args = SimpleNamespace(target="linux-x86_64", inputs_dir=root,
+                output=root / forge.package_name("0.3.0", "linux-x86_64"))
+            with mock.patch.object(forge, "load_inputs", return_value=value), \
+                    mock.patch.object(forge, "forge_version", return_value="0.3.0"), \
+                    mock.patch.object(forge, "launchkit_module", side_effect=modules.__getitem__), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                forge.package(args)
+            passed = packager.call_args.kwargs["native_programs"]
+            self.assertEqual(set(passed), {"collection", "provider"})
+            for role, pins in entry["native_programs"].items():
+                for kind, name in pins.items():
+                    self.assertEqual(passed[role][kind], artifact_type(root / name,
+                        entry["files"][name]["size"], entry["files"][name]["sha256"]))
+
+    def test_fetch_preserves_native_bytes_and_separate_modes(self):
+        value = inputs()
+        entry = with_native_programs(value["targets"]["linux-x86_64"])
+        helper = FetchTests()
+        served = helper.served()
+        for role, pins in entry["native_programs"].items():
+            for kind, name in pins.items():
+                served[entry["files"][name]["url"]] = (role + " " + kind).encode()
+        with fixture_directory() as directory:
+            git_fixture(directory, value)
+            output = helper.fetch(directory, served)
+            for role, pins in entry["native_programs"].items():
+                for kind, name in pins.items():
+                    self.assertEqual((output / name).read_bytes(), (role + " " + kind).encode())
+                    self.assertEqual((output / name).stat().st_mode & 0o777, 0o700 if kind == "executable" else 0o600)
+
 if __name__ == "__main__":
     unittest.main()

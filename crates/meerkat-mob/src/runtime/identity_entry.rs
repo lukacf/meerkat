@@ -1220,12 +1220,12 @@ pub(crate) fn machine_entry_origin(
 /// it, read from `state`, MobMachine's state before the step that writes the
 /// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal
 /// marks the identity's entry (`identity_entry_retiring`). The seal marks
-/// only a member whose retirement has not started and never drops the mark
-/// of one whose retirement has, so the start row and the end's row read the
-/// same mark, and the end of a marked retirement ends the entry. The one
-/// reader of the mark for the journal: the start row and the plain terminal
-/// row read it here. A rotation's terminal keeps the identity's standing and
-/// records no cause.
+/// only a member whose retirement has not started and whose spawn is not in
+/// flight, and never drops the mark of one whose retirement has, so the
+/// start row and the end's row read the same mark, and the end of a marked
+/// retirement ends the entry. The one reader of the mark for the journal:
+/// the start row and the plain terminal row read it here. A rotation's
+/// terminal keeps the identity's standing and records no cause.
 pub(crate) fn stored_retirement_cause(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,

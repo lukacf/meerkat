@@ -6249,11 +6249,12 @@ impl MobActor {
                                 "spawn rollback retirement journal has an invalid session: {error}"
                             ))
                         })?;
-                    // The cause the seal's mark gives this retirement, read
-                    // from the machine state before its step through the
-                    // helper a plain retirement's start row reads it with: a
-                    // restarted mob marks the identity again from the row, so
-                    // the end of the retirement ends the entry, as live.
+                    // The cause read through the helper every start row reads
+                    // it with, from the machine state before its step. The
+                    // seal marks no member whose spawn is still in flight
+                    // (`marked_entry_has_no_spawn_in_flight`), so a spawn
+                    // rollback's start row records none: a seal before its
+                    // Retire step leaves the entry to a later seal.
                     let cause = super::super::identity_entry::stored_retirement_cause(
                         self.dsl_authority.state(),
                         &identity,

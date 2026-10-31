@@ -1,6 +1,8 @@
 /* Approval card: a kit card (1 px rule, medium radius), the status as a tone
    chip, decisions as kit buttons. Tokens only, so every variant applies. */
 .cc-approval {
+  container-type: inline-size;
+  container-name: cc-approval;
   margin: 12px 0;
   padding: 14px 16px;
   border: 1px solid var(--_cc-border-soft);
@@ -44,6 +46,18 @@
   overflow-wrap: anywhere;
 }
 .cc-approval__scope.cc-kv { margin-top: 12px; }
+/* A narrow card stacks its details, each label above its value, as a narrow
+   kit panel does. A card in a chat transcript has no kit panel around it, so
+   the card is its own size container. The query reads the content box:
+   325 px is the kit's narrow-pane 359 px less the card's inline padding and
+   border. A size container takes no width from its content: the card's
+   parent gives it one (a block, or a stretched flex or grid item, as in the
+   chat and the inbox). These selectors outrank the kit's .cc-kv rules, which
+   load later. */
+@container cc-approval (max-width: 325px) {
+  .cc-approval .cc-kv { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .cc-approval .cc-kv dd { margin-bottom: 6px; }
+}
 .cc-approval__details code {
   font-family: var(--_cc-font-mono);
   font-size: 11px;

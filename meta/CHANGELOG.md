@@ -595,6 +595,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pass never waits for a reconcile in progress, and after a retry fails, it
   is tried again at the first health pass after the dispatcher's
   failed-round pause (30 seconds by default).
+- An approval card in a narrow Console chat pane no longer breaks its details
+  one character per line. The card kept each label beside its value at any
+  width, so a narrow pane left the values a column too narrow to read ("Not
+  specified" ran down the card a letter at a time). A card narrower than
+  360 px now lists each value under its label, wherever it is shown.
 
 ### Known limitations
 

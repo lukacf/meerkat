@@ -379,8 +379,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     incarnation, the step goes ahead past it, and the projection reads it
     once a preparation gets through (it tries again at each sweep); a
     cursor of another incarnation (the mob was recreated since), or one the
-    bridge cannot place, counts as none. A step whose record cannot be written (a reload's
-    and a respawn's too) is refused the same way, as
+    bridge cannot place, counts as none. A step whose record cannot be
+    written (a reload's and a respawn's too) is refused the same way, as
     `IdentityHistoryUnavailable`;
   - a roster pass that lists an identity again takes back an unlisting Core
     never carried out, and a step Core refused before any of it started puts

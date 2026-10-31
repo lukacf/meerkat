@@ -4402,7 +4402,7 @@ async fn a_predecessor_s_owed_hook_reaches_the_host_before_the_relisted_identity
     release.send(true).expect("release the hook");
     tokio::time::timeout(Duration::from_secs(10), settle)
         .await
-        .expect("the settle answers once the owed hook ran")
+        .expect("the settle task ends")
         .expect("the settle task");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while lock(&order).len() < 2 {

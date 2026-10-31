@@ -22,7 +22,8 @@ use crate::operator_instruction::{
 use crate::runtime::DormantSeatOutcome;
 use meerkat_core::{
     InstructionEffect, InstructionKey, InstructionNamespace, InstructionRevision,
-    InstructionSetErrorCode, InstructionSlot, InstructionTargetRecord,
+    InstructionSetErrorCode, InstructionSlot, InstructionTargetOwner, InstructionTargetRecord,
+    SessionInstructionChange, SessionInstructionWrite,
 };
 
 const STEP: Duration = Duration::from_mins(1);
@@ -170,10 +171,27 @@ impl InstructionMob {
         members: &[(&str, &str)],
         concurrency: Option<usize>,
     ) -> Self {
+        Self::with_storage(label, members, concurrency, MobStorage::in_memory()).await
+    }
+
+    /// [`Self::new`] over `events`, the mob's journal.
+    async fn with_events(
+        label: &str,
+        members: &[(&str, &str)],
+        events: Arc<dyn MobEventStore>,
+    ) -> Self {
+        Self::with_storage(label, members, None, MobStorage::with_events(events)).await
+    }
+
+    async fn with_storage(
+        label: &str,
+        members: &[(&str, &str)],
+        concurrency: Option<usize>,
+        storage: MobStorage,
+    ) -> Self {
         let definition = with_unique_mob_id(sample_definition(), label);
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
-        let storage = MobStorage::in_memory();
         let events = storage.events.clone();
         let runtime_metadata = storage.runtime_metadata.clone();
         let mut builder =
@@ -213,6 +231,85 @@ impl InstructionMob {
 
     fn member(&self, index: usize) -> (AgentIdentity, SessionId) {
         self.members[index].clone()
+    }
+
+    /// Spawn an autonomous member whose session its host keeps: the mob's
+    /// archive authority holds no record of the session, so the member's
+    /// retirement releases only its runtime, and the host keeps the session.
+    async fn spawn_host_kept(&mut self, name: &str) -> (AgentIdentity, SessionId) {
+        let identity = AgentIdentity::from(name);
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+        self.handle
+            .spawn_spec(spec)
+            .await
+            .expect("spawn the member");
+        let session = self
+            .handle
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("a session-backed member");
+        self.service.set_archive_authority_unknown(&session).await;
+        self.service.set_archive_not_found(&session).await;
+        self.members.push((identity.clone(), session.clone()));
+        (identity, session)
+    }
+
+    /// A durable session outside the mob, named for `identity` in this mob,
+    /// whose own host holds its operator-instruction target (one Active
+    /// slot), with no live actor: a session an attach adopts.
+    async fn host_instructed_session(&self, identity: &AgentIdentity) -> SessionId {
+        let created = self
+            .service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "a host's own session".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    comms_name: Some(
+                        crate::runtime::actor::render_member_comms_name(
+                            self.handle.mob_id().as_str(),
+                            "worker",
+                            identity.as_str(),
+                        )
+                        .expect("comms name"),
+                    ),
+                    mob_member_binding: None,
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            })
+            .await
+            .expect("the host's session");
+        let session = created.session_id;
+        MobSessionService::discard_live_session(self.service.as_ref(), &session)
+            .await
+            .expect("discard the creating actor");
+        self.service
+            .session_comms_names
+            .write()
+            .await
+            .remove(&session);
+        let mut persisted = self.service.persisted_sessions.write().await;
+        let document = persisted
+            .get_mut(&session)
+            .expect("the host's durable session");
+        document
+            .set_session_instruction(SessionInstructionWrite {
+                slot: slot("host"),
+                revision: revision(1),
+                change: SessionInstructionChange::Activate {
+                    body: BRIEF.to_string(),
+                    content_sha256: None,
+                },
+            })
+            .expect("the host writes its own instruction");
+        session
     }
 
     /// Crash the mob and restart its session service with its durable state
@@ -988,5 +1085,226 @@ async fn another_mobs_member_target_is_refused_until_it_releases_it() {
     assert_eq!(
         active_slots(&mob.service, &session).await,
         vec![("tone".to_string(), 2)]
+    );
+}
+
+/// A member whose session its host keeps retires: its mob releases the
+/// member session's target, empty and unowned, before the member's seat
+/// clears, and another mob's snapshot then binds the session while this mob
+/// lives on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retiring_member_whose_host_keeps_its_session_releases_the_target() {
+    let mut mob = InstructionMob::new("oi-release", &[]).await;
+    let (identity, session) = mob.spawn_host_kept("oi-release-w1").await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    current(&mob.handle, &identity).await;
+    mob.handle
+        .retire(identity.clone())
+        .await
+        .expect("the member retires");
+    let target = mob
+        .service
+        .committed_instruction_target(&session)
+        .await
+        .expect("the host keeps the session and its target");
+    assert_eq!(
+        target.owner(),
+        &InstructionTargetOwner::Unowned,
+        "the retirement released the member session's target: {target:?}"
+    );
+    assert!(
+        target.slots().is_empty(),
+        "a released target is empty: {target:?}"
+    );
+
+    // Another mob's snapshot binds the released session; this mob lives on.
+    let mut persisted = mob.service.persisted_sessions.write().await;
+    persisted
+        .get_mut(&session)
+        .expect("the host's session")
+        .record_instruction_target(InstructionTargetRecord {
+            mob_id: "another-mob".to_string(),
+            agent_identity: "another-member".to_string(),
+            generation: 1,
+            slots: Vec::new(),
+        })
+        .expect("another mob binds the released target");
+    drop(persisted);
+    assert!(
+        status(&mob.handle)
+            .await
+            .members
+            .iter()
+            .all(|member| member.agent_identity != identity),
+        "the retired member left the mob"
+    );
+}
+
+/// A destroy whose release of a member's target does not land answers
+/// incomplete and keeps the member seated with its delivery facts; the
+/// retried destroy releases the target and completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroy_whose_release_does_not_land_is_incomplete_and_its_retry_releases() {
+    let mut mob = InstructionMob::new("oi-destroy", &[]).await;
+    let (identity, session) = mob.spawn_host_kept("oi-destroy-w1").await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    current(&mob.handle, &identity).await;
+    mob.service.fail_next_instruction_release();
+    let error = mob
+        .handle
+        .destroy()
+        .await
+        .expect_err("a destroy whose release does not land is incomplete");
+    let report = match error {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("an incomplete destroy, not {other:?}"),
+    };
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains(identity.as_str()) && error.contains("operator instruction target")
+        }),
+        "the report names the member whose release did not land: {report:?}"
+    );
+    assert!(
+        mob.handle
+            .list_members_including_retiring()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == identity),
+        "the member stays seated for the retry"
+    );
+
+    mob.handle
+        .destroy()
+        .await
+        .expect("the retried destroy releases the target and completes");
+    let target = mob
+        .service
+        .committed_instruction_target(&session)
+        .await
+        .expect("the host keeps the session and its target");
+    assert_eq!(
+        target.owner(),
+        &InstructionTargetOwner::Unowned,
+        "the retried destroy released the target: {target:?}"
+    );
+}
+
+/// A write whose journal row landed although its append answered an error
+/// commits: the next write takes the next generation, and after a restart
+/// the acknowledged write is the slot's record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acknowledged_write_after_an_ambiguous_append_survives_a_restart() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let mob = InstructionMob::with_events(
+        "oi-ambiguous",
+        &[("oi-ambiguous-w1", "worker")],
+        events.clone(),
+    )
+    .await;
+    events
+        .fail_after_append_for("OperatorInstructionCommitted")
+        .await;
+    let landed = mob
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("a write whose row landed commits");
+    assert_eq!(landed.generation, 1);
+    events
+        .acknowledge_appends_for("OperatorInstructionCommitted")
+        .await;
+    let acknowledged = mob
+        .handle
+        .set_operator_instruction(write("tone", 2, BRIEF, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the next write commits");
+    assert_eq!(
+        acknowledged.generation, 2,
+        "the next write never reuses the landed row's generation"
+    );
+
+    let crashed = mob.crash().await;
+    let handle = crashed.resume().await;
+    let page = status(&handle).await;
+    assert_eq!(page.generation, 2);
+    let record = page
+        .desired
+        .iter()
+        .find(|record| record.slot == slot("tone"))
+        .expect("the slot's record");
+    assert_eq!(
+        record.revision,
+        revision(2),
+        "the acknowledged write is the slot's record after the restart"
+    );
+}
+
+/// A member seated over an existing session whose own host holds its
+/// operator-instruction target (an attach): the mob's first delivery takes
+/// the target over, so the member records the mob's snapshot, which
+/// replaces the host's target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_sessions_own_target_is_taken_over_by_the_mob() {
+    let mob = InstructionMob::new("oi-attach", &[]).await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    let identity = AgentIdentity::from("oi-attach-w1");
+    let session = mob.host_instructed_session(&identity).await;
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone()).with_launch_mode(
+        crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: session.clone(),
+            resume_from_role: None,
+        },
+    );
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    mob.handle
+        .spawn_spec(spec)
+        .await
+        .expect("attach the host's session");
+    let (handle_ref, identity_ref) = (&mob.handle, &identity);
+    eventually("the member's delivery settles", || async move {
+        member_status(handle_ref, identity_ref)
+            .await
+            .is_some_and(|member| {
+                !matches!(
+                    member.delivery.state,
+                    MemberInstructionDeliveryState::Owed { .. }
+                )
+            })
+    })
+    .await;
+    let member = member_status(&mob.handle, &identity)
+        .await
+        .expect("the member's row");
+    assert_eq!(
+        member.delivery.state,
+        MemberInstructionDeliveryState::Current,
+        "the mob's delivery took the host's target over: {member:?}"
+    );
+    let target = mob
+        .service
+        .committed_instruction_target(&session)
+        .await
+        .expect("the member session's target");
+    assert_eq!(
+        target.owner(),
+        &InstructionTargetOwner::Mob {
+            mob_id: mob.handle.mob_id().as_str().to_string(),
+            agent_identity: identity.as_str().to_string(),
+        }
+    );
+    assert_eq!(
+        active_slots(&mob.service, &session).await,
+        vec![("tone".to_string(), 1)],
+        "the mob's snapshot replaced the host's target"
     );
 }

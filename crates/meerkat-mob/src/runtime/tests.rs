@@ -2100,6 +2100,9 @@ struct MockSessionService {
     /// When set, every delivery takes a permit here before it writes: a row
     /// holds deliveries in flight and lets them through.
     instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, the next mob release of a member session's target fails
+    /// (a store that did not take the write), and the release writes nothing.
+    fail_next_instruction_release: AtomicBool,
     /// The spawner restrictions handed to the build of each session this
     /// mock created, as a session owner records them.
     tool_restrictions: std::sync::Mutex<
@@ -2462,6 +2465,12 @@ impl MockSessionService {
             .load(Ordering::SeqCst)
     }
 
+    /// Fail the next mob release of a member session's target.
+    fn fail_next_instruction_release(&self) {
+        self.fail_next_instruction_release
+            .store(true, Ordering::SeqCst);
+    }
+
     /// Hold every later delivery until the returned gate lets it through.
     fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -2501,6 +2510,7 @@ impl MockSessionService {
             instruction_records_in_flight: AtomicU64::new(0),
             instruction_records_max_in_flight: AtomicU64::new(0),
             instruction_record_gate: std::sync::Mutex::new(None),
+            fail_next_instruction_release: AtomicBool::new(false),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             tool_restrictions: std::sync::Mutex::new(HashMap::new()),
@@ -5726,6 +5736,17 @@ impl MobSessionService for MockSessionService {
         meerkat_core::InstructionReleaseDisposition,
         meerkat_core::service::SessionInstructionError,
     > {
+        if self
+            .fail_next_instruction_release
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "fault-injected operator instruction release failure".to_string(),
+                ))
+                .into(),
+            );
+        }
         let _authority_guard = self.resume_authority_gate.lock().await;
         let session_id = release.session_id().clone();
         let mut committed = self
@@ -7133,6 +7154,12 @@ impl FaultInjectedMobEventStore {
 
     async fn fail_after_append_for(&self, kind: &'static str) {
         self.fail_after_append_on_kind.write().await.insert(kind);
+    }
+
+    /// Acknowledge the appends of `kind` again (undo
+    /// [`Self::fail_after_append_for`]).
+    async fn acknowledge_appends_for(&self, kind: &'static str) {
+        self.fail_after_append_on_kind.write().await.remove(kind);
     }
 
     fn fail_clear(&self) {

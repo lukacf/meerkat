@@ -5,8 +5,10 @@
    for machine values only.
 
    Tone rule: status colour comes from data-tone (neutral, info, ok, warn,
-   crit, locked). The member accent is never a status colour; it marks
-   selection, the active tab, primary actions and live activity.
+   crit, locked, live). Every tone also has a shape (the StatusMark), so
+   colour never carries meaning alone. The member accent is never an
+   outcome; it means "now": live activity, the selection, the active tab
+   and the primary action (the live tone is the accent's own meaning).
    =================================================================== */
 
 .cc-theme-scope {
@@ -17,47 +19,65 @@
   --_cc-panel-fs-label: 10.5px;
   --_cc-panel-fs-mono: 11px;
   --_cc-panel-pad-x: 20px;
-  --_cc-panel-row-h: 36px;
   --_cc-panel-control-h: 28px;
+  /* Density (spec A4.3): comfortable here, compact on a PanelShell with
+     data-density="compact" and in every pane under 480 px. */
+  --_cc-panel-row-h: 40px;
+  --_cc-card-pad: 12px 14px;
+  --_cc-figure-size: var(--_cc-fs-figure);
+  --_cc-lane-min-h: 88px;
+}
+.cc-panel[data-density="compact"] {
+  --_cc-panel-row-h: var(--_cc-density-row);
+  --_cc-card-pad: 8px 10px;
+  --_cc-figure-size: 16px;
+  --_cc-lane-min-h: 64px;
 }
 
 /* ── Tones ─────────────────────────────────────────────────────── */
 
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row) {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar) {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="info"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="info"] {
   --_cc-tone: var(--_cc-link);
   --_cc-tone-ink: var(--_cc-link-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-link) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-link) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="ok"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="ok"] {
   --_cc-tone: var(--_cc-positive);
   --_cc-tone-ink: var(--_cc-positive-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-positive) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-positive) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="warn"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="warn"] {
   --_cc-tone: var(--_cc-warning);
   --_cc-tone-ink: var(--_cc-warning-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-warning) 14%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-warning) 36%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="crit"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="crit"] {
   --_cc-tone: var(--_cc-negative);
   --_cc-tone-ink: var(--_cc-negative-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-negative) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-negative) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="locked"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="locked"] {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
+}
+/* Live ("happening now"): the accent, with the foreground as its ink. */
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="live"] {
+  --_cc-tone: var(--_cc-viz-live);
+  --_cc-tone-ink: var(--_cc-foreground);
+  --_cc-tone-fill: var(--_cc-viz-live-soft);
+  --_cc-tone-line: color-mix(in oklch, var(--_cc-member-accent) 32%, transparent);
 }
 
 /* ── Utilities ─────────────────────────────────────────────────── */
@@ -167,6 +187,82 @@
   min-width: 0;
 }
 
+/* Header v2 (spec A3.1): the title with its scope chip, the live summary
+   line (facts with their marks, ending with the freshness), and on the
+   right the one view switch, hover-revealed tools and the quiet overflow
+   trigger. A refresh runs a 1 px accent hairline along the bottom rule. */
+.cc-panel-head--v2 {
+  position: relative;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 auto; }
+.cc-panel-head__title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.cc-panel-head__title-row > .cc-panel-head__title { flex: 0 1 auto; min-width: 0; }
+.cc-panel-head__scope {
+  display: inline-flex;
+  flex: none;
+  min-width: 0;
+  max-width: 50%;
+}
+.cc-panel-head__scope .cc-field { max-width: 100%; }
+.cc-panel-head--v2 .cc-panel-head__sub { margin-top: 3px; }
+.cc-panel-head__fact {
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-panel-head__fact[data-tone] { color: var(--_cc-tone-ink); }
+.cc-panel-head__fact[data-tone="neutral"],
+.cc-panel-head__fact[data-tone="locked"] { color: var(--_cc-foreground-muted); }
+.cc-panel-head__fact > .cc-mark {
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.cc-panel-head__fact > .cc-mark[data-tone="warn"] { vertical-align: 0.5px; }
+.cc-panel-head__sep { color: var(--_cc-foreground-meta); }
+.cc-panel-head--v2 .cc-panel-head__actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: -1px;
+}
+.cc-panel-head__view { margin-right: 6px; }
+.cc-panel-head__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cc-panel-head__menu--fold { display: none; }
+.cc-panel-head__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.cc-panel-head--flush .cc-panel-head__progress { bottom: 0; }
+.cc-panel-head__progress::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: var(--_cc-member-accent);
+  animation: cc-hairline 1.2s var(--_cc-ease-travel) infinite;
+}
+@keyframes cc-hairline {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(250%); }
+}
+
 /* ── Tabs ──────────────────────────────────────────────────────── */
 
 .cc-tabs {
@@ -227,6 +323,45 @@
   white-space: nowrap;
 }
 .cc-status-row__error { color: var(--_cc-negative-ink); }
+
+/* The status toast (spec A3.1): a refresh error over the top of the body.
+   The anchor takes no space, so nothing moves when it comes or goes. */
+.cc-status-toast-anchor {
+  position: relative;
+  z-index: 30;
+  flex: none;
+  height: 0;
+}
+.cc-status-toast {
+  position: absolute;
+  top: 8px;
+  left: var(--_cc-panel-pad-x);
+  right: var(--_cc-panel-pad-x);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid color-mix(in oklch, var(--_cc-negative) 34%, transparent);
+  border-radius: var(--_cc-radius-md);
+  background: color-mix(in srgb, var(--_cc-negative) 7%, var(--_cc-surface-card));
+  box-shadow: var(--_cc-shadow-md);
+  color: var(--_cc-foreground);
+  font-size: 12.5px;
+  line-height: 1.4;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-status-toast__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-status-toast__error { color: var(--_cc-foreground); }
+.cc-status-toast__stale { color: var(--_cc-foreground-muted); }
+.cc-status-toast__retry { flex: none; }
 
 /* ── Toolbar and fields ────────────────────────────────────────── */
 
@@ -304,6 +439,25 @@ textarea.cc-input {
   padding-left: 28px;
 }
 .cc-search__input::-webkit-search-cancel-button { cursor: pointer; }
+/* The key that focuses the search ("/"), shown while it is empty. */
+.cc-search--shortcut .cc-search__input { padding-right: 28px; }
+.cc-search__key {
+  position: absolute;
+  right: 7px;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-xs);
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--_cc-foreground-meta);
+  pointer-events: none;
+}
 .cc-select {
   position: relative;
   display: inline-flex;
@@ -325,6 +479,27 @@ textarea.cc-input {
   height: 12px;
   color: var(--_cc-foreground-meta);
   pointer-events: none;
+}
+/* The scope chip next to a panel title (spec A3.1): a quiet pill that is
+   still the native select with its accessible name. */
+.cc-field--chip .cc-select__control {
+  height: 22px;
+  padding: 0 22px 0 9px;
+  border-color: var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.cc-field--chip .cc-select__control:hover {
+  border-color: var(--_cc-border-strong);
+  color: var(--_cc-foreground);
+}
+.cc-field--chip .cc-select__chevron {
+  right: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 /* Segmented control: mutually exclusive views or filters. */
@@ -360,6 +535,14 @@ textarea.cc-input {
 .cc-seg__btn:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
+}
+.cc-seg__btn:disabled { opacity: 0.45; cursor: default; }
+.cc-seg__glyph {
+  width: 13px;
+  height: 13px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  stroke-width: 1.75;
 }
 
 /* ── Buttons ───────────────────────────────────────────────────── */
@@ -455,6 +638,42 @@ textarea.cc-input {
   border-color: transparent;
   background: var(--_cc-surface-hover);
 }
+/* Pressed or expanded (a toggle, an open menu): the soft fill. */
+.cc-btn[aria-pressed="true"],
+.cc-btn[aria-expanded="true"] {
+  color: var(--_cc-foreground);
+  background: var(--_cc-surface-soft);
+}
+.cc-btn:active:not(:disabled) { transition-duration: var(--_cc-dur-press); }
+/* Icon buttons (spec A3.2): the glyph at 16 px (14 px small). */
+.cc-btn--icon .cc-btn__icon svg,
+.cc-btn--icon > svg {
+  width: 16px;
+  height: 16px;
+}
+.cc-btn--icon.cc-btn--sm .cc-btn__icon svg,
+.cc-btn--icon.cc-btn--sm > svg {
+  width: 14px;
+  height: 14px;
+}
+.cc-btn--icon { position: relative; }
+.cc-btn--icon .cc-glyph { stroke-width: 1.75; }
+/* Quiet: the meta ink until hovered or open (the overflow trigger). */
+.cc-btn--quiet { color: var(--_cc-foreground-meta); }
+.cc-btn--quiet:hover:not(:disabled),
+.cc-btn--quiet[aria-expanded="true"] { color: var(--_cc-foreground); }
+/* A non-default state behind the button: a 5 px accent dot. */
+.cc-btn__badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card);
+  pointer-events: none;
+}
 .cc-btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -500,6 +719,22 @@ textarea.cc-input {
   font-family: var(--_cc-font-mono);
   font-size: 10.5px;
 }
+/* A status pill: the tone's mark 5 px before the word (spec A3.3). */
+.cc-chip--mark { padding-left: 7px; }
+.cc-chip > .cc-mark {
+  margin-right: 5px;
+  vertical-align: -0.5px;
+}
+.cc-chip > .cc-mark[data-tone="crit"] { margin-right: 5.8px; }
+/* Quiet: no fill and no border, the mark and the word in muted ink (dense
+   rows where a pill per row is too loud). */
+.cc-chip--quiet,
+.cc-chip.cc-chip--quiet:not([data-tone="neutral"]):not([data-tone="locked"]) {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+}
 .cc-chip__dot {
   display: inline-block;
   width: 6px;
@@ -543,6 +778,68 @@ textarea.cc-input {
 @keyframes cc-live-pulse {
   0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklch, var(--_cc-member-accent) 45%, transparent); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--_cc-member-accent) 10%, transparent); }
+}
+/* Every dot speaks shape too (spec A3.3): warn a triangle, crit a diamond. */
+.cc-dot[data-tone="warn"] {
+  width: 8px;
+  height: 7px;
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-dot[data-tone="crit"] {
+  width: 5.5px;
+  height: 5.5px;
+  margin: 0.75px;
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-dot[data-tone="live"]:not(.is-live) {
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px color-mix(in oklch, var(--_cc-member-accent) 55%, transparent);
+}
+
+/* ── Status marks (spec A2.4) ──────────────────────────────────────
+   One shape per tone in an 8 px box (10 px for size md): ok and info a
+   filled circle, warn a triangle (9 x 8), crit a diamond, neutral a
+   hollow circle, locked a hollow square, live the accent circle with a
+   pulse ring. Where the variant squares round corners (terminal), the
+   circles render as squares; the triangle and diamond keep their
+   geometry. */
+.cc-mark {
+  --_cc-mark-size: 8px;
+  display: inline-block;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--_cc-mark-size);
+  height: var(--_cc-mark-size);
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-tone);
+  vertical-align: middle;
+}
+.cc-mark[data-size="md"] { --_cc-mark-size: 10px; }
+.cc-mark[data-tone="warn"] {
+  width: calc(var(--_cc-mark-size) + 1px);
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-mark[data-tone="crit"] {
+  width: calc(var(--_cc-mark-size) * 0.8);
+  height: calc(var(--_cc-mark-size) * 0.8);
+  margin: calc(var(--_cc-mark-size) * 0.1);
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-mark[data-tone="neutral"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-viz-mid);
+}
+.cc-mark[data-tone="locked"] {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-foreground-meta);
+}
+.cc-mark[data-tone="live"] { background: var(--_cc-viz-live); }
+.cc-mark[data-tone="live"]:not(.cc-chip__mark) {
+  animation: cc-live-pulse var(--_cc-dur-pulse) ease-in-out infinite;
 }
 
 .cc-count {
@@ -1216,6 +1513,200 @@ button.cc-tile:focus-visible,
   transform: rotate(45deg);
 }
 
+/* ── Popovers, menus and view options (spec A3.2) ──────────────────
+   Elevation e2: a 1 px rule, the md shadow and the overlay surface. The
+   popover lives in the browser top layer where the Popover API exists
+   (so no pane clips it) and is a fixed layer otherwise; either way it
+   stays inside the theme scope. */
+.cc-popover {
+  position: fixed;
+  inset: auto;
+  z-index: 1000;
+  box-sizing: border-box;
+  max-height: 60vh;
+  margin: 0;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-overlay);
+  color: var(--_cc-foreground);
+  box-shadow: var(--_cc-shadow-md);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  line-height: 1.4;
+  text-align: left;
+  outline: none;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
+.cc-popover[data-state="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
+}
+@keyframes cc-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-pop-in-above {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.cc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 12px 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.cc-menu__item:hover,
+.cc-menu__item:focus { background: var(--_cc-surface-hover); outline: none; }
+.cc-menu__item:focus-visible { box-shadow: inset 0 0 0 2px var(--_cc-focus-ring); }
+.cc-menu__item[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.cc-menu__item.is-destructive { color: var(--_cc-negative-ink); }
+.cc-menu__lead {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--_cc-foreground-muted);
+}
+.cc-menu__lead .cc-glyph { width: 14px; height: 14px; stroke-width: 1.75; }
+.cc-menu__item[aria-checked="true"] .cc-menu__lead { color: var(--_cc-foreground); }
+.cc-menu__radio {
+  position: relative;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--_cc-radius-round);
+  box-shadow: inset 0 0 0 1.5px var(--_cc-border-strong);
+}
+.cc-menu__radio.is-checked { box-shadow: inset 0 0 0 1.5px var(--_cc-member-accent); }
+.cc-menu__radio.is-checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+}
+.cc-menu__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-menu__shortcut {
+  flex: none;
+  margin-left: 12px;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-menu__sep {
+  height: 1px;
+  margin: 4px -4px;
+  background: var(--_cc-border-soft);
+}
+.cc-menu__group { padding: 2px 0; }
+.cc-menu__label {
+  padding: 6px 8px 4px 32px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+/* A view switch folded into the menu shows only in a pane under 480 px. */
+.cc-menu__fold { display: none; }
+.cc-panel[data-density="compact"] .cc-menu__item { height: 26px; }
+
+.cc-view-options { padding: 12px 12px 8px; }
+.cc-view-options__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-view-options__label {
+  margin-bottom: 6px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__seg { display: flex; width: 100%; }
+.cc-view-options__seg .cc-seg__btn { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
+.cc-view-options__hint {
+  margin-top: 6px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__foot {
+  margin: 12px -12px -8px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--_cc-border-soft);
+}
+.cc-view-options__reset {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+}
+.cc-view-options__reset:hover:not(:disabled) { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-view-options__reset:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.cc-view-options__reset:disabled { color: var(--_cc-foreground-meta); opacity: 0.6; cursor: default; }
+
+/* ── Hover reveal (spec A4.1) ──────────────────────────────────────
+   Secondary controls fade in when their container is hovered or holds
+   focus, is selected, or the control is open; opacity only, so they stay
+   in the accessibility tree and the tab order. Always shown without hover
+   and in panes under 480 px. */
+.cc-reveal {
+  opacity: 0;
+  transition: opacity var(--_cc-dur-fast) ease;
+}
+.cc-reveal-host:hover .cc-reveal,
+.cc-reveal-host:focus-within .cc-reveal,
+.cc-reveal-host.is-selected .cc-reveal,
+.cc-reveal:focus-visible,
+.cc-reveal:focus-within,
+.cc-reveal[aria-expanded="true"],
+.cc-reveal:has([aria-expanded="true"]),
+.cc-reveal.has-badge { opacity: 1; }
+@media (hover: none) {
+  .cc-reveal { opacity: 1; }
+}
+
 /* ── Narrow panes ──────────────────────────────────────────────── */
 
 @container cc-panel (max-width: 719px) {
@@ -1236,6 +1727,26 @@ button.cc-tile:focus-visible,
 }
 
 @container cc-panel (max-width: 479px) {
+  .cc-reveal { opacity: 1; }
+  .cc-menu__fold { display: block; }
+  .cc-panel-head--v2 .cc-panel-head__actions {
+    flex-basis: auto;
+    margin-left: auto;
+  }
+  .cc-panel-head__view { display: none; }
+  .cc-panel-head__menu--fold { display: inline-flex; }
+  .cc-panel-head--v2 .cc-panel-head__summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+  }
+  .cc-panel > * {
+    --_cc-panel-row-h: var(--_cc-density-row);
+    --_cc-card-pad: 8px 10px;
+    --_cc-figure-size: 16px;
+    --_cc-lane-min-h: 64px;
+  }
   .cc-panel-head__actions {
     flex-basis: 100%;
     justify-content: flex-start;
@@ -1259,6 +1770,22 @@ button.cc-tile:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .cc-dot.is-live,
   .cc-skeleton__row { animation: none; }
+  .cc-popover,
+  .cc-status-toast { animation: cc-fade-in 120ms linear; }
+  .cc-panel-head__progress::before { animation: none; width: 50%; }
+  .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+  .cc-dot.is-live {
+    animation: none;
+    box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+  }
 }
 .reduced-motion .cc-dot.is-live,
 .reduced-motion .cc-skeleton__row { animation: none; }
+.reduced-motion .cc-popover,
+.reduced-motion .cc-status-toast { animation: cc-fade-in 120ms linear; }
+.reduced-motion .cc-panel-head__progress::before { animation: none; width: 50%; }
+.reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+.reduced-motion .cc-dot.is-live {
+  animation: none;
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+}

@@ -67,16 +67,18 @@
   --_cc-warning-default:           oklch(0.78 0.15 75);
   --_cc-warning:                   var(--cc-warning, var(--_cc-warning-default));
 
-  /* Rams-orange member accent */
-  --_cc-member-accent-default:     oklch(0.72 0.15 30);
+  /* Rams-orange member accent: the brand orange, hue 40 (rams dark here;
+     themes.css binds light and the other variants). It means "now": live
+     activity, the selection, the primary action, the active tab. */
+  --_cc-member-accent-default:     oklch(0.72 0.16 40);
   --_cc-member-accent:             var(--cc-member-accent, var(--_cc-member-accent-default));
   /* Keyboard focus ring (rethemable via --cc-focus-ring; themes.css overrides
      per variant). Consumed by the flow-card :focus-visible rules. */
   --_cc-focus-ring-default:        oklch(0.72 0.12 250 / 0.72);
   --_cc-focus-ring:                var(--cc-focus-ring, var(--_cc-focus-ring-default));
-  --_cc-member-accent-soft-default: oklch(0.32 0.08 30);
+  --_cc-member-accent-soft-default: oklch(0.32 0.08 40);
   --_cc-member-accent-soft:        var(--cc-member-accent-soft, var(--_cc-member-accent-soft-default));
-  --_cc-member-surface-default:    oklch(0.24 0.06 30);
+  --_cc-member-surface-default:    oklch(0.24 0.06 40);
   --_cc-member-surface:            var(--cc-member-surface, var(--_cc-member-surface-default));
 
   /* Text-safe derived inks. Small meta text and tone-coloured text mix
@@ -90,6 +92,37 @@
   --_cc-warning-ink:     var(--cc-warning-ink, color-mix(in srgb, var(--_cc-warning) 60%, var(--_cc-foreground)));
   --_cc-negative-ink:    var(--cc-negative-ink, color-mix(in srgb, var(--_cc-negative) 65%, var(--_cc-foreground)));
   --_cc-link-ink:        var(--cc-link-ink, color-mix(in srgb, var(--_cc-link) 80%, var(--_cc-foreground)));
+  /* The accent as text (a live label, a hot graph label): 6.5:1 light,
+     8.1:1 dark on the card. */
+  --_cc-accent-ink:      var(--cc-accent-ink, color-mix(in srgb, var(--_cc-member-accent) 80%, var(--_cc-foreground)));
+
+  /* Overlays (popovers, menus, tooltips, floating graph controls): the
+     raised surface in light themes, the hover surface in dark ones. */
+  --_cc-surface-overlay-default:   var(--_cc-surface-hover);
+  --_cc-surface-overlay:           var(--cc-surface-overlay, var(--_cc-surface-overlay-default));
+
+  /* ── Visualisation (spec A2.3; derived only) ──────────────────
+     Graph and chart marks are the foreground mixed toward the card: one
+     hue, never a categorical palette. Edges sit quiet (viz-edge, 1.9:1 in
+     light) and rise to viz-edge-strong (4.9:1) on hover, focus and
+     selection; live marks use the accent; magnitude uses the seq ramp.
+     Canvas renderers resolve these through a probe (viz/tokens.ts). */
+  --_cc-viz-ink:         var(--cc-viz-ink, var(--_cc-foreground));
+  --_cc-viz-mid:         var(--cc-viz-mid, color-mix(in srgb, var(--_cc-foreground) 55%, var(--_cc-surface-card)));
+  --_cc-viz-faint:       var(--cc-viz-faint, color-mix(in srgb, var(--_cc-foreground) 22%, var(--_cc-surface-card)));
+  --_cc-viz-edge:        var(--cc-viz-edge, color-mix(in srgb, var(--_cc-foreground) 30%, var(--_cc-surface-card)));
+  --_cc-viz-edge-strong: var(--cc-viz-edge-strong, color-mix(in srgb, var(--_cc-foreground) 62%, var(--_cc-surface-card)));
+  --_cc-viz-grid:        var(--cc-viz-grid, color-mix(in srgb, var(--_cc-foreground) 8%, var(--_cc-surface-card)));
+  --_cc-viz-plate:       var(--cc-viz-plate, var(--_cc-surface-card));
+  --_cc-viz-live:        var(--cc-viz-live, var(--_cc-member-accent));
+  --_cc-viz-live-soft:   var(--cc-viz-live-soft, color-mix(in srgb, var(--_cc-member-accent) 18%, var(--_cc-surface-card)));
+  --_cc-viz-seq-1:       var(--cc-viz-seq-1, color-mix(in srgb, var(--_cc-foreground) 10%, var(--_cc-surface-card)));
+  --_cc-viz-seq-2:       var(--cc-viz-seq-2, color-mix(in srgb, var(--_cc-foreground) 20%, var(--_cc-surface-card)));
+  --_cc-viz-seq-3:       var(--cc-viz-seq-3, color-mix(in srgb, var(--_cc-foreground) 32%, var(--_cc-surface-card)));
+  --_cc-viz-seq-4:       var(--cc-viz-seq-4, color-mix(in srgb, var(--_cc-foreground) 46%, var(--_cc-surface-card)));
+  --_cc-viz-seq-5:       var(--cc-viz-seq-5, color-mix(in srgb, var(--_cc-foreground) 60%, var(--_cc-surface-card)));
+  --_cc-viz-seq-6:       var(--cc-viz-seq-6, color-mix(in srgb, var(--_cc-foreground) 74%, var(--_cc-surface-card)));
+  --_cc-viz-seq-7:       var(--cc-viz-seq-7, color-mix(in srgb, var(--_cc-foreground) 88%, var(--_cc-surface-card)));
 
   --_cc-sheen-soft-default:        rgba(255, 255, 255, 0.08);
   --_cc-sheen-soft:                var(--_cc-sheen-soft-default);
@@ -114,6 +147,47 @@
   --_cc-workbench-activity-width: var(--cc-workbench-activity-width, 300px);
   --_cc-motion-duration: var(--cc-motion-duration, 160ms);
   --_cc-motion-ease:     var(--cc-motion-ease, ease);
+
+  /* ── Motion (spec A2.9) ─────────────────────────────────────────
+     Changes animate briefly and hold still; only "working now" pulses.
+     Under reduced motion components drop travel and pulses and enter with
+     opacity only. */
+  --_cc-dur-press:   var(--cc-dur-press, 80ms);
+  --_cc-dur-fast:    var(--cc-dur-fast, 120ms);
+  --_cc-dur-base:    var(--cc-dur-base, 160ms);
+  --_cc-dur-enter:   var(--cc-dur-enter, 200ms);
+  --_cc-dur-exit:    var(--cc-dur-exit, 140ms);
+  --_cc-dur-move:    var(--cc-dur-move, 320ms);
+  --_cc-dur-flash:   var(--cc-dur-flash, 500ms);
+  --_cc-dur-pulse:   var(--cc-dur-pulse, 1600ms);
+  --_cc-ease-out:    var(--cc-ease-out, cubic-bezier(0.2, 0, 0, 1));
+  --_cc-ease-in:     var(--cc-ease-in, cubic-bezier(0.4, 0, 1, 1));
+  --_cc-ease-travel: var(--cc-ease-travel, cubic-bezier(0.45, 0, 0.55, 1));
+
+  /* ── Type scale (spec A2.5) ─────────────────────────────────────
+     One family; the panel kit keeps its --_cc-panel-fs-* constants for
+     title, body, meta, mono and label. */
+  --_cc-fs-hero:    var(--cc-fs-hero, 28px);
+  --_cc-fs-figure:  var(--cc-fs-figure, 20px);
+  --_cc-fs-entity:  var(--cc-fs-entity, 18px);
+  --_cc-fs-card:    var(--cc-fs-card, 13px);
+  --_cc-fs-control: var(--cc-fs-control, 12px);
+  --_cc-fs-graph:   var(--cc-fs-graph, 11px);
+  --_cc-fs-lane:    var(--cc-fs-lane, 10px);
+  --_cc-fs-tick:    var(--cc-fs-tick, 9.5px);
+
+  /* ── Spacing (spec A2.6): a 4 px grid ───────────────────────────── */
+  --_cc-sp-1:  2px;
+  --_cc-sp-2:  4px;
+  --_cc-sp-3:  6px;
+  --_cc-sp-4:  8px;
+  --_cc-sp-5:  12px;
+  --_cc-sp-6:  16px;
+  --_cc-sp-7:  20px;
+  --_cc-sp-8:  24px;
+  --_cc-sp-9:  32px;
+  --_cc-sp-10: 40px;
+  --_cc-sp-11: 48px;
   --_cc-sidebar-safe-top:  var(--cc-sidebar-safe-top, 10px);
   --_cc-sidebar-pad-right: var(--cc-sidebar-pad-right, 12px);
   --_cc-sidebar-pad-left:  var(--cc-sidebar-pad-left, 12px);

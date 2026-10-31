@@ -17,7 +17,7 @@ export {
   toEpochMs,
 } from "./format";
 export type { TimeInput } from "./format";
-export { normalizeStatusWord, priorityTone, riskTierWord, riskTone, statusTone } from "./tone";
+export { normalizeStatusWord, priorityTone, riskTierWord, riskTone, statusTone, toneWord } from "./tone";
 export type { Tone } from "./tone";
 export {
   EMPTY_AGENT_DIRECTORY,
@@ -29,10 +29,13 @@ export {
 export type { AgentDirectory, AgentDirectoryEntry } from "./agents";
 export { AgentAvatar, AgentDirectoryProvider, AgentName, useAgentDirectory } from "./agent-name";
 export type { AgentAvatarSize } from "./agent-name";
-export { Button } from "./button";
-export type { ButtonProps, ButtonSize, ButtonVariant } from "./button";
-export { Chip, Count, StatusDot } from "./chip";
-export { KitGlyph } from "./glyphs";
+export { Button, IconButton } from "./button";
+export type { ButtonProps, ButtonSize, ButtonVariant, IconButtonProps } from "./button";
+export { Chip, Count, StatusDot, StatusPill } from "./chip";
+export type { ChipVariant } from "./chip";
+export { StatusMark } from "./status-mark";
+export type { StatusMarkSize } from "./status-mark";
+export { KIT_GLYPH_NAMES, KitGlyph } from "./glyphs";
 export type { KitGlyphName } from "./glyphs";
 export { KeyValueList } from "./key-value";
 export type { KeyValueItem } from "./key-value";
@@ -48,9 +51,27 @@ export {
   PanelTabs,
   SectionHeader,
   StatusRow,
+  StatusToast,
   panelTabIds,
+  usePanelOptions,
 } from "./panel";
-export type { PanelTab } from "./panel";
+export type {
+  PanelDensity,
+  PanelFreshness,
+  PanelHeaderMenu,
+  PanelOptions,
+  PanelTab,
+  PanelViewSwitch,
+  SummaryFact,
+} from "./panel";
+export {
+  PanelPreferencesProvider,
+  panelPreferenceKey,
+  standardPanelMenu,
+  usePanelDensity,
+  usePanelPreference,
+  useShowTechnicalIds,
+} from "./preferences";
 export { RelativeTime, useNow } from "./relative-time";
 export { SplitDetail } from "./split-detail";
 export { EmptyState, LoadingState, Notice } from "./states";
@@ -61,3 +82,17 @@ export { TechnicalDetails } from "./technical-details";
 export type { TechnicalDetail } from "./technical-details";
 export { SearchField, SegmentedControl, SelectField, Toolbar } from "./toolbar";
 export type { SegmentOption, SelectOption } from "./toolbar";
+export { Popover } from "./popover";
+export type { PopoverCloseReason, PopoverPlacement, PopoverProps } from "./popover";
+export { OverflowMenu } from "./menu";
+export type {
+  MenuCheckboxEntry,
+  MenuCommandEntry,
+  MenuEntry,
+  MenuRadioEntry,
+  MenuRadioOption,
+  MenuSeparatorEntry,
+  MenuTriggerProps,
+} from "./menu";
+export { ViewOptions, ViewOptionsMenu } from "./view-options";
+export type { ViewOptionsControl, ViewOptionsProps } from "./view-options";

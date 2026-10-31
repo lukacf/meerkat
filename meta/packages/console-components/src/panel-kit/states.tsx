@@ -90,6 +90,7 @@ export function LoadingState({
 const NOTICE_GLYPH: Record<Tone, KitGlyphName> = {
   neutral: "info",
   info: "info",
+  live: "info",
   ok: "check",
   warn: "info",
   crit: "info",

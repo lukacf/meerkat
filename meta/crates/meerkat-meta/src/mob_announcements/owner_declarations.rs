@@ -1132,7 +1132,7 @@ impl AnnouncementService {
     /// It runs under the declarations gate and never waits for it: while a
     /// reconcile, an apply or a read holds the gate, this pass leaves the
     /// declarations to it and the next pass looks again, so a round never
-    /// waits on a declaration. After a failed retry the next one waits out
+    /// waits on another gate holder. After a failed retry the next one waits out
     /// the slowest settle pause, so a failure that persists is retried at
     /// that pace, never once per round the retry's own puts wake.
     pub(super) async fn retry_declarations(&self) {

@@ -579,10 +579,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the next health pass. Before, the health pass reconciled again only while
   a declared record was pending, so the records the stopped reconcile had
   not reached stayed unmade, and missing from `declarations/get`, until the
-  next start, apply or change in the gateway's set of mobs. The health pass
-  never waits for a reconcile in progress, and after a retry fails it waits
-  as long as the dispatcher waits after a failed round (30 seconds by
-  default) before it retries again.
+  next start, apply or change in the gateway's set of mobs. A dropped record
+  whose end or cancel was refused for now is retried there too. The health
+  pass never waits for a reconcile in progress, and after a retry fails, it
+  is tried again at the first health pass after the dispatcher's
+  failed-round pause (30 seconds by default).
 
 ### Known limitations
 

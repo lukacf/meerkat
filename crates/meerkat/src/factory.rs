@@ -1928,14 +1928,51 @@ fn grant_gate_for_build(
     )))
 }
 
-/// Refuse a build that resumes `session` onto a model that cannot carry
-/// the operator-instruction entry rows the session wrote itself where they
-/// stand ([`meerkat_core::InstructionEntryPlacement::refusal`]), before the
-/// build resolves the model's client. The model is judged by the weakest
-/// lowering its binding may serve
-/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]);
-/// `authors_prompt_row` says whether the build adds a prompt row, which
-/// stands beside those entries.
+/// Where the operator-instruction entry rows `session` wrote itself stand in
+/// the requests of a build that resumes it
+/// ([`Session::own_operator_instruction_entry_placement`]). A prompt row the
+/// build authors (`authors_prompt_row`: the session carries no metadata, or
+/// the build names its prompt) stands beside them as another System row.
+pub(crate) fn resumed_build_entry_placement(
+    session: &Session,
+    authors_prompt_row: bool,
+) -> Result<meerkat_core::InstructionEntryPlacement, meerkat_core::ModelBoundaryProjectionError> {
+    let placement = session.own_operator_instruction_entry_placement()?;
+    Ok(if authors_prompt_row && !placement.is_empty() {
+        placement.with_another_system_row()
+    } else {
+        placement
+    })
+}
+
+/// Why a build that resumes `session` cannot serve its own
+/// operator-instruction entries on `identity`, or `None` when it can
+/// ([`meerkat_core::InstructionEntryPlacement::refusal`]). The model is
+/// judged by the weakest lowering its binding may serve
+/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]), before any
+/// client for it is built.
+fn resumed_build_entry_refusal(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    identity: &SessionLlmIdentity,
+    preferred_realm: Option<&RealmId>,
+    authors_prompt_row: bool,
+) -> Result<Option<meerkat_core::InstructionEntryLoweringRefusal>, BuildAgentError> {
+    let placement = resumed_build_entry_placement(session, authors_prompt_row)
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
+    if placement.is_empty() {
+        return Ok(None);
+    }
+    let lowering =
+        registry.weakest_instruction_lowering_for_target(config, identity, preferred_realm);
+    Ok(placement.refusal(lowering))
+}
+
+/// Refuse a build that resumes `session` onto a model that cannot carry the
+/// operator-instruction entry rows the session wrote itself where they stand
+/// ([`resumed_build_entry_refusal`]), before the build resolves the model's
+/// client.
 fn refuse_resumed_entries_the_model_cannot_carry(
     session: &Session,
     registry: &ModelRegistry,
@@ -1945,17 +1982,6 @@ fn refuse_resumed_entries_the_model_cannot_carry(
     self_hosted_server_id: &Option<String>,
     authors_prompt_row: bool,
 ) -> Result<(), BuildAgentError> {
-    let placement = session
-        .own_operator_instruction_entry_placement()
-        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
-    if placement.is_empty() {
-        return Ok(());
-    }
-    let placement = if authors_prompt_row {
-        placement.with_another_system_row()
-    } else {
-        placement
-    };
     let identity = SessionLlmIdentity {
         model: build_config.model.clone(),
         provider,
@@ -1963,12 +1989,14 @@ fn refuse_resumed_entries_the_model_cannot_carry(
         provider_params: build_config.provider_params.clone(),
         auth_binding: build_config.auth_binding.clone(),
     };
-    let lowering = registry.weakest_instruction_lowering_for_target(
+    match resumed_build_entry_refusal(
+        session,
+        registry,
         config,
         &identity,
         build_config.realm_id.as_ref(),
-    );
-    match placement.refusal(lowering) {
+        authors_prompt_row,
+    )? {
         None => Ok(()),
         Some(refusal) => Err(BuildAgentError::Config(format!(
             "model '{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
@@ -7995,6 +8023,22 @@ impl AgentFactory {
                 let Some(bootstrap_identity) = handoff_bootstrap_identity.as_ref() else {
                     return Err(primary_error);
                 };
+                // A target that cannot carry the session's own
+                // operator-instruction entries where they stand gets no
+                // bootstrap client: it would serve a transcript its wire
+                // refuses, and the realization denies the request anyway.
+                if resumed_build_entry_refusal(
+                    &session,
+                    &registry,
+                    config,
+                    bootstrap_identity,
+                    build_config.realm_id.as_ref(),
+                    authors_prompt_row,
+                )?
+                .is_some()
+                {
+                    return Err(primary_error);
+                }
                 let auth_lease_handle = match &build_config.runtime_build_mode {
                     RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
                     RuntimeBuildMode::StandaloneEphemeral => None,

@@ -356,6 +356,21 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         Ok(())
     }
 
+    /// Whether every request a switch onto `target_model` would serve can
+    /// carry `session_id`'s transcript as it stands: the operator-instruction
+    /// entry rows the session wrote itself, where they stand, and its ordered
+    /// instruction activations. The routing machine denies a switch onto a
+    /// target that cannot: the refusal is permanent, so a request held for it
+    /// would never end. A host decides it before any client for the target
+    /// is built. The default carries every target.
+    async fn switch_target_carries_session_transcript(
+        &self,
+        _session_id: &SessionId,
+        _target_model: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        Ok(true)
+    }
+
     /// Caller must hold the turn-finalization boundary.
     async fn apply_live_session_llm_identity(
         &self,

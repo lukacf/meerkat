@@ -1110,36 +1110,44 @@ impl SessionRuntimeLlmReconfigureHost {
         Ok(target)
     }
 
-    /// Refuse a live model change onto `identity` that cannot carry the
-    /// operator-instruction entry rows the session wrote itself where they
-    /// stand, before any client for it is built (a build resolves the
-    /// target's credential and publishes its lease). The target is judged by
-    /// the weakest lowering it may be served with
-    /// ([`ModelRegistry::weakest_instruction_lowering_for_target`]); the
-    /// refusal is typed as for instruction activation rows. The session
-    /// service's own hot swap refuses the same placement for the lowering
-    /// its request policy carries (`Agent::hot_swap_llm_identity`), so no
-    /// caller bypasses the guard.
-    async fn refuse_target_that_cannot_carry_own_instruction_entries(
+    /// Where the operator-instruction entry rows `session_id` wrote itself
+    /// stand: in the live session, or, for a session staged before its first
+    /// build (no live actor), in the session that build resumes
+    /// ([`StagedSessionRegistry::own_operator_instruction_entry_placement`]).
+    /// A session neither live nor staged holds none here.
+    async fn own_instruction_entry_placement(
         &self,
         session_id: &SessionId,
-        identity: &SessionLlmIdentity,
-    ) -> Result<(), RuntimeDriverError> {
-        let placement = match self
+    ) -> Result<meerkat_core::InstructionEntryPlacement, RuntimeDriverError> {
+        match self
             .service()?
             .live_session_own_operator_instruction_entry_placement(session_id)
             .await
         {
-            Ok(placement) => placement,
-            // A session without a live actor (one staged before its first
-            // build) has no transcript to carry; its build judges the
-            // session it materializes.
-            Err(SessionError::NotFound { .. }) => return Ok(()),
-            Err(err) => return Err(live_session_read_error_to_runtime_driver(session_id, err)),
-        };
-        if placement.is_empty() {
-            return Ok(());
+            Ok(placement) => Ok(placement),
+            Err(SessionError::NotFound { .. }) => self
+                .staged_sessions
+                .own_operator_instruction_entry_placement(session_id)
+                .await
+                .map(Option::unwrap_or_default)
+                .map_err(|error| {
+                    RuntimeDriverError::Internal(format!(
+                        "session {session_id}'s staged build cannot be projected for a model request: {error}"
+                    ))
+                }),
+            Err(err) => Err(live_session_read_error_to_runtime_driver(session_id, err)),
         }
+    }
+
+    /// The weakest operator-instruction lowering `identity` may be served
+    /// with for `session_id`, before any client for it is built
+    /// ([`ModelRegistry::weakest_instruction_lowering_for_target`], from the
+    /// session's own realm).
+    async fn weakest_target_lowering(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<meerkat_core::InstructionLowering, RuntimeDriverError> {
         let config = self.load_config_for_hot_swap().await?;
         let registry = config
             .model_registry(meerkat_models::canonical())
@@ -1152,11 +1160,33 @@ impl SessionRuntimeLlmReconfigureHost {
             self.inheritance_head_realm(),
         )
         .await?;
-        let lowering = registry.weakest_instruction_lowering_for_target(
+        Ok(registry.weakest_instruction_lowering_for_target(
             &config,
             identity,
             preferred_realm.as_ref(),
-        );
+        ))
+    }
+
+    /// Refuse a live model change onto `identity` that cannot carry the
+    /// operator-instruction entry rows the session wrote itself where they
+    /// stand, before any client for it is built (a build resolves the
+    /// target's credential and publishes its lease). The target is judged by
+    /// the weakest lowering it may be served with
+    /// ([`Self::weakest_target_lowering`]); the refusal is typed as for
+    /// instruction activation rows. The session service's own hot swap
+    /// refuses the same placement for the lowering its request policy
+    /// carries (`Agent::hot_swap_llm_identity`), so no caller bypasses the
+    /// guard.
+    async fn refuse_target_that_cannot_carry_own_instruction_entries(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        let placement = self.own_instruction_entry_placement(session_id).await?;
+        if placement.is_empty() {
+            return Ok(());
+        }
+        let lowering = self.weakest_target_lowering(session_id, identity).await?;
         match placement.refusal(lowering) {
             None => Ok(()),
             Some(refusal) => Err(RuntimeDriverError::ValidationFailed {
@@ -1297,16 +1327,59 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         self.resolved_reconfigure_target(target_identity).await
     }
 
+    /// Proves the target buildable now. The routing realization asks
+    /// `switch_target_carries_session_transcript` first and calls
+    /// this only for a target that can carry the session's transcript: one
+    /// that cannot is a permanent refusal, which generated authority denies,
+    /// and a failure here is a retriable hold.
     async fn preflight_target_session_llm_identity(
         &self,
         session_id: &SessionId,
         target_identity: &SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
-        self.refuse_target_that_cannot_carry_own_instruction_entries(session_id, target_identity)
-            .await?;
         self.build_adapter_for_session_llm_identity(session_id, target_identity)
             .await
             .map(|_| ())
+    }
+
+    async fn switch_target_carries_session_transcript(
+        &self,
+        session_id: &SessionId,
+        target_model: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        // The turn-entry resync, as the plan step performs it, so the live
+        // transcript read below is the session's own.
+        let hydrated = self.hydrate_session_llm_state(session_id).await?;
+        let placement = self.own_instruction_entry_placement(session_id).await?;
+        // Ordered instruction activations are mid-conversation System rows;
+        // a session with no live actor has none to carry yet.
+        let activations = match self
+            .service()?
+            .live_session_has_instruction_activations(session_id)
+            .await
+        {
+            Ok(activations) => activations,
+            Err(SessionError::NotFound { .. }) => false,
+            Err(err) => return Err(live_session_read_error_to_runtime_driver(session_id, err)),
+        };
+        if placement.is_empty() && !activations {
+            return Ok(true);
+        }
+        // The target as a model-only change resolves it from the current
+        // identity. Nothing is built for it.
+        let request = SessionLlmReconfigureRequest {
+            model: Some(target_model.to_string()),
+            provider: None,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let target = self
+            .resolve_target_llm_identity(&hydrated.current_identity, &request)
+            .await?;
+        let lowering = self.weakest_target_lowering(session_id, &target).await?;
+        Ok(placement.refusal(lowering).is_none()
+            && (!activations || lowering == meerkat_core::InstructionLowering::MidConversation))
     }
 
     async fn apply_live_session_llm_identity(

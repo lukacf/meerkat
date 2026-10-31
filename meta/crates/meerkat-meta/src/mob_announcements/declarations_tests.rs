@@ -1998,6 +1998,164 @@ async fn a_round_whose_retry_meets_a_wedged_member_check_ends_at_the_bound() {
     );
 }
 
+/// Retries against a call that stays wedged do not pile calls up on it. A
+/// call left running past its bound keeps its site until it ends, and a
+/// later holder of the declarations gate that would call there stops at
+/// once, without calling. Rounds that retry a pending record against one
+/// wedged member check make that check once: the first retry waits out the
+/// bound, and every later one stops at once. When the check answers, its
+/// site is free again: the next retry checks the member and makes the
+/// record.
+#[tokio::test(start_paused = true)]
+async fn retries_against_one_wedged_call_leave_one_call_running() {
+    const RETRIES: usize = 4;
+    let harness = harness_with(native_serving(&["agent:b"]));
+    let service = &harness.service;
+    let audience = serde_json::json!([{ "kind": "role", "mob_id": OWN_MOB, "role": "triager" }]);
+    within(
+        "declarations/apply answers",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([declared_inbox(audience)]),
+            serde_json::json!([declared_subscription(
+                "b-mail",
+                "agent:b",
+                &["mail.received"]
+            )]),
+        ),
+    )
+    .await
+    .unwrap();
+    let status = |view: &serde_json::Value| {
+        record(view, "subscription", "b-mail").map(|record| record["status"].clone())
+    };
+
+    // agent:b takes the role, and its member check never answers.
+    harness.native.set_roster_facts("agent:b", "triager", &[]);
+    harness.native.wedge("agent:b");
+    let checked = harness.native.checks("agent:b");
+    let mut took = Vec::with_capacity(RETRIES);
+    for _ in 0..RETRIES {
+        let started = tokio::time::Instant::now();
+        within("the round ends", service.run_round()).await.unwrap();
+        took.push(started.elapsed());
+        // Past the failed retry's pause, so the next round retries.
+        harness.clock.fetch_add(
+            AnnouncementConfig::default().settle_check_max_ms + 1,
+            Ordering::SeqCst,
+        );
+    }
+    assert_eq!(
+        harness.native.checks("agent:b") - checked,
+        1,
+        "{RETRIES} retries against one wedged member check make it once: {took:?}"
+    );
+    assert!(
+        took[0] >= CALL_BOUND && took[1..].iter().all(|each| *each < CALL_BOUND),
+        "the first retry waits out its bound, and every later one stops at once: {took:?}"
+    );
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("pending"))
+    );
+
+    // The check answers: once it ends, its site is free.
+    harness.native.unwedge("agent:b");
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    within("the next round ends", service.run_round())
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.native.checks("agent:b") - checked,
+        2,
+        "the next retry checks the member again"
+    );
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("applied"))
+    );
+    assert_eq!(
+        subscription_state(service, "b-mail").await.as_deref(),
+        Some("active")
+    );
+}
+
+/// Every holder of the declarations gate waits on each call it makes for at
+/// most the bound, a read included: a read's own wait for the gate has no
+/// bound, but the gate is never held without one. The store never answers a
+/// `declarations/get`'s read of the role template children, which it makes
+/// under the gate: the read answers the store's failure at the bound and
+/// releases the gate, so a `declarations/apply` asked meanwhile answers
+/// after at most the bound. The apply's reconcile goes on, and only its read
+/// of the result meets the call still running at that site; once the store
+/// answers it, the declarations read whole.
+#[tokio::test(start_paused = true)]
+async fn an_apply_behind_a_read_wedged_on_a_store_call_waits_at_most_the_bound() {
+    let applied = |ids: &[&str]| {
+        (
+            serde_json::json!(2),
+            ids.iter()
+                .map(|id| ((*id).to_string(), "applied".to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    let native = Arc::new(native_serving(&[]));
+    let service = declaring_over(&store, &native, declaring_subscriptions(1, &["declared-a"]));
+    within("revision 1 reconciles", service.reconcile_declarations())
+        .await
+        .unwrap();
+
+    // A read takes the gate, and the store never answers its read of the
+    // role template children.
+    let held = store.hold_role_children();
+    let started = tokio::time::Instant::now();
+    let reading = tokio::spawn({
+        let service = service.clone();
+        async move { try_host_call(&service, DECLARATIONS_GET, serde_json::json!({})).await }
+    });
+    assert!(
+        held.reached(STOPS_WITHIN).await,
+        "the read reaches the role template children"
+    );
+    let refused = within(
+        "declarations/apply answers once the read stops at its wedged store call",
+        try_apply(
+            &service,
+            2,
+            serde_json::json!([]),
+            declaring_subscriptions(2, &["declared-a", "declared-b"])["subscriptions"].clone(),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the read held the gate for its bound first: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        refused.code == -32000 && refused.message.contains("AnnouncementStore::role_children"),
+        "the apply's read of its result meets the call still running there: {refused:?}"
+    );
+    let read = within("the read ends", reading).await.unwrap().unwrap_err();
+    assert_eq!(
+        read.code, -32000,
+        "the read answers the store's failure: {read:?}"
+    );
+
+    // The store answers the held read: once it ends, its site is free.
+    held.release();
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a", "declared-b"]),
+        "the apply's reconcile went on once the read released the gate"
+    );
+}
+
 /// Options naming the applied revision with other declarations change
 /// nothing, as an apply at runtime moved the gateway past them: the gateway
 /// warns once per boot, naming the revision and both digests, and keeps the

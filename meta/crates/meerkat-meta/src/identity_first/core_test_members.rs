@@ -5,10 +5,10 @@
 //! answer from what the double's create, resume, reset and retire calls
 //! committed. Once [`CoreTestMembers::keep_journal`] was called, the member
 //! lifecycle journal reads answer too, with the facts Core journals: each
-//! bind journals a seat, each retire a retirement, each rotation
-//! ([`CoreTestMembers::rotate`]) the retirement and the seat that name each
-//! other, and each started retirement ([`CoreTestMembers::start_retirement`])
-//! its start. [`CoreTestMembers::mark_host_made`] makes an identity's member
+//! bind journals a seat, each retire a retirement's start and then its end,
+//! each rotation ([`CoreTestMembers::rotate`]) its retirement's start and then
+//! the retirement and the seat that name each other, and each started
+//! retirement ([`CoreTestMembers::start_retirement`]) its start. [`CoreTestMembers::mark_host_made`] makes an identity's member
 //! one a host made directly on the mob under the identity's member id,
 //! [`CoreTestMembers::read_retired_in_history`] has Core's member history
 //! disagree with Core's standing of a member, [`CoreTestMembers::respawn`]
@@ -133,6 +133,16 @@ impl CoreTestMembers {
                 } else {
                     meerkat_mob::RotationTarget::FreshSession
                 };
+                // The rotation's retirement starts first, unless a start Core
+                // journaled already carries it.
+                if !live.retiring {
+                    self.journal_fact(MemberLifecycleFact::retirement_started(
+                        member_id(identity),
+                        live.generation,
+                        Some(target),
+                        None,
+                    ));
+                }
                 self.journal_fact(
                     MemberLifecycleFact::retired(
                         member_id(identity),
@@ -212,6 +222,14 @@ impl CoreTestMembers {
         let Some(live) = members.get(identity).filter(|member| member.live).cloned() else {
             return;
         };
+        if !live.retiring {
+            self.journal_fact(MemberLifecycleFact::retirement_started(
+                member_id(identity),
+                live.generation,
+                None,
+                None,
+            ));
+        }
         self.journal_fact(
             MemberLifecycleFact::retired(
                 member_id(identity),
@@ -274,12 +292,21 @@ impl CoreTestMembers {
         }
     }
 
-    /// Core retired the member whose runtime id is `runtime_id`; its
-    /// binding stays in the history as retired.
+    /// Core retired the member whose runtime id is `runtime_id`, its
+    /// retirement's start journaled first (unless Core started it already);
+    /// its binding stays in the history as retired.
     pub(crate) fn retire(&self, runtime_id: &AgentRuntimeId) {
         let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         for (identity, member) in members.iter_mut() {
             if member.runtime_id == *runtime_id && member.live {
+                if !member.retiring {
+                    self.journal_fact(MemberLifecycleFact::retirement_started(
+                        member_id(identity),
+                        member.generation,
+                        None,
+                        None,
+                    ));
+                }
                 member.live = false;
                 member.retiring = false;
                 self.journal_fact(

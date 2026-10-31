@@ -234,8 +234,9 @@ impl ContinuityStore for CountingContinuityStore {
 /// creates, resumes, rotations and retires commit here; Core's member reads
 /// answer from here. Once [`CoreMembers::keep_journal`] was called, its
 /// member lifecycle journal reads answer too, with the facts Core journals:
-/// each bind journals a seat, each retire a retirement, and each rotation the
-/// retirement and the seat that name each other.
+/// each bind journals a seat, each retire a retirement's start and then its
+/// end, and each rotation its retirement's start and then the retirement and
+/// the seat that name each other.
 #[derive(Default)]
 struct CoreMembers {
     members: Mutex<BTreeMap<AgentIdentity, CoreMember>>,
@@ -337,6 +338,15 @@ impl CoreMembers {
                 } else {
                     meerkat_mob::RotationTarget::FreshSession
                 };
+                // The rotation's retirement starts first.
+                self.facts.lock().unwrap().push(
+                    meerkat_meta::identity_first::MemberLifecycleFact::retirement_started(
+                        member_id.clone(),
+                        live.generation,
+                        Some(target),
+                        None,
+                    ),
+                );
                 self.facts.lock().unwrap().push(
                     meerkat_meta::identity_first::MemberLifecycleFact::retired(
                         member_id.clone(),
@@ -558,11 +568,22 @@ impl CoreMembers {
         agent_runtime_id
     }
 
-    /// Core retired the member `runtime_id` names; its binding stays.
+    /// Core retired the member `runtime_id` names, its retirement's start
+    /// journaled first; its binding stays.
     fn retire(&self, runtime_id: &AgentRuntimeId) {
         for (identity, member) in self.members.lock().unwrap().iter_mut() {
             if member.runtime_id == *runtime_id && member.live {
                 member.live = false;
+                self.facts.lock().unwrap().push(
+                    meerkat_meta::identity_first::MemberLifecycleFact::retirement_started(
+                        meerkat_meta::member_comms_id::roster_member_id_for_identity(
+                            identity.as_str(),
+                        ),
+                        member.generation,
+                        None,
+                        None,
+                    ),
+                );
                 self.facts.lock().unwrap().push(
                     meerkat_meta::identity_first::MemberLifecycleFact::retired(
                         meerkat_meta::member_comms_id::roster_member_id_for_identity(

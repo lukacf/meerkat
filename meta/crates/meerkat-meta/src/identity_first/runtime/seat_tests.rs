@@ -322,9 +322,18 @@ impl SessionBridge for SeatCore {
             self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
-        // The restamp of a live member is Core's rotation onto the same
-        // session; the revival of one no member holds, a spawn.
-        let agent_runtime_id = if live.is_some() {
+        // The restamp of a live member on its own session is Core's rotation
+        // onto the same session, whose retirement and seat name each other.
+        // A resume of a live member onto another session retires the
+        // occupant and then spawns, two rows that name no rotation; so is the
+        // revival of one no member holds a spawn.
+        let restamp = live
+            .as_ref()
+            .is_some_and(|live| live.session_id.as_ref() == Some(session_id));
+        if !restamp && let Some(live) = live.as_ref() {
+            self.core.retire(&live.agent_runtime_id);
+        }
+        let agent_runtime_id = if restamp {
             rotate_live(
                 &self.core,
                 identity,

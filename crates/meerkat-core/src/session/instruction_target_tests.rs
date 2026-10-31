@@ -1080,22 +1080,59 @@ fn a_release_before_any_run_start_still_revokes_what_was_in_effect() {
     ));
 }
 
-/// A mob's delivery to a member seated over a session whose own host holds
-/// the target (an attach) takes the target over: the session-document
-/// authority rebinds it to the mob, then records the snapshot, which
-/// replaces it. A plain record is refused, and another mob's target is never
-/// taken.
+/// Stamp the mob member binding a mob writes into a session it seats as a
+/// member's (a spawn, or an attach of its host's own session): the session's
+/// binding fact from then on.
+fn seat_as_member(session: &mut Session) {
+    session
+        .set_session_metadata(crate::SessionMetadata {
+            model_fallback: None,
+            schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
+            model: "test-model".to_string(),
+            max_tokens: 1024,
+            structured_output_retries: 2,
+            provider: crate::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: crate::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(crate::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
+        })
+        .expect("the member's session metadata");
+}
+
+/// A mob's first delivery to a member seated over a session whose own host
+/// wrote its target before the mob seated it (an attach) takes the target
+/// over, in the one record: the mob owns it and the snapshot replaces it.
+/// The same target on a session no mob seated refuses the record, and
+/// another mob's target is never taken.
 #[test]
-fn a_mob_delivery_adopts_a_target_the_sessions_own_host_holds() {
+fn a_mob_delivery_takes_over_a_target_its_host_wrote_before_the_attach() {
     let mut session = conversed_session();
     session
         .set_session_instruction(activate("style", 1, "Use short sentences."))
         .unwrap();
     let snapshot = || mob_record("mob-1", 2, vec![("tone", 1, Some("Be brief."))]);
     let refused = session.record_instruction_target(snapshot()).unwrap_err();
-    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedBySession);
+    assert_eq!(
+        code(&refused),
+        InstructionSetErrorCode::OwnedBySession,
+        "a session no mob seated keeps its host's target"
+    );
 
-    let receipt = session.adopt_instruction_target(snapshot()).unwrap();
+    seat_as_member(&mut session);
+    let receipt = session.record_instruction_target(snapshot()).unwrap();
     assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
     assert_eq!(receipt.target_generation, 2);
     let state = session.instruction_target_state().unwrap().unwrap();
@@ -1111,13 +1148,47 @@ fn a_mob_delivery_adopts_a_target_the_sessions_own_host_holds() {
         "the snapshot replaces the target the host held"
     );
 
-    let repeated = session.adopt_instruction_target(snapshot()).unwrap();
+    let repeated = session.record_instruction_target(snapshot()).unwrap();
     assert_eq!(
         repeated.disposition,
         InstructionRecordDisposition::AlreadyRecorded
     );
     let refused = session
-        .adopt_instruction_target(mob_record("mob-2", 9, Vec::new()))
+        .record_instruction_target(mob_record("mob-2", 9, Vec::new()))
         .unwrap_err();
     assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByOtherMob);
+}
+
+/// A mob member's session takes no write and no adoption of its own host,
+/// whether or not its mob has recorded a target yet: the host is refused
+/// `owned_by_mob`, typed, and nothing changes, so the mob's first record
+/// never replaces a write the host was told was recorded.
+#[test]
+fn a_member_session_refuses_its_own_hosts_writes() {
+    let mut session = conversed_session();
+    seat_as_member(&mut session);
+    let document = session.to_persisted_bytes().unwrap();
+    for write in [activate("tone", 1, "Answer formally."), revoke("tone", 1)] {
+        let refused = session.set_session_instruction(write).unwrap_err();
+        assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByMob);
+    }
+    let refused = session
+        .rebind_instruction_owner(InstructionTargetOwner::Session)
+        .unwrap_err();
+    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByMob);
+    assert_eq!(
+        session.to_persisted_bytes().unwrap(),
+        document,
+        "a refused host write changes nothing"
+    );
+
+    // The mob's first record binds the untouched target.
+    let receipt = session
+        .record_instruction_target(record(1, vec![("tone", 1, Some("Be brief."))]))
+        .unwrap();
+    assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+    assert_eq!(
+        session.instruction_target_state().unwrap().unwrap().owner(),
+        &mob_owner()
+    );
 }

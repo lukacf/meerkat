@@ -1375,3 +1375,119 @@ pub(crate) fn operator_instruction_generation_highwater(events: &[MobEvent]) -> 
     }
     generation
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::{
+        InstructionKey, InstructionNamespace, InstructionRecordDisposition,
+        InstructionRecordReceipt, InstructionTargetRecordSlot, Session,
+    };
+
+    fn tone() -> InstructionSlot {
+        InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").unwrap(),
+            key: InstructionKey::new("tone").unwrap(),
+        }
+    }
+
+    /// A receipt whose target generation is above the delivery's is never
+    /// current: an earlier mob with this id recorded it, so the delivery is
+    /// retried with the reason. A receipt at the delivery's own generation
+    /// records it.
+    #[test]
+    fn a_receipt_above_the_delivered_generation_is_retried_not_current() {
+        let identity = AgentIdentity::from("member");
+        let session_id = SessionId::new();
+        let receipt = |target_generation| {
+            Ok(InstructionRecordReceipt {
+                disposition: InstructionRecordDisposition::AlreadyRecorded,
+                target_generation,
+            })
+        };
+        match classify_delivery_result(&identity, &session_id, 2, receipt(5)) {
+            DeliveryResult::Retry(reason) => assert!(reason.contains("generation 5"), "{reason}"),
+            DeliveryResult::Settled(_) => {
+                panic!("a later generation under this mob's id is not current")
+            }
+        }
+        assert!(matches!(
+            classify_delivery_result(&identity, &session_id, 2, receipt(2)),
+            DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Recorded {
+                generation: 2,
+                ..
+            })
+        ));
+    }
+
+    /// A slot the member's session recorded as desired but not yet in effect
+    /// says what it waits for: a model that cannot carry operator
+    /// instructions, one that lowers them only inside the leading System
+    /// prefix, or the next fresh run start.
+    #[test]
+    fn a_recorded_slot_waiting_on_its_lowering_says_why() {
+        let identity = AgentIdentity::from("member");
+        let mut session = Session::new();
+        session
+            .record_instruction_target(InstructionTargetRecord {
+                mob_id: "mob".to_string(),
+                agent_identity: "member".to_string(),
+                generation: 1,
+                slots: vec![InstructionTargetRecordSlot {
+                    slot: tone(),
+                    revision: InstructionRevision::new(1).unwrap(),
+                    body: Some("Be brief.".to_string()),
+                }],
+            })
+            .expect("the snapshot records");
+        let read = SessionInstructionRead {
+            target: session
+                .instruction_target_state()
+                .expect("the target reads"),
+            effective: meerkat_core::effective_operator_instructions(
+                session.id(),
+                session.messages(),
+            )
+            .expect("nothing is in effect yet"),
+            lowering: None,
+        };
+        let record = OperatorInstructionRecordStatus {
+            slot: tone(),
+            revision: InstructionRevision::new(1).unwrap(),
+            effect: meerkat_core::InstructionEffect::Active,
+            target: OperatorInstructionTarget::Mob,
+            content_sha256: None,
+            body_bytes: Some(9),
+        };
+        for (lowering, reason) in [
+            (
+                meerkat_core::InstructionLowering::Unavailable,
+                MemberInstructionPendingReason::LoweringUnavailable,
+            ),
+            (
+                meerkat_core::InstructionLowering::LeadingPrefixOnly,
+                MemberInstructionPendingReason::LeadingPrefixOnlyLowering,
+            ),
+            (
+                meerkat_core::InstructionLowering::MidConversation,
+                MemberInstructionPendingReason::AwaitingRunStart,
+            ),
+        ] {
+            let status = member_slot_status(
+                &record,
+                &identity,
+                "worker",
+                Some(&read),
+                &MemberInstructionDeliveryState::Current,
+                false,
+                lowering,
+            );
+            assert_eq!(
+                status.state,
+                MemberInstructionSlotState::Pending { reason },
+                "{lowering:?}"
+            );
+        }
+    }
+}

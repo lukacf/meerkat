@@ -189,7 +189,32 @@ impl InstructionMob {
         concurrency: Option<usize>,
         storage: MobStorage,
     ) -> Self {
-        let definition = with_unique_mob_id(sample_definition(), label);
+        Self::build(
+            with_unique_mob_id(sample_definition(), label),
+            members,
+            concurrency,
+            storage,
+        )
+        .await
+    }
+
+    /// [`Self::new`] over `definition`, with no member yet.
+    async fn with_definition(label: &str, definition: MobDefinition) -> Self {
+        Self::build(
+            with_unique_mob_id(definition, label),
+            &[],
+            None,
+            MobStorage::in_memory(),
+        )
+        .await
+    }
+
+    async fn build(
+        definition: MobDefinition,
+        members: &[(&str, &str)],
+        concurrency: Option<usize>,
+        storage: MobStorage,
+    ) -> Self {
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let events = storage.events.clone();
@@ -1306,5 +1331,246 @@ async fn an_attached_sessions_own_target_is_taken_over_by_the_mob() {
         active_slots(&mob.service, &session).await,
         vec![("tone".to_string(), 1)],
         "the mob's snapshot replaced the host's target"
+    );
+}
+
+/// A spawn whose activation fails after its membership commit rolls the
+/// member back. An attach of a host's own session is owed the mob's snapshot
+/// from that commit, but its delivery waits for the activation: while the
+/// failed activation's rollback is held, MobMachine prepares nothing for the
+/// member, and after the rollback the host's session keeps its own target,
+/// untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_attach_leaves_the_hosts_session_target_untouched() {
+    let mob =
+        InstructionMob::with_definition("oi-failed-attach", sample_definition_with_auto_wire())
+            .await;
+    let lead = AgentIdentity::from("oi-failed-attach-lead");
+    mob.handle
+        .spawn(ProfileName::from("lead"), lead.clone(), None)
+        .await
+        .expect("spawn the lead");
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    let identity = AgentIdentity::from("oi-failed-attach-w1");
+    let session = mob.host_instructed_session(&identity).await;
+    mob.service
+        .set_comms_behavior(
+            &test_comms_name_for(mob.handle.mob_id(), "lead", lead.as_str()),
+            MockCommsBehavior {
+                fail_send_peer_added: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+    let hold = crate::runtime::actor::retirement_stage_hold::install(&identity, "spawn-rollback");
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone()).with_launch_mode(
+        crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: session.clone(),
+            resume_from_role: None,
+        },
+    );
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let spawn = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.spawn_spec(spec).await }
+    });
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the failed activation's rollback starts");
+
+    // The member is seated, bound and owed while its rollback is held.
+    let preparation = mob
+        .handle
+        .prepare_member_instruction_delivery(&identity)
+        .await
+        .expect("MobMachine answers");
+    assert!(
+        matches!(
+            preparation,
+            crate::runtime::operator_instruction_delivery::MemberInstructionPreparation::NotNow
+        ),
+        "a member whose spawn has not activated is not delivered to"
+    );
+
+    hold.release();
+    let spawned = tokio::time::timeout(STEP, spawn)
+        .await
+        .expect("the spawn answers once its rollback settles")
+        .expect("the spawn task");
+    assert!(spawned.is_err(), "the attach fails its activation");
+    let target = mob
+        .service
+        .committed_instruction_target(&session)
+        .await
+        .expect("the host's session keeps its target");
+    assert_eq!(
+        target.owner(),
+        &InstructionTargetOwner::Session,
+        "the host still owns its session's target: {target:?}"
+    );
+    assert_eq!(
+        active_slots(&mob.service, &session).await,
+        vec![("host".to_string(), 1)],
+        "the host's own instruction is untouched"
+    );
+    assert_eq!(
+        writes_to(&mob.service, &session),
+        0,
+        "the mob recorded nothing in the host's session"
+    );
+}
+
+/// A member's session takes no session-level write of its own host, even
+/// before its mob has written anything: the host is refused `owned_by_mob`,
+/// typed, so the mob's first write can never replace a write the host was
+/// told was recorded. The mob's first write then binds the untouched target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_session_refuses_its_hosts_session_level_writes() {
+    let mob = InstructionMob::new("oi-host-write", &[("oi-host-write-w1", "worker")]).await;
+    let (identity, session) = mob.member(0);
+    let refused = mob
+        .service
+        .persisted_sessions
+        .write()
+        .await
+        .get_mut(&session)
+        .expect("the member's session")
+        .set_session_instruction(SessionInstructionWrite {
+            slot: slot("host"),
+            revision: revision(1),
+            change: SessionInstructionChange::Activate {
+                body: BRIEF.to_string(),
+                content_sha256: None,
+            },
+        })
+        .expect_err("a member's session takes no write of its host");
+    assert_eq!(refused.code(), InstructionSetErrorCode::OwnedByMob);
+    assert!(
+        mob.service
+            .committed_instruction_target(&session)
+            .await
+            .is_none(),
+        "the refused write recorded nothing"
+    );
+
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    current(&mob.handle, &identity).await;
+    assert_eq!(
+        active_slots(&mob.service, &session).await,
+        vec![("tone".to_string(), 1)],
+        "the mob's first write is the session's whole target"
+    );
+}
+
+/// A destroy goes on past every local member whose release does not land (a
+/// store that did not take the write) and answers incomplete naming each of
+/// them, all still seated, so one retried destroy releases them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroy_names_every_member_whose_release_did_not_land() {
+    let mut mob = InstructionMob::new("oi-destroy-all", &[]).await;
+    let (first, first_session) = mob.spawn_host_kept("oi-destroy-all-w1").await;
+    let (second, second_session) = mob.spawn_host_kept("oi-destroy-all-w2").await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    current(&mob.handle, &first).await;
+    current(&mob.handle, &second).await;
+    mob.service.fail_next_instruction_releases(2);
+    let error = mob
+        .handle
+        .destroy()
+        .await
+        .expect_err("a destroy whose releases do not land is incomplete");
+    let report = match error {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("an incomplete destroy, not {other:?}"),
+    };
+    let seated = mob.handle.list_members_including_retiring().await;
+    for identity in [&first, &second] {
+        assert!(
+            report.errors.iter().any(|error| {
+                error.contains(identity.as_str()) && error.contains("operator instruction target")
+            }),
+            "the report names {identity}, whose release did not land: {report:?}"
+        );
+        assert!(
+            seated.iter().any(|entry| &entry.agent_identity == identity),
+            "{identity} stays seated for the retry"
+        );
+    }
+
+    mob.handle
+        .destroy()
+        .await
+        .expect("the retried destroy releases every target and completes");
+    for session in [&first_session, &second_session] {
+        let target = mob
+            .service
+            .committed_instruction_target(session)
+            .await
+            .expect("the host keeps the session and its target");
+        assert_eq!(
+            target.owner(),
+            &InstructionTargetOwner::Unowned,
+            "the retried destroy released the target: {target:?}"
+        );
+    }
+}
+
+/// A member session whose operator-instruction state does not read holds no
+/// target its mob can release: the member's retirement and the mob's destroy
+/// go on as for a session that is gone, instead of failing on it forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_member_session_never_wedges_a_retire_or_a_destroy() {
+    let mut mob = InstructionMob::new("oi-unreadable", &[]).await;
+    let (retiring, _) = mob.spawn_host_kept("oi-unreadable-w1").await;
+    let (destroyed, _) = mob.spawn_host_kept("oi-unreadable-w2").await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    current(&mob.handle, &retiring).await;
+    current(&mob.handle, &destroyed).await;
+
+    mob.service.next_instruction_release_unreadable();
+    mob.handle
+        .retire(retiring.clone())
+        .await
+        .expect("the retirement goes on with nothing to release");
+    mob.service.next_instruction_release_unreadable();
+    mob.handle
+        .destroy()
+        .await
+        .expect("the destroy goes on with nothing to release");
+}
+
+/// A status read reads its page's member sessions in one call, so the session
+/// service resolves each model's lowering once for the page, not once per
+/// member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_page_reads_its_member_sessions_in_one_call() {
+    let mob = InstructionMob::new(
+        "oi-page-read",
+        &[
+            ("oi-page-read-w1", "worker"),
+            ("oi-page-read-w2", "worker"),
+            ("oi-page-read-w3", "lead"),
+        ],
+    )
+    .await;
+    let before = mob.service.member_instruction_reads().len();
+    let page = status(&mob.handle).await;
+    assert_eq!(page.members.len(), 3);
+    assert_eq!(
+        mob.service.member_instruction_reads()[before..],
+        [3],
+        "one read call carries the whole page"
     );
 }

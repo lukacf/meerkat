@@ -5113,6 +5113,13 @@ mod tests {
             "{}",
             listed.message
         );
+        assert!(
+            listed.message.contains(
+                "Core 0.9.7 and 0.9.8 stop restoring every mob of this realm at this journal"
+            ) && listed.message.contains("before a downgrade"),
+            "the finding names the realm-wide refusal and the step before a downgrade: {}",
+            listed.message
+        );
     }
 
     #[tokio::test]

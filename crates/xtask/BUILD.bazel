@@ -1062,6 +1062,7 @@ rust_test(
         "//crates/meerkat-mob:package_runfiles",
         "//crates/meerkat-rpc:package_runfiles",
         "//crates/meerkat-runtime:package_runfiles",
+        "//crates/meerkat:package_runfiles",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",

@@ -938,6 +938,52 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     );
 }
 
+/// The runtime authority bypass audit reads every production Rust source of
+/// the workspace (among them the callers of the session service's mob-only
+/// operator-instruction entry points, which any crate could add), so it runs
+/// on every pull request that changes Rust or a governance path, in the
+/// `ratchets` job, which every pull request runs and the CI gate requires.
+#[test]
+fn ci_runs_the_runtime_authority_bypass_audit_on_every_rust_change() {
+    let ci_yml = workflow_yml_path("ci.yml");
+    let doc = read_workflow(&ci_yml);
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .expect("ci workflow jobs mapping");
+    let ratchets = jobs
+        .get("ratchets")
+        .and_then(serde_json::Value::as_object)
+        .expect("ratchets job");
+    assert!(
+        ratchets.get("if").is_none(),
+        "the ratchets job runs on every pull request"
+    );
+    let steps = ratchets
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("ratchets steps");
+    let audit = steps
+        .iter()
+        .find(|step| {
+            step.get("run").and_then(serde_json::Value::as_str)
+                == Some("make runtime-authority-bypass")
+        })
+        .expect("the ratchets job runs the runtime authority bypass audit");
+    assert_eq!(
+        audit.get("if").and_then(serde_json::Value::as_str),
+        Some(
+            "${{ needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.governance_gates == 'true' }}"
+        ),
+        "the audit runs on every Rust change and on every governance change"
+    );
+    let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
+    assert!(
+        ci.contains("require_success \"Generation ratchets\""),
+        "the CI gate requires the ratchets job"
+    );
+}
+
 /// The typed governance gates run in CI on the agent gate's governance paths
 /// (machine authority or a dogma document), where the pre-push hook's
 /// changed-path ratchets ran them, in a job of their own, and the CI gate
@@ -961,7 +1007,7 @@ fn ci_runs_the_typed_governance_gates_on_governance_changes() {
     );
     let job_text = job_step_text(job);
     assert!(
-        job_text.contains("make rmat-audit seam-inventory runtime-authority-bypass"),
+        job_text.contains("make rmat-audit seam-inventory"),
         "governance-gates must run the audit gates; job:\n{job_text}"
     );
     // The machine-authority docs gate runs in a job of its own, on the same

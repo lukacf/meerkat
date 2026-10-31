@@ -2088,6 +2088,15 @@ impl PersistedSessionReadRefusal {
     }
 }
 
+/// How the mock answers one mob release of a member session's target.
+#[derive(Clone, Copy, Debug)]
+enum InstructionReleaseFault {
+    /// A store that did not take the write.
+    Failed,
+    /// A session whose operator-instruction state does not read.
+    Unreadable,
+}
+
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
     /// Every mob operator-instruction delivery this mock answered, in order:
@@ -2100,9 +2109,12 @@ struct MockSessionService {
     /// When set, every delivery takes a permit here before it writes: a row
     /// holds deliveries in flight and lets them through.
     instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
-    /// When set, the next mob release of a member session's target fails
-    /// (a store that did not take the write), and the release writes nothing.
-    fail_next_instruction_release: AtomicBool,
+    /// Faults the next mob releases of member session targets answer, one
+    /// each in order; a faulted release writes nothing.
+    instruction_release_faults: std::sync::Mutex<VecDeque<InstructionReleaseFault>>,
+    /// How many member sessions each operator-instruction read asked for,
+    /// one entry per read call.
+    member_instruction_reads: std::sync::Mutex<Vec<usize>>,
     /// The spawner restrictions handed to the build of each session this
     /// mock created, as a session owner records them.
     tool_restrictions: std::sync::Mutex<
@@ -2467,8 +2479,65 @@ impl MockSessionService {
 
     /// Fail the next mob release of a member session's target.
     fn fail_next_instruction_release(&self) {
-        self.fail_next_instruction_release
-            .store(true, Ordering::SeqCst);
+        self.fail_next_instruction_releases(1);
+    }
+
+    /// Fail the next `count` mob releases of member session targets (a store
+    /// that did not take the write).
+    fn fail_next_instruction_releases(&self, count: usize) {
+        let mut faults = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for _ in 0..count {
+            faults.push_back(InstructionReleaseFault::Failed);
+        }
+    }
+
+    /// Answer the next mob release of a member session's target as a session
+    /// whose operator-instruction state does not read.
+    fn next_instruction_release_unreadable(&self) {
+        self.instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(InstructionReleaseFault::Unreadable);
+    }
+
+    /// How many member sessions each operator-instruction read asked for.
+    fn member_instruction_reads(&self) -> Vec<usize> {
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One member session's committed operator-instruction state, as the
+    /// persistent owner reads it, never materializing the session.
+    async fn read_one_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering: None,
+        })
     }
 
     /// Hold every later delivery until the returned gate lets it through.
@@ -2510,7 +2579,8 @@ impl MockSessionService {
             instruction_records_in_flight: AtomicU64::new(0),
             instruction_records_max_in_flight: AtomicU64::new(0),
             instruction_record_gate: std::sync::Mutex::new(None),
-            fail_next_instruction_release: AtomicBool::new(false),
+            instruction_release_faults: std::sync::Mutex::new(VecDeque::new()),
+            member_instruction_reads: std::sync::Mutex::new(Vec::new()),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             tool_restrictions: std::sync::Mutex::new(HashMap::new()),
@@ -5736,16 +5806,30 @@ impl MobSessionService for MockSessionService {
         meerkat_core::InstructionReleaseDisposition,
         meerkat_core::service::SessionInstructionError,
     > {
-        if self
-            .fail_next_instruction_release
-            .swap(false, Ordering::SeqCst)
-        {
-            return Err(
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "fault-injected operator instruction release failure".to_string(),
-                ))
-                .into(),
-            );
+        let fault = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        match fault {
+            Some(InstructionReleaseFault::Failed) => {
+                return Err(
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "fault-injected operator instruction release failure".to_string(),
+                    ))
+                    .into(),
+                );
+            }
+            Some(InstructionReleaseFault::Unreadable) => {
+                return Err(meerkat_core::service::SessionInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::Malformed(
+                        meerkat_core::InstructionStateError::MalformedState(
+                            "fault-injected unreadable operator instruction state".to_string(),
+                        ),
+                    ),
+                ));
+            }
+            None => {}
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         let session_id = release.session_id().clone();
@@ -5778,24 +5862,11 @@ impl MobSessionService for MockSessionService {
         meerkat_core::service::SessionInstructionRead,
         meerkat_core::service::SessionInstructionError,
     > {
-        let session = self
-            .persisted_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.clone(),
-            })?;
-        let target = session.instruction_target_state()?;
-        let effective =
-            meerkat_core::effective_operator_instructions(session.id(), session.messages())
-                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
-        Ok(meerkat_core::service::SessionInstructionRead {
-            target,
-            effective,
-            lowering: None,
-        })
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(1);
+        self.read_one_member_instructions(session_id).await
     }
 
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {

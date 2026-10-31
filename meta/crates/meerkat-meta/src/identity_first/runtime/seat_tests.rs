@@ -2549,6 +2549,69 @@ async fn a_respawn_of_a_built_member_builds_it_once() {
     );
 }
 
+/// A respawn of a built member tells the agent customizer `after_create`
+/// once, from the lifecycle projection, with the session the respawn keeps:
+/// the archived session its seat step revives the identity on, never a
+/// fresh one. Counted from the projection's settle before the respawn, the
+/// customizer hears of one seat only, the respawn's. The build half of the
+/// same respawn is `a_respawn_of_a_built_member_builds_it_once`.
+#[tokio::test]
+async fn a_respawn_of_a_built_member_tells_after_create_once_of_the_session_it_keeps() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        archived: vec![session.clone()],
+        resumes_onto_session: true,
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    // As the identity context that serves a runtime binds it.
+    runtime.bind_lifecycle_projection(None);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    runtime
+        .materialize(&alice)
+        .await
+        .expect("the member is built");
+    runtime.settle_lifecycle_projection().await;
+    let told_before = customizer.told().len();
+
+    let scope = runtime
+        .respawn(&alice)
+        .await
+        .expect("the respawn succeeds")
+        .expect("a session-backed member has a delivery scope");
+    runtime.settle_lifecycle_projection().await;
+
+    assert_eq!(
+        scope.session_id(),
+        &session,
+        "the respawn keeps the session"
+    );
+    assert_eq!(
+        scope.generation(),
+        meerkat_mob::Generation::new(1),
+        "at the next generation"
+    );
+    assert_eq!(
+        core.resumes.load(Ordering::SeqCst),
+        1,
+        "the respawn's seat revives the identity once on its archived session"
+    );
+    let told = customizer.told();
+    assert_eq!(
+        told[told_before..],
+        [(alice, session)],
+        "the respawn tells after_create once, of the session it keeps: {told:?}"
+    );
+}
+
 /// A delivery to an identity whose built member Core retired: the seat step
 /// before its admission revives the identity once on its archived session,
 /// and the revival stays live for the delivery Core makes right after it.

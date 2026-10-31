@@ -73,8 +73,10 @@ const RESPAWN_BUILDS_TEST: &str = "a_respawn_of_a_built_member_customizes_and_bu
 /// gateway waits up to 130 seconds for a callback, so a send that waits for
 /// that callback's own identity lock answers only after this.
 const SELF_SEND_WINDOW: Duration = Duration::from_mins(1);
-/// What the runtime logs when a customizer's `after_create` fails.
-const AFTER_CREATE_WARNING: &str = "the agent customizer's after_create failed";
+/// What the runtime logs once per refused `after_create`: the start of the
+/// error event `lifecycle_effect_failed` it reports for the call, as the log
+/// line of every error event renders it (`meta runtime error event: {event}`).
+const AFTER_CREATE_FAILED: &str = "lifecycle_effect_failed: the after_create of";
 
 fn append(record: &Path, line: &str) {
     let mut file = std::fs::OpenOptions::new()
@@ -1085,8 +1087,8 @@ fn each_customized_build_tells_after_create_once() {
 }
 
 /// `after_create` is best-effort: when the SDK customizer refuses it, the
-/// runtime logs a warning and the build stands, at the roster bootstrap and at
-/// a respawn alike.
+/// runtime reports `lifecycle_effect_failed`, logged once per refused call,
+/// and the build stands, at the roster bootstrap and at a respawn alike.
 #[test]
 fn a_failing_after_create_leaves_the_build_standing() {
     serve_if_host_process();
@@ -1113,9 +1115,9 @@ fn a_failing_after_create_leaves_the_build_standing() {
         run.lines
     );
     assert_eq!(
-        run.stderr.matches(AFTER_CREATE_WARNING).count(),
+        run.stderr.matches(AFTER_CREATE_FAILED).count(),
         2,
-        "one warning per refused after_create"
+        "one lifecycle_effect_failed per refused after_create"
     );
 }
 

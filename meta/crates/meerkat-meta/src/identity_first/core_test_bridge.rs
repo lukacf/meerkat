@@ -92,6 +92,30 @@ pub(crate) fn rotate_live(
     Ok(agent_runtime_id)
 }
 
+/// A host's legacy respawn of `identity`'s live member onto `session` at
+/// `generation` under the role `profile`, as Core journals it
+/// ([`CoreTestMembers::respawn`]): a plain retirement, then a seat that names
+/// the incarnation it retired. Its runtime id is `rt:{identity}:{generation}`.
+pub(crate) fn respawn_live(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+    profile: &meerkat_mob::ProfileName,
+    generation: u64,
+    session: Option<SessionId>,
+) -> Result<AgentRuntimeId, BridgeError> {
+    let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
+        .map_err(|error| BridgeError::Mob(error.to_string()))?;
+    core.respawn(
+        identity,
+        &MemberRuntimeBinding {
+            agent_runtime_id: agent_runtime_id.clone(),
+            session_id: session,
+        },
+        profile,
+    );
+    Ok(agent_runtime_id)
+}
+
 /// Register `spec` with Core holding its member live at `generation` on
 /// `session`: the shape a materialized identity has at rest.
 pub(crate) async fn register_live(

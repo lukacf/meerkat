@@ -20,7 +20,7 @@ use crate::identity_first::bridge::{
     ResumeSessionOutcome, SessionBridge,
 };
 use crate::identity_first::core_test_bridge::{
-    CoreReadsBridge, bind_live, register_live, rotate_live,
+    CoreReadsBridge, bind_live, register_live, respawn_live, rotate_live,
 };
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
@@ -5583,6 +5583,49 @@ async fn a_reset_before_the_projection_reads_an_unlisting_keeps_the_unlisting_s_
             .is_empty(),
         "both records are consumed"
     );
+}
+
+/// A host's legacy respawn of an identity's member, which Core journals as a
+/// plain retirement and then a seat that names the incarnation it retired,
+/// owes what a rotation no Meta verb asked for owes, even when Core's member
+/// history keeps no binding of that incarnation any more (its session was
+/// named again since, say): the retirement Core journaled before the seat
+/// names its session and role, and the hook hears of it as `rotated`, with
+/// that session.
+///
+/// RED before the projection read a respawn's retired incarnation from
+/// Core's journal when the history keeps none: the miss read as a plain
+/// seat, and the hook heard nothing.
+#[tokio::test]
+async fn a_respawn_whose_retired_incarnation_the_history_no_longer_keeps_still_owes_its_effects() {
+    let alice = identity("personal:alice");
+    let first = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, first.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    // The projection starts at the journal's head, after alice's seat.
+    runtime.settle_lifecycle_projection().await;
+
+    respawn_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the host's legacy respawn");
+    core.core.forget_in_history(&alice, 0);
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "rotated", "{calls:?}");
+    assert_eq!(calls[0].session_id.as_ref(), Some(&first), "{calls:?}");
 }
 
 /// Source guard: the lifecycle projection and the verbs decide no

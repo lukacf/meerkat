@@ -9,9 +9,12 @@
 //! ([`CoreTestMembers::rotate`]) the retirement and the seat that name each
 //! other, and each started retirement ([`CoreTestMembers::start_retirement`])
 //! its start. [`CoreTestMembers::mark_host_made`] makes an identity's member
-//! one a host made directly on the mob under the identity's member id, and
+//! one a host made directly on the mob under the identity's member id,
 //! [`CoreTestMembers::read_retired_in_history`] has Core's member history
-//! disagree with Core's standing of a member.
+//! disagree with Core's standing of a member, [`CoreTestMembers::respawn`]
+//! journals a host's legacy respawn, and
+//! [`CoreTestMembers::forget_in_history`] has the history keep no binding of
+//! an incarnation the journal still names.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +60,9 @@ pub(crate) struct CoreTestMembers {
     /// The identities whose member Core's member history reads as retired
     /// ([`Self::read_retired_in_history`]).
     retired_in_history: Mutex<BTreeSet<AgentIdentity>>,
+    /// The incarnations Core's member history keeps no binding of
+    /// ([`Self::forget_in_history`]), by identity and generation.
+    forgotten_in_history: Mutex<BTreeSet<(AgentIdentity, u64)>>,
 }
 
 impl CoreTestMembers {
@@ -188,6 +194,64 @@ impl CoreTestMembers {
         );
     }
 
+    /// A host's legacy respawn of `identity`'s live member onto `binding`
+    /// under `profile`, as Core journals it: two steps. The first retires the
+    /// live incarnation, a plain retirement (no rotation, no cause); the
+    /// second seats the next one, and that seat names the incarnation the
+    /// first retired (`SeatRotation::RespawnAfter`). Nothing happens when
+    /// Core holds no live member of the identity. The generation is the
+    /// runtime id's `rt:{identity}:{generation}` suffix.
+    pub(crate) fn respawn(
+        &self,
+        identity: &AgentIdentity,
+        binding: &MemberRuntimeBinding,
+        profile: &meerkat_mob::ProfileName,
+    ) {
+        let generation = generation_of(&binding.agent_runtime_id);
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(live) = members.get(identity).filter(|member| member.live).cloned() else {
+            return;
+        };
+        self.journal_fact(
+            MemberLifecycleFact::retired(
+                member_id(identity),
+                live.generation,
+                live.profile.clone(),
+            )
+            .with_session(live.session_id.clone()),
+        );
+        self.ended
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((
+                identity.clone(),
+                TestMember {
+                    live: false,
+                    retiring: false,
+                    ..live.clone()
+                },
+            ));
+        self.journal_fact(
+            MemberLifecycleFact::seated(member_id(identity), generation, profile.clone())
+                .with_session(binding.session_id.clone())
+                .with_seat_rotation(Some(meerkat_mob::SeatRotation::respawn_after(
+                    meerkat_mob::Generation::new(live.generation),
+                ))),
+        );
+        members.insert(
+            identity.clone(),
+            TestMember {
+                runtime_id: binding.agent_runtime_id.clone(),
+                session_id: binding.session_id.clone(),
+                generation,
+                fence: live.fence + 1,
+                profile: profile.clone(),
+                live: true,
+                retiring: false,
+            },
+        );
+    }
+
     /// Core started the retirement of the live incarnation `runtime_id`,
     /// and has not ended it: its start is journaled, carrying out a rotation
     /// to `rotation` when it names one, and the member reads retiring.
@@ -251,6 +315,24 @@ impl CoreTestMembers {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(identity.clone());
+    }
+
+    /// From now on Core's member history keeps no binding of `identity`'s
+    /// incarnation `generation`, as when a later binding named its session
+    /// since: Core's journal still holds its facts.
+    pub(crate) fn forget_in_history(&self, identity: &AgentIdentity, generation: u64) {
+        self.forgotten_in_history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((identity.clone(), generation));
+    }
+
+    fn kept_in_history(&self, identity: &AgentIdentity, member: &TestMember) -> bool {
+        !self
+            .forgotten_in_history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(identity.clone(), member.generation))
     }
 
     fn reads_retired_in_history(&self, identity: &AgentIdentity) -> bool {
@@ -395,6 +477,7 @@ impl CoreTestMembers {
         let members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         let bindings = members
             .iter()
+            .filter(|(identity, member)| self.kept_in_history(identity, member))
             .map(|(identity, member)| self.history_binding(identity, member))
             .collect::<Vec<_>>();
         // Ended bindings first, so a session a live binding still names
@@ -404,6 +487,7 @@ impl CoreTestMembers {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
+            .filter(|(identity, member)| self.kept_in_history(identity, member))
             .map(|(identity, member)| self.history_binding(identity, member))
             .chain(bindings.iter().cloned())
             .collect::<Vec<_>>();

@@ -400,15 +400,28 @@ elif name in ("attestation-main-only", "attestation-any-release-branch", "attest
         f"             {rules[name]} and\n"
         "             ((.schema_version == 1",
     )
-elif name in ("evidence-main-only", "evidence-any-release-branch", "evidence-run-any-branch", "evidence-branch-reordered"):
+elif name in (
+    "evidence-main-only",
+    "evidence-any-release-branch",
+    "evidence-run-any-branch",
+    "evidence-pick-any-branch",
+    "evidence-branch-reordered",
+):
     # The readiness evidence's ref and run-branch rules: the
     # pre-maintenance-release rule (main only), any release branch, a run
-    # branch left unchecked, and an equivalent spelling.
+    # branch checked neither where the artifact is picked nor where its run
+    # is read, a pick of the tree's newest artifact from any branch, and an
+    # equivalent spelling.
     attested = (
         '             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and\n'
         "             .result == \"success\"'"
     )
     run_branch = '             (.head_branch == "main" or .head_branch == $release_branch) and\n'
+    pick_branch = (
+        "            '[.artifacts[] | select(.expired == false and\n"
+        '               (.workflow_run.head_branch == "main" or .workflow_run.head_branch == $release_branch))]\n'
+    )
+    pick_any = "            '[.artifacts[] | select(.expired == false)]\n"
     if name == "evidence-main-only":
         replace_once(attested, '             .ref == "refs/heads/main" and\n             .result == "success"\'')
         replace_once(run_branch, '             .head_branch == "main" and\n')
@@ -419,7 +432,10 @@ elif name in ("evidence-main-only", "evidence-any-release-branch", "evidence-run
             "             .result == \"success\"'",
         )
     elif name == "evidence-run-any-branch":
+        replace_once(pick_branch, pick_any)
         replace_once(run_branch, "")
+    elif name == "evidence-pick-any-branch":
+        replace_once(pick_branch, pick_any)
     else:
         replace_once(run_branch, '             (.head_branch == $release_branch or .head_branch == "main") and\n')
 elif name == "prebuild-publishes":
@@ -1136,6 +1152,9 @@ expect_fail_named evidence-any-release-branch "${TEST_ROOT}/evidence-any-release
 mutate evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml"
 expect_fail_named evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml" \
   "accepts the readiness evidence of a main-push attestation whose run ran on release/9.9.9" semver-evidence
+mutate evidence-pick-any-branch "${TEST_ROOT}/evidence-pick-any-branch.yml"
+expect_fail_named evidence-pick-any-branch "${TEST_ROOT}/evidence-pick-any-branch.yml" \
+  "refuses the readiness evidence of a push to main once a push of the same tree to release/9.9.9 (another version's release branch) uploaded newer evidence" semver-evidence
 
 mutate prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml"
 expect_fail_named prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml" \

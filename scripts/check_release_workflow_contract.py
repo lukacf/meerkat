@@ -1225,15 +1225,20 @@ def _check_attestation_refs(ci_block: list[str]) -> list[str]:
     return violations
 
 
-def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]:
+def _run_evidence_step(
+    step: Step, evidence: dict, run: dict, newer: tuple[dict, dict] | None = None
+) -> tuple[int, str]:
     """Run the semver gate's evidence step on one readiness artifact.
 
     The release tree is a scratch checkout of BINDING_VERSION. A stub `gh`
     answers the step's API reads as GitHub would: the unexpired artifact
     named after that tree, its zip (an attestation.json that `evidence`
     overrides, and the report it hashes) and the run that uploaded it, which
-    `run` overrides. `python3` is this interpreter, which has tomllib.
-    Returns the step's exit and log.
+    `run` overrides; the artifact listing names that run and its branch.
+    `newer`, an (evidence, run) pair, adds a second artifact of the same name
+    uploaded later, as a push of the same tree to another branch uploads it.
+    `python3` is this interpreter, which has tomllib. Returns the step's exit
+    and log.
     """
     env = {key: render_strict(value, TAG_PUSH) for key, value in step.env.items()}
     script = render_strict(step.raw_run, TAG_PUSH)
@@ -1265,50 +1270,62 @@ def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]
         git("add", "Cargo.toml")
         git("commit", "-q", "-m", "release")
         tree = git("rev-parse", "HEAD^{tree}")
+        commit = git("rev-parse", "HEAD")
 
         api = Path(scratch, "api")
         api.mkdir()
         report = b"semver report\n"
-        document = {
-            "schema_version": 1,
-            "repository": "example/meerkat",
-            "tree_sha": tree,
-            "commit_sha": git("rev-parse", "HEAD"),
-            "version": BINDING_VERSION,
-            "workflow": "Release semver readiness",
-            "workflow_run_id": "21",
-            "workflow_run_attempt": "1",
-            "event": "push",
-            "ref": "refs/heads/main",
-            "result": "success",
-            "report_sha256": hashlib.sha256(report).hexdigest(),
-            **evidence,
-        }
-        with zipfile.ZipFile(api / "evidence.zip", "w") as archive:
-            archive.writestr("attestation.json", json.dumps(document))
-            archive.writestr("report.txt", report)
-        listing = {
-            "total_count": 1,
-            "artifacts": [
+        uploads = [("2026-01-01T00:00:00Z", evidence, run)]
+        if newer is not None:
+            uploads.append(("2026-01-02T00:00:00Z", *newer))
+        artifacts: list[dict] = []
+        routes: list[str] = []
+        for index, (created_at, attested, producing) in enumerate(uploads):
+            artifact_id, run_id = 7 + index, 21 + index
+            document = {
+                "schema_version": 1,
+                "repository": "example/meerkat",
+                "tree_sha": tree,
+                "commit_sha": commit,
+                "version": BINDING_VERSION,
+                "workflow": "Release semver readiness",
+                "workflow_run_id": str(run_id),
+                "workflow_run_attempt": "1",
+                "event": "push",
+                "ref": "refs/heads/main",
+                "result": "success",
+                "report_sha256": hashlib.sha256(report).hexdigest(),
+                **attested,
+            }
+            with zipfile.ZipFile(api / f"evidence-{artifact_id}.zip", "w") as archive:
+                archive.writestr("attestation.json", json.dumps(document))
+                archive.writestr("report.txt", report)
+            producer = {
+                "id": run_id,
+                "name": "Release semver readiness",
+                "event": "push",
+                "head_branch": "main",
+                "conclusion": "success",
+                **producing,
+            }
+            Path(api, f"run-{run_id}.json").write_text(json.dumps(producer), encoding="utf-8")
+            # Newest first, as GitHub lists them.
+            artifacts.insert(
+                0,
                 {
-                    "id": 7,
+                    "id": artifact_id,
                     "name": f"{EVIDENCE_ARTIFACT_PREFIX}{tree}",
                     "expired": False,
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "workflow_run": {"id": 21},
-                }
-            ],
-        }
+                    "created_at": created_at,
+                    "workflow_run": {"id": run_id, "head_branch": producer["head_branch"]},
+                },
+            )
+            routes.append(
+                f'  "api "*"/actions/artifacts/{artifact_id}/zip") cat "$api/evidence-{artifact_id}.zip" ;;\n'
+                f'  "api "*"/actions/runs/{run_id}") cat "$api/run-{run_id}.json" ;;\n'
+            )
+        listing = {"total_count": len(artifacts), "artifacts": artifacts}
         Path(api, "artifacts.json").write_text(json.dumps(listing), encoding="utf-8")
-        producer = {
-            "id": 21,
-            "name": "Release semver readiness",
-            "event": "push",
-            "head_branch": "main",
-            "conclusion": "success",
-            **run,
-        }
-        Path(api, "run.json").write_text(json.dumps(producer), encoding="utf-8")
 
         tools = Path(scratch, "bin")
         tools.mkdir()
@@ -1318,9 +1335,8 @@ def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]
             f"api={shlex.quote(str(api))}\n"
             'case "$1 $2" in\n'
             f'  "api "*"/actions/artifacts?name={EVIDENCE_ARTIFACT_PREFIX}{tree}"*) cat "$api/artifacts.json" ;;\n'
-            '  "api "*"/actions/artifacts/7/zip") cat "$api/evidence.zip" ;;\n'
-            '  "api "*"/actions/runs/21") cat "$api/run.json" ;;\n'
-            '  *) echo "unexpected gh call: $*" >&2; exit 2 ;;\n'
+            + "".join(routes)
+            + '  *) echo "unexpected gh call: $*" >&2; exit 2 ;;\n'
             "esac\n",
             encoding="utf-8",
         )
@@ -1352,7 +1368,9 @@ def _check_evidence_refs(step: Step) -> list[str]:
 
     Its attestation's ref and its run's branch must each be main or the
     release branch of the tag's version (a maintenance release); evidence
-    from another branch, a pull request or a dispatch never qualifies.
+    from another branch, a pull request or a dispatch never qualifies. Every
+    such push names its evidence after the tree, so newer evidence of the
+    same tree from another branch must not hide the trusted push's.
     """
     violations: list[str] = []
     for label, ref in TRUSTED_PUSHES:
@@ -1360,6 +1378,18 @@ def _check_evidence_refs(step: Step) -> list[str]:
         if status != 0:
             violations.append(
                 f"step `{step.name}` refuses the readiness evidence of {label}: "
+                + " | ".join(line for line in log.splitlines() if line.strip())
+            )
+        status, log = _run_evidence_step(
+            step,
+            {"ref": ref},
+            {"head_branch": github_ref_name(ref)},
+            newer=({"ref": "refs/heads/release/9.9.9"}, {"head_branch": "release/9.9.9"}),
+        )
+        if status != 0:
+            violations.append(
+                f"step `{step.name}` refuses the readiness evidence of {label} once a push of the same "
+                "tree to release/9.9.9 (another version's release branch) uploaded newer evidence: "
                 + " | ".join(line for line in log.splitlines() if line.strip())
             )
     refused = [

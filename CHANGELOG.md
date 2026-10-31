@@ -676,17 +676,6 @@ them.
 
 ### Changed
 
-- `meerkat-mob`, `meerkat-machine-schema`: a mob reset (`MobHandle::reset`)
-  ends every identity's retained incarnation history in MobMachine, as a
-  restart after the reset does (the resume replays only the events after
-  the last reset): `ResetToRunning` folds each identity's retained
-  generation into its generation high-water and drops the retained
-  generation, fence, profile and runtime mode. Before, the running mob kept
-  them until a restart, so the same history gave two machine states: a
-  fresh life after a reset (`rotate_member` of an identity no member holds)
-  named a pre-reset incarnation (`SeatRotation::FreshLifeAfter`) only until
-  a restart. Minting is unchanged: an identity's next incarnation still
-  mints above every generation it used.
 - `meerkat-mob`: `MobHandle::rotate_member` no longer needs a host record to
   survive a crash: the rotation is durable from its start and a restarted mob
   finishes it itself. Re-issued while the rotation stands, the call re-drives
@@ -735,6 +724,17 @@ them.
   roster, is the new pure admission input `AdmitReset`: every guard of
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
+- `meerkat-mob`, `meerkat-machine-schema`: a mob reset (`MobHandle::reset`)
+  ends every identity's retained incarnation history in MobMachine, as a
+  restart after the reset does (the resume replays only the events after
+  the last reset): `ResetToRunning` folds each identity's retained
+  generation into its generation high-water and drops the retained
+  generation, fence, profile and runtime mode. Before, the running mob kept
+  them until a restart, so the same history gave two machine states: a
+  fresh life after a reset (`rotate_member` of an identity no member holds)
+  named a pre-reset incarnation (`SeatRotation::FreshLifeAfter`) only until
+  a restart. Minting is unchanged: an identity's next incarnation still
+  mints above every generation it used.
 - `meerkat-mob`: a mob storage on the host store SPI reads its identity
   intents one entry at a time. A created entry's row is kept as one, and an
   entry whose row this build cannot decode is kept as stored, read as

@@ -4351,6 +4351,125 @@ impl MemberLifecycleJournalPage {
     }
 }
 
+/// Meta's [`MemberLifecycleFact`] of one fact of Core's member lifecycle
+/// journal, with everything the journal says of it. Every kind Core
+/// journals is forwarded, and the lifecycle projection decides which owe
+/// side effects. A kind this build does not know (Core's journal may grow
+/// one) is not forwarded: no side effect can be owed for a fact this build
+/// cannot read.
+fn member_lifecycle_fact(event: meerkat_mob::MemberLifecycleEvent) -> Option<MemberLifecycleFact> {
+    Some(match event {
+        meerkat_mob::MemberLifecycleEvent::Spawned {
+            agent_identity,
+            generation,
+            role,
+            identity_entry,
+            history_unavailable,
+            session_id,
+            rotation,
+            ..
+        } => MemberLifecycleFact::Seated {
+            member: agent_identity,
+            generation: generation.get(),
+            role,
+            session: session_id,
+            identity_entry,
+            history_unavailable,
+            rotation,
+        },
+        meerkat_mob::MemberLifecycleEvent::Retired {
+            agent_identity,
+            generation,
+            role,
+            session_id,
+            identity_entry,
+            cause,
+            rotation,
+            ..
+        } => MemberLifecycleFact::Retired {
+            member: agent_identity,
+            generation: generation.get(),
+            role,
+            session: session_id,
+            identity_entry,
+            cause,
+            rotation,
+        },
+        meerkat_mob::MemberLifecycleEvent::RetirementStarted {
+            agent_identity,
+            generation,
+            rotation,
+            cause,
+            ..
+        } => MemberLifecycleFact::retirement_started(
+            agent_identity,
+            generation.get(),
+            rotation,
+            cause,
+        ),
+        meerkat_mob::MemberLifecycleEvent::EntryAdopted {
+            agent_identity,
+            generation,
+            origin,
+            ..
+        } => MemberLifecycleFact::entry_adopted(agent_identity, generation.get(), origin),
+        meerkat_mob::MemberLifecycleEvent::Reset {
+            agent_identity,
+            previous_generation,
+            new_generation,
+            ..
+        } => MemberLifecycleFact::legacy_reset(
+            agent_identity,
+            previous_generation.get(),
+            new_generation.get(),
+        ),
+        meerkat_mob::MemberLifecycleEvent::MobReset { .. } => MemberLifecycleFact::mob_reset(),
+        other => {
+            tracing::debug!(
+                ?other,
+                "a member lifecycle fact this build cannot read is not forwarded"
+            );
+            return None;
+        }
+    })
+}
+
+/// Meta's [`MemberStanding`] of Core's read of one identity
+/// (`MobHandle::identity_entry`): where the member that holds the name
+/// stands, whether the identity is an identity entry or not. A standing this
+/// build cannot read is answered as an error, never as one it can.
+fn member_standing_of(
+    read: &meerkat_mob::IdentityEntryRead,
+) -> Result<MemberStanding, BridgeError> {
+    let standing = match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => Some(&view.standing),
+        meerkat_mob::IdentityEntryRead::NotAnEntry { worker } => {
+            worker.as_ref().map(|worker| &worker.standing)
+        }
+        meerkat_mob::IdentityEntryRead::Unreadable { member } => member.as_ref(),
+        meerkat_mob::IdentityEntryRead::Removed => None,
+        other => {
+            return Err(BridgeError::Mob(format!(
+                "Core answered an identity read this build cannot read: {other:?}"
+            )));
+        }
+    };
+    Ok(match standing {
+        None | Some(meerkat_mob::EntryStanding::Unseated(_)) => MemberStanding::Unseated,
+        Some(meerkat_mob::EntryStanding::Seated(member)) => MemberStanding::Seated {
+            generation: member.generation.get(),
+        },
+        Some(meerkat_mob::EntryStanding::Retiring(member)) => MemberStanding::Retiring {
+            generation: member.generation.get(),
+        },
+        Some(other) => {
+            return Err(BridgeError::Mob(format!(
+                "Core answered a member standing this build cannot read: {other:?}"
+            )));
+        }
+    })
+}
+
 /// Bridge between the identity-first control plane and the Meerkat session
 /// pipeline. Each method maps an identity-layer operation to its concrete
 /// mob-level counterpart.
@@ -8708,31 +8827,38 @@ impl SessionBridge for MobSessionBridge {
             .records
             .into_iter()
             .filter_map(|record| {
-                // Adoptions, retirement starts and legacy member resets owe
-                // no side effect: the projection reads seats, retirements
-                // and mob resets only.
-                let fact = match record.event {
-                    meerkat_mob::MemberLifecycleEvent::Spawned {
-                        agent_identity,
-                        generation,
-                        role,
-                        ..
-                    } => MemberLifecycleFact::seated(agent_identity, generation.get(), role),
-                    meerkat_mob::MemberLifecycleEvent::Retired {
-                        agent_identity,
-                        generation,
-                        role,
-                        ..
-                    } => MemberLifecycleFact::retired(agent_identity, generation.get(), role),
-                    meerkat_mob::MemberLifecycleEvent::MobReset { .. } => {
-                        MemberLifecycleFact::mob_reset()
-                    }
-                    _ => return None,
-                };
-                Some(MemberLifecycleFactRecord::new(record.cursor.get(), fact))
+                let cursor = record.cursor.get();
+                member_lifecycle_fact(record.event)
+                    .map(|fact| MemberLifecycleFactRecord::new(cursor, fact))
             })
             .collect();
         Ok(MemberLifecycleJournalPage::new(records, page.next.get()))
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        match self
+            .handle
+            .identity_entry(&member_id_for_identity(identity))
+        {
+            Ok(read) => member_standing_of(&read),
+            // The handle's principal may not list the mob's members: this
+            // bridge cannot read Core's standing, now or later.
+            Err(meerkat_mob::MobError::ScopeDenied(denial)) => {
+                tracing::warn!(
+                    ?denial,
+                    "the session bridge's mob handle may not read Core's standing of a member"
+                );
+                Err(BridgeError::Unsupported {
+                    operation: "member_standing",
+                })
+            }
+            Err(error) => Err(BridgeError::Mob(format!(
+                "reading Core's standing of {identity}: {error}"
+            ))),
+        }
     }
 
     async fn identity_management(

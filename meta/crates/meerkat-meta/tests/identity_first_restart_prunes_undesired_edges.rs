@@ -1295,6 +1295,13 @@ mod no_registration_reload {
             self.inner.member_lifecycle_journal_page(after, limit).await
         }
 
+        async fn member_standing(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<MemberStanding, BridgeError> {
+            self.inner.member_standing(identity).await
+        }
+
         async fn identity_management(
             &self,
             identity: &AgentIdentity,

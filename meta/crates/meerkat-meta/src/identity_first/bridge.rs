@@ -4033,39 +4033,105 @@ impl MemberLifecycleJournalHead {
 }
 
 /// One member lifecycle fact of Core's journal, as Meta's lifecycle
-/// projection reads it ([`SessionBridge::member_lifecycle_journal_page`]).
-/// Each variant may grow fields as Core's journal says more of its step;
-/// build one with its constructor.
+/// projection reads it ([`SessionBridge::member_lifecycle_journal_page`]):
+/// a fact MobMachine decided in the step that journaled it
+/// (`meerkat_mob::MemberLifecycleEvent`). Each variant may grow fields as
+/// Core's journal says more of its step; build one with its constructor and
+/// the `with_` builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberLifecycleFact {
-    /// Core seated an incarnation of `member`: a spawn, a dormant seat, a
-    /// rotation's next incarnation, or a resume onto a session.
+    /// Core seated the incarnation `generation` of `member` under `role`: a
+    /// spawn, a dormant seat, a rotation's next incarnation, or a resume
+    /// onto a session. `session` is the session it was seated on (none for
+    /// a member bound to no session of its own), `identity_entry` the
+    /// identity entry it is the member of, `history_unavailable` set when it
+    /// was seated on a fresh session because its archived session is gone
+    /// from the store, and `rotation` what seated it when a rotation did: a
+    /// rotation's terminal step, which retired the identity's previous
+    /// incarnation in the same step, or a fresh life of an identity no member
+    /// held, which names the incarnation it follows.
     #[non_exhaustive]
     Seated {
         member: meerkat_mob::AgentIdentity,
         generation: u64,
+        role: meerkat_mob::ProfileName,
+        session: Option<meerkat_core::types::SessionId>,
+        identity_entry: Option<meerkat_mob::IdentityEntryOrigin>,
+        history_unavailable: Option<meerkat_mob::HistoryUnavailable>,
+        rotation: Option<meerkat_mob::SeatRotation>,
     },
     /// Core retired the incarnation `generation` of `member`, which ran under
-    /// `role`.
+    /// `role`. `session` is the session it was bound to at its end (none for
+    /// a member bound to no session of its own), `identity_entry` the
+    /// identity entry it was the member of, `cause` why it ended when the
+    /// journal says (the declared apply's seal unlisted the identity), and
+    /// `rotation` the rotation whose terminal step retired it and seated the
+    /// identity's next incarnation in the same step.
     #[non_exhaustive]
     Retired {
         member: meerkat_mob::AgentIdentity,
         generation: u64,
         role: meerkat_mob::ProfileName,
+        session: Option<meerkat_core::types::SessionId>,
+        identity_entry: Option<meerkat_mob::IdentityEntryOrigin>,
+        cause: Option<meerkat_mob::MemberRetirementCause>,
+        rotation: Option<meerkat_mob::RetiredRotation>,
+    },
+    /// Core started the retirement of the incarnation `generation` of
+    /// `member`. `rotation` is the target of the rotation the retirement
+    /// carries out, and `cause` why it started, when the journal says.
+    #[non_exhaustive]
+    RetirementStarted {
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        rotation: Option<meerkat_mob::RotationTarget>,
+        cause: Option<meerkat_mob::MemberRetirementCause>,
+    },
+    /// Core adopted the legacy member incarnation `generation` of `member`
+    /// as an identity entry of `origin`.
+    #[non_exhaustive]
+    EntryAdopted {
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        origin: meerkat_mob::IdentityEntryOrigin,
+    },
+    /// A legacy member reset, a row no current Core writes, carried `member`
+    /// from `previous_generation` to `new_generation`.
+    #[non_exhaustive]
+    LegacyReset {
+        member: meerkat_mob::AgentIdentity,
+        previous_generation: u64,
+        new_generation: u64,
     },
     /// The mob was reset: no member before it is a member after it.
     MobReset,
 }
 
 impl MemberLifecycleFact {
-    /// Core seated the incarnation `generation` of `member`.
-    pub fn seated(member: meerkat_mob::AgentIdentity, generation: u64) -> Self {
-        Self::Seated { member, generation }
+    /// Core seated the incarnation `generation` of `member` under `role`,
+    /// with nothing more said of it: no session, no identity entry, no
+    /// rotation. The `with_` builders add what the journal says.
+    pub fn seated(
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        role: meerkat_mob::ProfileName,
+    ) -> Self {
+        Self::Seated {
+            member,
+            generation,
+            role,
+            session: None,
+            identity_entry: None,
+            history_unavailable: None,
+            rotation: None,
+        }
     }
 
     /// Core retired the incarnation `generation` of `member`, which ran
-    /// under `role`.
+    /// under `role`, with nothing more said of it: no session, no identity
+    /// entry, no cause, no rotation. The `with_` builders add what the
+    /// journal says.
     pub fn retired(
         member: meerkat_mob::AgentIdentity,
         generation: u64,
@@ -4075,12 +4141,181 @@ impl MemberLifecycleFact {
             member,
             generation,
             role,
+            session: None,
+            identity_entry: None,
+            cause: None,
+            rotation: None,
+        }
+    }
+
+    /// Core started the retirement of the incarnation `generation` of
+    /// `member`, carrying out a rotation to `rotation` when it names one,
+    /// for `cause` when it names one.
+    pub fn retirement_started(
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        rotation: Option<meerkat_mob::RotationTarget>,
+        cause: Option<meerkat_mob::MemberRetirementCause>,
+    ) -> Self {
+        Self::RetirementStarted {
+            member,
+            generation,
+            rotation,
+            cause,
+        }
+    }
+
+    /// Core adopted the legacy member incarnation `generation` of `member`
+    /// as an identity entry of `origin`.
+    pub fn entry_adopted(
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        origin: meerkat_mob::IdentityEntryOrigin,
+    ) -> Self {
+        Self::EntryAdopted {
+            member,
+            generation,
+            origin,
+        }
+    }
+
+    /// A legacy member reset carried `member` from `previous_generation` to
+    /// `new_generation`.
+    pub fn legacy_reset(
+        member: meerkat_mob::AgentIdentity,
+        previous_generation: u64,
+        new_generation: u64,
+    ) -> Self {
+        Self::LegacyReset {
+            member,
+            previous_generation,
+            new_generation,
         }
     }
 
     /// The mob was reset.
     pub fn mob_reset() -> Self {
         Self::MobReset
+    }
+
+    /// This seat or retirement, with the session its incarnation was seated
+    /// on or bound to at its end. Any other fact is answered unchanged.
+    pub fn with_session(mut self, session: Option<meerkat_core::types::SessionId>) -> Self {
+        if let Self::Seated { session: field, .. } | Self::Retired { session: field, .. } =
+            &mut self
+        {
+            *field = session;
+        }
+        self
+    }
+
+    /// This seat or retirement, with the identity entry its incarnation is
+    /// (or was, at its end) the member of. Any other fact is answered
+    /// unchanged.
+    pub fn with_identity_entry(mut self, origin: Option<meerkat_mob::IdentityEntryOrigin>) -> Self {
+        if let Self::Seated {
+            identity_entry: field,
+            ..
+        }
+        | Self::Retired {
+            identity_entry: field,
+            ..
+        } = &mut self
+        {
+            *field = origin;
+        }
+        self
+    }
+
+    /// This seat, with what seated it when a rotation did. Any other fact is
+    /// answered unchanged.
+    pub fn with_seat_rotation(mut self, rotation: Option<meerkat_mob::SeatRotation>) -> Self {
+        if let Self::Seated {
+            rotation: field, ..
+        } = &mut self
+        {
+            *field = rotation;
+        }
+        self
+    }
+
+    /// This retirement, with the rotation whose terminal step retired its
+    /// incarnation. Any other fact is answered unchanged.
+    pub fn with_retired_rotation(mut self, rotation: Option<meerkat_mob::RetiredRotation>) -> Self {
+        if let Self::Retired {
+            rotation: field, ..
+        } = &mut self
+        {
+            *field = rotation;
+        }
+        self
+    }
+
+    /// This retirement, with why its incarnation ended. Any other fact is
+    /// answered unchanged.
+    pub fn with_cause(mut self, cause: Option<meerkat_mob::MemberRetirementCause>) -> Self {
+        if let Self::Retired { cause: field, .. } = &mut self {
+            *field = cause;
+        }
+        self
+    }
+
+    /// The member the fact names; `None` for a mob reset.
+    pub fn member(&self) -> Option<&meerkat_mob::AgentIdentity> {
+        match self {
+            Self::Seated { member, .. }
+            | Self::Retired { member, .. }
+            | Self::RetirementStarted { member, .. }
+            | Self::EntryAdopted { member, .. }
+            | Self::LegacyReset { member, .. } => Some(member),
+            Self::MobReset => None,
+        }
+    }
+}
+
+/// Where Core's member of an identity stands now, as MobMachine records it
+/// ([`SessionBridge::member_standing`]): the incarnation that holds the
+/// identity, and whether its retirement started, or none. Build one with its
+/// constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberStanding {
+    /// No member holds the identity: Core never seated it since the mob's
+    /// last reset, or its last incarnation's retirement ended.
+    Unseated,
+    /// The incarnation `generation` holds the identity.
+    #[non_exhaustive]
+    Seated { generation: u64 },
+    /// The incarnation `generation` holds the identity, and its retirement
+    /// started: Core journaled the start, and not yet the end.
+    #[non_exhaustive]
+    Retiring { generation: u64 },
+}
+
+impl MemberStanding {
+    /// No member holds the identity.
+    pub fn unseated() -> Self {
+        Self::Unseated
+    }
+
+    /// The incarnation `generation` holds the identity.
+    pub fn seated(generation: u64) -> Self {
+        Self::Seated { generation }
+    }
+
+    /// The incarnation `generation` holds the identity, and its retirement
+    /// started.
+    pub fn retiring(generation: u64) -> Self {
+        Self::Retiring { generation }
+    }
+
+    /// The generation of the incarnation that holds the identity; `None`
+    /// when none does.
+    pub fn generation(&self) -> Option<u64> {
+        match self {
+            Self::Seated { generation } | Self::Retiring { generation } => Some(*generation),
+            Self::Unseated => None,
+        }
     }
 }
 
@@ -4500,6 +4735,26 @@ pub trait SessionBridge: Send + Sync {
         let _ = (after, limit);
         Err(BridgeError::Unsupported {
             operation: "member_lifecycle_journal_page",
+        })
+    }
+
+    /// Where Core's member of `identity` stands now (`MobHandle::identity_entry`):
+    /// the incarnation that holds the identity, and whether its retirement
+    /// started, read from the machine state the mob's actor last published.
+    /// No store read and no actor command, and it never wakes a member; it
+    /// can trail Core's journal by the step the actor is committing. The
+    /// identity runtime's lifecycle projection reads it to tell whether a
+    /// seat's incarnation is still Core's, and a roster pass to tell whether
+    /// Core started an unlisting's retirement. A bridge without it answers
+    /// [`BridgeError::Unsupported`], with the same outcome as
+    /// [`Self::member_lifecycle_journal_head`]'s: the projection is off. A
+    /// bridge that wraps another forwards it.
+    async fn member_standing(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "member_standing",
         })
     }
 
@@ -8460,8 +8715,9 @@ impl SessionBridge for MobSessionBridge {
                     meerkat_mob::MemberLifecycleEvent::Spawned {
                         agent_identity,
                         generation,
+                        role,
                         ..
-                    } => MemberLifecycleFact::seated(agent_identity, generation.get()),
+                    } => MemberLifecycleFact::seated(agent_identity, generation.get(), role),
                     meerkat_mob::MemberLifecycleEvent::Retired {
                         agent_identity,
                         generation,
@@ -9569,6 +9825,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge
             .member_lifecycle_journal_page(after, limit)
             .await
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        self.bridge.member_standing(identity).await
     }
 
     async fn identity_management(

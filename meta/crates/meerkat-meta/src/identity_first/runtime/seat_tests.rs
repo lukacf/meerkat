@@ -16,10 +16,12 @@ use tokio::sync::oneshot;
 use super::*;
 use crate::identity_first::bridge::{
     BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberLifecycleJournalHead,
-    MemberLifecycleJournalPage, MemberRuntimeBinding, ResumeRejectionKind, ResumeSessionOutcome,
-    SessionBridge,
+    MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding, ResumeRejectionKind,
+    ResumeSessionOutcome, SessionBridge,
 };
-use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
+use crate::identity_first::core_test_bridge::{
+    CoreReadsBridge, bind_live, register_live, rotate_live,
+};
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
 use crate::identity_first::local_lease::LocalLeaseProvider;
@@ -137,9 +139,14 @@ struct SeatCore {
     /// Core's session service keeps sessions in memory only: no session
     /// outlives its member. Otherwise the double cannot say.
     sessions_in_memory: bool,
-    /// Core's rotation fails with this error after it may have started (a
-    /// failure that is not one of Core's typed refusals before the start).
+    /// Core's rotation fails with this error after it started: Core
+    /// journaled the start of the live incarnation's retirement, and ended
+    /// neither the retirement nor the rotation.
     rotation_failure: StdMutex<Option<BridgeError>>,
+    /// The bridge answers the next rotation with this error before it asks
+    /// Core for anything (a spec it could not lower, say): nothing reaches
+    /// Core.
+    refuse_before_core: StdMutex<Option<BridgeError>>,
     /// The launch's member auth binding refuses these identities' member
     /// builds wherever Core builds one outside a wake, as the bridge reads
     /// the gateway's build check off Core's typed refusal: the live spawn
@@ -297,24 +304,36 @@ impl SessionBridge for SeatCore {
         // its next generation. A spawn ends no host preparation, and Core
         // refuses the plain retirement of an occupant while its host
         // preparation is pending: the retirement never reaches its terminal.
-        if let Some(live) = self.core.live_member(identity)? {
+        let live = self.core.live_member(identity)?;
+        if let Some(live) = live.as_ref() {
             if lock(&self.host_pending).contains(identity) {
                 return Err(BridgeError::Mob(format!(
                     "{identity}: Core refuses retiring the occupant while its host preparation \
                      is pending"
                 )));
             }
-            self.core.retire(&live.agent_runtime_id);
             self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
-        let agent_runtime_id = bind_live(
-            &self.core,
-            identity,
-            &spec.profile,
-            generation,
-            Some(session_id.clone()),
-        )?;
+        // The restamp of a live member is Core's rotation onto the same
+        // session; the revival of one no member holds, a spawn.
+        let agent_runtime_id = if live.is_some() {
+            rotate_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session_id.clone()),
+            )?
+        } else {
+            bind_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session_id.clone()),
+            )?
+        };
         // A resume is a spawn: Core builds the member, live.
         self.materialize(&agent_runtime_id);
         Ok(ResumeSessionOutcome::Resumed {
@@ -532,6 +551,9 @@ impl SessionBridge for SeatCore {
         _draft: &AgentBuildDraft,
     ) -> Result<SessionId, BridgeError> {
         self.rotation_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(refusal) = lock(&self.refuse_before_core).take() {
+            return Err(refusal);
+        }
         let gate = lock(&self.rotate_gate).take();
         if let Some((reached, release)) = gate {
             let _ = reached.send(());
@@ -559,6 +581,12 @@ impl SessionBridge for SeatCore {
             });
         }
         if let Some(failure) = lock(&self.rotation_failure).take() {
+            if let Some(live) = self.core.live_member(identity)? {
+                self.core.start_retirement(
+                    &live.agent_runtime_id,
+                    Some(meerkat_mob::RotationTarget::FreshSession),
+                );
+            }
             return Err(failure);
         }
         let listed = self.manifest_dir.as_deref().is_some_and(|dir| {
@@ -572,12 +600,13 @@ impl SessionBridge for SeatCore {
         lock(&self.rotations).push(identity.clone());
         lock(&self.rotations_listed).push((identity.clone(), listed));
         if let Some(live) = self.core.live_member(identity)? {
-            self.core.retire(&live.agent_runtime_id);
             self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
         let session_id = SessionId::new();
-        bind_live(
+        // One step retires the live incarnation and seats the next one, and
+        // its journal rows name each other, as Core's rotation's do.
+        rotate_live(
             &self.core,
             identity,
             &spec.profile,
@@ -679,6 +708,13 @@ impl SessionBridge for SeatCore {
 
     fn mob_incarnation(&self) -> Option<String> {
         Some(crate::identity_first::core_test_members::JOURNAL_INCARNATION.to_string())
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        self.core.member_standing(identity)
     }
 
     async fn member_lifecycle_journal_page(
@@ -3519,7 +3555,7 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later()
 async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
-    *lock(&core.rotation_failure) = Some(BridgeError::InvalidInput(
+    *lock(&core.refuse_before_core) = Some(BridgeError::InvalidInput(
         "lowering the fresh life spec failed".to_string(),
     ));
     let runtime = runtime_over(None, &core);

@@ -8745,11 +8745,6 @@ mod tests {
             self.create_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.last_create_spec.lock().await = Some(spec.clone());
-            // Core's rotation retires the live incarnation, then seats the
-            // next one.
-            if let Some(live) = self.core.live_member(identity)? {
-                self.core.retire(&live.agent_runtime_id);
-            }
             let generation = self.create_calls.load(std::sync::atomic::Ordering::SeqCst) as u64;
             let alias = format!("rt:{}:{generation}", identity.as_str());
             let agent_runtime_id =
@@ -8761,7 +8756,9 @@ mod tests {
                 agent_runtime_id,
                 session_id: Some(session_id.clone()),
             };
-            self.core.bind(identity, &binding, &spec.profile);
+            // Core's rotation retires the live incarnation and seats the
+            // next one in one step, whose journal rows name each other.
+            self.core.rotate(identity, &binding, &spec.profile);
             Ok(session_id)
         }
 
@@ -8875,6 +8872,13 @@ mod tests {
             limit: usize,
         ) -> Result<crate::identity_first::MemberLifecycleJournalPage, BridgeError> {
             self.core.journal_page(after, limit)
+        }
+
+        async fn member_standing(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<crate::identity_first::MemberStanding, BridgeError> {
+            self.core.member_standing(identity)
         }
     }
 

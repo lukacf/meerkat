@@ -20,8 +20,9 @@
 //! is being woken or has work in flight. Its member lifecycle journal reads
 //! answer once its members keep the journal
 //! ([`CoreTestMembers::keep_journal`]);
-//! [`CoreReadsBridge::refuse_journal_pages`] and
-//! [`CoreReadsBridge::refuse_binding_reads`] have reads answer
+//! [`CoreReadsBridge::refuse_journal_pages`],
+//! [`CoreReadsBridge::refuse_binding_reads`] and
+//! [`CoreReadsBridge::refuse_standing_reads`] have reads answer
 //! `Unsupported` as a bridge without them does.
 
 use std::collections::BTreeSet;
@@ -33,7 +34,7 @@ use meerkat_core::types::SessionId;
 use super::IdentityRuntime;
 use super::bridge::{
     BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError,
-    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding,
+    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
     ResumeSessionOutcome, SessionBridge,
 };
 use super::core_test_members::CoreTestMembers;
@@ -55,6 +56,32 @@ pub(crate) fn bind_live(
     let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
         .map_err(|error| BridgeError::Mob(error.to_string()))?;
     core.bind(
+        identity,
+        &MemberRuntimeBinding {
+            agent_runtime_id: agent_runtime_id.clone(),
+            session_id: session,
+        },
+        profile,
+    );
+    Ok(agent_runtime_id)
+}
+
+/// Core rotates `identity`'s member onto `session` (`None` for a peer-only
+/// member) at `generation` under the role `profile`, as Core's rotation does
+/// ([`CoreTestMembers::rotate`]): the live incarnation's retirement and the
+/// next one's seat name each other, and an identity no member holds is
+/// seated as a fresh life after its last incarnation. Its runtime id is
+/// `rt:{identity}:{generation}`.
+pub(crate) fn rotate_live(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+    profile: &meerkat_mob::ProfileName,
+    generation: u64,
+    session: Option<SessionId>,
+) -> Result<AgentRuntimeId, BridgeError> {
+    let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
+        .map_err(|error| BridgeError::Mob(error.to_string()))?;
+    core.rotate(
         identity,
         &MemberRuntimeBinding {
             agent_runtime_id: agent_runtime_id.clone(),
@@ -116,6 +143,8 @@ pub(crate) struct CoreReadsBridge {
     journal_pages_refused: AtomicBool,
     /// Set by [`Self::refuse_binding_reads`].
     binding_reads_refused: AtomicBool,
+    /// Set by [`Self::refuse_standing_reads`].
+    standing_reads_refused: AtomicBool,
 }
 
 /// The reads of Core's member history that still answer, then the reads
@@ -333,6 +362,18 @@ impl SessionBridge for CoreReadsBridge {
             });
         }
         self.core.journal_page(after, limit)
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        if self.standing_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_standing",
+            });
+        }
+        self.core.member_standing(identity)
     }
 
     async fn identity_management(

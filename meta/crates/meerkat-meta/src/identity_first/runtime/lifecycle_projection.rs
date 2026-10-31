@@ -888,6 +888,7 @@ fn rotation_successor(
         MemberLifecycleFact::Seated {
             member: seated,
             generation: successor,
+            ..
         } if seated == member && *successor > generation => Some(*successor),
         _ => None,
     }
@@ -1908,7 +1909,9 @@ impl IdentityRuntime {
         let (store, mob_id) = self.identity_record_store();
         for (index, record) in records.iter().enumerate() {
             match &record.fact {
-                MemberLifecycleFact::Seated { member, generation } => {
+                MemberLifecycleFact::Seated {
+                    member, generation, ..
+                } => {
                     // Nothing to tell without a customizer.
                     if customizer.is_none() {
                         continue;
@@ -1927,6 +1930,7 @@ impl IdentityRuntime {
                     member,
                     generation,
                     role,
+                    ..
                 } => {
                     let Some(identity) = meta_identity(member) else {
                         continue;
@@ -1983,7 +1987,10 @@ impl IdentityRuntime {
                         }
                     }
                 }
-                MemberLifecycleFact::MobReset => {}
+                MemberLifecycleFact::RetirementStarted { .. }
+                | MemberLifecycleFact::EntryAdopted { .. }
+                | MemberLifecycleFact::LegacyReset { .. }
+                | MemberLifecycleFact::MobReset => {}
             }
         }
         if !pending.is_empty() {
@@ -2099,7 +2106,10 @@ impl IdentityRuntime {
                     let member = match &record.fact {
                         MemberLifecycleFact::Seated { member, .. }
                         | MemberLifecycleFact::Retired { member, .. } => member,
-                        MemberLifecycleFact::MobReset => continue,
+                        MemberLifecycleFact::RetirementStarted { .. }
+                        | MemberLifecycleFact::EntryAdopted { .. }
+                        | MemberLifecycleFact::LegacyReset { .. }
+                        | MemberLifecycleFact::MobReset => continue,
                     };
                     if let Some(identity) = meta_identity(member) {
                         owed.insert(identity, record.cursor);
@@ -2636,7 +2646,11 @@ mod tests {
     fn seated(cursor: u64, generation: u64) -> MemberLifecycleFactRecord {
         MemberLifecycleFactRecord::new(
             cursor,
-            MemberLifecycleFact::seated(meerkat_mob::AgentIdentity::from("alpha"), generation),
+            MemberLifecycleFact::seated(
+                meerkat_mob::AgentIdentity::from("alpha"),
+                generation,
+                meerkat_mob::ProfileName::from("lead"),
+            ),
         )
     }
 

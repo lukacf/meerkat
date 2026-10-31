@@ -488,6 +488,23 @@ pub struct LifecycleEffectIntent {
     /// When the step was asked, in Unix milliseconds. The exit interview the
     /// step queues is keyed by it, so a replay of the step queues it once.
     pub recorded_at_ms: u64,
+    /// The cursor of the head of Core's member lifecycle journal, read
+    /// before Core was asked for the step: a fact of the identity's member
+    /// that Core journaled after it is the step's (or another step's of the
+    /// same member), so a step that failed tells from the journal whether
+    /// any of it reached Core. `None` for an intent recorded without it (by
+    /// an earlier build, or when the head did not read): a step that failed
+    /// then keeps its intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_after: Option<u64>,
+    /// Core had retired the incarnation `generation` before the step was
+    /// asked: the step (a reset, a delete) seats the identity's fresh life
+    /// after it, and Core journals that seat as a fresh life after
+    /// `generation`. The projection reads the intent at that seat, not at
+    /// the incarnation's retirement, and runs the verb's memory side effects
+    /// on `session_id`, with no retirement hook.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub predecessor_retired: bool,
 }
 
 impl LifecycleEffectIntent {
@@ -510,7 +527,25 @@ impl LifecycleEffectIntent {
             verb,
             session_id,
             recorded_at_ms,
+            asked_after: None,
+            predecessor_retired: false,
         }
+    }
+
+    /// The intent, with the head of Core's journal its step read before
+    /// Core was asked (`asked_after`).
+    #[must_use]
+    pub fn with_asked_after(mut self, asked_after: Option<u64>) -> Self {
+        self.asked_after = asked_after;
+        self
+    }
+
+    /// The intent, for a step whose incarnation Core had already retired
+    /// before it was asked (`predecessor_retired`).
+    #[must_use]
+    pub fn with_predecessor_retired(mut self, predecessor_retired: bool) -> Self {
+        self.predecessor_retired = predecessor_retired;
+        self
     }
 
     /// The intent's key.

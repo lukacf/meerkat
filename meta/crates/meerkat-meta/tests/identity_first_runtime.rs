@@ -233,8 +233,9 @@ impl ContinuityStore for CountingContinuityStore {
 /// runtime id and session are Core's member history). The bridge's seats,
 /// creates, resumes, rotations and retires commit here; Core's member reads
 /// answer from here. Once [`CoreMembers::keep_journal`] was called, its
-/// member lifecycle journal reads answer too: each bind journals a seat,
-/// each retire a retirement.
+/// member lifecycle journal reads answer too, with the facts Core journals:
+/// each bind journals a seat, each retire a retirement, and each rotation the
+/// retirement and the seat that name each other.
 #[derive(Default)]
 struct CoreMembers {
     members: Mutex<BTreeMap<AgentIdentity, CoreMember>>,
@@ -293,7 +294,7 @@ impl CoreMembers {
             .unwrap_or(0);
         let mut members = self.members.lock().unwrap();
         let fence = members.get(identity).map_or(1, |member| member.fence + 1);
-        self.journal_seat(identity, generation);
+        self.journal_seat(identity, generation, profile, binding.session_id.clone());
         members.insert(
             identity.clone(),
             CoreMember {
@@ -308,6 +309,92 @@ impl CoreMembers {
         );
     }
 
+    /// Core rotated `identity`'s member onto `binding` under `profile`, as
+    /// Core's rotation does: one step retires the live incarnation and seats
+    /// the next one, and its two journal rows name each other (onto a fresh
+    /// session, unless `binding` keeps the live incarnation's session).
+    fn rotate(
+        &self,
+        identity: &AgentIdentity,
+        binding: &meerkat_meta::identity_first::MemberRuntimeBinding,
+        profile: &meerkat_mob::ProfileName,
+    ) {
+        let generation = binding
+            .agent_runtime_id
+            .as_str()
+            .rsplit(':')
+            .next()
+            .and_then(|generation| generation.parse().ok())
+            .unwrap_or(0);
+        let member_id =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        let mut members = self.members.lock().unwrap();
+        let seat_rotation = match members.get_mut(identity) {
+            Some(live) if live.live => {
+                live.live = false;
+                let target = if live.session_id == binding.session_id {
+                    meerkat_mob::RotationTarget::SameSession
+                } else {
+                    meerkat_mob::RotationTarget::FreshSession
+                };
+                self.facts.lock().unwrap().push(
+                    meerkat_meta::identity_first::MemberLifecycleFact::retired(
+                        member_id.clone(),
+                        live.generation,
+                        live.profile.clone(),
+                    )
+                    .with_session(live.session_id.clone())
+                    .with_retired_rotation(Some(
+                        meerkat_mob::RetiredRotation::new(
+                            target,
+                            meerkat_mob::Generation::new(generation),
+                            profile.clone(),
+                        ),
+                    )),
+                );
+                Some(meerkat_mob::SeatRotation::successor(
+                    meerkat_mob::Generation::new(live.generation),
+                    target,
+                ))
+            }
+            Some(retired) => Some(meerkat_mob::SeatRotation::fresh_life_after(
+                meerkat_mob::Generation::new(retired.generation),
+            )),
+            None => None,
+        };
+        let fence = members.get(identity).map_or(1, |member| member.fence + 1);
+        self.facts.lock().unwrap().push(
+            meerkat_meta::identity_first::MemberLifecycleFact::seated(
+                member_id,
+                generation,
+                profile.clone(),
+            )
+            .with_session(binding.session_id.clone())
+            .with_seat_rotation(seat_rotation),
+        );
+        members.insert(
+            identity.clone(),
+            CoreMember {
+                runtime_id: binding.agent_runtime_id.clone(),
+                session_id: binding.session_id.clone(),
+                generation,
+                fence,
+                profile: profile.clone(),
+                live: true,
+                marked: true,
+            },
+        );
+    }
+
+    /// Where Core's member of `identity` stands: the incarnation that holds
+    /// the identity, or none.
+    fn standing(&self, identity: &AgentIdentity) -> meerkat_meta::identity_first::MemberStanding {
+        match self.live(identity) {
+            Some(member) => meerkat_meta::identity_first::MemberStanding::seated(member.generation),
+            None => meerkat_meta::identity_first::MemberStanding::unseated(),
+        }
+    }
+
     /// From now on the member lifecycle journal reads answer, with every
     /// fact journaled so far; until then they answer `Unsupported`, as a
     /// bridge without the journal does.
@@ -315,14 +402,21 @@ impl CoreMembers {
         self.journal.store(true, Ordering::SeqCst);
     }
 
-    fn journal_seat(&self, identity: &AgentIdentity, generation: u64) {
-        self.facts
-            .lock()
-            .unwrap()
-            .push(meerkat_meta::identity_first::MemberLifecycleFact::seated(
+    fn journal_seat(
+        &self,
+        identity: &AgentIdentity,
+        generation: u64,
+        profile: &meerkat_mob::ProfileName,
+        session: Option<meerkat_core::types::SessionId>,
+    ) {
+        self.facts.lock().unwrap().push(
+            meerkat_meta::identity_first::MemberLifecycleFact::seated(
                 meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str()),
                 generation,
-            ));
+                profile.clone(),
+            )
+            .with_session(session),
+        );
     }
 
     fn journal_head(
@@ -381,9 +475,10 @@ impl CoreMembers {
         session: Option<meerkat_core::types::SessionId>,
     ) -> AgentRuntimeId {
         let runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}")).unwrap();
+        let profile = meerkat_mob::ProfileName::from(profile);
         let mut members = self.members.lock().unwrap();
         let fence = members.get(identity).map_or(1, |member| member.fence + 1);
-        self.journal_seat(identity, generation);
+        self.journal_seat(identity, generation, &profile, session.clone());
         members.insert(
             identity.clone(),
             CoreMember {
@@ -391,7 +486,7 @@ impl CoreMembers {
                 session_id: session,
                 generation,
                 fence,
-                profile: meerkat_mob::ProfileName::from(profile),
+                profile,
                 live: true,
                 marked: false,
             },
@@ -475,7 +570,8 @@ impl CoreMembers {
                         ),
                         member.generation,
                         member.profile.clone(),
-                    ),
+                    )
+                    .with_session(member.session_id.clone()),
                 );
             }
         }
@@ -1197,9 +1293,6 @@ impl SessionBridge for CountingBridge {
             .core
             .member(identity)
             .map_or(0, |member| member.generation + 1);
-        if let Some(live) = self.core.live(identity) {
-            self.core.retire(&live.runtime_id);
-        }
         let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
             .map_err(|error| BridgeError::Mob(error.to_string()))?;
         let session_id = self
@@ -1209,7 +1302,9 @@ impl SessionBridge for CountingBridge {
             .clone()
             .unwrap_or_else(meerkat_core::types::SessionId::new);
         *self.deliver_session_id.lock().await = Some(session_id.clone());
-        self.core.bind(
+        // Core's rotation retires the live incarnation and seats the next
+        // one in one step, whose journal rows name each other.
+        self.core.rotate(
             identity,
             &meerkat_meta::identity_first::MemberRuntimeBinding {
                 agent_runtime_id,
@@ -1257,6 +1352,13 @@ impl SessionBridge for CountingBridge {
         limit: usize,
     ) -> Result<meerkat_meta::identity_first::MemberLifecycleJournalPage, BridgeError> {
         self.core.journal_page(after, limit)
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_meta::identity_first::MemberStanding, BridgeError> {
+        Ok(self.core.standing(identity))
     }
 
     async fn durable_identity_members(

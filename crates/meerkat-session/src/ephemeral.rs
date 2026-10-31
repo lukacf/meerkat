@@ -8985,11 +8985,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             )
         };
         // The task that runs every turn of the session is built in its own
-        // frame and boxed: `tokio::spawn` takes its future by value, and at
-        // opt-level 0 this one, with the agent in it, was copied through each
-        // of spawn's frames on top of the materialization that spawns it. A
-        // member's materialization runs on the host's runtime, whose workers
-        // also run the session's turns.
+        // frame and boxed before the spawn. That keeps the future out of the
+        // two frames that held it whole: this creating frame, which now keeps
+        // only the task's arguments, and the entry frame of `tokio::spawn`,
+        // which takes its future by value. In a debug build tokio already
+        // boxes any future over 2 KiB at that entry, so no deeper frame of
+        // the spawn held a copy of this one. A member's materialization runs
+        // on the host's runtime, whose workers also run the session's turns.
         #[cfg(all(feature = "runtime-machine", not(target_arch = "wasm32")))]
         let task_handle = tokio::spawn(meerkat_runtime::stack_relief::box_in_own_frame(
             make_session_task,

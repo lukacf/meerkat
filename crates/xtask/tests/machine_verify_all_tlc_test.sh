@@ -246,7 +246,8 @@ fi
 # settlement and an abandon that keep it, a hold that ignores the input's
 # phase, a release that clears every hold, a resume that ignores the
 # destination and a resume that keeps the previous staged run and context.
-# 14 steps reach every witness. It runs alone in shard audits-h.
+# 14 steps reach every witness. It runs in shard audits-h, with the
+# instruction boundary audit.
 input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
 if [[ ! -x "${input_controller_hold_audit}" ]]; then
   echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
@@ -800,6 +801,34 @@ if run_part audits-o; then
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part hosted
 fi
 
+# The SessionDocumentMachine operator-instruction region: a hand-written
+# audit drives the generated arms as the shell does (one session, two
+# slots, revisions 1..2, a small and a budget-sized body, two mobs, every
+# run start, all lowerings, folds at and after a run's first request,
+# session writes, mob records, rebinds and releases) within the ci.cfg step
+# bound, and checks the machine's own per-slot state: the slots in effect
+# change only at a FreshRun start or a run-start fold and hold only Active
+# slots, an application reaches the target with one entry per run start, an
+# applied revoke holds, a mid-run fold keeps what is in effect, a session
+# write never lowers a revision, a leading-prefix-only model applies only on
+# a leading System prefix, a mob-owned target changes owner only by its own
+# mob's release, a release empties the target and the next fresh run start
+# revokes what the released mob had in effect, a rebind starts from the
+# right target, and the target stays within the active budget. It first
+# checks that the generated model defines every arm it drives, and requires
+# its five witnesses reached. --mutants refuses ten seeded defects, each by
+# the invariant it targets. Not yet measured on a hosted runner; it joins
+# this shard as the lightest one measured locally.
+instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
+if [[ ! -x "${instruction_boundary_audit}" ]]; then
+  echo "error: instruction boundary audit runner is missing from workspace runfiles: ${instruction_boundary_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded instruction boundary TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${instruction_boundary_audit}" --mutants
+fi
+
 # The MobMachine arm-coverage gate: every arm of the generated model's Next
 # relation is either in a hand-written audit runner's covered_actions array
 # (each runner checks with TLC coverage that every listed arm fires) or named
@@ -1009,9 +1038,12 @@ run_machine_verify() {
 # the whole audit took about 390 s locally with 4 TLC workers, past 10
 # minutes on a hosted runner, so its witness runs moved to a shard of their
 # own: its eleven whole-space runs took 179 s locally with 4 TLC workers;
-# audits-h = input controller hold with --mutants, alone: its safety run
-# (1617 distinct states at 14 steps), nine witness runs and nine
-# single-worker mutant runs took 100 s on a 4-worker local run;
+# audits-h = input controller hold with --mutants: its safety run (1617
+# distinct states at 14 steps), nine witness runs and nine single-worker
+# mutant runs took 100 s on a 4-worker local run; the SessionDocumentMachine
+# instruction boundary audit with --mutants joined it after these
+# measurements (twelve runs over a model that does not extend
+# meerkat_machine; not yet measured);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

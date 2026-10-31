@@ -618,14 +618,63 @@ impl BackendProfile {
     /// Whether requests through this backend can carry an ordered System
     /// message after the leading system prefix, as the provider matrix
     /// declares it ([`OpenAiBackendKind::admits_mid_conversation_system_messages`]).
-    /// A backend of another provider, or a backend kind this version does not
-    /// know, leaves the model's own capability standing.
+    /// A backend of another provider leaves the model's own capability
+    /// standing. An OpenAI backend kind this version does not know fails
+    /// closed, as a binding the config does not resolve does: it may be a
+    /// backend whose wire carries no System row after the leading prefix.
     pub fn admits_mid_conversation_system_messages(&self) -> bool {
         match self.provider {
             Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
-                .is_none_or(OpenAiBackendKind::admits_mid_conversation_system_messages),
+                .is_some_and(OpenAiBackendKind::admits_mid_conversation_system_messages),
             _ => true,
         }
+    }
+
+    /// Whether requests through this backend can carry more than one System
+    /// message in the leading system prefix, as the provider matrix declares
+    /// it ([`OpenAiBackendKind::admits_additional_leading_system_messages`]).
+    /// A backend of another provider carries them. An OpenAI backend kind
+    /// this version does not know fails closed, as a binding the config does
+    /// not resolve does: it may be a backend whose wire carries only the
+    /// prompt's row.
+    pub fn admits_additional_leading_system_messages(&self) -> bool {
+        match self.provider {
+            Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
+                .is_some_and(OpenAiBackendKind::admits_additional_leading_system_messages),
+            _ => true,
+        }
+    }
+}
+
+/// Whether the wire of a `provider` model served through `auth_binding`
+/// carries more than one System message in the leading system prefix
+/// ([`BackendProfile::admits_additional_leading_system_messages`]), as
+/// `config` resolves that binding to its backend.
+///
+/// No binding, or the synthetic env-var default, is the provider's API-key
+/// backend: a build or a model change names every configured binding it
+/// resolves on the identity. A named binding that `config` does not resolve
+/// has an unknown backend: it carries them only when every backend kind of
+/// `provider` does.
+pub(crate) fn binding_admits_additional_leading_system_messages(
+    config: &Config,
+    provider: Provider,
+    auth_binding: Option<&AuthBindingRef>,
+) -> bool {
+    let Some(auth_binding) = auth_binding else {
+        return true;
+    };
+    if auth_binding.is_env_default() {
+        return true;
+    }
+    match resolve_explicit_auth_binding_target(config, auth_binding) {
+        Ok(target) => target.backend.admits_additional_leading_system_messages(),
+        Err(_) => match provider {
+            Provider::OpenAI => OpenAiBackendKind::ALL
+                .iter()
+                .all(|kind| kind.admits_additional_leading_system_messages()),
+            _ => true,
+        },
     }
 }
 
@@ -2738,8 +2787,11 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// The ChatGPT backend carries no System row after the leading prefix,
+    /// and an OpenAI backend kind this version does not know fails closed: it
+    /// may be such a backend.
     #[test]
-    fn only_a_chatgpt_backend_profile_refuses_mid_conversation_system_messages() {
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_mid_conversation_system_messages() {
         let backend = |provider, backend_kind: &str| BackendProfile {
             id: "backend".to_string(),
             provider,
@@ -2748,20 +2800,102 @@ mod tests {
             options: serde_json::Value::Null,
             server: None,
         };
-        assert!(
-            !backend(Provider::OpenAI, "chatgpt_backend").admits_mid_conversation_system_messages()
-        );
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind).admits_mid_conversation_system_messages(),
+                "{backend_kind}"
+            );
+        }
         for (provider, backend_kind) in [
             (Provider::OpenAI, "openai_api"),
             (Provider::OpenAI, "azure_openai"),
             (Provider::OpenAI, "copilot"),
-            (Provider::OpenAI, "a_backend_this_version_does_not_know"),
             (Provider::Anthropic, "anthropic_api"),
             (Provider::Gemini, "google_genai"),
         ] {
             assert!(
                 backend(provider, backend_kind).admits_mid_conversation_system_messages(),
                 "{backend_kind}"
+            );
+        }
+    }
+
+    /// The ChatGPT backend carries only the prompt's leading System row, and
+    /// an OpenAI backend kind this version does not know fails closed: it may
+    /// be such a backend.
+    #[test]
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_additional_leading_system_messages() {
+        let backend = |provider, backend_kind: &str| BackendProfile {
+            id: "backend".to_string(),
+            provider,
+            backend_kind: backend_kind.to_string(),
+            base_url: None,
+            options: serde_json::Value::Null,
+            server: None,
+        };
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind)
+                    .admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
+        for (provider, backend_kind) in [
+            (Provider::OpenAI, "openai_api"),
+            (Provider::OpenAI, "azure_openai"),
+            (Provider::OpenAI, "copilot"),
+            (Provider::Anthropic, "anthropic_api"),
+            (Provider::Gemini, "google_genai"),
+        ] {
+            assert!(
+                backend(provider, backend_kind).admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
+    }
+
+    /// A named OpenAI binding whose backend kind this version does not know
+    /// fails closed, as one the config does not resolve: neither is known to
+    /// carry a second leading System row.
+    #[test]
+    fn an_unknown_or_unresolvable_openai_binding_admits_no_additional_leading_system_row() {
+        let config = config_with_realms(
+            r#"
+[prod]
+default_binding = "primary"
+
+[prod.backend.openai_unknown]
+provider = "openai"
+backend_kind = "a_backend_this_version_does_not_know"
+
+[prod.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[prod.binding.primary]
+backend_profile = "openai_unknown"
+auth_profile = "openai_oauth"
+"#,
+        );
+        let binding = |realm: &str| AuthBindingRef {
+            realm: RealmId::parse(realm).unwrap(),
+            binding: BindingId::parse("primary").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        assert!(
+            resolve_explicit_auth_binding_target(&config, &binding("prod")).is_ok(),
+            "the binding resolves"
+        );
+        for realm in ["prod", "missing"] {
+            assert!(
+                !binding_admits_additional_leading_system_messages(
+                    &config,
+                    Provider::OpenAI,
+                    Some(&binding(realm)),
+                ),
+                "{realm}"
             );
         }
     }

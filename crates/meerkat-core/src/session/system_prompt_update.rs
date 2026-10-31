@@ -227,135 +227,148 @@ impl Session {
             })
             .next_back();
 
-        let (selection, replacement_index, version) =
-            if let Some((current_index, current_message, current_version)) = current {
-                if let Some(requested) = request.target_message_index
-                    && requested != current_index
-                {
-                    return Err(SystemPromptUpdateError::TargetConflict {
-                        key: request.key,
-                        requested,
-                        actual: current_index,
-                    });
-                }
+        let (selection, replacement_index, version) = if let Some((
+            current_index,
+            current_message,
+            current_version,
+        )) = current
+        {
+            if let Some(requested) = request.target_message_index
+                && requested != current_index
+            {
+                return Err(SystemPromptUpdateError::TargetConflict {
+                    key: request.key,
+                    requested,
+                    actual: current_index,
+                });
+            }
 
-                let exact_retry = if current_message.content == request.content {
-                    let introducing_predecessor = self
-                        .system_prompt_update_introducing_predecessor(
-                            &request.key,
-                            current_message,
-                        )?;
-                    let legacy_immediate_successor = matches!(
-                        introducing_predecessor,
-                        PromptUpdatePredecessor::NotRetained
-                    ) && (request
-                        .expected_version
-                        .and_then(SystemPromptVersion::checked_next)
-                        == Some(current_version)
-                        || (request.expected_version.is_none()
-                            && current_version == SystemPromptVersion::INITIAL));
-                    let retained_predecessor_matches = match introducing_predecessor {
-                        PromptUpdatePredecessor::NotRetained => false,
-                        PromptUpdatePredecessor::Unversioned => request.expected_version.is_none(),
-                        PromptUpdatePredecessor::Versioned(version) => {
-                            request.expected_version == Some(version)
-                        }
-                    };
-                    retained_predecessor_matches || legacy_immediate_successor
-                } else {
-                    false
+            let exact_retry = if current_message.content == request.content {
+                let introducing_predecessor = self
+                    .system_prompt_update_introducing_predecessor(&request.key, current_message)?;
+                let legacy_immediate_successor = matches!(
+                    introducing_predecessor,
+                    PromptUpdatePredecessor::NotRetained
+                ) && (request
+                    .expected_version
+                    .and_then(SystemPromptVersion::checked_next)
+                    == Some(current_version)
+                    || (request.expected_version.is_none()
+                        && current_version == SystemPromptVersion::INITIAL));
+                let retained_predecessor_matches = match introducing_predecessor {
+                    PromptUpdatePredecessor::NotRetained => false,
+                    PromptUpdatePredecessor::Unversioned => request.expected_version.is_none(),
+                    PromptUpdatePredecessor::Versioned(version) => {
+                        request.expected_version == Some(version)
+                    }
                 };
-                if exact_retry {
-                    let revision = self
-                        .transcript_content_digest()
-                        .map_err(|error| SystemPromptUpdateError::Revision(error.to_string()))?;
-                    return Ok(SystemPromptUpdateResult {
-                        session_id: self.id().clone(),
-                        key: request.key,
-                        version: current_version,
-                        message_index: current_index,
-                        status: SystemPromptUpdateStatus::Duplicate,
-                        transcript_revision: revision,
-                        commit: None,
-                    });
-                }
-                if request.expected_version != Some(current_version) {
-                    return Err(SystemPromptUpdateError::VersionConflict {
-                        key: request.key,
-                        expected: request.expected_version,
-                        actual: Some(current_version),
-                    });
-                }
-                let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
-                let version = lineage_high_water
-                    .unwrap_or(current_version)
-                    .checked_next()
-                    .ok_or_else(|| SystemPromptUpdateError::VersionExhausted {
-                        key: request.key.clone(),
-                    })?;
-                let insertion = current_index.saturating_add(1);
-                (
-                    TranscriptRewriteSelection::MessageRange {
-                        start: insertion,
-                        end: insertion,
-                    },
-                    insertion,
-                    version,
-                )
+                retained_predecessor_matches || legacy_immediate_successor
             } else {
-                if request.expected_version.is_some() {
-                    return Err(SystemPromptUpdateError::VersionConflict {
-                        key: request.key,
-                        expected: request.expected_version,
-                        actual: None,
-                    });
+                false
+            };
+            if exact_retry {
+                let revision = self
+                    .transcript_content_digest()
+                    .map_err(|error| SystemPromptUpdateError::Revision(error.to_string()))?;
+                return Ok(SystemPromptUpdateResult {
+                    session_id: self.id().clone(),
+                    key: request.key,
+                    version: current_version,
+                    message_index: current_index,
+                    status: SystemPromptUpdateStatus::Duplicate,
+                    transcript_revision: revision,
+                    commit: None,
+                });
+            }
+            if request.expected_version != Some(current_version) {
+                return Err(SystemPromptUpdateError::VersionConflict {
+                    key: request.key,
+                    expected: request.expected_version,
+                    actual: Some(current_version),
+                });
+            }
+            let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
+            let version = lineage_high_water
+                .unwrap_or(current_version)
+                .checked_next()
+                .ok_or_else(|| SystemPromptUpdateError::VersionExhausted {
+                    key: request.key.clone(),
+                })?;
+            let insertion = current_index.saturating_add(1);
+            (
+                TranscriptRewriteSelection::MessageRange {
+                    start: insertion,
+                    end: insertion,
+                },
+                insertion,
+                version,
+            )
+        } else {
+            if request.expected_version.is_some() {
+                return Err(SystemPromptUpdateError::VersionConflict {
+                    key: request.key,
+                    expected: request.expected_version,
+                    actual: None,
+                });
+            }
+            let target = request.target_message_index.ok_or_else(|| {
+                SystemPromptUpdateError::MissingInitialTarget {
+                    key: request.key.clone(),
                 }
-                let target = request.target_message_index.ok_or_else(|| {
-                    SystemPromptUpdateError::MissingInitialTarget {
+            })?;
+            let Some(message) = self.messages().get(target) else {
+                return Err(SystemPromptUpdateError::TargetOutOfBounds {
+                    index: target,
+                    message_count: self.messages().len(),
+                });
+            };
+            let Message::System(system) = message else {
+                return Err(SystemPromptUpdateError::TargetIsNotSystem { index: target });
+            };
+            if let Some(identity) = system.prompt_version.as_ref() {
+                return Err(SystemPromptUpdateError::TargetOwnedByDifferentKey {
+                    index: target,
+                    existing_key: identity.key.clone(),
+                });
+            }
+            if system.identity.is_some() {
+                return Err(SystemPromptUpdateError::TargetHasAppendIdentity { index: target });
+            }
+            if system.instruction_activation.is_some() {
+                return Err(SystemPromptUpdateError::TargetHasInstructionActivation {
+                    index: target,
+                });
+            }
+            // An operator-instruction entry is not an ordinary System
+            // message: only a run start or a compaction fold mints or
+            // moves one. Refused as the transcript rewrite it would be,
+            // naming the entry (it is a System row, so the
+            // not-a-System-row refusal would mislead).
+            if system.instruction_entry.is_some() {
+                return Err(SystemPromptUpdateError::Transcript(
+                    TranscriptEditError::InvalidTranscriptShape(format!(
+                        "system prompt target index {target} is an operator instruction entry, which only a run start or a compaction fold writes"
+                    )),
+                ));
+            }
+            let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
+            let version = match lineage_high_water {
+                Some(high_water) => high_water.checked_next().ok_or_else(|| {
+                    SystemPromptUpdateError::VersionExhausted {
                         key: request.key.clone(),
                     }
-                })?;
-                let Some(message) = self.messages().get(target) else {
-                    return Err(SystemPromptUpdateError::TargetOutOfBounds {
-                        index: target,
-                        message_count: self.messages().len(),
-                    });
-                };
-                let Message::System(system) = message else {
-                    return Err(SystemPromptUpdateError::TargetIsNotSystem { index: target });
-                };
-                if let Some(identity) = system.prompt_version.as_ref() {
-                    return Err(SystemPromptUpdateError::TargetOwnedByDifferentKey {
-                        index: target,
-                        existing_key: identity.key.clone(),
-                    });
-                }
-                if system.identity.is_some() {
-                    return Err(SystemPromptUpdateError::TargetHasAppendIdentity { index: target });
-                }
-                if system.instruction_activation.is_some() {
-                    return Err(SystemPromptUpdateError::TargetHasInstructionActivation {
-                        index: target,
-                    });
-                }
-                let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
-                let version = match lineage_high_water {
-                    Some(high_water) => high_water.checked_next().ok_or_else(|| {
-                        SystemPromptUpdateError::VersionExhausted {
-                            key: request.key.clone(),
-                        }
-                    })?,
-                    None => SystemPromptVersion::INITIAL,
-                };
-                (
-                    TranscriptRewriteSelection::MessageRange {
-                        start: target,
-                        end: target.saturating_add(1),
-                    },
-                    target,
-                    version,
-                )
+                })?,
+                None => SystemPromptVersion::INITIAL,
             };
+            (
+                TranscriptRewriteSelection::MessageRange {
+                    start: target,
+                    end: target.saturating_add(1),
+                },
+                target,
+                version,
+            )
+        };
 
         let replacement = Message::System(SystemMessage {
             content: request.content,
@@ -366,6 +379,7 @@ impl Session {
                 version,
             }),
             instruction_activation: None,
+            instruction_entry: None,
         });
         let commit = self.commit_transcript_rewrite_authorized(
             selection,
@@ -529,6 +543,7 @@ mod tests {
                 version: SystemPromptVersion::INITIAL,
             }),
             instruction_activation: None,
+            instruction_entry: None,
         });
 
         let error = expected_error(
@@ -587,6 +602,7 @@ mod tests {
                     version: SystemPromptVersion::INITIAL,
                 }),
                 instruction_activation: None,
+                instruction_entry: None,
             }));
         }));
         let payload = match outcome {

@@ -16,6 +16,8 @@
 
 use meerkat_machine_dsl::machine;
 
+use super::OptionValueExt;
+
 /// Bridging key type for session identity. Maps to `meerkat_core::SessionId`.
 ///
 /// The DSL needs `Ord + Hash + Clone` for `Map` keys; this newtype satisfies
@@ -619,6 +621,114 @@ pub enum TranscriptEditKind {
     Rewrite,
 }
 
+// ---------------------------------------------------------------------------
+// Operator-instruction region typed vocabulary.
+//
+// The machine holds each session's operator-instruction facts per slot: the
+// recorded target (revision, effect, digest and body bytes per slot), its
+// owner (and the mob a mob owner is) and generation, the slots in effect
+// (the same per slot) and the target generation they realize, and the
+// entry-sequence high-water. A slot key is the
+// slot's canonical string; a digest is `sha256:<hex>`, and empty while the
+// slot is Absent; a mob id is empty unless the owner is a mob. The slots in
+// effect are Active slots only: an application puts the target's Active
+// slots in effect, so a revoked slot leaves them exactly as the shell's
+// recovery from entry rows leaves it. The shell
+// recovers the target from its durable projection of this state and the
+// slots in effect from the session's entry rows (a transcript fact), keeps
+// the bodies by digest, and renders entries from this state. Ownership,
+// revision order, the slot limit, the active budget, the application
+// boundary, deferral, the entry sequence and the fold source are all decided
+// here.
+// ---------------------------------------------------------------------------
+
+/// Who owns a session's recorded operator-instruction target. `Unowned` is
+/// the Rust `Default`: no owner holds a target (none was recorded, or a mob
+/// released it), and an unowned target is empty, so whatever is still in
+/// effect is revoked at the next fresh run start. A session-owned target is
+/// written slot by slot by the session's own host; a mob-owned one is a
+/// whole member snapshot its mob delivers by generation, and the machine
+/// records which mob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionTargetOwner {
+    #[default]
+    Unowned,
+    Session,
+    Mob,
+}
+
+/// Whether a slot's body applies. Maps to `meerkat_core::InstructionEffect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionEffect {
+    #[default]
+    Absent,
+    Active,
+}
+
+/// How a run starts, from the turn's resolved start disposition: a content
+/// turn or a run of a pending tail starts fresh, a resumed run continues,
+/// and a turn with no pending boundary runs nothing. `NoRun` is the Rust
+/// `Default`: nothing applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionRunStart {
+    FreshRun,
+    ResumeRun,
+    #[default]
+    NoRun,
+}
+
+/// How the session's model carries a System row after conversation rows:
+/// anywhere, only inside the leading System prefix, or not at all.
+/// `Unavailable` is the fail-closed Rust `Default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionLowering {
+    MidConversation,
+    LeadingPrefixOnly,
+    #[default]
+    Unavailable,
+}
+
+/// Outcome of a recorded write or record: `Recorded` changed the target,
+/// `Duplicate` is an exact retry or an already-recorded generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionWriteOutcome {
+    Recorded,
+    #[default]
+    Duplicate,
+}
+
+/// Typed refusal of a write or record. Maps to the matching
+/// `meerkat_core::InstructionSetErrorCode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionWriteRefusal {
+    #[default]
+    StaleRevision,
+    RevisionConflict,
+    OwnedByMob,
+    OwnedBySession,
+    SlotLimitExceeded,
+    UnknownSlot,
+    OwnedByOtherMob,
+    ActiveSetBudgetExceeded,
+}
+
+/// Why a fresh run start leaves pending changes pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionDeferReason {
+    #[default]
+    LeadingPrefixOnly,
+    LoweringUnavailable,
+}
+
+/// The set a compaction fold renders its snapshot from: what is in effect,
+/// or the recorded target when the fold is at a run's first request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionFoldSource {
+    #[default]
+    Effective,
+    Target,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -646,6 +756,25 @@ machine! {
             session_live_assistant_terminal_observation: Map<SessionId, Enum<LiveAssistantPlaybackTerminalObservation>>,
             session_live_assistant_terminal_prefix_chars: Map<SessionId, u64>,
             session_live_assistant_terminal_prefix_digest: Map<SessionId, String>,
+            // Operator-instruction region. One entry per session the shell
+            // recovered: the owner and the mob a mob owner is, the target
+            // generation, the recorded target and the slots in effect per
+            // slot (revision, effect, digest, body bytes), and the
+            // entry-sequence high-water. The guards read these strictly, so
+            // an unrecovered session is refused.
+            session_instruction_owner: Map<SessionId, Enum<InstructionTargetOwner>>,
+            session_instruction_owner_mob: Map<SessionId, String>,
+            session_instruction_target_generation: Map<SessionId, u64>,
+            session_instruction_target_revision: Map<SessionId, Map<String, u64>>,
+            session_instruction_target_effect: Map<SessionId, Map<String, Enum<InstructionEffect>>>,
+            session_instruction_target_digest: Map<SessionId, Map<String, String>>,
+            session_instruction_target_bytes: Map<SessionId, Map<String, u64>>,
+            session_instruction_effective_revision: Map<SessionId, Map<String, u64>>,
+            session_instruction_effective_effect: Map<SessionId, Map<String, Enum<InstructionEffect>>>,
+            session_instruction_effective_digest: Map<SessionId, Map<String, String>>,
+            session_instruction_effective_bytes: Map<SessionId, Map<String, u64>>,
+            session_instruction_effective_generation: Map<SessionId, u64>,
+            session_instruction_entry_sequence: Map<SessionId, u64>,
         }
 
         init(Ready) {
@@ -665,6 +794,19 @@ machine! {
             session_live_assistant_terminal_observation = EmptyMap,
             session_live_assistant_terminal_prefix_chars = EmptyMap,
             session_live_assistant_terminal_prefix_digest = EmptyMap,
+            session_instruction_owner = EmptyMap,
+            session_instruction_owner_mob = EmptyMap,
+            session_instruction_target_generation = EmptyMap,
+            session_instruction_target_revision = EmptyMap,
+            session_instruction_target_effect = EmptyMap,
+            session_instruction_target_digest = EmptyMap,
+            session_instruction_target_bytes = EmptyMap,
+            session_instruction_effective_revision = EmptyMap,
+            session_instruction_effective_effect = EmptyMap,
+            session_instruction_effective_digest = EmptyMap,
+            session_instruction_effective_bytes = EmptyMap,
+            session_instruction_effective_generation = EmptyMap,
+            session_instruction_entry_sequence = EmptyMap,
         }
 
         terminal []
@@ -1130,6 +1272,89 @@ machine! {
                 durable_document_present: bool,
                 runtime_observation: Enum<SessionArchiveRuntimeObservation>,
             },
+
+            // -----------------------------------------------------------
+            // Operator-instruction region. The shell recovers a session
+            // before every operation, in three steps: the owner, the target
+            // generation and the entry-sequence high-water (which empties
+            // both slot sets), then the recorded target from its durable
+            // projection, then the slots in effect from the session's own
+            // entry rows (a transcript fact). Every other input carries the
+            // request and transcript facts only; none carries a pre-decided
+            // verdict or a shell-computed comparison.
+            // -----------------------------------------------------------
+            RecoverSessionInstructionState {
+                session_id: SessionId,
+                owner: Enum<InstructionTargetOwner>,
+                owner_mob: String,
+                target_generation: u64,
+                entry_sequence: u64,
+            },
+            RecoverSessionInstructionTarget {
+                session_id: SessionId,
+                revision: Map<String, u64>,
+                effect: Map<String, Enum<InstructionEffect>>,
+                digest: Map<String, String>,
+                bytes: Map<String, u64>,
+            },
+            // `generation` is the target generation the session's last entry
+            // row realized and `last_entry_sequence` that row's sequence.
+            RecoverSessionInstructionEffective {
+                session_id: SessionId,
+                revision: Map<String, u64>,
+                effect: Map<String, Enum<InstructionEffect>>,
+                digest: Map<String, String>,
+                bytes: Map<String, u64>,
+                generation: u64,
+                last_entry_sequence: u64,
+            },
+            // A mob delivers a member's whole snapshot at its generation.
+            RecordInstructionTarget {
+                session_id: SessionId,
+                mob_id: String,
+                generation: u64,
+                revision: Map<String, u64>,
+                effect: Map<String, Enum<InstructionEffect>>,
+                digest: Map<String, String>,
+                bytes: Map<String, u64>,
+            },
+            // The session's own host writes one slot; a revoke is an Absent
+            // effect with an empty digest and no body bytes.
+            SetSessionInstruction {
+                session_id: SessionId,
+                slot: String,
+                revision: u64,
+                effect: Enum<InstructionEffect>,
+                digest: String,
+                body_bytes: u64,
+            },
+            // An explicit attach or a host's standalone adoption. `mob_id`
+            // names the mob of a mob owner and is empty otherwise.
+            RebindInstructionOwner {
+                session_id: SessionId,
+                owner: Enum<InstructionTargetOwner>,
+                mob_id: String,
+            },
+            // The owning mob releases a member's target (a retire, a
+            // destroy), so another owner may bind it.
+            ReleaseInstructionTarget {
+                session_id: SessionId,
+                mob_id: String,
+            },
+            // A turn start, after its start disposition is resolved and
+            // before any input of the run is appended.
+            ResolveRunStartInstructions {
+                session_id: SessionId,
+                run_start: Enum<InstructionRunStart>,
+                lowering: Enum<InstructionLowering>,
+                transcript_is_system_prefix: bool,
+            },
+            // A compaction that folds the entry rows into one snapshot.
+            AuthorizeInstructionFold {
+                session_id: SessionId,
+                at_run_start: bool,
+                lowering: Enum<InstructionLowering>,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -1398,6 +1623,42 @@ machine! {
                 write_document: bool,
                 retire_runtime: bool,
             },
+
+            // Operator-instruction region effects. A recorded verdict names
+            // the target generation; a refusal names its typed reason; a
+            // release names whether the releasing mob owned the target (an
+            // unowned target answers "already unowned"); an authorized entry
+            // or fold names the entry sequence the shell mints, and a fold
+            // the set it renders and the generation that set realizes. The
+            // shell persists the machine's state after each and decides
+            // nothing.
+            SessionInstructionStateRecovered,
+            InstructionTargetRecorded {
+                generation: u64,
+                outcome: Enum<InstructionWriteOutcome>,
+            },
+            InstructionTargetRefused {
+                refusal: Enum<InstructionWriteRefusal>,
+            },
+            InstructionOwnerRebound {
+                owner: Enum<InstructionTargetOwner>,
+            },
+            InstructionTargetReleased {
+                was_owned: bool,
+            },
+            InstructionEntryAuthorized {
+                entry_sequence: u64,
+                generation: u64,
+            },
+            InstructionEntryNotNeeded,
+            InstructionApplicationDeferred {
+                reason: Enum<InstructionDeferReason>,
+            },
+            InstructionFoldAuthorized {
+                entry_sequence: u64,
+                source: Enum<InstructionFoldSource>,
+                generation: u64,
+            },
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -1557,6 +1818,82 @@ machine! {
                         == SessionArchiveRuntimeObservation::RetirementRequired)
         }
 
+        // Operator-instruction region helpers.
+        //
+        // One slot set (a recorded target, the slots in effect or a mob
+        // snapshot) is well formed when its four maps name the same slots,
+        // every revision is at least 1, and a slot carries a digest exactly
+        // while it is Active (an Absent slot has no body bytes either).
+        helper instruction_slot_maps_consistent(
+            revision: Map<String, u64>,
+            effect: Map<String, Enum<InstructionEffect>>,
+            digest: Map<String, String>,
+            bytes: Map<String, u64>
+        ) -> bool {
+            revision.keys() == effect.keys()
+                && revision.keys() == digest.keys()
+                && revision.keys() == bytes.keys()
+                && for_all(slot in revision.keys(),
+                    revision.get_cloned(slot).get("value") >= 1
+                    && ((effect.get_cloned(slot).get("value") == InstructionEffect::Active
+                            && digest.get_cloned(slot).get("value") != "")
+                        || (effect.get_cloned(slot).get("value") == InstructionEffect::Absent
+                            && digest.get_cloned(slot).get("value") == ""
+                            && bytes.get_cloned(slot).get("value") == 0)))
+        }
+
+        // A slot set within the slot limit.
+        helper instruction_slot_count_within_limit(revision: Map<String, u64>) -> bool {
+            revision.len() <= 64
+        }
+
+        helper instruction_slot_set_empty(revision: Map<String, u64>) -> bool {
+            revision.len() == 0
+        }
+
+        // The recorded target differs from what is in effect: an Active
+        // target slot not in effect at its revision and digest, an Absent
+        // target slot still in effect, or a slot in effect the target no
+        // longer names. One coalesced entry carries every such change.
+        helper instruction_change_pending(
+            target_revision: Map<String, u64>,
+            target_effect: Map<String, Enum<InstructionEffect>>,
+            target_digest: Map<String, String>,
+            effective_revision: Map<String, u64>,
+            effective_effect: Map<String, Enum<InstructionEffect>>,
+            effective_digest: Map<String, String>
+        ) -> bool {
+            exists(slot in target_revision.keys(),
+                (target_effect.get_cloned(slot).get("value") == InstructionEffect::Active
+                    && (effective_effect.contains_key(slot) == false
+                        || effective_effect.get_cloned(slot).get("value")
+                            != InstructionEffect::Active
+                        || effective_revision.get_cloned(slot).get("value")
+                            != target_revision.get_cloned(slot).get("value")
+                        || effective_digest.get_cloned(slot).get("value")
+                            != target_digest.get_cloned(slot).get("value")))
+                || (target_effect.get_cloned(slot).get("value") == InstructionEffect::Absent
+                    && effective_effect.contains_key(slot)
+                    && effective_effect.get_cloned(slot).get("value")
+                        == InstructionEffect::Active))
+            || exists(slot in effective_effect.keys(),
+                effective_effect.get_cloned(slot).get("value") == InstructionEffect::Active
+                && target_revision.contains_key(slot) == false)
+        }
+
+        // A run start may append an entry on this lowering: a model that
+        // lowers System rows mid-conversation takes one anywhere; a
+        // leading-prefix-only model takes one only while the transcript is
+        // still a leading System prefix.
+        helper instruction_entry_lowers(
+            lowering: Enum<InstructionLowering>,
+            transcript_is_system_prefix: bool
+        ) -> bool {
+            lowering == InstructionLowering::MidConversation
+                || (lowering == InstructionLowering::LeadingPrefixOnly
+                    && transcript_is_system_prefix)
+        }
+
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnOverridesResolved => local seam NoOwnerRealization,
         disposition SessionInitialPromptStageResolved => local seam NoOwnerRealization,
@@ -1600,6 +1937,15 @@ machine! {
         disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
         disposition SessionRevivalResolved => local seam NoOwnerRealization,
         disposition SessionArchiveResolved => local seam NoOwnerRealization,
+        disposition SessionInstructionStateRecovered => local seam NoOwnerRealization,
+        disposition InstructionTargetRecorded => local seam NoOwnerRealization,
+        disposition InstructionTargetRefused => local seam NoOwnerRealization,
+        disposition InstructionOwnerRebound => local seam NoOwnerRealization,
+        disposition InstructionTargetReleased => local seam NoOwnerRealization,
+        disposition InstructionEntryAuthorized => local seam NoOwnerRealization,
+        disposition InstructionEntryNotNeeded => local seam NoOwnerRealization,
+        disposition InstructionApplicationDeferred => local seam NoOwnerRealization,
+        disposition InstructionFoldAuthorized => local seam NoOwnerRealization,
 
         invariant live_interaction_transcript_binding_is_complete {
             self.session_live_channel_id.keys() == self.session_live_interaction_id.keys()
@@ -1635,6 +1981,100 @@ machine! {
             && for_all(session_id in self.session_live_assistant_playback_response_id.keys(),
                 self.session_live_channel_id.contains_key(session_id)
                 && self.session_live_interaction_id.contains_key(session_id))
+        }
+
+        // Operator-instruction region invariants. A session's facts are
+        // recovered together and never removed one by one, and each of its
+        // slot sets (the target, the slots in effect) is well formed.
+        invariant instruction_state_maps_lockstep {
+            self.session_instruction_owner.keys()
+                == self.session_instruction_owner_mob.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_target_generation.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_target_revision.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_target_effect.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_target_digest.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_target_bytes.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_revision.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_effect.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_digest.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_bytes.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_effective_generation.keys()
+            && self.session_instruction_owner.keys()
+                == self.session_instruction_entry_sequence.keys()
+            && for_all(session_id in self.session_instruction_owner.keys(),
+                instruction_slot_maps_consistent(
+                    self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_bytes.get_cloned(session_id).get("value"))
+                && instruction_slot_maps_consistent(
+                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_bytes.get_cloned(session_id).get("value")))
+        }
+
+        // A recorded target always has an owner: only a session write, a mob
+        // record or a rebind fills a target, and each names its owner; a
+        // release empties it.
+        invariant instruction_owner_present_with_target {
+            for_all(session_id in self.session_instruction_owner.keys(),
+                self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Unowned
+                || (self.session_instruction_target_generation.get_cloned(session_id).get("value") == 0
+                    && instruction_slot_set_empty(
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value"))))
+        }
+
+        invariant instruction_slot_count_bounded {
+            for_all(session_id in self.session_instruction_target_revision.keys(),
+                instruction_slot_count_within_limit(
+                    self.session_instruction_target_revision.get_cloned(session_id).get("value")))
+        }
+
+        // The Active bodies of the target and of the slots in effect stay
+        // within the active budget.
+        invariant instruction_active_bytes_bounded {
+            for_all(session_id in self.session_instruction_target_effect.keys(),
+                1048576
+                    >= session_document_instruction_active_bytes(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_bytes.get_cloned(session_id).get("value"))
+                && 1048576
+                    >= session_document_instruction_active_bytes(
+                        self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_effective_bytes.get_cloned(session_id).get("value")))
+        }
+
+        // An Active effective slot was put there by an entry, so the
+        // entry-sequence high-water is at least one.
+        invariant instruction_entry_sequence_covers_effective {
+            for_all(session_id in self.session_instruction_effective_effect.keys(),
+                self.session_instruction_entry_sequence.get_cloned(session_id).get("value") >= 1
+                || for_all(slot in self.session_instruction_effective_effect.get_cloned(session_id).get("value").keys(),
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value") != InstructionEffect::Active))
+        }
+
+        // A mob owner names its mob, and no other owner names one.
+        invariant instruction_mob_owner_names_its_mob {
+            for_all(session_id in self.session_instruction_owner.keys(),
+                (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        == InstructionTargetOwner::Mob
+                    && self.session_instruction_owner_mob.get_cloned(session_id).get("value") != "")
+                || (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        != InstructionTargetOwner::Mob
+                    && self.session_instruction_owner_mob.get_cloned(session_id).get("value") == ""))
         }
 
         // ---------------------------------------------------------------
@@ -4923,5 +5363,1008 @@ machine! {
             }
         }
 
+        // ===============================================================
+        // Operator-instruction region. The shell recovers a session before
+        // every operation; every arm below reads the recovered state
+        // strictly and decides from it. Revision order is decided per slot
+        // for session-owned writes; a mob-owned target takes a whole
+        // snapshot by generation alone, so a rebind never reconciles two
+        // revision spaces. A mob-owned target belongs to its mob until the
+        // mob releases it. The slot limit and the active budget hold for
+        // every recorded target. Nothing here wakes a session or applies
+        // inside a running turn: a fresh run start and a fold at a run's
+        // first request are the only application points.
+        // ===============================================================
+
+        transition RecoverSessionInstructionState {
+            on input RecoverSessionInstructionState {
+                session_id,
+                owner,
+                owner_mob,
+                target_generation,
+                entry_sequence
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (owner != InstructionTargetOwner::Unowned || target_generation == 0)
+                && ((owner == InstructionTargetOwner::Mob && owner_mob != "")
+                    || (owner != InstructionTargetOwner::Mob && owner_mob == ""))
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, owner);
+                self.session_instruction_owner_mob.insert(session_id, owner_mob);
+                self.session_instruction_target_generation.insert(session_id, target_generation);
+                self.session_instruction_target_revision.insert(session_id, EmptyMap);
+                self.session_instruction_target_effect.insert(session_id, EmptyMap);
+                self.session_instruction_target_digest.insert(session_id, EmptyMap);
+                self.session_instruction_target_bytes.insert(session_id, EmptyMap);
+                self.session_instruction_effective_revision.insert(session_id, EmptyMap);
+                self.session_instruction_effective_effect.insert(session_id, EmptyMap);
+                self.session_instruction_effective_digest.insert(session_id, EmptyMap);
+                self.session_instruction_effective_bytes.insert(session_id, EmptyMap);
+                self.session_instruction_effective_generation.insert(session_id, 0);
+                self.session_instruction_entry_sequence.insert(session_id, entry_sequence);
+            }
+            to Ready
+            emit SessionInstructionStateRecovered
+        }
+
+        // The recorded target, after its owner: an unowned target is empty,
+        // and a recorded one is well formed, within the slot limit and the
+        // active budget.
+        transition RecoverSessionInstructionTarget {
+            on input RecoverSessionInstructionTarget {
+                session_id,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        != InstructionTargetOwner::Unowned
+                    || instruction_slot_set_empty(revision))
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision)
+                && 1048576 >= session_document_instruction_active_bytes(effect, bytes)
+            }
+            update {
+                self.session_instruction_target_revision.insert(session_id, revision);
+                self.session_instruction_target_effect.insert(session_id, effect);
+                self.session_instruction_target_digest.insert(session_id, digest);
+                self.session_instruction_target_bytes.insert(session_id, bytes);
+            }
+            to Ready
+            emit SessionInstructionStateRecovered
+        }
+
+        // The slots in effect and the generation they realize, after the
+        // owner: an Active slot was put there by an entry, and the
+        // entry-sequence high-water becomes the later of the recorded one
+        // and the session's last entry row. The slots in effect are Active
+        // slots only, as an application leaves them: a projection holding a
+        // revoked slot in effect is torn.
+        transition RecoverSessionInstructionEffective {
+            on input RecoverSessionInstructionEffective {
+                session_id,
+                revision,
+                effect,
+                digest,
+                bytes,
+                generation,
+                last_entry_sequence
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_entry_sequence.contains_key(session_id)
+                && (last_entry_sequence >= 1
+                    || self.session_instruction_entry_sequence.get_cloned(session_id).get("value") >= 1
+                    || for_all(slot in effect.keys(),
+                        effect.get_cloned(slot).get("value") != InstructionEffect::Active))
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && for_all(slot in effect.keys(),
+                    effect.get_cloned(slot).get("value") == InstructionEffect::Active)
+                && 1048576 >= session_document_instruction_active_bytes(effect, bytes)
+            }
+            update {
+                self.session_instruction_effective_revision.insert(session_id, revision);
+                self.session_instruction_effective_effect.insert(session_id, effect);
+                self.session_instruction_effective_digest.insert(session_id, digest);
+                self.session_instruction_effective_bytes.insert(session_id, bytes);
+                self.session_instruction_effective_generation.insert(session_id, generation);
+                self.session_instruction_entry_sequence.insert(
+                    session_id,
+                    if last_entry_sequence
+                        > self.session_instruction_entry_sequence.get_cloned(session_id).get("value")
+                    {
+                        last_entry_sequence
+                    } else {
+                        self.session_instruction_entry_sequence.get_cloned(session_id).get("value")
+                    });
+            }
+            to Ready
+            emit SessionInstructionStateRecovered
+        }
+
+        // A snapshot above the recorded generation, into an unowned target
+        // or from the mob that owns it, within the slot limit and the active
+        // budget, replaces the target and makes that mob its owner;
+        // recording applies nothing.
+        transition RecordInstructionTargetAdvance {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation
+                    > self.session_instruction_target_generation.get_cloned(session_id).get("value")
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision)
+            }
+            guard "within_budget" {
+                1048576 >= session_document_instruction_active_bytes(effect, bytes)
+            }
+            guard "owning_mob" {
+                self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Unowned
+                || (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        == InstructionTargetOwner::Mob
+                    && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                        == mob_id)
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Mob);
+                self.session_instruction_owner_mob.insert(session_id, mob_id);
+                self.session_instruction_target_generation.insert(session_id, generation);
+                self.session_instruction_target_revision.insert(session_id, revision);
+                self.session_instruction_target_effect.insert(session_id, effect);
+                self.session_instruction_target_digest.insert(session_id, digest);
+                self.session_instruction_target_bytes.insert(session_id, bytes);
+            }
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: generation,
+                outcome: InstructionWriteOutcome::Recorded
+            }
+        }
+
+        // The same snapshot over the active budget records nothing.
+        transition RecordInstructionTargetActiveBudgetExceeded {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation
+                    > self.session_instruction_target_generation.get_cloned(session_id).get("value")
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision)
+                && session_document_instruction_active_bytes(effect, bytes) > 1048576
+                && (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        == InstructionTargetOwner::Unowned
+                    || (self.session_instruction_owner.get_cloned(session_id).get("value")
+                            == InstructionTargetOwner::Mob
+                        && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                            == mob_id))
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::ActiveSetBudgetExceeded
+            }
+        }
+
+        // The same snapshot over the slot limit records nothing, whatever
+        // its bodies weigh.
+        transition RecordInstructionTargetSlotLimitExceeded {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation
+                    > self.session_instruction_target_generation.get_cloned(session_id).get("value")
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision) == false
+                && (self.session_instruction_owner.get_cloned(session_id).get("value")
+                        == InstructionTargetOwner::Unowned
+                    || (self.session_instruction_owner.get_cloned(session_id).get("value")
+                            == InstructionTargetOwner::Mob
+                        && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                            == mob_id))
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::SlotLimitExceeded
+            }
+        }
+
+        // A repeated delivery from the owning mob at or below the recorded
+        // generation (a resumed fan-out, a retry) answers "already recorded"
+        // and writes nothing.
+        transition RecordInstructionTargetAlreadyRecorded {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Mob
+                && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                    == mob_id
+                && generation
+                    <= self.session_instruction_target_generation.get_cloned(session_id).get("value")
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: self.session_instruction_target_generation.get_cloned(session_id).get("value"),
+                outcome: InstructionWriteOutcome::Duplicate
+            }
+        }
+
+        transition RecordInstructionTargetOwnedBySession {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedBySession
+            }
+        }
+
+        // A target another mob owns takes no snapshot until that mob
+        // releases it.
+        transition RecordInstructionTargetOwnedByOtherMob {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Mob
+                && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                    != mob_id
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedByOtherMob
+            }
+        }
+
+        // A session-owned write of a slot the target does not hold yet,
+        // within the slot limit and the active budget.
+        transition SetSessionInstructionNew {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot) == false
+                && effect == InstructionEffect::Active
+                && digest != ""
+                && revision >= 1
+                && 64
+                    > self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                        .len()
+            }
+            guard "within_budget" {
+                1048576
+                    >= session_document_instruction_active_bytes(
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                            slot,
+                            effect),
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_bytes.get_cloned(session_id).get("value"),
+                            slot,
+                            body_bytes))
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Session);
+                self.session_instruction_target_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value") + 1);
+                self.session_instruction_target_revision.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                        slot,
+                        revision));
+                self.session_instruction_target_effect.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        slot,
+                        effect));
+                self.session_instruction_target_digest.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                        slot,
+                        digest));
+                self.session_instruction_target_bytes.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_bytes.get_cloned(session_id).get("value"),
+                        slot,
+                        body_bytes));
+            }
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: self.session_instruction_target_generation.get_cloned(session_id).get("value"),
+                outcome: InstructionWriteOutcome::Recorded
+            }
+        }
+
+        // A higher revision supersedes the slot's record within the active
+        // budget; a revoke is a revision whose effect is Absent, whose digest
+        // is empty and whose body has no bytes.
+        transition SetSessionInstructionAdvance {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot)
+                && ((effect == InstructionEffect::Active && digest != "")
+                    || (effect == InstructionEffect::Absent && digest == "" && body_bytes == 0))
+            }
+            guard "within_budget" {
+                1048576
+                    >= session_document_instruction_active_bytes(
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                            slot,
+                            effect),
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_bytes.get_cloned(session_id).get("value"),
+                            slot,
+                            body_bytes))
+            }
+            guard "higher_revision" {
+                revision
+                    > self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value")
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Session);
+                self.session_instruction_target_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value") + 1);
+                self.session_instruction_target_revision.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                        slot,
+                        revision));
+                self.session_instruction_target_effect.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        slot,
+                        effect));
+                self.session_instruction_target_digest.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                        slot,
+                        digest));
+                self.session_instruction_target_bytes.insert(
+                    session_id,
+                    session_document_instruction_slot_after_set(
+                        self.session_instruction_target_bytes.get_cloned(session_id).get("value"),
+                        slot,
+                        body_bytes));
+            }
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: self.session_instruction_target_generation.get_cloned(session_id).get("value"),
+                outcome: InstructionWriteOutcome::Recorded
+            }
+        }
+
+        // An activation that a new slot or a higher revision would record,
+        // but whose Active bodies would exceed the active budget.
+        transition SetSessionInstructionActiveBudgetExceeded {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && effect == InstructionEffect::Active
+                && digest != ""
+                && ((self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                            .contains_key(slot) == false
+                        && revision >= 1
+                        && 64
+                            > self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                                .len())
+                    || (self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                            .contains_key(slot)
+                        && revision
+                            > self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                                .get_cloned(slot).get("value")))
+                && session_document_instruction_active_bytes(
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                            slot,
+                            effect),
+                        session_document_instruction_slot_after_set(
+                            self.session_instruction_target_bytes.get_cloned(session_id).get("value"),
+                            slot,
+                            body_bytes))
+                    > 1048576
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::ActiveSetBudgetExceeded
+            }
+        }
+
+        // An exact retry: the same revision with the same effect and digest.
+        transition SetSessionInstructionDuplicate {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot)
+                && revision
+                    == self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value")
+                && self.session_instruction_target_effect.get_cloned(session_id).get("value")
+                    .get_cloned(slot).get("value") == effect
+                && self.session_instruction_target_digest.get_cloned(session_id).get("value")
+                    .get_cloned(slot).get("value") == digest
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: self.session_instruction_target_generation.get_cloned(session_id).get("value"),
+                outcome: InstructionWriteOutcome::Duplicate
+            }
+        }
+
+        // A revision binds one content forever.
+        transition SetSessionInstructionConflict {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot)
+                && revision
+                    == self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value")
+                && (self.session_instruction_target_effect.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value") != effect
+                    || self.session_instruction_target_digest.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value") != digest)
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::RevisionConflict
+            }
+        }
+
+        transition SetSessionInstructionStale {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot)
+                && revision
+                    < self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                        .get_cloned(slot).get("value")
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::StaleRevision
+            }
+        }
+
+        // A mob-owned target takes no session write, whatever the slot.
+        transition SetSessionInstructionOwnedByMob {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Mob
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedByMob
+            }
+        }
+
+        transition SetSessionInstructionSlotLimitExceeded {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot) == false
+                && effect == InstructionEffect::Active
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .len() >= 64
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::SlotLimitExceeded
+            }
+        }
+
+        // A revoke of a slot the target does not hold.
+        transition SetSessionInstructionUnknownSlot {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+                && self.session_instruction_target_revision.get_cloned(session_id).get("value")
+                    .contains_key(slot) == false
+                && effect == InstructionEffect::Absent
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::UnknownSlot
+            }
+        }
+
+        // An attach: a mob takes a session-owned target and starts from what
+        // is in effect. The target becomes the slots in effect and the
+        // generation restarts, so no pending write of the session carries
+        // over and nothing becomes pending. A mob-owned target takes no
+        // rebind until its mob releases it. The ownership check is a guard
+        // of its own.
+        transition RebindInstructionOwner {
+            on input RebindInstructionOwner { session_id, owner, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && owner == InstructionTargetOwner::Mob
+                && mob_id != ""
+                && self.session_instruction_effective_revision.get_cloned(session_id).get("value")
+                    .len() <= 64
+            }
+            guard "session_owned" {
+                self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, owner);
+                self.session_instruction_owner_mob.insert(session_id, mob_id);
+                self.session_instruction_target_generation.insert(session_id, 0);
+                self.session_instruction_target_revision.insert(
+                    session_id,
+                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"));
+                self.session_instruction_target_effect.insert(
+                    session_id,
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"));
+                self.session_instruction_target_digest.insert(
+                    session_id,
+                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"));
+                self.session_instruction_target_bytes.insert(
+                    session_id,
+                    self.session_instruction_effective_bytes.get_cloned(session_id).get("value"));
+            }
+            to Ready
+            emit InstructionOwnerRebound { owner: owner }
+        }
+
+        // A new owner of an unowned target (a host's standalone adoption, an
+        // attach of a released member) starts from that empty target: what
+        // is still in effect is revoked at the next fresh run start. The
+        // ownership check is a guard of its own.
+        transition RebindInstructionOwnerUnowned {
+            on input RebindInstructionOwner { session_id, owner, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && ((owner == InstructionTargetOwner::Session && mob_id == "")
+                    || (owner == InstructionTargetOwner::Mob && mob_id != ""))
+            }
+            guard "unowned" {
+                self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Unowned
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, owner);
+                self.session_instruction_owner_mob.insert(session_id, mob_id);
+                self.session_instruction_target_generation.insert(session_id, 0);
+            }
+            to Ready
+            emit InstructionOwnerRebound { owner: owner }
+        }
+
+        // The owning mob releases a member's target (a retire, a destroy):
+        // the target empties and is unowned. The release applies nothing by
+        // itself; the next fresh run start revokes what the mob had in
+        // effect, and a later owner starts from the empty target.
+        transition ReleaseInstructionTarget {
+            on input ReleaseInstructionTarget { session_id, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Mob
+                && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                    == mob_id
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Unowned);
+                self.session_instruction_owner_mob.insert(session_id, "");
+                self.session_instruction_target_generation.insert(session_id, 0);
+                self.session_instruction_target_revision.insert(session_id, EmptyMap);
+                self.session_instruction_target_effect.insert(session_id, EmptyMap);
+                self.session_instruction_target_digest.insert(session_id, EmptyMap);
+                self.session_instruction_target_bytes.insert(session_id, EmptyMap);
+            }
+            to Ready
+            emit InstructionTargetReleased { was_owned: true }
+        }
+
+        // A repeated release (a resumed retire) finds the target unowned.
+        transition ReleaseInstructionTargetAlreadyUnowned {
+            on input ReleaseInstructionTarget { session_id, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Unowned
+            }
+            update {}
+            to Ready
+            emit InstructionTargetReleased { was_owned: false }
+        }
+
+        transition ReleaseInstructionTargetOwnedByOtherMob {
+            on input ReleaseInstructionTarget { session_id, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Mob
+                && self.session_instruction_owner_mob.get_cloned(session_id).get("value")
+                    != mob_id
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedByOtherMob
+            }
+        }
+
+        transition ReleaseInstructionTargetOwnedBySession {
+            on input ReleaseInstructionTarget { session_id, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedBySession
+            }
+        }
+
+        // A fresh run start with pending changes, on a lowering that can
+        // carry the entry here, applies all of them in one entry: the
+        // target's Active slots become effective when the run commits, and a
+        // revoked slot leaves the slots in effect.
+        transition ResolveRunStartInstructionsApply {
+            on input ResolveRunStartInstructions {
+                session_id,
+                run_start,
+                lowering,
+                transcript_is_system_prefix
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && instruction_change_pending(
+                    self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"))
+            }
+            guard "fresh_run" {
+                run_start == InstructionRunStart::FreshRun
+            }
+            guard "lowers" {
+                instruction_entry_lowers(lowering, transcript_is_system_prefix)
+            }
+            update {
+                self.session_instruction_effective_revision.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_effect.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_digest.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_digest.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_bytes.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_bytes.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value"));
+                self.session_instruction_entry_sequence.insert(
+                    session_id,
+                    self.session_instruction_entry_sequence.get_cloned(session_id).get("value") + 1);
+            }
+            to Ready
+            emit InstructionEntryAuthorized {
+                entry_sequence: self.session_instruction_entry_sequence.get_cloned(session_id).get("value"),
+                generation: self.session_instruction_target_generation.get_cloned(session_id).get("value")
+            }
+        }
+
+        // Not a fresh run start, or nothing pending.
+        transition ResolveRunStartInstructionsNoChange {
+            on input ResolveRunStartInstructions {
+                session_id,
+                run_start,
+                lowering,
+                transcript_is_system_prefix
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (run_start != InstructionRunStart::FreshRun
+                    || instruction_change_pending(
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                        self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
+                        self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_effective_digest.get_cloned(session_id).get("value"))
+                        == false)
+            }
+            update {}
+            to Ready
+            emit InstructionEntryNotNeeded
+        }
+
+        // A leading-prefix-only model after conversation rows: the changes
+        // stay pending until a fresh session's first run or a run-start
+        // fold carries them in the leading prefix.
+        transition ResolveRunStartInstructionsDeferredLeadingPrefix {
+            on input ResolveRunStartInstructions {
+                session_id,
+                run_start,
+                lowering,
+                transcript_is_system_prefix
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && run_start == InstructionRunStart::FreshRun
+                && instruction_change_pending(
+                    self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"))
+                && lowering == InstructionLowering::LeadingPrefixOnly
+                && transcript_is_system_prefix == false
+            }
+            update {}
+            to Ready
+            emit InstructionApplicationDeferred {
+                reason: InstructionDeferReason::LeadingPrefixOnly
+            }
+        }
+
+        // A wire that carries no System row after its single leading one:
+        // the changes are never lowered as anything else and stay pending.
+        transition ResolveRunStartInstructionsDeferredUnavailable {
+            on input ResolveRunStartInstructions {
+                session_id,
+                run_start,
+                lowering,
+                transcript_is_system_prefix
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && run_start == InstructionRunStart::FreshRun
+                && instruction_change_pending(
+                    self.session_instruction_target_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_target_digest.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
+                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"))
+                && lowering == InstructionLowering::Unavailable
+            }
+            update {}
+            to Ready
+            emit InstructionApplicationDeferred {
+                reason: InstructionDeferReason::LoweringUnavailable
+            }
+        }
+
+        // A compaction at a fresh run's first request folds the recorded
+        // target: its snapshot sits in the leading prefix, so a
+        // leading-prefix-only model can take it. The target's Active slots
+        // become effective, as at an application.
+        transition AuthorizeInstructionFoldAtRunStart {
+            on input AuthorizeInstructionFold { session_id, at_run_start, lowering }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_entry_sequence.contains_key(session_id)
+            }
+            guard "at_run_start" {
+                at_run_start == true
+            }
+            guard "lowering_available" {
+                lowering != InstructionLowering::Unavailable
+            }
+            update {
+                self.session_instruction_effective_revision.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_revision.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_effect.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_digest.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_digest.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_bytes.insert(
+                    session_id,
+                    session_document_instruction_active_slots(
+                        self.session_instruction_target_effect.get_cloned(session_id).get("value"),
+                        self.session_instruction_target_bytes.get_cloned(session_id).get("value")));
+                self.session_instruction_effective_generation.insert(
+                    session_id,
+                    self.session_instruction_target_generation.get_cloned(session_id).get("value"));
+                self.session_instruction_entry_sequence.insert(
+                    session_id,
+                    self.session_instruction_entry_sequence.get_cloned(session_id).get("value") + 1);
+            }
+            to Ready
+            emit InstructionFoldAuthorized {
+                entry_sequence: self.session_instruction_entry_sequence.get_cloned(session_id).get("value"),
+                source: InstructionFoldSource::Target,
+                generation: self.session_instruction_effective_generation.get_cloned(session_id).get("value")
+            }
+        }
+
+        // Any other compaction folds what is in effect and applies nothing.
+        transition AuthorizeInstructionFoldEffective {
+            on input AuthorizeInstructionFold { session_id, at_run_start, lowering }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_entry_sequence.contains_key(session_id)
+                && (at_run_start == false
+                    || lowering == InstructionLowering::Unavailable)
+            }
+            update {
+                self.session_instruction_entry_sequence.insert(
+                    session_id,
+                    self.session_instruction_entry_sequence.get_cloned(session_id).get("value") + 1);
+            }
+            to Ready
+            emit InstructionFoldAuthorized {
+                entry_sequence: self.session_instruction_entry_sequence.get_cloned(session_id).get("value"),
+                source: InstructionFoldSource::Effective,
+                generation: self.session_instruction_effective_generation.get_cloned(session_id).get("value")
+            }
+        }
+    }
+}
+
+impl SessionDocumentMachineAuthority {
+    // Pure construction of one session's slot map with one slot set. Every
+    // admission and ordering decision stays in the canonical transitions.
+    fn session_document_instruction_slot_after_set<V: Clone>(
+        current: &std::collections::BTreeMap<String, V>,
+        slot: &str,
+        value: &V,
+    ) -> std::collections::BTreeMap<String, V> {
+        let mut updated = current.clone();
+        updated.insert(slot.to_owned(), value.clone());
+        updated
+    }
+
+    // The body bytes of one slot set's Active slots. A slot the bytes map
+    // does not name counts nothing.
+    fn session_document_instruction_active_bytes(
+        effect: &std::collections::BTreeMap<String, InstructionEffect>,
+        bytes: &std::collections::BTreeMap<String, u64>,
+    ) -> u64 {
+        effect
+            .iter()
+            .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)
+            .fold(0_u64, |total, (slot, _)| {
+                total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
+            })
+    }
+
+    // The entries of one slot set's map whose slot is Active in `effect`:
+    // what an application puts in effect. A slot `effect` holds Absent, or
+    // does not name, is left out.
+    fn session_document_instruction_active_slots<V: Clone>(
+        effect: &std::collections::BTreeMap<String, InstructionEffect>,
+        values: &std::collections::BTreeMap<String, V>,
+    ) -> std::collections::BTreeMap<String, V> {
+        values
+            .iter()
+            .filter(|(slot, _)| effect.get(slot.as_str()) == Some(&InstructionEffect::Active))
+            .map(|(slot, value)| (slot.clone(), value.clone()))
+            .collect()
     }
 }

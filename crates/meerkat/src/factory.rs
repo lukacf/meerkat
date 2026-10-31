@@ -1962,6 +1962,84 @@ fn grant_gate_for_build(
     )))
 }
 
+/// Where the operator-instruction entry rows `session` wrote itself stand in
+/// the requests of a build that resumes it
+/// ([`Session::own_operator_instruction_entry_placement`]). A prompt row the
+/// build authors (`authors_prompt_row`: the session carries no metadata, or
+/// the build names its prompt) stands beside them as another System row.
+pub(crate) fn resumed_build_entry_placement(
+    session: &Session,
+    authors_prompt_row: bool,
+) -> Result<meerkat_core::InstructionEntryPlacement, meerkat_core::ModelBoundaryProjectionError> {
+    let placement = session.own_operator_instruction_entry_placement()?;
+    Ok(if authors_prompt_row && !placement.is_empty() {
+        placement.with_another_system_row()
+    } else {
+        placement
+    })
+}
+
+/// Why a build that resumes `session` cannot serve its own
+/// operator-instruction entries on `identity`, or `None` when it can
+/// ([`meerkat_core::InstructionEntryPlacement::refusal`]). The model is
+/// judged by the weakest lowering its binding may serve
+/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]), before any
+/// client for it is built.
+fn resumed_build_entry_refusal(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    identity: &SessionLlmIdentity,
+    preferred_realm: Option<&RealmId>,
+    authors_prompt_row: bool,
+) -> Result<Option<meerkat_core::InstructionEntryLoweringRefusal>, BuildAgentError> {
+    let placement = resumed_build_entry_placement(session, authors_prompt_row)
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
+    if placement.is_empty() {
+        return Ok(None);
+    }
+    let lowering =
+        registry.weakest_instruction_lowering_for_target(config, identity, preferred_realm);
+    Ok(placement.refusal(lowering))
+}
+
+/// Refuse a build that resumes `session` onto a model that cannot carry the
+/// operator-instruction entry rows the session wrote itself where they stand
+/// ([`resumed_build_entry_refusal`]), before the build resolves the model's
+/// client.
+fn refuse_resumed_entries_the_model_cannot_carry(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    build_config: &AgentBuildConfig,
+    provider: Provider,
+    self_hosted_server_id: &Option<String>,
+    authors_prompt_row: bool,
+) -> Result<(), BuildAgentError> {
+    let identity = SessionLlmIdentity {
+        model: build_config.model.clone(),
+        provider,
+        self_hosted_server_id: self_hosted_server_id.clone(),
+        provider_params: build_config.provider_params.clone(),
+        auth_binding: build_config.auth_binding.clone(),
+    };
+    match resumed_build_entry_refusal(
+        session,
+        registry,
+        config,
+        &identity,
+        build_config.realm_id.as_ref(),
+        authors_prompt_row,
+    )? {
+        None => Ok(()),
+        Some(refusal) => Err(BuildAgentError::Config(format!(
+            "model '{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+            identity.model,
+            session.id()
+        ))),
+    }
+}
+
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
@@ -6307,6 +6385,9 @@ impl AgentFactory {
             } else {
                 meerkat_core::ProviderNativeToolPolicy::Inherit
             },
+            // A live hot swap installs it: the agent cannot judge the binding.
+            operator_instruction_lowering: registry
+                .instruction_lowering_for_identity(config, identity),
         })
     }
 
@@ -7948,12 +8029,28 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        // A session that resumes holds its own operator-instruction entry
+        // rows where they stand: a model that cannot carry them there is
+        // refused here, before its client is built (credential resolution,
+        // lease publication). A prompt row this build authors stands beside
+        // them too.
+        let authors_prompt_row =
+            resumed_session_metadata.is_none() || build_config.system_prompt.is_explicit();
         let primary_llm_client_phase = match prepared_controller.as_deref() {
             Some(graph) => {
                 build_config.model.clone_from(&graph.resolved_model);
                 build_config
                     .auth_binding
                     .clone_from(&graph.resolved_auth_binding);
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 Ok(ResolvedLlmClientPhase {
                     llm_client: None,
                     credential_identity: graph.credential_identity.clone(),
@@ -7963,6 +8060,15 @@ impl AgentFactory {
                 })
             }
             None => {
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 self.resolve_llm_client_phase(
                     config,
                     &registry,
@@ -7981,6 +8087,22 @@ impl AgentFactory {
                 let Some(bootstrap_identity) = handoff_bootstrap_identity.as_ref() else {
                     return Err(primary_error);
                 };
+                // A target that cannot carry the session's own
+                // operator-instruction entries where they stand gets no
+                // bootstrap client: it would serve a transcript its wire
+                // refuses, and the realization denies the request anyway.
+                if resumed_build_entry_refusal(
+                    &session,
+                    &registry,
+                    config,
+                    bootstrap_identity,
+                    build_config.realm_id.as_ref(),
+                    authors_prompt_row,
+                )?
+                .is_some()
+                {
+                    return Err(primary_error);
+                }
                 let auth_lease_handle = match &build_config.runtime_build_mode {
                     RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
                     RuntimeBuildMode::StandaloneEphemeral => None,
@@ -9792,6 +9914,14 @@ impl AgentFactory {
         if let Some(max_turns) = config.agent.max_turns {
             builder = builder.max_turns(max_turns);
         }
+        // Operator instructions lower as the session's model is served by its
+        // backend (`ModelRegistry::instruction_lowering_for_identity`): the
+        // ChatGPT backend's wire carries only the prompt's leading System
+        // row, so it lowers no entry, and it narrows a model that carries
+        // mid-conversation System rows.
+        builder = builder.with_operator_instruction_lowering(
+            registry.instruction_lowering_for_identity(config, &resolved_llm_identity),
+        );
 
         if let Some(defaults) = provider_request_defaults_for(
             provider,
@@ -14098,6 +14228,53 @@ mod tests {
         );
     }
 
+    /// The request policy a live hot swap installs carries the
+    /// operator-instruction lowering the identity's binding serves: none on
+    /// the ChatGPT backend, whose wire carries only the prompt's leading
+    /// System row, and what the model row lowers on the public API, for an
+    /// identity naming no binding too.
+    #[test]
+    fn a_request_policy_carries_the_operator_instruction_lowering_its_binding_serves() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (mut config, chatgpt_binding) = chatgpt_backend_cache_config();
+        config.realm.insert(
+            "public".to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        let lowering = |auth_binding: Option<AuthBindingRef>| {
+            factory
+                .request_policy_for_llm_identity(
+                    &config,
+                    &SessionLlmIdentity {
+                        model: "gpt-5.6-sol".to_string(),
+                        provider: Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding,
+                    },
+                    ToolCategoryOverride::Disable,
+                )
+                .expect("request policy")
+                .operator_instruction_lowering
+        };
+        assert_eq!(
+            lowering(Some(chatgpt_binding)),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the ChatGPT backend's wire carries no entry"
+        );
+        assert_eq!(
+            lowering(Some(configured_auth_binding("public", "default_openai"))),
+            meerkat_core::InstructionLowering::MidConversation,
+            "the public API carries the row's mid-conversation System rows"
+        );
+        assert_eq!(
+            lowering(None),
+            meerkat_core::InstructionLowering::MidConversation,
+            "an identity naming no binding is served by the API-key backend"
+        );
+    }
+
     /// Lower `identity`'s request policy through a ChatGPT-backend client, as
     /// the session's turn does, and return the body the wire would carry.
     #[cfg(feature = "openai")]
@@ -14185,6 +14362,321 @@ mod tests {
             "cache defaults computed for an unresolved binding reached the ChatGPT backend wire: {:?}",
             cache_fields(&body)
         );
+    }
+
+    /// Answers a request only after lowering it through the real ChatGPT
+    /// backend Responses request builder, as the OpenAI client does before
+    /// it sends one: a request that wire cannot carry fails the turn.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    struct ChatGptWireAnsweringClient {
+        wire: meerkat_openai::OpenAiClient,
+        bodies: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    impl ChatGptWireAnsweringClient {
+        fn new() -> Self {
+            Self {
+                wire: meerkat_openai::OpenAiClient::new("test-key".to_string())
+                    .with_chatgpt_backend_wire(),
+                bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn bodies(&self) -> Vec<serde_json::Value> {
+            self.bodies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for ChatGptWireAnsweringClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            self.wire.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
+        {
+            match self.wire.build_request_body(request) {
+                Err(error) => Box::pin(futures::stream::iter(vec![Err(error)])),
+                Ok(body) => {
+                    self.bodies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(body);
+                    Box::pin(futures::stream::iter(vec![
+                        Ok(LlmEvent::TextDelta {
+                            delta: "done".to_string(),
+                            meta: None,
+                        }),
+                        Ok(LlmEvent::UsageUpdate {
+                            usage: meerkat_core::TurnUsage::host_declared(
+                                Provider::OpenAI,
+                                &request.model,
+                                meerkat_core::Usage::default(),
+                            ),
+                        }),
+                        Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A session the factory builds on the ChatGPT backend: that wire
+    /// carries exactly one leading System row, the session's prompt, so the
+    /// build resolves no operator-instruction lowering. A recorded target
+    /// stays pending at the fresh session's first run and at the next one,
+    /// no entry row is written, and every request reaches the wire through
+    /// the real ChatGPT backend request builder.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn chatgpt_backend_session_keeps_the_target_pending_and_every_request_succeeds() {
+        const REALM: &str = "operator_instructions_chatgpt";
+        let mut config = Config::default();
+        let mut realm = inline_realm_section(&[("openai", "test-key")]);
+        realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert(REALM.to_string(), realm);
+        let client = Arc::new(ChatGptWireAnsweringClient::new());
+        let wire_client: Arc<dyn LlmClient> = client.clone();
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+        build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+        build.llm_client_override = Some(wire_client);
+        build.system_prompt =
+            crate::SystemPromptOverride::Set("You are a careful assistant.".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_web_search = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("a ChatGPT backend session builds");
+        assert_eq!(
+            agent.operator_instruction_lowering(),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the build resolves the backend's lowering, not the model row's"
+        );
+
+        agent
+            .session_mut()
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example")
+                        .expect("namespace"),
+                    key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .expect("the session records the target");
+        for input in ["first", "second"] {
+            assert_eq!(
+                agent
+                    .apply_run_start_operator_instructions(
+                        meerkat_core::InstructionRunStart::FreshRun,
+                        None,
+                    )
+                    .expect("the run start resolves"),
+                meerkat_core::RunStartInstructionOutcome::Deferred(
+                    meerkat_core::InstructionDeferReason::LoweringUnavailable
+                ),
+                "the target stays pending at the {input} run's start"
+            );
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text(input.to_string()))
+                .await
+                .expect("the request reaches the ChatGPT backend wire");
+        }
+
+        let bodies = client.bodies();
+        assert_eq!(bodies.len(), 2, "every request reached the wire");
+        for body in &bodies {
+            assert!(
+                !body.to_string().contains("Answer formally."),
+                "no instruction body reaches the wire: {body}"
+            );
+        }
+        assert!(
+            agent.session().messages().iter().all(|message| !matches!(
+                message,
+                meerkat_core::Message::System(system) if system.instruction_entry.is_some()
+            )),
+            "no entry row is written"
+        );
+        let state = agent
+            .session()
+            .instruction_target_state()
+            .expect("the target state reads")
+            .expect("the target is recorded");
+        assert_eq!(
+            state.slots()[0].pending_body.as_deref(),
+            Some("Answer formally."),
+            "the target stays pending"
+        );
+    }
+
+    /// A resumed build is refused, before its client is built, where the
+    /// model it resumes on cannot carry the operator-instruction entry rows
+    /// the session wrote itself where they stand: an entry after a
+    /// conversation row on a model that lowers System rows only in the
+    /// leading prefix, and an entry beside the session's prompt on the
+    /// ChatGPT backend, whose wire takes one leading System row. The first
+    /// session resumes on a model that lowers entries anywhere.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_resumed_build_is_refused_where_its_model_cannot_carry_the_sessions_own_entries() {
+        const REALM: &str = "operator_instructions_resume";
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let mut api_config = Config::default();
+        api_config.realm.insert(
+            REALM.to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        api_config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let mut chatgpt_config = Config::default();
+        let mut chatgpt_realm = inline_realm_section(&[("openai", "test-key")]);
+        chatgpt_realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        chatgpt_realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        chatgpt_config
+            .realm
+            .insert(REALM.to_string(), chatgpt_realm);
+        let resume = |model: &str, session: Session| {
+            let mut build = AgentBuildConfig::new(model);
+            build.provider = Some(Provider::OpenAI);
+            build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+            build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::for_provider(
+                Provider::OpenAI,
+            )));
+            build.resume_session = Some(session);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_web_search = ToolCategoryOverride::Disable;
+            build
+        };
+        let mut after_conversation = Session::new();
+        after_conversation.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        after_conversation
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry after the conversation row");
+        let mut beside_the_prompt = Session::new();
+        beside_the_prompt.push(meerkat_core::Message::System(
+            meerkat_core::SystemMessage::new("You are a careful assistant."),
+        ));
+        beside_the_prompt
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry beside the prompt");
+
+        for (target, build, config) in [
+            (
+                "a leading-prefix-only model",
+                resume("custom-prefix-model", after_conversation.clone()),
+                &api_config,
+            ),
+            (
+                "the ChatGPT backend",
+                resume("gpt-5.5", beside_the_prompt),
+                &chatgpt_config,
+            ),
+        ] {
+            let Err(error) = factory.build_agent(build, config).await else {
+                panic!("a resumed build on {target} must be refused");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    BuildAgentError::Config(message)
+                        if message.contains("cannot represent the operator-instruction entries")
+                ),
+                "unexpected build error on {target}: {error}"
+            );
+        }
+
+        factory
+            .build_agent(resume("gpt-5.5", after_conversation), &api_config)
+            .await
+            .expect("a model that lowers entries anywhere resumes the session");
     }
 
     /// An inherited tool-visibility ceiling keeps the identity witnesses that
@@ -15812,6 +16304,8 @@ mod tests {
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
     const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
+    const FALLBACK_REALM_CHATGPT_BOUND_LOWERING: &str = "fallback_chatgpt_bound_lowering";
+    const FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING: &str = "fallback_chatgpt_unbound_lowering";
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
@@ -16469,14 +16963,18 @@ mod tests {
     /// Run one sticky fallback from an Anthropic source onto `gpt-5.5`
     /// through realm `realm_name` (the caller's own), whose OpenAI binding is the private
     /// ChatGPT backend, and return the session's resolved capability surface
-    /// afterwards. `bound` names that binding on both the source and the
+    /// and the agent's operator-instruction lowering afterwards. `bound`
+    /// names that binding on both the source and the
     /// fallback target; otherwise neither names one, and the target is served
     /// by the binding its client resolution selects (the ChatGPT one).
     #[cfg(not(target_arch = "wasm32"))]
     async fn chatgpt_backend_sticky_fallback_capabilities(
         realm_name: &str,
         bound: bool,
-    ) -> meerkat_runtime::SessionLlmCapabilitySurface {
+    ) -> (
+        meerkat_runtime::SessionLlmCapabilitySurface,
+        meerkat_core::InstructionLowering,
+    ) {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
 
         let primary_model = "claude-sonnet-4-5";
@@ -16589,11 +17087,12 @@ mod tests {
             Some(backup_binding),
             "the fallback is served through the ChatGPT-backend binding"
         );
-        runtime
+        let capabilities = runtime
             .resolved_session_llm_capabilities(&session_id)
             .await
             .expect("resolved capability read")
-            .expect("the fallback records a resolved capability surface")
+            .expect("the fallback records a resolved capability surface");
+        (capabilities, agent.operator_instruction_lowering())
     }
 
     /// A sticky fallback onto a target that names the ChatGPT-backend binding
@@ -16604,7 +17103,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sticky_fallback_onto_a_chatgpt_binding_records_its_backend_capability() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_BOUND, true).await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
@@ -16619,7 +17118,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn unbound_fallback_target_is_judged_by_the_binding_it_resolves() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_UNBOUND, false)
                 .await;
         assert!(
@@ -16627,6 +17126,27 @@ mod tests {
             "the target resolves the ChatGPT-backend binding; the row's capability \
              must not stand for it"
         );
+    }
+
+    /// A sticky fallback onto the ChatGPT backend, through a binding the
+    /// target names or the one its client resolution selects, lowers no
+    /// operator-instruction entry afterwards: that wire carries exactly one
+    /// leading System row, the session's prompt. The activated witness,
+    /// judged through that binding, states it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sticky_fallback_onto_a_chatgpt_binding_lowers_no_operator_instruction_entry() {
+        for (realm, bound) in [
+            (FALLBACK_REALM_CHATGPT_BOUND_LOWERING, true),
+            (FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING, false),
+        ] {
+            let (_, lowering) = chatgpt_backend_sticky_fallback_capabilities(realm, bound).await;
+            assert_eq!(
+                lowering,
+                meerkat_core::InstructionLowering::Unavailable,
+                "a fallback onto the ChatGPT backend (target names its binding: {bound})"
+            );
+        }
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

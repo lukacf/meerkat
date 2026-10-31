@@ -2,7 +2,9 @@
 //!
 //! Every store read path deserializes persisted rows through typed serde and
 //! the generated `session_persistence_version_authority`. Session envelopes
-//! accept the current version and the explicit v3-to-v4 migration. Metadata
+//! accept the current version 5, the baseline 4 every document without an
+//! operator-instruction fact is still written at, and the explicit v3
+//! migration. Metadata
 //! accepts exactly the current version. Stored input state admits
 //! the explicitly modeled v4-to-v5 migration from the 0.8.10 floor; every
 //! older, missing, or future version FAILS CLOSED with a typed rejection.
@@ -10,8 +12,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_core::generated::session_persistence_version_authority::{
-    STORED_INPUT_STATE_BASELINE_VERSION, STORED_INPUT_STATE_VERSION,
-    restore_stored_input_state_version, stored_input_state_version_for_row,
+    SESSION_ENVELOPE_BASELINE_VERSION, STORED_INPUT_STATE_BASELINE_VERSION,
+    STORED_INPUT_STATE_VERSION, restore_session_envelope_version,
+    restore_stored_input_state_version, session_envelope_version_for_document,
+    stored_input_state_version_for_row,
 };
 use meerkat_core::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION, Session, SessionMetadata};
 use serde_json::{Value, json};
@@ -57,8 +61,8 @@ fn current_version_session_envelope_round_trips() {
     let value = serde_json::to_value(&session).expect("serialize");
     assert_eq!(
         value.get("version").and_then(Value::as_u64),
-        Some(u64::from(SESSION_VERSION)),
-        "writer must stamp the current envelope version"
+        Some(u64::from(SESSION_ENVELOPE_BASELINE_VERSION)),
+        "writer must stamp the baseline envelope on a document without instruction facts"
     );
     let parsed: Session = serde_json::from_value(value).expect("current version must round-trip");
     assert_eq!(parsed.version(), SESSION_VERSION);
@@ -177,7 +181,17 @@ fn stored_input_state_version_is_pinned_to_current() {
     assert_eq!(restore_stored_input_state_version(7), Ok(8));
     assert_eq!(restore_stored_input_state_version(8), Ok(8));
     assert!(restore_stored_input_state_version(9).is_err());
-    assert_eq!(SESSION_VERSION, 4);
+    // The session envelope is chosen per document the same way: 5 only for a
+    // document carrying an operator-instruction fact, the 0.9.x baseline 4
+    // otherwise; 3, 4 and 5 restore to the in-memory current version.
+    assert_eq!(SESSION_VERSION, 5);
+    assert_eq!(SESSION_ENVELOPE_BASELINE_VERSION, 4);
+    assert_eq!(session_envelope_version_for_document(false), 4);
+    assert_eq!(session_envelope_version_for_document(true), 5);
+    assert_eq!(restore_session_envelope_version(3), Ok(5));
+    assert_eq!(restore_session_envelope_version(4), Ok(5));
+    assert_eq!(restore_session_envelope_version(5), Ok(5));
+    assert!(restore_session_envelope_version(6).is_err());
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }
 

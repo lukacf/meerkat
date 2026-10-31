@@ -729,6 +729,7 @@ mod tests {
                 provider_params: None,
                 provider_tool_defaults: None,
                 provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: meerkat_core::InstructionLowering::LeadingPrefixOnly,
             },
             identity,
             client: Arc::new(ScriptedClient {
@@ -1581,5 +1582,107 @@ mod tests {
             client.active_model_fallback_identity().unwrap().model,
             "backup"
         );
+    }
+
+    /// A fallback target whose model cannot carry the request's
+    /// operator-instruction entry rows where they stand is skipped, typed,
+    /// as a request it cannot lower: the entry stands after a conversation
+    /// row, so only a model that lowers System rows anywhere can carry it.
+    /// The next candidate that can is taken; with none left the fallback
+    /// refuses, naming the skipped target and its reason. A request without
+    /// an entry row is the control.
+    #[test]
+    fn model_fallback_skips_a_target_that_cannot_carry_the_requests_operator_instruction_entries() {
+        let seen_tools = Arc::new(Mutex::new(Vec::new()));
+        let mut session = meerkat_core::Session::new();
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        let without_entries = session.messages().to_vec();
+        session
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry after the conversation row");
+        let with_an_entry = session.messages().to_vec();
+        let prefix_only = |model: &str| {
+            candidate(
+                Provider::OpenAI,
+                model,
+                Some(200_000),
+                Some(4096),
+                Arc::clone(&seen_tools),
+            )
+        };
+        let anywhere = || {
+            let mut capable = candidate(
+                Provider::OpenAI,
+                "gpt-5.5",
+                Some(200_000),
+                Some(4096),
+                Arc::clone(&seen_tools),
+            );
+            capable.target_profile = meerkat_core::ModelRegistry::from_config(
+                &meerkat_core::Config::default(),
+                meerkat_models::canonical(),
+            )
+            .expect("canonical registry")
+            .profile_witness_for_provider(Provider::OpenAI, "gpt-5.5")
+            .expect("the catalog row");
+            capable
+        };
+        let skipped_as_unsupported = |skipped: &[meerkat_core::AgentLlmFallbackSkippedTarget]| {
+            skipped.iter().any(|target| {
+                target.identity.model == "prefix-backup"
+                    && target.reason == ModelFallbackSkipReason::RequestUnsupported
+            })
+        };
+
+        let client = ModelFallbackClient::new(
+            vec![
+                prefix_only("primary"),
+                prefix_only("prefix-backup"),
+                anywhere(),
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .expect("chain with two backups");
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&with_an_entry))
+            .expect("the backup that carries the entry");
+        assert_eq!(switch.new_identity.model, "gpt-5.5");
+        assert!(
+            skipped_as_unsupported(&switch.skipped_targets),
+            "the leading-prefix-only backup is skipped typed: {:?}",
+            switch.skipped_targets
+        );
+
+        let client = ModelFallbackClient::new(
+            vec![prefix_only("primary"), prefix_only("prefix-backup")],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .expect("chain with one backup");
+        let skipped = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&with_an_entry))
+            .expect_err("no backup can carry the entry");
+        assert!(
+            skipped_as_unsupported(&skipped),
+            "the refusal names the skipped backup: {skipped:?}"
+        );
+
+        let switch = client
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &request(&without_entries),
+            )
+            .expect("a request without an entry row takes the backup");
+        assert_eq!(switch.new_identity.model, "prefix-backup");
     }
 }

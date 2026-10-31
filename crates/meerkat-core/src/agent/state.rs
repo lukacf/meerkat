@@ -1640,6 +1640,7 @@ where
                 }
                 self.latest_run_checkpoint_receipt = Some(next);
                 self.note_tail_carries_pending_compaction();
+                self.note_operator_instruction_checkpoint();
                 // The checkpoint moved the durable head over every rewrite the
                 // run made, so the live history retires to the retention now
                 // instead of at the next compaction. The boundary commit that
@@ -2155,6 +2156,7 @@ where
         }
         self.latest_run_checkpoint_receipt = Some(receipt);
         self.note_tail_carries_pending_compaction();
+        self.note_operator_instruction_checkpoint();
         self.round_commits.rewritten_since_base = false;
         self.round_commits.rebased = true;
         Ok(())
@@ -2297,6 +2299,9 @@ where
             })?;
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
+        // A fallback witness is judged as the target's binding serves it:
+        // the operator-instruction lowering derives from it.
+        self.operator_instruction_lowering = None;
         self.session = pending.next_session;
         self.tool_application_observations
             .refresh(self.session.messages());
@@ -2878,6 +2883,9 @@ where
             }
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
+            // A fallback witness is judged as the target's binding serves it:
+            // the operator-instruction lowering derives from it.
+            self.operator_instruction_lowering = None;
             self.session = next_session;
             self.tool_application_observations
                 .refresh(self.session.messages());
@@ -3909,9 +3917,15 @@ where
     }
 
     /// A resumed session whose active identity is a model-fallback target
-    /// re-admits that fallback before the next attempt. Synchronous and kept
-    /// out of line: the session-metadata decode and its temporaries never sit
-    /// in the retry loop's poll frame.
+    /// re-admits that fallback before the next attempt. It judges with the
+    /// active model profile. After a resumed build that is the catalog
+    /// witness the builder seeds, which names no binding, so its check of the
+    /// request's operator-instruction entry rows reads the model row's
+    /// lowering, not the one the target's backend serves. The resumed build
+    /// itself refuses, before its client is built, a session whose own entry
+    /// rows that backend cannot carry (`AgentFactory::build_agent`).
+    /// Synchronous and kept out of line: the session-metadata decode and its
+    /// temporaries never sit in the retry loop's poll frame.
     #[inline(never)]
     fn admit_fallback_origin_resume(
         &self,
@@ -4490,10 +4504,11 @@ where
     async fn execute_turn_effects_unboxed(
         &mut self,
         transition: &TurnExecutionTransition,
-        // Retained in the signature as the turn context effects execute within;
-        // no longer consumed since compaction indexing stopped using the turn
-        // as a source-identity proxy (#152).
-        _turn_count: u32,
+        // The turn context effects execute within. A compaction reads it for
+        // one fact only: whether it runs before the run's first model
+        // response, where an operator-instruction fold may apply the
+        // recorded target.
+        turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
@@ -4640,6 +4655,15 @@ where
                                 }),
                             None => Ok(()),
                         };
+                        // The operator-instruction fold this rewrite carries.
+                        // It applies the recorded target only before the
+                        // first model response of a run that started fresh
+                        // (not from a run cursor); the session-document
+                        // authority decides.
+                        let instruction_fold_at_run_start =
+                            self.run_started_fresh && turn_count == 0;
+                        let instruction_lowering = self.operator_instruction_lowering();
+                        let instruction_run_id = self.runtime_started_run_id.clone();
                         let compaction_source = externalized.and_then(|()| {
                             self.session
                                 .transcript_content_digest()
@@ -4666,12 +4690,29 @@ where
                                         )
                                     }),
                             }
+                        })
+                        .and_then(|(revision, observations, prefix)| {
+                            self.session
+                                .authorize_instruction_fold(
+                                    instruction_fold_at_run_start,
+                                    instruction_lowering,
+                                    instruction_run_id,
+                                )
+                                .map(|fold| (revision, observations, prefix, fold))
+                                .map_err(|error| {
+                                    format!("operator instructions cannot be folded: {error}")
+                                })
                         });
                         // The summary request's own operation, so a refusal
                         // the host observes names what the audit records.
                         let summary_operation = crate::OperationId::new();
                         let outcome = match compaction_source {
-                            Ok((parent_revision, observation_source, prefix_messages)) => {
+                            Ok((
+                                parent_revision,
+                                observation_source,
+                                prefix_messages,
+                                instruction_fold,
+                            )) => {
                                 // Compaction of the admitted controller's own
                                 // context is its housekeeping: it runs on the
                                 // retained controller client (still authorized
@@ -4732,6 +4773,7 @@ where
                                         ),
                                         _ => crate::agent::compact::FoldedCalls::default(),
                                     },
+                                    instruction_fold,
                                 };
                                 // The compactor's warnings (a bounded source,
                                 // a rewrite keeping no complete turn) name the
@@ -4897,16 +4939,31 @@ where
                                 );
                             }
                             let retention = compactor.transcript_history_retention();
+                            let instruction_fold = outcome.instruction_fold;
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
                                     &outcome.rewrite_authority,
                                 )
                                 .and_then(|commit| {
-                                    // Bound the graph in the same prepared
-                                    // value: retired bodies never reach a
-                                    // persisted document.
                                     if commit.is_some() {
+                                        // The operator-instruction fold's
+                                        // target state (its entry-sequence
+                                        // high-water, the pending bodies it
+                                        // applied) goes with the rewrite
+                                        // that inserted its snapshot.
+                                        if let Some(fold) = instruction_fold.as_ref() {
+                                            compacted_session
+                                                .record_instruction_fold(fold)
+                                                .map_err(|error| {
+                                                    crate::TranscriptEditError::HistoryStateMalformed(
+                                                        error.to_string(),
+                                                    )
+                                                })?;
+                                        }
+                                        // Bound the graph in the same prepared
+                                        // value: retired bodies never reach a
+                                        // persisted document.
                                         compacted_session.retire_transcript_history(retention)?;
                                     }
                                     Ok(commit)
@@ -6427,15 +6484,22 @@ where
         // left by another run, so a stale request never leaks into this run.
 
         // --- Authority lifecycle: consume the generated primitive start ---
+        // A run id a run start reserved for its operator-instruction entry
+        // belongs to this run, whichever source names it: no later run
+        // adopts it.
+        let reserved_run_id = self.run_start_reserved_run_id.take();
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
             run_id
         } else {
             let run_id = match resumed.as_ref() {
                 Some(start) => start.cursor.run_id.clone(),
+                // The run its run start named in an operator-instruction
+                // entry, when it reserved one, then a new one.
                 None => self
                     .turn_state_handle
                     .as_deref()
                     .and_then(|handle| handle.snapshot().active_run_id)
+                    .or(reserved_run_id)
                     .unwrap_or_else(|| RunId(uuid::Uuid::new_v4())),
             };
             self.apply_turn_input(TurnExecutionInput::StartConversationRun {
@@ -6448,6 +6512,9 @@ where
             })?;
             run_id
         };
+        // The run started: an operator-instruction entry its run start
+        // applied names a run that ran.
+        self.note_operator_instruction_run_started();
         // A provisional receipt belongs to exactly one run. Clear any
         // zero-checkpoint predecessor synchronously once the fresh run
         // identity is known, before the first suspension point, so service
@@ -6471,6 +6538,10 @@ where
             }
         };
         self.runtime_started_run_id = Some(run_id.clone());
+        // A compaction before this run's first model response folds
+        // operator instructions at the run's start only when the run starts
+        // fresh, not from a run cursor.
+        self.run_started_fresh = resumed.is_none();
         self.tool_dispatch_context.bind_run_id(run_id.clone());
         match resumed.as_ref() {
             Some((cursor, _)) => self.resume_round_commits(cursor),
@@ -20157,6 +20228,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         temperature: Some(0.2),
                         ..Default::default()
@@ -20230,6 +20302,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                         web_search: Some(OpaqueProviderBody::from_value(
@@ -20344,6 +20417,7 @@ mod tests {
                     model: "turn-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(native_search()),
                     provider_tool_defaults: None,
                 },
@@ -20383,6 +20457,7 @@ mod tests {
             model: model.to_string(),
             credential_identity: None,
             provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+            operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
             provider_params: None,
             provider_tool_defaults: None,
         }
@@ -30011,6 +30086,7 @@ mod tests {
                 model: "backup".to_string(),
                 credential_identity: None,
                 provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                 provider_params: None,
                 provider_tool_defaults: None,
             },
@@ -30732,6 +30808,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -31016,6 +31093,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(
                         crate::lifecycle::run_primitive::ProviderParamsOverride {
                             temperature: Some(0.37),
@@ -31237,6 +31315,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -33603,6 +33682,7 @@ mod tests {
                     model: "claude-backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         provider_tag: Some(if self.mismatched_fallback_tag {
                             ProviderTag::OpenAi(OpenAiProviderTag::default())

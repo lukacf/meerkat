@@ -689,6 +689,7 @@ mod tests {
             identity: None,
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
         })
     }
 
@@ -711,6 +712,7 @@ mod tests {
             identity: None,
             prompt_version: None,
             instruction_activation: Some(identity),
+            instruction_entry: None,
         })
     }
 

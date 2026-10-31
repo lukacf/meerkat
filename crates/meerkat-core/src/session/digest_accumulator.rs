@@ -169,6 +169,14 @@ struct AccumulatorState {
     /// every resume. The count advances across appends and materializes the
     /// prefix only if a rewrite or HeadCanonical conversion actually asks.
     lazy_exact_row_current_count: Option<u64>,
+    /// Rows below this count whose operator-instruction entry rows were
+    /// verified against their typed identities in this buffer
+    /// (`Session::verify_operator_instruction_rows`), so a model request
+    /// does not re-render and re-hash them. Appends keep it: they change no
+    /// earlier row. Every other mutation drops it, as it drops the digest
+    /// witnesses; an in-place scan keeps the rows below the lowest index it
+    /// changed.
+    verified_entry_rows: usize,
     /// Monotonic count of non-append transcript mutations. Observability for
     /// tests and diagnostics; correctness does not depend on it.
     epoch: u64,
@@ -246,6 +254,7 @@ impl TranscriptDigestAccumulator {
         state.exact_row_committed = None;
         state.exact_row_current = None;
         state.lazy_exact_row_current_count = None;
+        state.verified_entry_rows = 0;
         state.parked = None;
         state.epoch = state.epoch.saturating_add(1);
     }
@@ -298,6 +307,7 @@ impl TranscriptDigestAccumulator {
             && state.exact_row_committed.is_none()
             && state.exact_row_current.is_none()
             && state.lazy_exact_row_current_count.is_none()
+            && state.verified_entry_rows == 0
         {
             return;
         }
@@ -308,6 +318,7 @@ impl TranscriptDigestAccumulator {
             exact_row_committed: state.exact_row_committed.take(),
             exact_row_current: state.exact_row_current.take(),
             lazy_exact_row_current_count: state.lazy_exact_row_current_count.take(),
+            verified_entry_rows: std::mem::take(&mut state.verified_entry_rows),
             epoch: state.epoch,
             parked: None,
         };
@@ -324,6 +335,9 @@ impl TranscriptDigestAccumulator {
     /// early `?` return — leaves the accumulator invalidated, which is the
     /// fail-safe direction.
     ///
+    /// The verified entry rows below the lowest changed index stay verified,
+    /// for the same reason.
+    ///
     /// Returns whether a mutation dropped a lineage that was only the lazy
     /// WholeBlob mark (no installed prefix); the caller re-marks it at the
     /// post-scan length.
@@ -337,6 +351,7 @@ impl TranscriptDigestAccumulator {
                 state.exact_row_committed = None;
                 state.exact_row_current = None;
                 state.lazy_exact_row_current_count = None;
+                state.verified_entry_rows = 0;
                 state.epoch = state.epoch.saturating_add(1);
             }
             return false;
@@ -353,6 +368,7 @@ impl TranscriptDigestAccumulator {
                 u64::try_from(lowest_mutated_index)
                     .is_ok_and(|index| index >= committed.row_count())
             });
+            state.verified_entry_rows = parked.verified_entry_rows.min(lowest_mutated_index);
             state.epoch = state.epoch.saturating_add(1);
             return lazy_whole_blob_lineage;
         }
@@ -362,6 +378,7 @@ impl TranscriptDigestAccumulator {
         state.exact_row_committed = parked.exact_row_committed;
         state.exact_row_current = parked.exact_row_current;
         state.lazy_exact_row_current_count = parked.lazy_exact_row_current_count;
+        state.verified_entry_rows = parked.verified_entry_rows;
         false
     }
 
@@ -425,6 +442,18 @@ impl TranscriptDigestAccumulator {
             .exact_row_committed
             .as_ref()
             .map(SessionMessageRowPrefixAccumulator::row_count)
+    }
+
+    fn verified_entry_rows(&self) -> usize {
+        self.locked().verified_entry_rows
+    }
+
+    fn record_verified_entry_rows(&self, count: usize) {
+        let mut state = self.locked();
+        // A parked scan may be changing rows; nothing is recorded under it.
+        if state.parked.is_none() {
+            state.verified_entry_rows = state.verified_entry_rows.max(count);
+        }
     }
 
     fn exact_row_prefix_at(&self, row_count: u64) -> Option<SessionMessageRowPrefixAccumulator> {
@@ -677,6 +706,22 @@ impl TranscriptMessages {
         self.accumulator.committed_row_prefix_count()
     }
 
+    /// Rows below this count hold operator-instruction entry rows this buffer
+    /// already verified against their typed identities. A row below it cannot
+    /// change without a non-append mutation, which lowers the count.
+    pub(crate) fn verified_entry_row_count(&self) -> usize {
+        self.accumulator
+            .verified_entry_rows()
+            .min(self.messages.len())
+    }
+
+    /// Record that every operator-instruction entry row below `count` holds
+    /// the bytes its typed identity names.
+    pub(crate) fn record_verified_entry_rows(&self, count: usize) {
+        self.accumulator
+            .record_verified_entry_rows(count.min(self.messages.len()));
+    }
+
     /// Exact durable-row prefix witnessed at `row_count`, if it is either the
     /// last installed authority or that authority extended only by appends.
     pub(crate) fn exact_row_prefix_at(
@@ -778,6 +823,20 @@ impl TranscriptMessages {
         if lazy_whole_blob_lineage {
             self.mark_lazy_whole_blob_row_lineage();
         }
+    }
+
+    /// SEAM (removal of one row): take out the row at `index`. It is an
+    /// in-place change from `index` on, so every exact durable-row prefix
+    /// and every verified entry row before it is kept, and every other
+    /// witness is dropped. The caller keeps `index` beyond every committed
+    /// row.
+    pub(crate) fn remove_row(&mut self, index: usize) -> Option<Message> {
+        if index >= self.messages.len() {
+            return None;
+        }
+        let removed = self.begin_in_place_scan().remove(index);
+        self.finish_in_place_scan(Some(index));
+        Some(removed)
     }
 
     /// Format-2 transcript digest of the current buffer.
@@ -1246,5 +1305,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Verified entry rows belong to the rows themselves: appends keep them,
+    /// a scan keeps the rows below the lowest index it changed, a row
+    /// removal keeps the rows before it, and a replacement drops them all.
+    #[test]
+    fn verified_entry_rows_survive_appends_and_drop_with_other_mutations() {
+        let mut messages = TranscriptMessages::from_vec(transcript(4));
+        assert_eq!(messages.verified_entry_row_count(), 0);
+        messages.record_verified_entry_rows(4);
+        messages.record_verified_entry_rows(2);
+        messages.record_verified_entry_rows(9);
+        assert_eq!(
+            messages.verified_entry_row_count(),
+            4,
+            "the count never goes back and never passes the buffer"
+        );
+
+        messages.push(user("m4"));
+        assert_eq!(messages.verified_entry_row_count(), 4);
+        let clone = messages.clone();
+
+        let _ = messages.begin_in_place_scan();
+        messages.finish_in_place_scan(None);
+        assert_eq!(messages.verified_entry_row_count(), 4);
+        let _ = messages.begin_in_place_scan();
+        messages.finish_in_place_scan(Some(2));
+        assert_eq!(messages.verified_entry_row_count(), 2);
+
+        messages.record_verified_entry_rows(5);
+        assert_eq!(messages.remove_row(3), Some(user("m3")));
+        assert_eq!(messages.verified_entry_row_count(), 3);
+        assert_eq!(
+            messages.digest().unwrap(),
+            super::super::transcript_messages_digest(&messages).unwrap()
+        );
+
+        messages.replace(transcript(4));
+        assert_eq!(messages.verified_entry_row_count(), 0);
+        assert_eq!(clone.verified_entry_row_count(), 4, "a clone keeps its own");
     }
 }

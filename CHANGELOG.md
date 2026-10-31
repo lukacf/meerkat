@@ -575,6 +575,76 @@ them.
   downstream exhaustive match needs the arm. A session service surfaces it
   as its generic build error (`AgentError::BuildError`).
 
+- `meerkat-core`, `meerkat-contracts`: operator-instruction entries are System
+  rows with a typed identity (see Added). `SystemMessage` gains the public
+  field `instruction_entry: Option<InstructionEntryIdentity>`, so code that
+  builds a `SystemMessage` literally must set it (`None` keeps the previous
+  behaviour). `WireSessionMessage::System` gains the field
+  `instruction_entry: Option<WireInstructionEntryIdentity>`, so code that
+  builds the variant literally or destructures it without `..` must name it.
+
+- `meerkat-core`, `meerkat`: a live model change carries the
+  operator-instruction lowering of its binding (see Added).
+  `SessionLlmRequestPolicy` gains the public field
+  `operator_instruction_lowering`, so code that builds the policy literally
+  must set it (it is not serialized). `SessionRuntimeLlmReconfigureService`
+  gains the required method
+  `live_session_own_operator_instruction_entry_placement`, so an
+  implementation must answer it.
+
+- `meerkat-machine-schema`, `meerkat-runtime`: a model routing request onto a
+  target that cannot carry the session's transcript is denied by
+  `MeerkatMachine` (see Added). The inputs `RequestFiniteSwitchTurn` and
+  `RequestUntilChangedSwitchTurn` gain the field `target_carries_transcript`,
+  so code that builds them literally must set it, and the machine gains the
+  transitions `RequestFiniteSwitchTurnTranscriptUnsupported` and
+  `RequestUntilChangedSwitchTurnTranscriptUnsupported`.
+  `SessionLlmReconfigureHost` gains `switch_target_carries_session_transcript`,
+  with a default that carries every target.
+
+- `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  `SessionDocumentMachine` holds each session's operator-instruction state
+  (see Added). The generated session-document authority
+  (`meerkat_core::generated::session_document`), the catalog
+  (`meerkat_machine_schema::catalog::dsl::session_document`) and the kernel
+  `generated::session_document` gain, appended last, the inputs
+  `RecoverSessionInstructionState`, `RecoverSessionInstructionTarget`,
+  `RecoverSessionInstructionEffective`, `RecordInstructionTarget`,
+  `SetSessionInstruction`, `RebindInstructionOwner`,
+  `ReleaseInstructionTarget`, `ResolveRunStartInstructions` and
+  `AuthorizeInstructionFold`, the effects `SessionInstructionStateRecovered`,
+  `InstructionTargetRecorded`, `InstructionTargetRefused`,
+  `InstructionOwnerRebound`, `InstructionTargetReleased` (whose `was_owned`
+  says whether the releasing mob owned the target),
+  `InstructionEntryAuthorized`, `InstructionEntryNotNeeded`,
+  `InstructionApplicationDeferred` and `InstructionFoldAuthorized`, and the
+  transitions that decide them; the machine state gains the
+  `session_instruction_*` maps; and the enums `InstructionTargetOwner`,
+  `InstructionEffect`, `InstructionRunStart`, `InstructionLowering`,
+  `InstructionWriteOutcome`, `InstructionWriteRefusal`,
+  `InstructionDeferReason` and `InstructionFoldSource` are new. Exhaustive
+  matches must add the new variants, and code that builds the state struct
+  literally must set the new fields.
+
+- `meerkat-core`, `meerkat-store`: a session document that carries an
+  operator-instruction fact (an entry row or the recorded instruction state)
+  is written at session envelope 5, and a release before operator
+  instructions refuses such a document typed until it is rolled forward;
+  every other document stays at envelope 4, byte for byte, so documents of
+  sessions that never use operator instructions still read on older
+  binaries. The generated session persistence version authority accepts 5
+  (`SESSION_VERSION` is 5): its state gains `session_envelope_baseline_version`
+  (4), the input `RestoreSessionEnvelopeVersion` gains the transition
+  `RestoreBaselineSessionEnvelopeVersion`, which restores a document written
+  at the baseline, and `meerkat_core::generated::session_persistence_version_authority`
+  gains `SESSION_ENVELOPE_BASELINE_VERSION` and
+  `session_envelope_version_for_document`. `rkat storage doctor` lists the
+  sessions at envelope 5 (Info finding `operator-instruction-envelope`) in
+  SQLite realms and in the runtime store of JSONL realms
+  (`runtime.sqlite3`), so an operator sees what a rollback would refuse;
+  host-store realms keep their documents in the host's store and are not
+  listed.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1162,7 +1232,78 @@ them.
   external tools wraps them; tools it replaces outright leave the session
   with no recorded authority, and its creator check refuses.
 
+- `meerkat-core`, `meerkat-session`, `meerkat-contracts`, `meerkat-store`:
+  operator instructions, standing instructions a host gives a session by
+  slot (namespace and key), revision and body (Rust API).
+  `Session::set_session_instruction` records a session-owned write
+  (activate a body, or revoke, at a higher revision; an exact retry is a
+  duplicate); `Session::record_instruction_target` records a mob member's
+  whole snapshot by generation (a repeated or older generation answers
+  already recorded). Another mob's snapshot or release is refused
+  `owned_by_other_mob` until the owning mob releases the target
+  (`Session::release_instruction_target`): a release empties the target, the
+  session's next fresh run start revokes what the mob had in effect, and a
+  later owner starts from the empty target.
+  `Session::rebind_instruction_owner` attaches a mob to a session-owned
+  target from the instructions in effect, or gives an unowned target a new
+  owner. A stale or conflicting revision, a slot
+  that instruction activations manage, more than 64 slots, a body over
+  256 KiB and more than 1 MiB of Active bodies are refused typed
+  (`InstructionSetErrorCode`). A write or record changes only the recorded
+  target and wakes nothing. The pending changes apply at the next fresh run
+  start as one System entry appended before the run's own input, naming the
+  run; a resumed run applies nothing, and a run that never starts takes its
+  entry back, so the changes stay pending. A model that lowers System rows
+  only in its leading prompt defers (`leading_prefix_only`) until a
+  compaction at a run's first request carries the target in its snapshot,
+  and a backend whose wire carries only one leading System row (the ChatGPT
+  backend, `OpenAiBackendKind::admits_additional_leading_system_messages`;
+  an OpenAI backend kind this version does not know counts as one) keeps
+  them pending (`lowering_unavailable`), whether the session was built
+  there, fell back there or was switched there live. A live model change
+  installs the lowering the host resolves for the new binding, so a change
+  between other bindings keeps applying instructions. A model change onto a
+  target that cannot carry the entry rows the session wrote itself where
+  they stand (an entry after a conversation row on a model that lowers
+  System rows only in its leading prompt or on such a backend, an entry
+  beside another System row on such a backend) is refused typed: a live
+  change before any client for the target is built (`ValidationFailed`, and
+  the session service's own hot swap refuses it too; a session staged before
+  its first build is judged on the session that build resumes), a model
+  routing request (a committed `brain_swap` among them) is denied by the
+  routing machine (`capability_policy`) instead of being held, so the
+  session keeps serving on its current model, a sticky model fallback skips
+  the target (`request_unsupported`; it judges every entry row of the
+  request, rows a fork copied included), and a resumed build refuses
+  (`BuildAgentError::Config`) and bootstraps no client for a committed
+  routing target that cannot carry them.
+  `Session::own_operator_instruction_entry_placement` says where they stand
+  (`InstructionEntryPlacement`). A compaction folds every
+  entry row into one snapshot of the instructions in effect after the
+  leading System prefix, and no summary request, host curator window or
+  compactor input carries an instruction body; the shrink rule does not
+  count entry rows. `session/update_system_prompt` keeps committing later
+  prompt versions in sessions that hold entries, and a fork child's request
+  leaves out copied entry rows its model cannot carry.
+  `SessionServiceInstructionExt` (`set_session_instruction`,
+  `record_instruction_target`, `read_session_instructions`; the persistent
+  service implements it, the ephemeral one refuses `durability_unavailable`)
+  records a live session's write through a task the service owns, so a
+  caller that stops waiting never leaves it uncommitted, and a dormant
+  session's store-only without waking it. History reads carry each entry's
+  identity as `WireInstructionEntryIdentity`, raw for a form the reader does
+  not know. `SessionDocumentMachine` decides ownership, revision order, the
+  slot limit, the active budget, application, deferral, the entry sequence
+  and the fold source.
+
 ### Changed
+
+- `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
+  answers no for an OpenAI backend kind this version does not know (it
+  answered yes), as for a binding the config does not resolve. A capability
+  surface read through such a binding no longer claims ordered System
+  messages after the leading prefix, so instruction activations there are
+  refused.
 
 - `meerkat-core`: a `policy_denied` tool error's model-facing message now
   reads `Tool call denied (<code>): <message>` from the denial itself, for an

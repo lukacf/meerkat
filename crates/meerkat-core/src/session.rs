@@ -125,8 +125,16 @@ mod import_0810;
 #[cfg(test)]
 mod inline_image_externalization_tests;
 mod instruction_activation;
+#[cfg(test)]
+mod instruction_envelope_tests;
+mod instruction_target;
+#[cfg(test)]
+mod instruction_target_tests;
 pub mod model_routing_control;
 pub mod model_routing_handoff_staging;
+mod operator_instructions;
+#[cfg(test)]
+mod operator_instructions_tests;
 mod system_prompt_update;
 mod transcript_history;
 
@@ -153,6 +161,28 @@ pub use instruction_activation::{
     InstructionActivationRequest, MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES,
     MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
     materialize_instruction_activation_messages, validate_instruction_activation_messages,
+};
+pub(crate) use instruction_target::InstructionFold;
+pub use instruction_target::{
+    InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRunStart,
+    InstructionSetErrorCode, InstructionStateError, InstructionTargetOwner,
+    InstructionTargetRecord, InstructionTargetRecordSlot, InstructionTargetSlot,
+    InstructionWriteDisposition, InstructionWriteError, RunStartInstructionOutcome,
+    SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
+    SessionInstructionWrite,
+};
+pub use operator_instructions::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
+    InstructionEntryKind, InstructionEntryLoweringRefusal, InstructionEntryPlacement,
+    InstructionRevision, InstructionSlot, InvalidInstructionRevision,
+    MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
+    RunStartInstructionApplication, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
+};
+pub(crate) use operator_instructions::{
+    is_operator_instruction_entry, rows_besides_operator_instruction_entries,
 };
 pub use system_prompt_update::{
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
@@ -185,6 +215,11 @@ pub use transcript_history::{
 /// in memory; new writes use the current version. The exact released 0.8.10
 /// envelope crosses only the explicit one-time importer.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
+
+/// The envelope version a document without any operator-instruction fact is
+/// written with ([`Session::persisted_envelope_version`]): the released
+/// binaries' envelope, so such a document stays byte-identical.
+pub use crate::generated::session_persistence_version_authority::SESSION_ENVELOPE_BASELINE_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
@@ -1138,7 +1173,7 @@ impl Serialize for Session {
         }
         let history = self.history_caches.shared_state.get();
         let serde_repr = SessionWholeBlobSerdeRef {
-            version: self.version,
+            version: self.persisted_envelope_version(),
             id: &self.id,
             messages: self.messages(),
             created_at: &self.created_at,
@@ -2098,6 +2133,14 @@ impl Session {
 
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
+
+/// Metadata key holding the recorded operator-instruction target state: the
+/// owner, the target generation, the entry-sequence high-water and the slots
+/// the next run start applies (with the bodies still pending). A separate key
+/// from [`SESSION_DEFERRED_TURN_STATE_KEY`]: the target is long-lived and must
+/// not change [`Session::is_deferred_template`]. A document carrying it is
+/// written at envelope 5.
+pub const SESSION_INSTRUCTION_STATE_KEY: &str = "session_instruction_state_v1";
 
 /// Metadata key holding the open run cursor of a durable session.
 ///
@@ -5274,6 +5317,13 @@ fn assert_host_append_does_not_mint_system_semantics(message: &Message) {
         ),
         "ordinary Session append cannot mint an instruction activation; use activate_instruction",
     );
+    assert!(
+        !matches!(
+            message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ),
+        "ordinary Session append cannot mint an operator instruction entry; only a run start or a compaction fold mints one",
+    );
 }
 
 impl Session {
@@ -5342,6 +5392,30 @@ impl Session {
     /// Get the session version
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Whether this document carries a fact only envelope 5 can read: the
+    /// recorded operator-instruction state. Every path that puts an
+    /// operator-instruction entry row in a session records it (a run start's
+    /// application, a compaction fold, any entry append, a fork that copies
+    /// entry rows), and decode carries it with the rows, so the key alone
+    /// answers, in O(1) and without reading the transcript. Entry rows leave
+    /// the live transcript only through a compaction fold, which records the
+    /// state in the same rewrite, so a document whose rewrite graph retains
+    /// an entry row always carries it too: once 5, always 5.
+    pub fn carries_operator_instruction_facts(&self) -> bool {
+        self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
+    }
+
+    /// The envelope version this document is written with: the current
+    /// version when it carries an operator-instruction fact, the baseline
+    /// otherwise, so a document without one stays byte-identical to what the
+    /// released binaries write and read. In memory every restored document
+    /// carries [`SESSION_VERSION`] ([`Self::version`]).
+    pub fn persisted_envelope_version(&self) -> u32 {
+        session_persistence_version_authority::session_envelope_version_for_document(
+            self.carries_operator_instruction_facts(),
+        )
     }
 
     /// Get all messages.
@@ -5465,9 +5539,15 @@ impl Session {
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
-        if messages.len() >= self.messages.len() || summary_count != 1 {
+        // The shrink rule counts the rows other than operator-instruction
+        // entries: the fold's snapshot and the entry rows it takes out are
+        // neutral, so the compactor's own rebuild must have taken rows out.
+        if operator_instructions::rows_besides_operator_instruction_entries(&messages)
+            >= operator_instructions::rows_besides_operator_instruction_entries(self.messages())
+            || summary_count != 1
+        {
             return Err(TranscriptEditError::InvalidTranscriptShape(
-                "validated compaction rewrite must shrink the transcript and carry exactly one CompactionSummary"
+                "validated compaction rewrite must shrink the transcript (operator instruction entries aside) and carry exactly one CompactionSummary"
                     .to_string(),
             ));
         }
@@ -6803,6 +6883,7 @@ impl Session {
             identity,
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
         }));
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
@@ -6945,6 +7026,14 @@ impl Session {
         &self,
         messages: &[Message],
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        // Every operator-instruction entry row read here holds the bytes its
+        // typed identity names: the transcript buffer verifies each row once,
+        // and a row cannot change in place without dropping that record.
+        self.verify_operator_instruction_rows(messages.len())
+            .map_err(|reason| ModelBoundaryProjectionError {
+                session_id: self.id().clone(),
+                reason,
+            })?;
         let copied = crate::fork_notice::CopiedForkRows::of(
             self.messages(),
             self.id(),
@@ -6959,6 +7048,12 @@ impl Session {
                 session_id: self.id().clone(),
                 reason,
             })?;
+        // Operator-instruction entries a fork copied read as history in the
+        // child.
+        operator_instructions::project_verified_operator_instruction_messages_in_place(
+            self.id(),
+            &mut projected,
+        );
         crate::types::strip_tool_result_host_metadata(&mut projected);
         Ok(projected)
     }
@@ -9071,6 +9166,20 @@ impl Session {
                         .to_string(),
                 ));
             }
+            // Only a run start appends an operator-instruction entry row, and
+            // only the validated compaction fold takes entry rows out and
+            // inserts a snapshot. Entry rows are compared by identity and by
+            // their place among the conversation rows and the System rows of
+            // their gap, not by offset: a keyed prompt update adopts a row in
+            // place and inserts its later version before them.
+            if operator_instructions::operator_instruction_entry_places(self.messages())
+                != operator_instructions::operator_instruction_entry_places(&rewritten)
+            {
+                return Err(TranscriptEditError::InvalidTranscriptShape(
+                    "same-session transcript rewrite cannot mint, alter, move, erase, or restore operator instruction entries"
+                        .to_string(),
+                ));
+            }
         }
         // One required hash of the genuinely new content, computed FIRST so
         // the whole-span digests below reuse it instead of re-hashing the
@@ -9379,7 +9488,7 @@ impl Session {
         let now = SystemTime::now();
         let truncated = self.messages[..index.min(self.messages.len())].to_vec();
         let id = SessionId::new();
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9401,7 +9510,9 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked
     }
 
     /// Fork at one complete transcript boundary.
@@ -9550,6 +9661,15 @@ impl Session {
                     .to_string(),
             ));
         }
+        if matches!(
+            &replacement_message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "fork replacement cannot mint an operator instruction entry; fork-at may only copy exact source-prefix entries"
+                    .to_string(),
+            ));
+        }
 
         // The edited row is new content on a new branch. It keeps no
         // occurrence id, whether it replaced a whole message or one block of
@@ -9571,7 +9691,7 @@ impl Session {
     pub fn fork(&self) -> Self {
         let now = SystemTime::now();
         let id = SessionId::new();
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9587,7 +9707,11 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        // A source without the instruction state holds no entry row, so a
+        // fork of one stays O(1).
+        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked
     }
 }
 
@@ -9990,6 +10114,20 @@ pub struct SessionLlmRequestPolicy {
     /// Narrow-only final policy for provider-native server tools.
     #[serde(default)]
     pub provider_native_tools: ProviderNativeToolPolicy,
+    /// How operator-instruction entries lower on the target as its backend
+    /// serves it, resolved with the config that resolves the target's
+    /// binding (`ModelRegistry::instruction_lowering_for_identity`). A live
+    /// hot swap installs it: the agent holds no config to judge the new
+    /// binding itself. Live policy only, never serialized; a deserialized
+    /// policy lowers no entry.
+    #[serde(skip, default = "lowering_of_a_deserialized_request_policy")]
+    pub operator_instruction_lowering: crate::InstructionLowering,
+}
+
+/// A request policy read back from bytes carries no resolved lowering: it
+/// lowers no operator-instruction entry.
+fn lowering_of_a_deserialized_request_policy() -> crate::InstructionLowering {
+    crate::InstructionLowering::Unavailable
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

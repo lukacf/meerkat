@@ -4432,6 +4432,20 @@ fn infer_expr_type(
                 .ok()
                 .map(TypeRef::Enum)
         }
+        Expr::Call { helper, args } if helper == "session_document_instruction_slot_after_set" => {
+            args.first().and_then(|current| {
+                infer_expr_type(current, field_types, helper_returns, binding_types)
+            })
+        }
+        Expr::Call { helper, .. } if helper == "session_document_instruction_active_bytes" => {
+            Some(TypeRef::U64)
+        }
+        // The Active entries of a slot map: the type of the map it filters.
+        Expr::Call { helper, args } if helper == "session_document_instruction_active_slots" => {
+            args.get(1).and_then(|values| {
+                infer_expr_type(values, field_types, helper_returns, binding_types)
+            })
+        }
         Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
             Some(TypeRef::Map(
                 Box::new(TypeRef::String),
@@ -6236,6 +6250,53 @@ mod tests {
     }
 
     #[test]
+    fn session_document_instruction_natives_have_the_rust_semantics_in_tla() {
+        // The DSL authority, the kernel oracle and the Core mirror give these
+        // natives one meaning, pinned here as the generated TLA renders it:
+        // a slot map with one slot set (insert or replace), the body bytes of
+        // a slot set's Active slots (a slot the bytes map does not name
+        // counts nothing), and the entries of a slot map whose slot is
+        // Active.
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+        let model = render_machine_semantic_model(&schema).expect("render model");
+        let slot_after_set = r"session_document_instruction_slot_after_set(current, slot, value) ==
+    MapSet(current, slot, value)
+";
+        let active_bytes = r#"session_document_instruction_active_bytes(slot_effect, slot_bytes) ==
+    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)
+        SessionDocumentInstructionActiveBytesOver(instruction_slots) ==
+            IF instruction_slots = {} THEN 0
+            ELSE LET instruction_slot == CHOOSE candidate_slot \in instruction_slots : TRUE
+                 IN (IF slot_effect[instruction_slot] = "Active" /\ instruction_slot \in DOMAIN slot_bytes
+                     THEN slot_bytes[instruction_slot] ELSE 0)
+                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \ {instruction_slot})
+    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)
+"#;
+        let active_slots = r#"session_document_instruction_active_slots(slot_effect, slot_values) ==
+    [instruction_slot \in {candidate_slot \in DOMAIN slot_values :
+            candidate_slot \in DOMAIN slot_effect /\ slot_effect[candidate_slot] = "Active"}
+        |-> slot_values[instruction_slot]]
+"#;
+        for (native, definition) in [
+            (
+                "session_document_instruction_slot_after_set",
+                slot_after_set,
+            ),
+            ("session_document_instruction_active_bytes", active_bytes),
+            ("session_document_instruction_active_slots", active_slots),
+        ] {
+            assert!(
+                model.contains(definition),
+                "the generated model must define {native} with its Rust semantics"
+            );
+            assert!(
+                model.matches(&format!("{native}(")).count() > 1,
+                "the generated arms must call the formally defined {native}"
+            );
+        }
+    }
+
+    #[test]
     fn meerkat_session_id_native_helper_matches_typed_option_contract() {
         let model =
             render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
@@ -7529,6 +7590,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "RuntimeDeliveryMachine" {
                 compiler.render_runtime_delivery_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(&mut out);
                 pushln!(&mut out);
             }
 
@@ -8839,6 +8904,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "RuntimeDeliveryMachine" {
                 compiler.render_runtime_delivery_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(out);
                 pushln!(out);
             }
 
@@ -10498,6 +10567,9 @@ impl<'a> MachineTlaCompiler<'a> {
         if self.schema.machine.as_str() == "RuntimeDeliveryMachine" {
             self.render_runtime_delivery_native_helpers(&mut out);
         }
+        if self.schema.machine.as_str() == "SessionDocumentMachine" {
+            self.render_session_document_native_helpers(&mut out);
+        }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);
         }
@@ -10769,6 +10841,70 @@ impl<'a> MachineTlaCompiler<'a> {
         )
         .expect("write to string");
         pushln!(out, "    MapSet(current, recipient, outcome)");
+    }
+
+    fn render_session_document_native_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "{}(current, slot, value) ==",
+            self.scoped_helper_name("session_document_instruction_slot_after_set")
+        )
+        .expect("write to string");
+        pushln!(out, "    MapSet(current, slot, value)");
+        // The body bytes of the Active slots; a slot the bytes map does not
+        // name counts nothing (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_bytes) ==",
+            self.scoped_helper_name("session_document_instruction_active_bytes")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)"
+        );
+        pushln!(
+            out,
+            "        SessionDocumentInstructionActiveBytesOver(instruction_slots) =="
+        );
+        pushln!(out, "            IF instruction_slots = {{}} THEN 0");
+        pushln!(
+            out,
+            "            ELSE LET instruction_slot == CHOOSE candidate_slot \\in instruction_slots : TRUE"
+        );
+        pushln!(
+            out,
+            "                 IN (IF slot_effect[instruction_slot] = \"Active\" /\\ instruction_slot \\in DOMAIN slot_bytes"
+        );
+        pushln!(
+            out,
+            "                     THEN slot_bytes[instruction_slot] ELSE 0)"
+        );
+        pushln!(
+            out,
+            "                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \\ {{instruction_slot}})"
+        );
+        pushln!(
+            out,
+            "    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)"
+        );
+        // The entries of a slot map whose slot is Active: what an
+        // application puts in effect (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_values) ==",
+            self.scoped_helper_name("session_document_instruction_active_slots")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [instruction_slot \\in {{candidate_slot \\in DOMAIN slot_values :"
+        );
+        pushln!(
+            out,
+            "            candidate_slot \\in DOMAIN slot_effect /\\ slot_effect[candidate_slot] = \"Active\"}}"
+        );
+        pushln!(out, "        |-> slot_values[instruction_slot]]");
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {

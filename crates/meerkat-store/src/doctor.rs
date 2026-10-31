@@ -50,7 +50,7 @@
 //! report cannot be read as covering a pool it never touched.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,6 +171,15 @@ pub const FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED: &str
 /// transitions, and the physical/runtime owner references that keep exact
 /// states reachable.
 pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
+/// Sessions written at the envelope that carries operator-instruction facts
+/// (an entry row or the recorded target state). A release before operator
+/// instructions refuses them typed until a roll-forward; an operator lists
+/// them before a rollback. Informational. The census covers the realms whose
+/// documents are on disk: SQLite realms (head rows and documents in
+/// `sessions.sqlite3`) and JSONL realms (the WholeBlob documents of their
+/// runtime store, `runtime.sqlite3`). A host-store realm keeps its documents
+/// in the host's store, not on disk, so the disk sweep cannot list them.
+pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
 /// implying the unmeasured bytes are healthy.
@@ -812,6 +821,7 @@ fn diagnose_realm_dir(
     diagnosis: &mut StorageDiagnosis,
 ) {
     let mut sessions_db_swept = false;
+    let mut runtime_db_swept = false;
     for (relative, expected_domains) in REALM_DATABASE_FILES {
         let db_path = realm_dir.join(relative);
         if !probe_database_file(&db_path, realm, diagnosis) {
@@ -819,6 +829,9 @@ fn diagnose_realm_dir(
         }
         if *relative == "sessions.sqlite3" {
             sessions_db_swept = true;
+        }
+        if *relative == "runtime.sqlite3" {
+            runtime_db_swept = true;
         }
         entry.databases.push(inspect_database(
             &db_path,
@@ -869,6 +882,12 @@ fn diagnose_realm_dir(
                         Ok(tx) => {
                             sweep_dangling_blobs(&tx, realm_dir, &sessions_db, realm, diagnosis);
                             census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
+                            census_operator_instruction_envelopes(
+                                &tx,
+                                &sessions_db,
+                                realm,
+                                diagnosis,
+                            );
                         }
                         Err(err) => {
                             diagnosis.findings.push(
@@ -888,6 +907,18 @@ fn diagnose_realm_dir(
                 }
             }
         }
+    }
+
+    // A JSONL realm keeps its session documents in its WholeBlob runtime
+    // store, not beside the JSONL files.
+    if let Some("jsonl") = backend
+        && runtime_db_swept
+    {
+        census_runtime_store_instruction_envelopes(
+            &realm_dir.join("runtime.sqlite3"),
+            realm,
+            diagnosis,
+        );
     }
 
     diagnose_jsonl_session_index_projection(realm_dir, realm, backend, diagnosis);
@@ -1808,6 +1839,179 @@ fn census_storage_footprint(
     report_frozen_archives(&archives, &gaps, db_path, realm, diagnosis);
     report_head_metadata_pool(&head_metadata, &gaps, db_path, realm, diagnosis);
     report_census_gaps(&gaps, db_path, realm, diagnosis);
+}
+
+/// The most session ids the operator-instruction envelope finding names.
+const OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP: usize = 50;
+
+/// Envelope lens of a session document: its version only.
+#[derive(Deserialize)]
+struct EnvelopeVersionLens {
+    version: u32,
+}
+
+/// Whether a session document is written at `envelope`. An undecodable
+/// document is not; the blob sweep and the runtime store's own reads report
+/// it.
+fn document_is_at_envelope(document: JsonColumnBytes, envelope: u32) -> bool {
+    serde_json::from_slice::<EnvelopeVersionLens>(&document.into_bytes())
+        .is_ok_and(|lens| lens.version == envelope)
+}
+
+/// The sessions of one database written at the operator-instruction
+/// envelope: head rows by their indexed `version`, head-less documents by
+/// their envelope, and a runtime store's WholeBlob documents (each session's
+/// committed body, and the candidate body of a run's provisional tail) by
+/// their envelope. Snapshot rows from before the WholeBlob authority predate
+/// the envelope and are not read.
+fn operator_instruction_envelope_sessions(
+    conn: &Connection,
+    envelope: u32,
+) -> Result<BTreeSet<String>, rusqlite::Error> {
+    let mut sessions = BTreeSet::new();
+    let heads = table_exists(conn, "session_heads")?;
+    if heads {
+        let mut statement = conn.prepare(
+            "SELECT session_id FROM session_heads WHERE version = ?1 ORDER BY session_id",
+        )?;
+        let mut rows = statement.query(rusqlite::params![i64::from(envelope)])?;
+        while let Some(row) = rows.next()? {
+            sessions.insert(row.get::<_, String>(0)?);
+        }
+    }
+    let mut documents = Vec::new();
+    if table_exists(conn, "sessions")? {
+        documents.push(if heads {
+            "SELECT session_id, session_json FROM sessions \
+             WHERE session_id NOT IN (SELECT session_id FROM session_heads) ORDER BY session_id"
+        } else {
+            "SELECT session_id, session_json FROM sessions ORDER BY session_id"
+        });
+    }
+    if table_exists(conn, "runtime_whole_blob_bodies")? {
+        if table_exists(conn, "runtime_whole_blob_authority")? {
+            documents.push(
+                "SELECT authority.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_authority AS authority \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = authority.blob_sha256",
+            );
+        }
+        if table_exists(conn, "runtime_whole_blob_provisional_tails")? {
+            documents.push(
+                "SELECT tail.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_provisional_tails AS tail \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = tail.candidate_blob_sha256",
+            );
+        }
+    }
+    for sql in documents {
+        let mut statement = conn.prepare(sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            if document_is_at_envelope(row.get(1)?, envelope) {
+                sessions.insert(session_id);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// [`census_operator_instruction_envelopes`] over a JSONL realm's runtime
+/// store, in one read snapshot.
+fn census_runtime_store_instruction_envelopes(
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    // No schema preflight: doctor must open future files to report them
+    // (module safety contract). An unopenable file is already reported by
+    // inspect_database.
+    let profile = meerkat_sqlite::ConnectionProfile::ReadOnly;
+    let Ok(conn) = meerkat_sqlite::open(db_path, profile) else {
+        return;
+    };
+    match conn.unchecked_transaction() {
+        Ok(tx) => census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis),
+        Err(err) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Error,
+                    FINDING_DATABASE_UNREADABLE,
+                    format!("cannot begin read-snapshot transaction: {err}"),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+        }
+    }
+}
+
+/// One Info finding naming the sessions of this database a release without
+/// operator instructions refuses.
+fn census_operator_instruction_envelopes(
+    conn: &Connection,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let envelope =
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        );
+    let sessions = match operator_instruction_envelope_sessions(conn, envelope) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!(
+                        "could not list the sessions at the operator-instruction envelope \
+                         {envelope}: {error}"
+                    ),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    let listed = sessions
+        .iter()
+        .take(OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let overflow = sessions
+        .len()
+        .saturating_sub(OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP);
+    let overflow_note = if overflow > 0 {
+        format!(" and {overflow} more")
+    } else {
+        String::new()
+    };
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+            format!(
+                "{} session(s) carry operator instructions at session envelope {envelope}: \
+                 {listed}{overflow_note}; a release before operator instructions refuses them \
+                 typed until a roll-forward. The census reads the realms whose documents are \
+                 on disk (SQLite realms, and JSONL realms through runtime.sqlite3); host-store \
+                 realms keep their documents in the host's store and are not listed",
+                sessions.len()
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
 }
 
 /// Head rows: the classification key (live strand + prefix length) and the
@@ -4608,6 +4812,160 @@ mod tests {
         assert!(pool.message.contains("partial census"), "{}", pool.message);
         // The undecodable document is still reported by the blob sweep.
         assert!(codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE));
+    }
+
+    /// Before a rollback an operator needs the sessions a release without
+    /// operator instructions refuses: the doctor lists the heads (and the
+    /// head-less documents) written at the operator-instruction envelope,
+    /// and nothing else.
+    #[tokio::test]
+    async fn sessions_at_the_operator_instruction_envelope_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "envelopes", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let instructed_id = Session::new().id().clone();
+        let headless_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_heads (
+                    session_id TEXT PRIMARY KEY, version INTEGER, strand TEXT,
+                    head_revision TEXT, message_count INTEGER, rewrite_count INTEGER,
+                    total_tokens INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER,
+                    metadata_json TEXT, head_json BLOB, cas_token TEXT)",
+            )
+            .unwrap();
+            for (id, version) in [(&plain_id, 4), (&instructed_id, 5)] {
+                conn.execute(
+                    "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                     message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                     metadata_json, head_json, cas_token) \
+                     VALUES (?1, ?2, 'root', 'digest', 0, 0, 0, 0, 0, '{}', '{}', 'cas')",
+                    rusqlite::params![id.to_string(), version],
+                )
+                .unwrap();
+            }
+            // A head-less WholeBlob document at envelope 5.
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 0, 0, '{}', ?2)",
+                rusqlite::params![
+                    headless_id.to_string(),
+                    br#"{"version":5,"messages":[]}"#.as_slice()
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("envelopes"));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&instructed_id.to_string()));
+        assert!(listed.message.contains(&headless_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "a session at the baseline envelope is not listed: {}",
+            listed.message
+        );
+    }
+
+    /// A JSONL realm keeps its session documents in its WholeBlob runtime
+    /// store: the doctor lists the documents there written at the
+    /// operator-instruction envelope (a committed body, and a run's
+    /// provisional candidate body), and the finding says which realm kinds
+    /// the census covers.
+    #[tokio::test]
+    async fn runtime_store_documents_at_the_operator_instruction_envelope_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "jsonl-envelopes", "jsonl");
+        let db_path = realm_dir.join("runtime.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let instructed_id = Session::new().id().clone();
+        let candidate_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+                 CREATE TABLE runtime_whole_blob_provisional_tails (
+                    runtime_id TEXT PRIMARY KEY, session_id TEXT, candidate_blob_sha256 TEXT);",
+            )
+            .unwrap();
+            let body = |blob: &str, version: u32| {
+                let document = format!(r#"{{"version":{version},"messages":[]}}"#);
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.as_bytes()],
+                )
+                .unwrap();
+            };
+            // Committed bodies: one at the baseline envelope, one at 5, and
+            // one at the baseline whose run left a candidate at 5.
+            for (id, blob, version) in [
+                (&plain_id, "row-sha256:plain", 4),
+                (&instructed_id, "row-sha256:instructed", 5),
+                (&candidate_id, "row-sha256:candidate-base", 4),
+            ] {
+                body(blob, version);
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            }
+            body("row-sha256:candidate", 5);
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_provisional_tails (runtime_id, session_id, \
+                 candidate_blob_sha256) VALUES (?1, ?2, 'row-sha256:candidate')",
+                rusqlite::params![
+                    format!("rt:session:{candidate_id}"),
+                    candidate_id.to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("jsonl-envelopes"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&instructed_id.to_string()));
+        assert!(listed.message.contains(&candidate_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "a session at the baseline envelope is not listed: {}",
+            listed.message
+        );
+        assert!(
+            listed.message.contains("host-store realms"),
+            "the finding says which realm kinds the census covers: {}",
+            listed.message
+        );
     }
 
     #[tokio::test]

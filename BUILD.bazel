@@ -758,6 +758,7 @@ test_suite(
         "//crates/meerkat-machine-schema:runtime_authority_reconciliation_totality_test",
         "//crates/meerkat-machine-schema:schema_construction_cache_test",
         "//crates/meerkat-machine-schema:schema_contracts_test",
+        "//crates/meerkat-machine-schema:session_document_instruction_region_test",
         "//crates/meerkat-machine-schema:stopped_phase_revival_lattice_test",
         "//crates/meerkat-machine-schema:strict_guard_map_reads_test",
         "//crates/meerkat-machine-schema:temporary_council_lifecycle_machine_test",

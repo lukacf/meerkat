@@ -1377,8 +1377,112 @@ impl GeneratedMachineKernel {
             "mob_machine_placed_cleanup_obligation" => {
                 self.eval_mob_machine_placed_cleanup_obligation(args, transition_name)
             }
+            "session_document_instruction_slot_after_set" => {
+                self.eval_session_document_instruction_slot_after_set(args, transition_name)
+            }
+            "session_document_instruction_active_bytes" => {
+                self.eval_session_document_instruction_active_bytes(args, transition_name)
+            }
+            "session_document_instruction_active_slots" => {
+                self.eval_session_document_instruction_active_slots(args, transition_name)
+            }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
+    }
+
+    /// One session's slot map with one slot set: `current` with `slot`
+    /// mapped to `value`.
+    fn eval_session_document_instruction_slot_after_set(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, slot, value]: [KernelValue; 3] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_slot_after_set expects three args",
+            )
+        })?;
+        let mut current = current
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        current.insert(slot, value);
+        Ok(KernelValue::Map(current))
+    }
+
+    /// The body bytes of one slot set's Active slots: the sum over `effect`'s
+    /// Active slots of their `bytes` entry, a slot `bytes` does not name
+    /// counting nothing.
+    fn eval_session_document_instruction_active_bytes(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, bytes]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_active_bytes expects two args",
+            )
+        })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let bytes = bytes
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut total = 0_u64;
+        for (slot, slot_effect) in &effect {
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if active {
+                let slot_bytes = match bytes.get(slot) {
+                    Some(value) => value
+                        .as_u64()
+                        .map_err(|error| self.eval_error(transition_name, error))?,
+                    None => 0,
+                };
+                total = total.saturating_add(slot_bytes);
+            }
+        }
+        Ok(KernelValue::U64(total))
+    }
+
+    /// The entries of a slot map whose slot is Active in `effect`: what an
+    /// application puts in effect. A slot `effect` holds Absent, or does not
+    /// name, is left out.
+    fn eval_session_document_instruction_active_slots(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, values]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_active_slots expects two args",
+            )
+        })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let values = values
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut active_slots = BTreeMap::new();
+        for (slot, value) in values {
+            let Some(slot_effect) = effect.get(&slot) else {
+                continue;
+            };
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if active {
+                active_slots.insert(slot, value);
+            }
+        }
+        Ok(KernelValue::Map(active_slots))
     }
 
     fn eval_meerkat_machine_session_id_matches_string(

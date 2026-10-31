@@ -22,8 +22,15 @@ mod extraction;
 mod hook_impl;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod hooks_behavior_tests;
+mod instruction_run_start;
 #[cfg(test)]
 mod observation_barrier_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_run_start_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_turn_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;
@@ -5446,6 +5453,12 @@ where
     /// Registry-minted facts for the active model. This replaces client-local
     /// capability/limit projections as the durable source used by later turns.
     pub(crate) active_model_profile: Option<crate::ModelProfileWitness>,
+    /// How the active model carries an operator-instruction entry, as the
+    /// build resolved it from the model as its backend serves it. `None`
+    /// derives it from [`Self::active_model_profile`]; a hot swap, whose
+    /// witness is the catalog row, installs the lowering its request policy
+    /// carries, which the host resolved for the new binding's backend.
+    pub(crate) operator_instruction_lowering: Option<crate::InstructionLowering>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,
     /// Resources this agent's construction handed over that must be released
@@ -5460,6 +5473,21 @@ where
     /// failures can return before `StartConversationRun` and must never reuse
     /// the previous turn's terminal snapshot.
     pub(crate) runtime_started_run_id: Option<crate::lifecycle::RunId>,
+    /// The run in flight started fresh, not from a run cursor. A compaction
+    /// before its first model response may fold operator instructions at
+    /// the run's start (`Session::authorize_instruction_fold`).
+    pub(crate) run_started_fresh: bool,
+    /// The run id a fresh run start named in its operator-instruction entry
+    /// when no run was started in the turn authority yet: the run loop
+    /// starts the run under it, so the entry names the run the agent runs.
+    /// The run loop takes it whenever it picks a run's id.
+    pub(crate) run_start_reserved_run_id: Option<crate::lifecycle::RunId>,
+    /// What the last fresh run start's operator-instruction entry changed,
+    /// and whether its run started and a checkpoint holds it, until the
+    /// session task concludes the run start
+    /// (`Agent::conclude_run_start_operator_instructions`).
+    pub(crate) unconcluded_run_start_instructions:
+        Option<Box<instruction_run_start::UnconcludedRunStartInstructions>>,
     /// Machine-terminal failure observed for the exact runtime run above.
     /// Kept separate from the public `AgentError` so direct session surfaces
     /// preserve their original typed errors while the runtime can commit a

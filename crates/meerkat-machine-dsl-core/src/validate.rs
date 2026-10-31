@@ -4,8 +4,17 @@ use syn::Error;
 
 use crate::ast::*;
 
-const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+// Native helpers of every machine: a machine's DSL calls them without
+// declaring them, and each has a hand-written body in the executors of the
+// machine that calls it.
+const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "runtime_delivery_recipient_outcomes_after_set",
+    // SessionDocumentMachine: one session's slot map with one slot set, the
+    // body bytes of a slot set's Active slots, and the entries of a slot map
+    // whose slot is Active.
+    "session_document_instruction_slot_after_set",
+    "session_document_instruction_active_bytes",
+    "session_document_instruction_active_slots",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
@@ -620,7 +629,7 @@ fn validate_expr(
         ExprDef::Call { helper, .. } => {
             let helper_name = helper.to_string();
             if !helpers.contains(&helper_name)
-                && !NATIVE_MOB_MACHINE_HELPERS.contains(&helper_name.as_str())
+                && !NATIVE_MACHINE_HELPERS.contains(&helper_name.as_str())
             {
                 errors.push(Error::new(
                     helper.span(),

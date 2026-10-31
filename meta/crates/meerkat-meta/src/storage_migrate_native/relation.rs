@@ -73,7 +73,10 @@ pub(super) async fn durable_head_relation(
     else {
         return Ok(DurableHeadRelation::Unproven);
     };
-    if head.version != meerkat_core::SESSION_VERSION {
+    // The envelope is chosen per document (envelope 5 only for a document
+    // carrying an operator-instruction fact): a durable head proves the
+    // relation only at the envelope the successor writes.
+    if head.version != successor.persisted_envelope_version() {
         return Ok(DurableHeadRelation::Unproven);
     }
     let committed_generation = successor.transcript_rewrite_generation().map_err(|e| {

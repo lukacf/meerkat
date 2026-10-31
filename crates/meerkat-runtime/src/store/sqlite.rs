@@ -28221,7 +28221,7 @@ ORDER BY runtime_id";
         #[tokio::test]
         async fn head_canonical_v3_provisional_chain_preserves_old_authority_until_successor_write()
         {
-            assert_eq!(meerkat_core::SESSION_VERSION, 4);
+            assert_eq!(meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION, 4);
             assert_head_canonical_provisional_chain(true).await;
         }
 
@@ -28463,7 +28463,8 @@ ORDER BY runtime_id";
                 PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
             assert_eq!(
                 second_tail.successor_head().version,
-                meerkat_core::SESSION_VERSION
+                meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION,
+                "a successor of a document without instruction facts keeps the baseline envelope"
             );
             let second_candidate = resumed.clone();
             let second_prepared = PreparedHeadCanonicalProvisionalTail::prepare(
@@ -28516,7 +28517,7 @@ ORDER BY runtime_id";
             );
             assert_eq!(
                 source.physical_head().version,
-                meerkat_core::SESSION_VERSION
+                meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
             );
             assert_eq!(
                 source.physical_head_cas_token(),

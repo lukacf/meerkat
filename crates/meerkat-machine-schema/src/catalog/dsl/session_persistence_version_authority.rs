@@ -16,6 +16,14 @@ machine! {
         state {
             lifecycle_phase: SessionPersistenceVersionAuthorityPhase,
             session_envelope_version: u64,
+            // The envelope a session document is written with when it carries
+            // no fact only the current version can read. An operator
+            // instruction fact (an entry row, current or retained in the
+            // rewrite graph, or the recorded target state) needs the current
+            // version; every other document stays at the baseline, so a host
+            // that never uses operator instructions keeps the older reader's
+            // downgrade.
+            session_envelope_baseline_version: u64,
             session_envelope_released_v3: u64,
             stored_input_state_version: u64,
             // The version a stored input row is written with when it carries
@@ -33,7 +41,8 @@ machine! {
         }
 
         init(Ready) {
-            session_envelope_version = 4,
+            session_envelope_version = 5,
+            session_envelope_baseline_version = 4,
             session_envelope_released_v3 = 3,
             stored_input_state_version = 8,
             stored_input_state_baseline_version = 7,
@@ -70,6 +79,20 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && persisted_version == self.session_envelope_version
+            }
+            update {}
+            to Ready
+            emit VersionRestoreAuthorized {
+                field: SessionPersistenceVersionField::SessionEnvelope,
+                version: self.session_envelope_version
+            }
+        }
+
+        transition RestoreBaselineSessionEnvelopeVersion {
+            on input RestoreSessionEnvelopeVersion { persisted_version }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persisted_version == self.session_envelope_baseline_version
             }
             update {}
             to Ready

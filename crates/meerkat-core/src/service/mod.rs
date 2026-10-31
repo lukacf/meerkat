@@ -4,10 +4,14 @@
 //! Implementations may be ephemeral (in-memory only) or persistent (backed by a store).
 
 pub mod context_append;
+pub mod operator_instructions;
 pub mod transport;
 pub use context_append::{
     ContextControlFacts, PreparedSystemContextAppend, SystemContextAppendControl,
     SystemContextControlRequest,
+};
+pub use operator_instructions::{
+    SessionInstructionError, SessionInstructionRead, SessionServiceInstructionExt,
 };
 
 use crate::event::AgentEvent;

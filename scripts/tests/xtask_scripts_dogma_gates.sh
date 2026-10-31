@@ -417,6 +417,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # durable_decision_audit) generated a state, its fifteen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
+# instruction_boundary_audit.sh (session_document) requires its five
+# witnesses violated, and with --mutants each seeded defect's target
+# invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -554,6 +557,20 @@ printf '%s\n' \
   'echo "Error: Invariant AuditDisagreeingCursorHolds is violated by the initial state:"' \
   'echo "Error: Invariant AuditCursorOnEndTurnHolds is violated by the initial state:"' \
   'echo "Error: Invariant AuditContinuableNeedsAgreeingBoundCursor is violated by the initial state:"' \
+  'echo "Error: Invariant NotAuditWitnessApplied is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokeApplied is violated."' \
+  'echo "Error: Invariant NotAuditWitnessMobOwnedEffective is violated."' \
+  'echo "Error: Invariant AuditEffectiveChangesOnlyAtRunStart is violated."' \
+  'echo "Error: Invariant AuditMidRunFoldKeepsEffective is violated."' \
+  'echo "Error: Invariant AuditSessionWriteNeverLowersRevision is violated."' \
+  'echo "Error: Invariant AuditPrefixOnlyAppliesInLeadingPrefix is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReboundAfterRelease is violated."' \
+  'echo "Error: Invariant AuditMobTargetBoundUntilReleased is violated."' \
+  'echo "Error: Invariant AuditTargetWithinBudget is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedInstructionsRevoked is violated."' \
+  'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
+  'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
+  'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

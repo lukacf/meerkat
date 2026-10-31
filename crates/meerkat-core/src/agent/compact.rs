@@ -12,7 +12,7 @@ use crate::compact::{
 use crate::event::AgentEvent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{AssistantBlock, Message, StopReason, TurnUsage, Usage};
+use crate::types::{AssistantBlock, Message, StopReason, SystemMessage, TurnUsage, Usage};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -106,6 +106,18 @@ fn checked_offset(kind: &str, offset: u64, upper_bound: usize) -> Result<usize, 
     Ok(offset)
 }
 
+/// What a rebuilt transcript inserts besides its summary.
+#[derive(Debug, Clone, Copy)]
+enum RebuildInsertions<'a> {
+    /// A compactor's own rebuild: only the summary is new, and every ordinary
+    /// System row, operator-instruction entry rows included, stays verbatim.
+    Summary,
+    /// The rebuild after the operator-instruction fold: every entry row is
+    /// taken out, and the fold's snapshot (none for an empty set) is the last
+    /// row of the leading System prefix, before the summary.
+    Fold { snapshot: Option<&'a SystemMessage> },
+}
+
 fn validate_compaction_rebuild(
     messages: &[Message],
     rebuilt: &[Message],
@@ -114,6 +126,26 @@ fn validate_compaction_rebuild(
     retained: &[CompactionRetained],
     discarded: &[CompactionDiscard],
 ) -> Result<(), CompactionError> {
+    validate_compaction_rebuild_with(
+        messages,
+        rebuilt,
+        summary,
+        summary_text,
+        retained,
+        discarded,
+        RebuildInsertions::Summary,
+    )
+}
+
+fn validate_compaction_rebuild_with(
+    messages: &[Message],
+    rebuilt: &[Message],
+    summary: &CompactionSummary,
+    summary_text: &str,
+    retained: &[CompactionRetained],
+    discarded: &[CompactionDiscard],
+    insertions: RebuildInsertions<'_>,
+) -> Result<(), CompactionError> {
     #[derive(Clone, Copy)]
     enum SourceDisposition {
         Retained,
@@ -121,6 +153,18 @@ fn validate_compaction_rebuild(
     }
 
     let superseded_system_prompts = crate::types::superseded_system_prompt_offsets(messages);
+    let folds_entries = matches!(insertions, RebuildInsertions::Fold { .. });
+    let snapshot = match insertions {
+        RebuildInsertions::Fold { snapshot } => snapshot,
+        RebuildInsertions::Summary => None,
+    };
+    let folded_entry = |source_offset: u64| {
+        folds_entries
+            && usize::try_from(source_offset)
+                .ok()
+                .and_then(|offset| messages.get(offset))
+                .is_some_and(crate::session::is_operator_instruction_entry)
+    };
 
     if discarded.is_empty() {
         return Err(CompactionError::InvalidRebuild(
@@ -225,11 +269,15 @@ fn validate_compaction_rebuild(
             "source offset {missing_offset} is neither retained nor discarded"
         )));
     }
-    if rebuilt.len() > messages.len() {
+    // The shrink rule counts the rows other than operator-instruction
+    // entries: the fold's snapshot is neutral in it, and so are the entry
+    // rows the fold takes out. A compactor's own rebuild keeps every entry
+    // row, so for it the count is its plain row count.
+    let source_rows = crate::session::rows_besides_operator_instruction_entries(messages);
+    let rebuilt_rows = crate::session::rows_besides_operator_instruction_entries(rebuilt);
+    if rebuilt_rows > source_rows {
         return Err(CompactionError::InvalidRebuild(format!(
-            "compaction must not grow the transcript from {} to {} messages",
-            messages.len(),
-            rebuilt.len()
+            "compaction must not grow the transcript from {source_rows} to {rebuilt_rows} messages (operator instruction entries aside)"
         )));
     }
 
@@ -240,11 +288,25 @@ fn validate_compaction_rebuild(
             summary.rebuilt_offset
         )));
     }
-    let first_discarded_source_offset = discarded[0].source_offset;
+    // The summary takes the place of the first row the compactor folded;
+    // the entry rows the fold takes out are not the compactor's, and the
+    // fold's snapshot sits before the summary.
+    let first_discarded_source_offset = discarded
+        .iter()
+        .map(|discard| discard.source_offset)
+        .find(|source_offset| !folded_entry(*source_offset))
+        .ok_or_else(|| {
+            CompactionError::InvalidRebuild(
+                "compaction must discard at least one source message besides operator \
+                 instruction entries"
+                    .to_string(),
+            )
+        })?;
     let expected_summary_offset = retained
         .iter()
         .take_while(|retention| retention.source_offset < first_discarded_source_offset)
-        .count();
+        .count()
+        + usize::from(snapshot.is_some());
     if summary_offset != expected_summary_offset {
         return Err(CompactionError::InvalidRebuild(format!(
             "summary must replace the first discarded source position at rebuilt offset {expected_summary_offset}, found {summary_offset}"
@@ -263,6 +325,14 @@ fn validate_compaction_rebuild(
         let was_retained = retained
             .iter()
             .any(|retention| retention.source_offset == source_offset);
+        if folded_entry(source_offset) {
+            if was_retained {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "operator instruction entry at source offset {source_offset} must be folded, not retained"
+                )));
+            }
+            continue;
+        }
         if must_retain && !was_retained {
             return Err(CompactionError::InvalidRebuild(format!(
                 "active ordered System message at source offset {source_offset} must be retained verbatim"
@@ -300,12 +370,137 @@ fn validate_compaction_rebuild(
         .enumerate()
         .filter_map(|(offset, owner)| owner.is_none().then_some(offset))
         .collect::<Vec<_>>();
-    if unmapped_rebuilt.as_slice() != [summary_offset] {
-        return Err(CompactionError::InvalidRebuild(format!(
-            "rebuilt transcript must contain only the mapped summary as an inserted message, found unmapped offsets {unmapped_rebuilt:?}"
-        )));
+    let expected_unmapped = match snapshot {
+        None => vec![summary_offset],
+        Some(snapshot) => {
+            // The snapshot is the last row of the leading System prefix.
+            let leading_system_rows = rebuilt
+                .iter()
+                .take_while(|message| matches!(message, Message::System(_)))
+                .count();
+            let snapshot_offset = leading_system_rows.checked_sub(1).ok_or_else(|| {
+                CompactionError::InvalidRebuild(
+                    "operator instruction snapshot must follow the leading System prefix"
+                        .to_string(),
+                )
+            })?;
+            if !matches!(&rebuilt[snapshot_offset], Message::System(row) if row == snapshot) {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "rebuilt offset {snapshot_offset} must be the authorized operator instruction snapshot"
+                )));
+            }
+            vec![snapshot_offset, summary_offset]
+        }
+    };
+    if unmapped_rebuilt != expected_unmapped {
+        return Err(CompactionError::InvalidRebuild(match snapshot {
+            None => format!(
+                "rebuilt transcript must contain only the mapped summary as an inserted message, found unmapped offsets {unmapped_rebuilt:?}"
+            ),
+            Some(_) => format!(
+                "rebuilt transcript must contain only the mapped summary and the operator instruction snapshot as inserted messages, found unmapped offsets {unmapped_rebuilt:?}"
+            ),
+        }));
     }
     Ok(())
+}
+
+/// The operator-instruction fold of a validated rebuild: every entry row the
+/// compactor retained (as it retains every System row) joins the discarded
+/// rows, and the fold's snapshot (none for an empty set) becomes the last row
+/// of the leading System prefix, before the summary. Retained and summary
+/// offsets move with their rows. The folded rebuild is validated again in
+/// its folded form; without a fold the rebuild is returned as it is.
+fn fold_operator_instruction_entries(
+    messages: &[Message],
+    result: crate::compact::CompactionResult,
+    summary_text: &str,
+    fold: Option<&crate::session::InstructionFold>,
+) -> Result<crate::compact::CompactionResult, CompactionError> {
+    let Some(fold) = fold else {
+        return Ok(result);
+    };
+    let crate::compact::CompactionResult {
+        messages: rebuilt,
+        summary,
+        retained,
+        mut discarded,
+    } = result;
+    let summary_offset = usize::try_from(summary.rebuilt_offset).map_err(|_| {
+        CompactionError::InvalidRebuild("summary offset does not fit this target".to_string())
+    })?;
+    let mut retained = retained.into_iter().peekable();
+    let mut folded = Vec::with_capacity(rebuilt.len() + 1);
+    let mut folded_retained = Vec::with_capacity(retained.len());
+    let mut folded_summary_offset = None;
+    for (offset, message) in rebuilt.into_iter().enumerate() {
+        if offset == summary_offset {
+            folded_summary_offset = Some(folded.len());
+            folded.push(message);
+            continue;
+        }
+        let Some(retention) = retained
+            .next_if(|retention| usize::try_from(retention.rebuilt_offset).ok() == Some(offset))
+        else {
+            return Err(CompactionError::InvalidRebuild(format!(
+                "rebuilt offset {offset} has no retained source message"
+            )));
+        };
+        if crate::session::is_operator_instruction_entry(&message) {
+            discarded.push(CompactionDiscard::new(
+                retention.source_offset,
+                retention.message,
+            ));
+            continue;
+        }
+        folded_retained.push(CompactionRetained::new(
+            retention.source_offset,
+            u64::try_from(folded.len()).unwrap_or(u64::MAX),
+            retention.message,
+        ));
+        folded.push(message);
+    }
+    let mut summary_offset = folded_summary_offset.ok_or_else(|| {
+        CompactionError::InvalidRebuild("summary offset is outside the rebuilt transcript".into())
+    })?;
+    discarded.sort_by_key(|discard| discard.source_offset);
+    if let Some(snapshot) = fold.snapshot() {
+        let at = folded
+            .iter()
+            .take_while(|message| matches!(message, Message::System(_)))
+            .count();
+        folded.insert(at, Message::System(snapshot.clone()));
+        let at_offset = u64::try_from(at).unwrap_or(u64::MAX);
+        for retention in &mut folded_retained {
+            if retention.rebuilt_offset >= at_offset {
+                retention.rebuilt_offset += 1;
+            }
+        }
+        if summary_offset >= at {
+            summary_offset += 1;
+        }
+    }
+    let folded = crate::compact::CompactionResult {
+        messages: folded,
+        summary: CompactionSummary::new(
+            u64::try_from(summary_offset).unwrap_or(u64::MAX),
+            summary.message,
+        ),
+        retained: folded_retained,
+        discarded,
+    };
+    validate_compaction_rebuild_with(
+        messages,
+        &folded.messages,
+        &folded.summary,
+        summary_text,
+        &folded.retained,
+        &folded.discarded,
+        RebuildInsertions::Fold {
+            snapshot: fold.snapshot(),
+        },
+    )?;
+    Ok(folded)
 }
 
 /// Approximate token cost per image block.
@@ -660,7 +855,9 @@ pub(crate) struct CompactionInvocation<'a> {
     pub(crate) budget: Option<&'a crate::budget::Budget>,
     /// Exact model-facing projection. Superseded prompt versions remain in
     /// the durable `window` for rewrite validation but never enter forecasts
-    /// or the summarization request.
+    /// or the summarization request. Operator-instruction entry rows are in
+    /// it as the model reads them; no summarizer reads them
+    /// (`without_operator_instruction_entries`).
     pub(crate) model_messages: &'a [Message],
     /// Unmeasured dialogue must reach a generated summary or remain intact
     /// when a mechanical rebuild would discard its unsummarized details.
@@ -691,6 +888,10 @@ pub(crate) struct CompactionInvocation<'a> {
     /// ([`open_run_folded_calls`]); used only when this attempt folds the
     /// run's rounds.
     pub(crate) earlier_folded_calls: FoldedCalls,
+    /// The operator-instruction fold the session-document authority
+    /// authorized for this attempt (`Session::authorize_instruction_fold`);
+    /// `None` for a session without operator-instruction facts.
+    pub(crate) instruction_fold: Option<crate::session::InstructionFold>,
 }
 
 /// What a compaction folds, given the run in flight.
@@ -735,9 +936,15 @@ fn is_request_input_row(message: &Message) -> bool {
     }
 }
 
-/// `index` moved back over the input rows right before it.
+/// `index` moved back over the input rows right before it, and over the
+/// operator-instruction entry rows among them: a run start appends its entry
+/// after a pending tail or before the run's own input, so an entry belongs
+/// to the request rows of the run it starts.
 fn back_over_inputs(messages: &[Message], mut index: usize) -> usize {
-    while index > 0 && is_request_input_row(&messages[index - 1]) {
+    while index > 0
+        && (is_request_input_row(&messages[index - 1])
+            || crate::session::is_operator_instruction_entry(&messages[index - 1]))
+    {
         index -= 1;
     }
     index
@@ -755,7 +962,8 @@ fn first_run_response(messages: &[Message], run_id: &crate::lifecycle::RunId) ->
 
 /// The first row of the run `run_id` while it is in flight: the start of
 /// the input rows (request, injected context, typed appends, notices) before
-/// its first assistant row. The walk stops at a System row, a response, a
+/// its first assistant row, with the operator-instruction entry its run
+/// start applied. The walk stops at any other System row, a response, a
 /// tool-results row or a compaction summary. `None` before the run's first
 /// assistant row exists, so a run's first boundary compacts as it always
 /// did. Derived from the transcript at each boundary (assistant rows carry
@@ -1332,6 +1540,25 @@ where
     }
 }
 
+/// `messages` without its operator-instruction entry rows: what a
+/// summarizer reads. Borrowed when it holds none.
+fn without_operator_instruction_entries(messages: &[Message]) -> std::borrow::Cow<'_, [Message]> {
+    if messages
+        .iter()
+        .any(crate::session::is_operator_instruction_entry)
+    {
+        std::borrow::Cow::Owned(
+            messages
+                .iter()
+                .filter(|message| !crate::session::is_operator_instruction_entry(message))
+                .cloned()
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(messages)
+    }
+}
+
 async fn compact_history<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
@@ -1358,6 +1585,7 @@ where
         scope,
         projection,
         earlier_folded_calls,
+        instruction_fold,
     } = invocation;
     let CompactionWindow {
         messages,
@@ -1369,6 +1597,14 @@ where
     let estimated = estimate_tokens(projection)?;
     let message_count = projection.len();
     let mut event_stream_open = true;
+    // No summarizer reads an operator-instruction entry row, a delta or a
+    // snapshot: a summary is a user row, so a body it paraphrased would
+    // outlive the entry that superseded or revoked it. The fold carries what
+    // is in effect into its snapshot instead. Taken out once, here, before
+    // the host curator and the compactor's own preparation, which a host
+    // implements and cannot be relied on to do it; the counts above keep the
+    // rows the model reads.
+    let summarizer_input = without_operator_instruction_entries(model_messages);
 
     // 1. Emit CompactionStarted
     if event_stream_open
@@ -1396,7 +1632,7 @@ where
     let mut summary_usage_identity_dispute = None;
     let (summary_text, summary_usage, summary_source) = if let Some(curator) = curator {
         let curator_window = CompactionWindow {
-            messages: model_messages,
+            messages: &summarizer_input,
             last_input_tokens,
             session_boundary_index,
         };
@@ -1438,7 +1674,7 @@ where
         let crate::compact::SummarizationSource {
             messages: mut compaction_messages,
             bound: source_bound,
-        } = compactor.prepare_for_summarization(model_messages, summarization_budget);
+        } = compactor.prepare_for_summarization(&summarizer_input, summarization_budget);
         compaction_messages.push(Message::User(crate::types::UserMessage::text(
             compaction_prompt.to_string(),
         )));
@@ -1666,32 +1902,47 @@ where
             compactor.rebuild_history_under_pressure(messages, &summary_text, request_pressure)
         }
     };
-    if let Err(error) = validate_compaction_rebuild(
+    // 5. Validate the compactor's rebuild, then fold the operator-instruction
+    // entry rows: the compactor keeps them as it keeps every System row, and
+    // the fold takes them out and inserts the authorized snapshot.
+    let validated = validate_compaction_rebuild(
         messages,
         &result.messages,
         &result.summary,
         &summary_text,
         &result.retained,
         &result.discarded,
-    ) {
-        if event_stream_open
-            && !crate::event_tap::tap_emit(
-                event_tap,
-                event_tx.as_ref(),
-                AgentEvent::CompactionFailed {
-                    reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
-                        error.to_string(),
-                    ),
-                },
-            )
-            .await
-        {
-            tracing::warn!(
-                "compaction event stream receiver dropped before invalid-rebuild CompactionFailed"
-            );
+    )
+    .and_then(|()| {
+        fold_operator_instruction_entries(
+            messages,
+            result,
+            &summary_text,
+            instruction_fold.as_ref(),
+        )
+    });
+    let result = match validated {
+        Ok(result) => result,
+        Err(error) => {
+            if event_stream_open
+                && !crate::event_tap::tap_emit(
+                    event_tap,
+                    event_tx.as_ref(),
+                    AgentEvent::CompactionFailed {
+                        reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                            error.to_string(),
+                        ),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    "compaction event stream receiver dropped before invalid-rebuild CompactionFailed"
+                );
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     let rewrite_authority = ValidatedCompactionRewrite::from_validated(
         parent_revision,
         messages,
@@ -1717,6 +1968,7 @@ where
         messages_after,
         rewrite_authority,
         folded_run_calls: folded_calls,
+        instruction_fold,
     })
 }
 
@@ -1885,6 +2137,10 @@ pub struct CompactionOutcome {
     /// run's rounds: the caller stores it with the rewrite
     /// ([`persist_open_run_folded_calls`]).
     pub(crate) folded_run_calls: Option<FoldedCalls>,
+    /// The operator-instruction fold whose snapshot the rewrite inserted:
+    /// the caller records it in the same prepared session value as the
+    /// rewrite (`Session::record_instruction_fold`).
+    pub(crate) instruction_fold: Option<crate::session::InstructionFold>,
 }
 
 #[cfg(test)]
@@ -2169,6 +2425,7 @@ mod tests {
                 scope: CompactionScope::Whole,
                 projection: &model_messages,
                 earlier_folded_calls: FoldedCalls::default(),
+                instruction_fold: None,
             },
             &None,
             &crate::event_tap::new_event_tap(),
@@ -2682,6 +2939,7 @@ mod tests {
                 scope: CompactionScope::Whole,
                 projection: &model_messages,
                 earlier_folded_calls: FoldedCalls::default(),
+                instruction_fold: None,
             },
             &None,
             &crate::event_tap::new_event_tap(),

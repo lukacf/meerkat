@@ -512,6 +512,7 @@ pub use wire::{
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
+    WireInstructionEntryIdentity,
     WireInterruptOutcome,
     WireLiveAdapterErrorCode,
     WireLiveAdapterObservation,

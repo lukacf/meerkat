@@ -5625,6 +5625,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             RuntimeState { runtime_id: String },
             ModelRoutingStatus { session_id: SessionId },
             SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
+            // `target_carries_transcript`: whether every request the target
+            // would serve can carry the session's transcript as it stands
+            // (the operator-instruction entry rows the session wrote itself,
+            // where they stand, and its ordered instruction activations). A
+            // target that cannot is a permanent refusal: the switch is
+            // denied, never held.
             RequestFiniteSwitchTurn {
                 request_id: String,
                 target_model: String,
@@ -5635,6 +5641,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             RequestUntilChangedSwitchTurn {
                 request_id: String,
@@ -5645,6 +5652,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
             AdmitModelRoutingAssistantTurn,
@@ -14149,13 +14157,49 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
+        // A switch onto a target that cannot carry the session's transcript
+        // as it stands is denied whatever else holds: the refusal is
+        // permanent, so a request held for it would never end.
+        transition RequestFiniteSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
+        transition RequestUntilChangedSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
         transition RequestFiniteSwitchTurnApprovalUnavailable {
             per_phase [Idle, Attached, Running]
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -14171,8 +14215,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             update {
@@ -14192,8 +14237,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
                 || self.model_routing_operation_override_id != None
@@ -14212,8 +14258,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -14241,8 +14288,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             update {
@@ -14265,8 +14313,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -14282,8 +14331,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             update {

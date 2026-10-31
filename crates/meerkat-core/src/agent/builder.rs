@@ -115,6 +115,7 @@ pub struct AgentBuilder {
     pub(super) auth_credential_identity: Option<crate::AuthCredentialIdentity>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
+    pub(super) operator_instruction_lowering: Option<crate::InstructionLowering>,
 }
 
 /// Error returned when the canonical factory has not composed the policy state
@@ -293,6 +294,7 @@ impl AgentBuilder {
             auth_lease_handle: None,
             auth_credential_identity: None,
             mcp_server_lifecycle_handle: None,
+            operator_instruction_lowering: None,
         }
     }
 
@@ -702,7 +704,11 @@ impl AgentBuilder {
 
         // Seed active model limits only from the captured effective registry
         // and the durable session identity. The LLM client is an execution
-        // adapter, not capability or token-limit authority.
+        // adapter, not capability or token-limit authority. This catalog
+        // witness names no binding: the operator-instruction lowering it
+        // states is the model row's, not the one the binding's backend
+        // serves, which the factory passes on its own
+        // (`with_operator_instruction_lowering`).
         let active_model_profile = self.effective_model_registry.as_ref().and_then(|registry| {
             session.session_metadata().and_then(|metadata| {
                 let identity = metadata.llm_identity();
@@ -809,6 +815,9 @@ impl AgentBuilder {
             runtime_execution_kind_required: self.runtime_execution_kind_required,
             runtime_execution_kind: self.runtime_execution_kind,
             runtime_started_run_id: None,
+            run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
@@ -820,6 +829,7 @@ impl AgentBuilder {
             pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry,
             active_model_profile,
+            operator_instruction_lowering: self.operator_instruction_lowering,
             external_tool_surface_handle: self.external_tool_surface_handle,
             live_mcp_attachment: None,
             auth_lease_handle: self.auth_lease_handle,
@@ -1277,6 +1287,18 @@ impl AgentBuilder {
     /// registry captured by the construction pipeline.
     pub fn with_effective_model_registry(mut self, registry: Arc<crate::ModelRegistry>) -> Self {
         self.effective_model_registry = Some(registry);
+        self
+    }
+
+    /// How the model this agent runs carries an operator-instruction entry,
+    /// as its backend serves it: the factory resolves it from
+    /// `ModelRegistry::instruction_lowering_for_identity`. Without it the
+    /// agent derives the lowering from its active model profile.
+    pub fn with_operator_instruction_lowering(
+        mut self,
+        lowering: crate::InstructionLowering,
+    ) -> Self {
+        self.operator_instruction_lowering = Some(lowering);
         self
     }
 

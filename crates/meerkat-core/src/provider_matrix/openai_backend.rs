@@ -85,6 +85,18 @@ impl OpenAiBackendKind {
         !matches!(self, Self::ChatGptBackend)
     }
 
+    /// Whether this backend's wire carries more than one System message in
+    /// the leading system prefix. The ChatGPT backend's single top-level
+    /// `instructions` string carries exactly one leading System row, the
+    /// session's prompt, and the OpenAI client refuses a second one there
+    /// even before any conversation row. The other backends carry each
+    /// leading System row as an input item of its own. Operator instructions
+    /// resolve their lowering from this fact: a wire that carries only the
+    /// prompt's row lowers no entry.
+    pub fn admits_additional_leading_system_messages(self) -> bool {
+        !matches!(self, Self::ChatGptBackend)
+    }
+
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAiApi => "https://api.openai.com",
@@ -117,6 +129,18 @@ mod tests {
         for kind in OpenAiBackendKind::ALL {
             assert_eq!(
                 kind.admits_mid_conversation_system_messages(),
+                *kind != OpenAiBackendKind::ChatGptBackend,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_chatgpt_backend_refuses_additional_leading_system_messages() {
+        for kind in OpenAiBackendKind::ALL {
+            assert_eq!(
+                kind.admits_additional_leading_system_messages(),
                 *kind != OpenAiBackendKind::ChatGptBackend,
                 "{}",
                 kind.as_str()

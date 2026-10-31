@@ -499,6 +499,38 @@ impl StagedSessionRegistry {
         self.info(id).await
     }
 
+    /// Where the operator-instruction entry rows of the session the staged
+    /// build resumes stand in that build's requests, read without promoting
+    /// the slot (`resumed_build_entry_placement`: a prompt row the build
+    /// authors counts as another System row). A model change of a session
+    /// staged before its first build is judged on it. `Ok(None)` when no
+    /// slot exists for `id`; an empty placement while a promotion is
+    /// building the session (that build judges it) or when the build resumes
+    /// no session.
+    pub async fn own_operator_instruction_entry_placement(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::InstructionEntryPlacement>,
+        meerkat_core::ModelBoundaryProjectionError,
+    > {
+        let slots = self.slots.read().await;
+        let Some(slot) = slots.get(id) else {
+            return Ok(None);
+        };
+        let (StagedPayload::Staged { build_config } | StagedPayload::Closing { build_config }) =
+            &slot.payload
+        else {
+            return Ok(Some(meerkat_core::InstructionEntryPlacement::default()));
+        };
+        let Some(session) = build_config.resume_session.as_ref() else {
+            return Ok(Some(meerkat_core::InstructionEntryPlacement::default()));
+        };
+        let authors_prompt_row =
+            session.session_metadata().is_none() || build_config.system_prompt.is_explicit();
+        crate::factory::resumed_build_entry_placement(session, authors_prompt_row).map(Some)
+    }
+
     /// Effective LLM identity captured by generated authority when the slot was
     /// staged.
     pub async fn effective_llm_identity(

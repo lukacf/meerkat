@@ -524,6 +524,8 @@ pub trait Compactor: Send + Sync {
     /// summarization pass (e.g. base64-encoded images), and should drop
     /// superseded versions of typed keyed system prompts
     /// ([`crate::types::materialize_latest_system_prompt_versions`]).
+    /// `messages` holds no operator-instruction entry row: the agent takes
+    /// them out before any summarizer reads the transcript.
     ///
     /// `budget` is the serialized size the model that writes the summary can
     /// take for its source ([`SummarizationSourceBudget::for_summary_model`]);
@@ -571,6 +573,9 @@ pub trait Compactor: Send + Sync {
     /// it remains after the summary. Its typed role and text must match the
     /// exact summary supplied to this method. At least one source message must
     /// be discarded, and the rebuild must not grow the transcript.
+    /// Operator-instruction entry rows are System rows like any other here:
+    /// keep them; the agent then takes them out and inserts its snapshot,
+    /// which the shrink rule does not count.
     ///
     /// `messages` is the whole transcript, except inside a run after its first
     /// response: the agent then hands over only the rows before that run, and
@@ -588,10 +593,12 @@ pub trait Compactor: Send + Sync {
 ///
 /// This is exactly the data the agent-loop compaction flow already holds when
 /// it would otherwise run the summarization LLM call: the transcript the
-/// summary is written from (including every ordered System message and any
-/// prior typed compaction-summary user message), the last observed input
-/// token count, and the session-scoped boundary index at which compaction
-/// runs.
+/// summary is written from (including every ordered System message other
+/// than an operator-instruction entry, and any prior typed
+/// compaction-summary user message), the last observed input token count,
+/// and the session-scoped boundary index at which compaction runs. No
+/// summarizer reads an operator-instruction entry: the compaction carries
+/// the instructions in effect into its snapshot instead.
 ///
 /// The transcript is the whole current one, except inside a run after its
 /// first response while the rows before the run still hold a turn: the

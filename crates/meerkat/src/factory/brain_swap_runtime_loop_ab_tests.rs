@@ -124,6 +124,19 @@ const CROSS_PROVIDER_ROUTE: RouteSpec = RouteSpec {
     binding_b: TEST_BINDING,
 };
 
+/// A=OpenAI `gpt-5.5`, a model that lowers operator-instruction entries
+/// anywhere, and B=Anthropic `claude-sonnet-4-6`, a model that lowers them
+/// only inside the leading System prefix, on bindings that share one
+/// credential account.
+const TO_LEADING_PREFIX_ONLY_ROUTE: RouteSpec = RouteSpec {
+    model_a: MODEL_B,
+    provider_a: Provider::OpenAI,
+    binding_a: TEST_BINDING,
+    model_b: "claude-sonnet-4-6",
+    provider_b: Provider::Anthropic,
+    binding_b: "default_anthropic",
+};
+
 const AUTHORING_TEXT: &str = "staged the swap";
 const NEXT_TURN_TEXT: &str = "answered after the swap";
 const SECOND_NEXT_TURN_TEXT: &str = "answered the second queued turn";
@@ -709,6 +722,13 @@ impl AbHarness {
     }
 
     async fn cold_restart(self) -> Self {
+        let (environment, session_id) = self.detach().await;
+        attach_harness(environment, Some(session_id)).await
+    }
+
+    /// Tear the runtime attachment down, as a restart does before it
+    /// reattaches the same session, and hand back what reattaching needs.
+    async fn detach(self) -> (Arc<AbEnvironment>, SessionId) {
         let environment = Arc::clone(&self.environment);
         let session_id = self.session_id.clone();
         // A restart reattaches the same session, so it must observe terminal
@@ -728,7 +748,7 @@ impl AbHarness {
             .expect("tear down the original runtime attachment");
         assert!(torn_down, "the original registration was no longer current");
         drop(self);
-        attach_harness(environment, Some(session_id)).await
+        (environment, session_id)
     }
 }
 
@@ -737,7 +757,22 @@ async fn build_harness(profile: PersistenceProfile) -> AbHarness {
 }
 
 async fn build_harness_for(profile: PersistenceProfile, route: RouteSpec) -> AbHarness {
-    let environment = Arc::new(AbEnvironment {
+    attach_harness(new_environment(profile, route), None).await
+}
+
+/// A harness whose session had `seed`'s rows before the harness built it.
+async fn build_harness_seeded(
+    profile: PersistenceProfile,
+    route: RouteSpec,
+    seed: Session,
+) -> AbHarness {
+    try_attach_harness(new_environment(profile, route), HarnessSession::Fresh(seed))
+        .await
+        .expect("materialize the runtime-backed session with a real executor")
+}
+
+fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvironment> {
+    Arc::new(AbEnvironment {
         profile,
         route,
         temp: tempfile::tempdir().expect("brain-swap A/B tempdir"),
@@ -745,14 +780,35 @@ async fn build_harness_for(profile: PersistenceProfile, route: RouteSpec) -> AbH
         availability: Arc::new(ModelAvailability::default()),
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
         resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
-    });
-    attach_harness(environment, None).await
+    })
+}
+
+/// The session a harness attaches: a fresh one (maybe seeded with rows) or
+/// the retained session of an earlier attachment.
+enum HarnessSession {
+    Fresh(Session),
+    Retained(SessionId),
 }
 
 async fn attach_harness(
     environment: Arc<AbEnvironment>,
     resume_session_id: Option<SessionId>,
 ) -> AbHarness {
+    let session = match resume_session_id {
+        Some(session_id) => HarnessSession::Retained(session_id),
+        None => HarnessSession::Fresh(Session::new()),
+    };
+    try_attach_harness(environment, session)
+        .await
+        .expect("materialize the runtime-backed session with a real executor")
+}
+
+/// Attach `session` through the production composition, answering a
+/// materialization failure instead of panicking on it.
+async fn try_attach_harness(
+    environment: Arc<AbEnvironment>,
+    session: HarnessSession,
+) -> Result<AbHarness, String> {
     let route = environment.route;
     let mut factory = AgentFactory::new(environment.temp.path().join("factory-sessions"))
         .without_provider_auth_persistence()
@@ -839,14 +895,14 @@ async fn attach_harness(
         )
         .expect("compose the runtime-backed service");
 
-    let fresh = resume_session_id.is_none();
-    let session = match resume_session_id {
-        Some(session_id) => service
+    let fresh = matches!(session, HarnessSession::Fresh(_));
+    let session = match session {
+        HarnessSession::Retained(session_id) => service
             .load_authoritative_session(&session_id)
             .await
             .expect("load the retained authoritative session after restart")
             .expect("the retained session must remain durable"),
-        None => Session::new(),
+        HarnessSession::Fresh(session) => session,
     };
     let session_id = session.id().clone();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
@@ -864,17 +920,17 @@ async fn attach_harness(
         },
     ))
     .await
-    .expect("materialize the runtime-backed session with a real executor");
+    .map_err(|error| format!("{error:?}"))?;
     assert_eq!(materialized.session_id, session_id);
 
-    AbHarness {
+    Ok(AbHarness {
         service,
         adapter,
         runtime_store,
         session_id,
         runtime_id,
         environment,
-    }
+    })
 }
 
 struct CommittedHandoffProof {
@@ -1561,4 +1617,192 @@ async fn whole_blob_concurrent_next_admissions_realize_once_in_order() {
 #[tokio::test]
 async fn head_canonical_concurrent_next_admissions_realize_once_in_order() {
     concurrent_next_admissions_realize_once_in_order(PersistenceProfile::HeadCanonical).await;
+}
+
+// ---------------------------------------------------------------------------
+// A target that cannot carry the session's own operator-instruction entries
+// ---------------------------------------------------------------------------
+
+/// A session that had a conversation before the harness built it, so the
+/// operator-instruction entry its next fresh run start applies stands after
+/// conversation rows.
+fn conversed_seed() -> Session {
+    let mut session = Session::new();
+    session.push(meerkat_core::Message::User(
+        meerkat_core::UserMessage::text("an earlier question"),
+    ));
+    session.push(meerkat_core::Message::BlockAssistant(
+        meerkat_core::BlockAssistantMessage {
+            blocks: vec![meerkat_core::AssistantBlock::Text {
+                text: "an earlier answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(StopReason::EndTurn),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        },
+    ));
+    session
+}
+
+/// A seeded harness on [`TO_LEADING_PREFIX_ONLY_ROUTE`] whose authoring run
+/// applied an operator-instruction entry after the conversation and
+/// committed a `brain_swap` request for B.
+async fn harness_with_an_entry_b_cannot_carry(
+    profile: PersistenceProfile,
+) -> (AbHarness, CommittedHandoffProof) {
+    use meerkat_core::service::SessionServiceInstructionExt as _;
+
+    let harness =
+        build_harness_seeded(profile, TO_LEADING_PREFIX_ONLY_ROUTE, conversed_seed()).await;
+    Arc::clone(&harness.service)
+        .set_session_instruction(
+            &harness.session_id,
+            meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example")
+                        .expect("namespace"),
+                    key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            },
+        )
+        .await
+        .expect("the session records the operator instruction");
+    let proof = commit_brain_swap_request(&harness).await;
+    assert_eq!(
+        harness
+            .authoritative_session()
+            .await
+            .own_operator_instruction_entry_placement()
+            .expect("the transcript projects")
+            .refusal(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
+        "the authoring run applied its entry after the conversation"
+    );
+    (harness, proof)
+}
+
+/// A committed `brain_swap` onto a model that cannot carry the session's own
+/// operator-instruction entry where it stands (after the conversation) is
+/// denied by the routing machine, typed, when the next input realizes it:
+/// no client is built for B, the request ends Denied, and the next input
+/// runs on A. A hold would leave that input, and every later one,
+/// unattempted for good.
+async fn a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a(
+    profile: PersistenceProfile,
+) {
+    let (harness, proof) = harness_with_an_entry_b_cannot_carry(profile).await;
+    let route = proof.route;
+    harness.clear_client_build_models();
+
+    let next = harness.run_prompt("continue on the current model").await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the next input must run on A once the request is denied: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_a,
+            model: route.model_a.to_string(),
+        }),
+        "A serves the next input"
+    );
+    assert!(
+        !harness
+            .client_build_models()
+            .iter()
+            .any(|model| model == route.model_b),
+        "no client is built for a target the routing machine denies: {:?}",
+        harness.client_build_models()
+    );
+    let records = harness.durable_routing_records().await;
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[1].request_id(), &proof.request_id);
+    assert!(
+        matches!(
+            &records[1],
+            SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
+                reason: meerkat_core::image_generation::SwitchTurnDenialReason::CapabilityPolicy,
+                ..
+            }
+        ),
+        "the request ends Denied, typed: {records:?}"
+    );
+    assert_eq!(harness.realized_terminal_count().await, 0);
+    assert_eq!(harness.live_identity().await.model, route.model_a);
+    assert_eq!(harness.durable_identity().await.model, route.model_a);
+}
+
+#[tokio::test]
+async fn whole_blob_a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a() {
+    a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a() {
+    a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// A restart that cannot build A bootstraps a client for the committed
+/// request's target only when that target can carry the session's own
+/// operator-instruction entries where they stand. B cannot, so no client is
+/// built for it and the restart fails on A's own error: a bootstrap client
+/// for B would serve a transcript its wire refuses.
+async fn a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
+    profile: PersistenceProfile,
+) {
+    let (harness, proof) = harness_with_an_entry_b_cannot_carry(profile).await;
+    let route = proof.route;
+    harness.set_available(route.model_a, false);
+    harness.clear_client_build_models();
+    let (environment, session_id) = harness.detach().await;
+
+    let restarted = try_attach_harness(
+        Arc::clone(&environment),
+        HarnessSession::Retained(session_id),
+    )
+    .await;
+    let built = environment
+        .client_build_models
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        !built.iter().any(|model| model == route.model_b),
+        "no bootstrap client is built for a target that cannot carry the entries: {built:?}"
+    );
+    assert!(
+        restarted.is_err(),
+        "with A unavailable and no bootstrap the restart fails on A's error"
+    );
+}
+
+#[tokio::test]
+async fn whole_blob_a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries() {
+    a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries()
+{
+    a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
 }

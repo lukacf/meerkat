@@ -235,7 +235,10 @@ fn run_input_from_admitted_pending_tail(
     messages: &[Message],
     admitted_tail: ObservedSessionTailKind,
 ) -> Result<RunInput, AgentError> {
-    match (admitted_tail, messages.last()) {
+    match (
+        admitted_tail,
+        crate::pending_continuation::last_non_entry_message(messages),
+    ) {
         (ObservedSessionTailKind::User, Some(Message::User(user)))
             if user.has_non_text_content() =>
         {
@@ -1077,6 +1080,11 @@ where
     /// serialized through the session metadata authority, and auth rotation is
     /// staged. The final client, request policy, durable identity, and active
     /// profile publication is therefore an infallible in-memory commit.
+    ///
+    /// A target whose operator-instruction lowering (the request policy's)
+    /// cannot carry the entry rows the session wrote itself where they
+    /// stand is refused before anything changes
+    /// ([`crate::InstructionEntryPlacement::refusal`]).
     pub fn hot_swap_llm_identity(
         &mut self,
         client: Arc<C>,
@@ -1094,6 +1102,23 @@ where
                 "live LLM hot-swap request policy provider params do not match the durable target identity"
                     .to_string(),
             ));
+        }
+        // Every request carries the operator-instruction entry rows this
+        // session wrote itself where they stand: a target that cannot carry
+        // them there would refuse every later request. Every live model
+        // change reaches this swap, a direct session-service caller's
+        // included, so none bypasses it.
+        if let Some(refusal) = self
+            .session
+            .own_operator_instruction_entry_placement()?
+            .refusal(request_policy.operator_instruction_lowering)
+        {
+            return Err(AgentError::ConfigError(format!(
+                "live LLM hot-swap target '{}:{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+                identity.provider.as_str(),
+                identity.model,
+                self.session.id()
+            )));
         }
         let target_profile = self
             .effective_model_registry
@@ -1147,6 +1172,10 @@ where
             .provider_native_tools
             .narrow(request_policy.provider_native_tools);
         let next_auth_credential_identity = request_policy.credential_identity;
+        // The swap's witness is the model's catalog row, and the agent holds
+        // no config to judge the new binding: operator instructions lower as
+        // the host resolved for that binding's backend.
+        let next_operator_instruction_lowering = request_policy.operator_instruction_lowering;
 
         let _auth_rotation = self.stage_auth_lease_credential_identity(
             self.auth_credential_identity.as_ref(),
@@ -1165,6 +1194,7 @@ where
         self.tool_application_observations
             .refresh(self.session.messages());
         self.active_model_profile = Some(target_profile);
+        self.operator_instruction_lowering = Some(next_operator_instruction_lowering);
         Ok(())
     }
 
@@ -1877,7 +1907,11 @@ where
         self.session
             .validate_instruction_activation_turn_readiness()
             .map_err(AgentError::InstructionActivation)?;
-        let mut messages = self.session.messages_for_model_boundary()?;
+        // Operator-instruction rows a fork copied that this model cannot
+        // lower where they stand are left out of its request.
+        let mut messages = self
+            .session
+            .messages_for_model_request(self.operator_instruction_lowering())?;
         if let Some(instructions) = self.output_schema_request_instructions() {
             crate::structured_output::project_output_schema_instructions(
                 &mut messages,
@@ -2410,6 +2444,14 @@ where
         let saved_runtime_execution_kind_required = self.runtime_execution_kind_required;
         let saved_runtime_execution_kind = self.runtime_execution_kind;
         let saved_runtime_started_run_id = self.runtime_started_run_id.take();
+        let saved_run_started_fresh = self.run_started_fresh;
+        // The member's own run start: what its operator-instruction entry
+        // changed, whether its run started and a checkpoint holds the entry,
+        // and the run id it reserved. The bridge run neither notes nor adopts
+        // them.
+        let saved_unconcluded_run_start_instructions =
+            self.unconcluded_run_start_instructions.take();
+        let saved_run_start_reserved_run_id = self.run_start_reserved_run_id.take();
         let saved_runtime_terminal_failure_witness = self.runtime_terminal_failure_witness.take();
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
@@ -2504,6 +2546,9 @@ where
         self.runtime_execution_kind_required = saved_runtime_execution_kind_required;
         self.runtime_execution_kind = saved_runtime_execution_kind;
         self.runtime_started_run_id = saved_runtime_started_run_id;
+        self.run_started_fresh = saved_run_started_fresh;
+        self.unconcluded_run_start_instructions = saved_unconcluded_run_start_instructions;
+        self.run_start_reserved_run_id = saved_run_start_reserved_run_id;
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;
@@ -3730,9 +3775,13 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry.clone(),
             active_model_profile: self.active_model_profile.clone(),
+            operator_instruction_lowering: self.operator_instruction_lowering,
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             runtime_started_run_id: None,
+            run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),

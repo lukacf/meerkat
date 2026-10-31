@@ -1736,8 +1736,8 @@ mod schema_floor_tests {
                 .await
                 .expect("full supported v3 read")
                 .expect("session exists");
-            assert_eq!(loaded.version(), 4);
-            assert_eq!(verified.session().version(), 4);
+            assert_eq!(loaded.version(), meerkat_core::SESSION_VERSION);
+            assert_eq!(verified.session().version(), meerkat_core::SESSION_VERSION);
             assert_eq!(loaded.metadata(), original.metadata());
             assert_eq!(
                 serde_json::to_vec(loaded.messages()).expect("loaded exact messages"),
@@ -2258,12 +2258,15 @@ mod schema_floor_tests {
         let (row_version, migrated_json, migrated_token) = raw_head(&conn, &id);
         assert_eq!(
             row_version,
-            i64::from(meerkat_core::SESSION_VERSION),
+            i64::from(meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION),
             "the indexed row envelope advances in the migration transaction"
         );
         let migrated: SessionHead =
             serde_json::from_value(migrated_json).expect("deserialize migrated head");
-        assert_eq!(migrated.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            migrated.version,
+            meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
+        );
         assert_eq!(migrated.id, id);
         assert!(
             migrated.message_row_prefix.is_some() && migrated.row_lineage_anchor.is_some(),
@@ -2302,7 +2305,7 @@ mod schema_floor_tests {
         );
         assert_eq!(
             raw_head(&conn, &released_id).0,
-            i64::from(meerkat_core::SESSION_VERSION)
+            i64::from(meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION)
         );
     }
 
@@ -11617,7 +11620,10 @@ mod tests {
             .await
             .expect("load migrated released head")
             .expect("released corpus head remains present");
-        assert_eq!(head.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            head.version,
+            meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
+        );
 
         let migrated = open_connection(&path).unwrap();
         let (row_version, embedded_version, stored_token): (i64, u32, String) = migrated
@@ -11634,8 +11640,14 @@ mod tests {
                 },
             )
             .expect("read migrated corpus head envelope");
-        assert_eq!(row_version, i64::from(meerkat_core::SESSION_VERSION));
-        assert_eq!(embedded_version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            row_version,
+            i64::from(meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION)
+        );
+        assert_eq!(
+            embedded_version,
+            meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
+        );
         assert_eq!(
             stored_token,
             session_head_cas_token(&head).expect("migrated corpus head token")
@@ -15682,7 +15694,10 @@ mod tests {
             .expect("load imported head")
             .expect("imported head exists");
         assert_eq!(imported_head.rewrite_count, 2);
-        assert_eq!(imported_head.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            imported_head.version,
+            meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
+        );
 
         let store_for_activation =
             SqliteSessionStore::open(&path).expect("open activation store handle");
@@ -15940,7 +15955,10 @@ mod tests {
             .await
             .expect("load rebuilt collapse head")
             .expect("rebuilt collapse head exists");
-        assert_eq!(head.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            head.version,
+            meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
+        );
         assert_eq!(head.rewrite_count, 1);
         assert_ne!(head.head_revision, released_head_revision);
         let records = incremental

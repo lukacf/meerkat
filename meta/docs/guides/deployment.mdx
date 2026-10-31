@@ -288,7 +288,8 @@ What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)
 counts the journal events left. One identity's side effects keep the
 journal's order, so a step the new gateway takes for an identity the stopped
-one still owed side effects runs its own after those. A session bridge that
+one still owed side effects runs its own after those, in the background:
+init never waits for them. A session bridge that
 cannot read Core's journal turns the side effects off: the gateway reports
 `lifecycle_projection_off` once, and its status and health read degraded.
 They read degraded too while the projection keeps failing (`stalled`): its

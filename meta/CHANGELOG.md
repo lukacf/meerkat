@@ -77,7 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   them, for any lifecycle side effect to run. One that does not is reported
   once at start as the error event `lifecycle_projection_off`, logged at
   ERROR, and `meta/status` (`lifecycle_projection.state`) and the JSON
-  `/healthz` summary read `off`, degraded.
+  `/healthz` summary read `off`, degraded. A wrapper that keeps the default
+  of `mob_incarnation` instead of forwarding it only has a seat step refused,
+  retryable, while the head of Core's journal does not read.
 
 - A host's retirement hook or `after_create` that has not answered within 30
   seconds is called again, at most three times in all, then reported
@@ -223,6 +225,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MemberLifecycleFact::seated`, `retired`, `mob_reset`, and so on), so the
   facts can say more of their step without another break.
 
+- `SessionBridge::mob_incarnation` names the incarnation of the bridge's mob
+  without a store read; it defaults to `None`, and `MobSessionBridge` (and
+  the `PublicSessionBridge` that wraps it) answer it. When the head of the
+  journal does not read, a seat step goes ahead past a stored projection
+  cursor only when the cursor is of that incarnation (see Changed). A bridge
+  that wraps another forwards it.
+
 - The error events `lifecycle_effect_failed` (`identity`,
   `agent_runtime_id`, `session_id`, `effect`, `attempts`, `error`), for a
   lifecycle side effect (`after_create`, an exit interview's write, a
@@ -244,8 +253,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   while it is off or stalled and names it, and names the owed events while
   they drain.
   `IdentityRuntime::lifecycle_effect_failures(skip, limit)` reads a page of
-  the side effects recorded as failed, oldest first; each start of the
-  projection keeps the latest 1024 of the mob's and removes the older ones.
+  the side effects recorded as failed, oldest first. The projection keeps
+  the latest 1024 of the mob's: each start removes the older ones, and so
+  does a run after every 256 it records.
 
 - `RetiredIdentityCause::RoleMove` (`role_move`), for an incarnation a role
   move rotated onto a fresh session, and `RetiredIdentityCause::Rotated`
@@ -343,9 +353,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     one that never answers, or a write that always fails, delays later side
     effects by at most its bound. A step that holds an identity's lifecycle
     lock past 30 seconds (a build stuck in the customizer) is not waited
-    for; a retirement hook call that would have waited for it names no
-    registration. Hooks and `after_create` calls for different identities
-    run up to 16 at once, in no order across identities;
+    for; a retirement hook call that would have waited for it names the
+    registration only when the step that ended the incarnation had settled
+    it already. `after_create` reports the build a step made for its seat
+    also when the projection reaches the seat while the rest of the step
+    still runs.
+    Hooks and `after_create` calls for different identities run up to 16 at
+    once, in no order across identities;
   - a first-boot `Fresh` row (`meta_gateway identity-reset`) of a live member
     distills the old session, as the online reset does;
   - a unified runtime's identity bootstrap answers once the side effects of
@@ -356,12 +370,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     of this process for an identity the predecessor still owed side effects
     has its own run after those (a hook the predecessor owed an unlisted
     identity reaches the host before the relisted identity's next
-    `after_create`);
+    `after_create`), in the background too: the bootstrap never waits for a
+    predecessor's backlog, and the side effects of its steps for such an
+    identity, and of the steps journaled after them, follow it;
   - a seat step is refused, retryable, with nothing asked of Core, while no
     projection cursor is stored and none can be started, so no seat is ever
-    committed behind it. With a cursor stored, the step goes ahead past it,
-    and the projection reads it once a preparation gets through (it tries
-    again at each sweep). A step whose record cannot be written (a reload's
+    committed behind it. With a cursor stored for the mob's current
+    incarnation, the step goes ahead past it, and the projection reads it
+    once a preparation gets through (it tries again at each sweep); a
+    cursor of another incarnation (the mob was recreated since), or one the
+    bridge cannot place, counts as none. A step whose record cannot be written (a reload's
     and a respawn's too) is refused the same way, as
     `IdentityHistoryUnavailable`;
   - a roster pass that lists an identity again takes back an unlisting Core

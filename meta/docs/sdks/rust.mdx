@@ -372,10 +372,11 @@ reads fail answers anyway, and the calls follow). Calls for different
 identities run concurrently, up to 16 at once, in no order across
 identities. Calls for one identity keep the journal's order, also across a
 restart: what a stopped gateway still owed an identity (its retirement hook,
-say) comes before the calls this gateway's own steps owe it. A seat whose
-incarnation has ended by the time the gateway reaches it (the identity was
-retired, reset or moved since) is not told: its retirement is handed to the
-retirement hook instead.
+say) comes before the calls this gateway's own steps owe it, which then
+follow the init in the background: the init never waits for what a stopped
+gateway owed. A seat whose incarnation has ended by the time the gateway
+reaches it (the identity was retired, reset or moved since) is not told: its
+retirement is handed to the retirement hook instead.
 
 Each call has a deadline of 30 seconds. A call that has not answered by then
 is made again, at most three times in all; an error it answers is final. A

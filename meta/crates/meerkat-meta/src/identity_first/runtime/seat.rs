@@ -1039,7 +1039,9 @@ impl IdentityRuntime {
                         draft: draft.clone(),
                         host_preparation_ended: false,
                     };
-                    answered.push((planned, draft, Ok(outcome)));
+                    let result = Ok(outcome);
+                    self.settle_lifecycle_build(&planned.spec.identity, &result);
+                    answered.push((planned, draft, result));
                 }
                 SeatPlan::Seat { .. } => seats.push((planned, draft)),
                 SeatPlan::Rotate { .. }
@@ -1084,6 +1086,7 @@ impl IdentityRuntime {
                                 planned.spec.identity
                             ))),
                         };
+                        self.settle_lifecycle_build(&planned.spec.identity, &result);
                         answered.push((planned, draft, result));
                     }
                 }
@@ -1097,6 +1100,7 @@ impl IdentityRuntime {
                             session_id: None,
                             detail: format!("seating the identity in Core's mob failed: {error}"),
                         });
+                        self.settle_lifecycle_build(&planned.spec.identity, &result);
                         answered.push((planned, draft, result));
                     }
                 }
@@ -1104,25 +1108,31 @@ impl IdentityRuntime {
         }
         for (planned, draft) in others {
             let result = self.commit_other(bridge, &planned, &draft).await;
+            self.settle_lifecycle_build(&planned.spec.identity, &result);
             answered.push((planned, draft, result));
-        }
-        // What each build made is the one its seat's `after_create` reports:
-        // bound to the session Core seated, before the step releases the
-        // identities' lifecycle locks, which the projection takes before it
-        // reads it. A step that seated nothing forgets it.
-        for (planned, _draft, result) in &answered {
-            let identity = &planned.spec.identity;
-            match result {
-                Ok(SeatOutcome {
-                    already_seated: false,
-                    session_id: Some(session_id),
-                    ..
-                }) => self.bind_lifecycle_build(identity, session_id),
-                _ => self.forget_lifecycle_build(identity),
-            }
         }
         drop(guards);
         answered
+    }
+
+    /// What the build of `identity`'s step made is the one its seat's
+    /// `after_create` reports: bound to the session Core seated as soon as
+    /// Core answered the identity's own part of the step, still under its
+    /// lifecycle lock, so a projection that reaches the seat while the rest
+    /// of a long step runs finds it. A step that seated nothing forgets it.
+    fn settle_lifecycle_build(
+        &self,
+        identity: &AgentIdentity,
+        result: &Result<SeatOutcome, IdentityRuntimeError>,
+    ) {
+        match result {
+            Ok(SeatOutcome {
+                already_seated: false,
+                session_id: Some(session_id),
+                ..
+            }) => self.bind_lifecycle_build(identity, session_id),
+            _ => self.forget_lifecycle_build(identity),
+        }
     }
 
     /// One identity's seat outcome from Core's answer. An archived session

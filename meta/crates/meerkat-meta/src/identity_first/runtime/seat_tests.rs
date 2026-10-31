@@ -637,6 +637,10 @@ impl SessionBridge for SeatCore {
         self.core.journal_head()
     }
 
+    fn mob_incarnation(&self) -> Option<String> {
+        Some(crate::identity_first::core_test_members::JOURNAL_INCARNATION.to_string())
+    }
+
     async fn member_lifecycle_journal_page(
         &self,
         after: u64,

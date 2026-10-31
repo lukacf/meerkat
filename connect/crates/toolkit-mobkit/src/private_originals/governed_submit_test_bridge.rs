@@ -597,6 +597,10 @@ impl SessionBridge for ObservedBridge {
         self.inner.member_lifecycle_journal_head().await
     }
 
+    fn mob_incarnation(&self) -> Option<String> {
+        self.inner.mob_incarnation()
+    }
+
     async fn member_lifecycle_journal_page(
         &self,
         after: u64,

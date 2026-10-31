@@ -85,11 +85,12 @@
 //! The side effects of the events a stopped process left behind its cursor
 //! when this one starts run in the background, in a lane of their own, and
 //! their count stands in the projection's status until they ran: an
-//! identity bootstrap waits only for the steps this process takes. One
-//! identity's side effects keep journal order across the two lanes: the
-//! live lane runs an identity's only once the backlog lane ran every one
-//! the backlog owes that identity, so a step this process takes for such an
-//! identity waits for those first.
+//! identity bootstrap never waits for them. One identity's side effects
+//! keep journal order across the two lanes: the live lane holds a page with
+//! side effects of an identity the backlog still owes some, after running
+//! the other identities' of the page, and the live task runs the page again
+//! once the backlog lane ran past that identity; the steps journaled after
+//! it follow it there, in the background too.
 //!
 //! # Scale
 //!
@@ -136,7 +137,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -193,6 +194,10 @@ const STALE_INTENT_SWEEP: usize = 1024;
 /// How many lifecycle effect failures of the mob a start of the projection
 /// keeps: the latest ones.
 const FAILURES_KEPT: usize = 1024;
+
+/// After how many failures recorded in one run the projection prunes them
+/// again: a long run keeps at most [`FAILURES_KEPT`] and this many more.
+const FAILURES_PRUNED_EVERY: usize = 256;
 
 fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -302,7 +307,7 @@ pub(super) struct LifecycleProjection {
     /// The incarnation a step this process asked Core for is about to end,
     /// as the retirement hook reads it, by identity: its registration was
     /// read before Core was asked.
-    retiring: StdMutex<BTreeMap<AgentIdentity, RetiredIdentityMember>>,
+    retiring: StdMutex<BTreeMap<AgentIdentity, Retiring>>,
     /// What the build of a seat-like step made, by identity, until Core
     /// answers the step with its session.
     building: StdMutex<BTreeMap<AgentIdentity, SessionCreatedContext>>,
@@ -315,6 +320,8 @@ pub(super) struct LifecycleProjection {
     /// Whether a step was refused its record for want of a binding, said
     /// once.
     unbound_said: AtomicBool,
+    /// How many lifecycle effect failures this run recorded.
+    failures_recorded: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -338,6 +345,17 @@ struct Owner {
     customizer: Option<Arc<dyn AgentCustomizer>>,
     /// An identity context bound it; another binding never replaces one.
     by_context: bool,
+}
+
+/// An incarnation a step this process asked Core for is about to end, as
+/// the retirement hook reads it.
+struct Retiring {
+    member: RetiredIdentityMember,
+    /// The step answered Core's part and settled the registration (a
+    /// registration still current after Core's answer was not ended by it):
+    /// what the hook names, whether or not the step still holds the
+    /// identity's lifecycle lock.
+    settled: bool,
 }
 
 /// One lane's progress.
@@ -404,14 +422,16 @@ struct Failures {
 pub(super) struct UnpreparedProjection {
     /// What failed.
     detail: String,
-    /// The store holds a cursor of the projection already.
+    /// The store holds a cursor of the projection over the journal of the
+    /// mob's current incarnation already.
     cursor_stored: bool,
 }
 
 impl UnpreparedProjection {
-    /// Whether the store holds a cursor of the projection already: a step
-    /// Core journals now lies past it, so the projection reads that step
-    /// once a preparation gets through.
+    /// Whether the store holds a cursor of the projection over the journal
+    /// of the mob's current incarnation already: a step Core journals now
+    /// lies past it, so the projection reads that step once a preparation
+    /// gets through.
     pub(super) fn cursor_stored(&self) -> bool {
         self.cursor_stored
     }
@@ -427,10 +447,10 @@ impl std::fmt::Display for UnpreparedProjection {
 enum PageError {
     /// The bridge cannot do this read at all: the projection is off.
     Unreadable(&'static str),
-    /// An identity's side effects on the page wait for a predecessor's
-    /// backlog, which cannot run past them in this run: the page runs again
-    /// at a later run.
-    Held,
+    /// The side effects of these identities on the page follow a
+    /// predecessor's backlog, which has not run past them yet: the page
+    /// runs again once it has.
+    Held(BTreeSet<AgentIdentity>),
     Failed(String),
 }
 
@@ -442,11 +462,21 @@ impl From<String> for PageError {
 
 /// Why one identity's side effects of a page stopped short.
 enum JobStop {
-    /// They wait for a predecessor's backlog, which cannot run past them in
-    /// this run.
-    Held,
+    /// They follow a predecessor's backlog, which still owes this identity
+    /// side effects.
+    Held(AgentIdentity),
     /// A side effect's failure could not be recorded.
     Failed(String),
+}
+
+/// How a run of a lane ended, short of a failure.
+enum LaneEnd {
+    /// It reached its end: the journal's head, or the end of the owed
+    /// ranges.
+    Reached,
+    /// It holds a page whose side effects of these identities follow a
+    /// predecessor's backlog.
+    Held(BTreeSet<AgentIdentity>),
 }
 
 impl LifecycleProjection {
@@ -472,6 +502,7 @@ impl LifecycleProjection {
             limits: StdMutex::new(EffectLimits::default()),
             failed_runs: StdMutex::new(FailedRuns::default()),
             unbound_said: AtomicBool::new(false),
+            failures_recorded: AtomicUsize::new(0),
         }
     }
 
@@ -495,30 +526,38 @@ impl LifecycleProjection {
     }
 
     fn stash_retiring(&self, member: RetiredIdentityMember) {
-        lock(&self.retiring).insert(member.identity.clone(), member);
+        lock(&self.retiring).insert(
+            member.identity.clone(),
+            Retiring {
+                member,
+                settled: false,
+            },
+        );
     }
 
-    /// Replace the kept incarnation of `member`'s identity, while the
-    /// projection has not taken it yet.
+    /// Replace the kept incarnation of `member`'s identity with the one its
+    /// step settled, while the projection has not taken it yet.
     fn refine_retiring(&self, member: RetiredIdentityMember) {
         let mut retiring = lock(&self.retiring);
         if retiring
             .get(&member.identity)
-            .is_some_and(|kept| kept.generation == member.generation)
+            .is_some_and(|kept| kept.member.generation == member.generation)
         {
-            retiring.insert(member.identity.clone(), member);
+            retiring.insert(
+                member.identity.clone(),
+                Retiring {
+                    member,
+                    settled: true,
+                },
+            );
         }
     }
 
-    fn take_retiring(
-        &self,
-        identity: &AgentIdentity,
-        generation: u64,
-    ) -> Option<RetiredIdentityMember> {
+    fn take_retiring(&self, identity: &AgentIdentity, generation: u64) -> Option<Retiring> {
         let mut retiring = lock(&self.retiring);
         if retiring
             .get(identity)
-            .is_some_and(|kept| kept.generation == generation)
+            .is_some_and(|kept| kept.member.generation == generation)
         {
             return retiring.remove(identity);
         }
@@ -566,11 +605,9 @@ impl LifecycleProjection {
         })
     }
 
-    /// Whether the backlog task runs.
-    fn backlog_running(&self) -> bool {
-        lock(&self.backlog_task)
-            .as_ref()
-            .is_some_and(|task| !task.is_finished())
+    /// Whether a predecessor's backlog still owes `identity` side effects.
+    fn still_owed(&self, identity: &AgentIdentity) -> bool {
+        backlog_owes(&self.owed.borrow(), identity)
     }
 }
 
@@ -813,6 +850,27 @@ fn backlog_owes(
         .is_none_or(|owed| owed.contains_key(identity))
 }
 
+/// Wait until the backlog lane ran past every identity of `held`: whether it
+/// did (`false` once the projection is gone).
+async fn backlog_passed(
+    owed: &mut watch::Receiver<Option<BTreeMap<AgentIdentity, u64>>>,
+    held: &BTreeSet<AgentIdentity>,
+) -> bool {
+    loop {
+        let pending = {
+            let published = owed.borrow_and_update();
+            held.iter()
+                .any(|identity| backlog_owes(&published, identity))
+        };
+        if !pending {
+            return true;
+        }
+        if owed.changed().await.is_err() {
+            return false;
+        }
+    }
+}
+
 /// The seat of `member` at `generation` follows its retirement at
 /// `generation` in the same append: Core rotated it.
 fn rotation_successor(
@@ -924,8 +982,8 @@ impl IdentityRuntime {
 
     /// One page of the lifecycle side effects the projection recorded as
     /// failed, oldest first: at most `limit` of them, after the first
-    /// `skip`. Each start of the projection keeps the latest 1024 of the
-    /// mob's and removes the older ones.
+    /// `skip`. The projection keeps the latest 1024 of the mob's: each start
+    /// removes the older ones, and so does a run after every 256 it records.
     pub async fn lifecycle_effect_failures(
         &self,
         skip: usize,
@@ -975,8 +1033,9 @@ impl IdentityRuntime {
             projection.set_phase(Phase::Inactive);
             return Ok(());
         };
-        // The stored cursor first: once one is stored, a step Core journals
-        // lies past it whatever else fails here, so a seat step goes ahead.
+        // The stored cursor first: once one of the mob's current incarnation
+        // is stored, a step Core journals lies past it whatever else fails
+        // here, so a seat step goes ahead.
         let (store, mob_id) = self.identity_record_store();
         let stored = store
             .lifecycle_projection_cursor(&mob_id)
@@ -985,11 +1044,6 @@ impl IdentityRuntime {
                 detail: format!("reading the lifecycle projection's cursor: {error}"),
                 cursor_stored: false,
             })?;
-        let cursor_stored = stored.is_some();
-        let unprepared = |detail: String| UnpreparedProjection {
-            detail,
-            cursor_stored,
-        };
         let head = match bridge.member_lifecycle_journal_head().await {
             Ok(head) => head,
             Err(BridgeError::Unsupported { .. }) => {
@@ -999,10 +1053,25 @@ impl IdentityRuntime {
                 return Ok(());
             }
             Err(error) => {
-                return Err(unprepared(format!(
-                    "reading the head of Core's member lifecycle journal: {error}"
-                )));
+                // Without the head, the bridge's own answer says which
+                // incarnation of the mob runs: a cursor of another one (the
+                // mob was recreated since), or one the bridge cannot place,
+                // makes no step safe.
+                let current = bridge.mob_incarnation();
+                return Err(UnpreparedProjection {
+                    detail: format!("reading the head of Core's member lifecycle journal: {error}"),
+                    cursor_stored: stored.as_ref().is_some_and(|stored| {
+                        current.as_deref() == Some(stored.incarnation.as_str())
+                    }),
+                });
             }
+        };
+        let cursor_stored = stored
+            .as_ref()
+            .is_some_and(|stored| stored.incarnation == head.incarnation);
+        let unprepared = |detail: String| UnpreparedProjection {
+            detail,
+            cursor_stored,
         };
         // A bridge that reads the head may still read no page.
         match bridge.member_lifecycle_journal_page(head.cursor, 1).await {
@@ -1133,9 +1202,14 @@ impl IdentityRuntime {
                                  again at the next sweep"
                             );
                         }
+                        let mut held = None;
                         match identities.lifecycle_projection.phase() {
                             Phase::Ready { .. } => {
-                                identities.run_logged_lifecycle_lane(LaneKind::Live).await;
+                                if let Some(LaneEnd::Held(held_identities)) =
+                                    identities.run_logged_lifecycle_lane(LaneKind::Live).await
+                                {
+                                    held = Some(held_identities);
+                                }
                                 // The backlog task, for a backlog the
                                 // preparation found.
                                 identities.start_lifecycle_projection();
@@ -1143,18 +1217,38 @@ impl IdentityRuntime {
                             Phase::Unprepared => {}
                             Phase::Inactive | Phase::Off { .. } => return,
                         }
+                        let mut owed = identities.lifecycle_projection.owed.subscribe();
                         drop(identities);
                         if *stopping.borrow() {
                             return;
                         }
-                        tokio::select! {
-                            () = kick.notified() => {}
-                            () = tokio::time::sleep(SWEEP_INTERVAL) => {}
-                            changed = stopping.changed() => {
-                                if changed.is_err() {
-                                    return;
+                        match held {
+                            // A page held for a predecessor's backlog runs
+                            // again once the backlog ran past every identity
+                            // it held, or at the next sweep; the steps
+                            // journaled after it follow it.
+                            Some(held) => tokio::select! {
+                                passed = backlog_passed(&mut owed, &held) => {
+                                    if !passed {
+                                        return;
+                                    }
                                 }
-                            }
+                                () = tokio::time::sleep(SWEEP_INTERVAL) => {}
+                                changed = stopping.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                }
+                            },
+                            None => tokio::select! {
+                                () = kick.notified() => {}
+                                () = tokio::time::sleep(SWEEP_INTERVAL) => {}
+                                changed = stopping.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                }
+                            },
                         }
                     }
                 }));
@@ -1174,10 +1268,12 @@ impl IdentityRuntime {
                 let Some(identities) = runtime.upgrade() else {
                     return;
                 };
-                let drained = identities
-                    .run_logged_lifecycle_lane(LaneKind::Backlog)
-                    .await
-                    && identities.lifecycle_projection.owed_events() == 0;
+                let drained = matches!(
+                    identities
+                        .run_logged_lifecycle_lane(LaneKind::Backlog)
+                        .await,
+                    Some(LaneEnd::Reached)
+                ) && identities.lifecycle_projection.owed_events() == 0;
                 let off = !matches!(identities.lifecycle_projection.phase(), Phase::Ready { .. });
                 drop(identities);
                 if drained || off || *stopping.borrow() {
@@ -1206,10 +1302,12 @@ impl IdentityRuntime {
     /// process started, here: the live lane reaches the journal's head
     /// before this answers, or stops at a failure, which is logged and read
     /// again at its next sweep. What a stopped predecessor still owed runs
-    /// in the background, except what it owes an identity a step of this
-    /// process journaled after it, which runs first. Never call it from a
-    /// retirement hook or a customizer's `after_create`: it would wait for
-    /// the side effect that is running it.
+    /// in the background, and never holds this up: a page with side effects
+    /// of an identity that backlog still owes is left to the live task,
+    /// which runs it once the backlog ran past that identity, and the steps
+    /// journaled after it follow it there. Never call it from a retirement
+    /// hook or a customizer's `after_create`: it would wait for the side
+    /// effect that is running it.
     pub(crate) async fn settle_lifecycle_projection(&self) {
         if let Err(error) = self.prepare_lifecycle_projection().await {
             tracing::warn!(
@@ -1222,7 +1320,8 @@ impl IdentityRuntime {
             return;
         }
         self.run_logged_lifecycle_lane(LaneKind::Live).await;
-        self.start_lifecycle_projection();
+        // The live task takes up a page this run held.
+        self.kick_lifecycle_projection();
     }
 
     /// Stop the projection at a shutdown: its live task reaches the journal's
@@ -1523,13 +1622,14 @@ impl IdentityRuntime {
     }
 
     /// Run `kind`'s lane, logging what stopped it short and counting it
-    /// toward the stall the status reports: whether it reached its end.
-    async fn run_logged_lifecycle_lane(&self, kind: LaneKind) -> bool {
+    /// toward the stall the status reports: how it ended, `None` when it
+    /// failed.
+    async fn run_logged_lifecycle_lane(&self, kind: LaneKind) -> Option<LaneEnd> {
         let outcome = self.run_lifecycle_lane(kind).await;
         self.lifecycle_projection
             .note_run(Run::Lane(kind), outcome.as_ref().err().map(String::as_str));
         match outcome {
-            Ok(()) => true,
+            Ok(end) => Some(end),
             Err(error) => {
                 tracing::warn!(
                     runtime_instance_id = %self.runtime_instance_id,
@@ -1537,7 +1637,7 @@ impl IdentityRuntime {
                     "the lifecycle projection stopped short; it reads from where it stopped at \
                      its next sweep"
                 );
-                false
+                None
             }
         }
     }
@@ -1545,14 +1645,16 @@ impl IdentityRuntime {
     /// Read the journal for `kind`'s lane from its cursor to its end (the
     /// head, for the live lane; the owed ranges, for the backlog lane),
     /// running each page's side effects and then recording where the lane
-    /// stands. A lane's runs are serialized.
-    async fn run_lifecycle_lane(&self, kind: LaneKind) -> Result<(), String> {
+    /// stands. The live lane holds a page with side effects of an identity a
+    /// predecessor's backlog still owes, and ends there. A lane's runs are
+    /// serialized.
+    async fn run_lifecycle_lane(&self, kind: LaneKind) -> Result<LaneEnd, String> {
         let projection = &self.lifecycle_projection;
         let Phase::Ready { incarnation } = projection.phase() else {
-            return Ok(());
+            return Ok(LaneEnd::Reached);
         };
         let Some(bridge) = self.bridge.clone() else {
-            return Ok(());
+            return Ok(LaneEnd::Reached);
         };
         let mut lane = projection.lane(kind).lock().await;
         // The live lane moved past pages with no fact since its last write.
@@ -1560,11 +1662,11 @@ impl IdentityRuntime {
         loop {
             if kind == LaneKind::Backlog {
                 if *projection.stopping.borrow() {
-                    return Ok(());
+                    return Ok(LaneEnd::Reached);
                 }
                 // The first owed range is the one the lane reads.
                 let Some(range) = lock(&projection.record).backlog.first().copied() else {
-                    return Ok(());
+                    return Ok(LaneEnd::Reached);
                 };
                 if lane.until != Some(range.until) || lane.cursor < range.after {
                     *lane = Lane {
@@ -1584,7 +1686,7 @@ impl IdentityRuntime {
                     self.turn_lifecycle_projection_off(
                         "read the pages of Core's member lifecycle journal",
                     );
-                    return Ok(());
+                    return Ok(LaneEnd::Reached);
                 }
                 Err(error) => {
                     return Err(format!(
@@ -1608,7 +1710,7 @@ impl IdentityRuntime {
                 if unwritten {
                     self.write_lifecycle_record(&incarnation).await?;
                 }
-                return Ok(());
+                return Ok(LaneEnd::Reached);
             };
             let consumed = match self
                 .apply_lifecycle_page(kind, &incarnation, records, &mut lane.done)
@@ -1617,16 +1719,17 @@ impl IdentityRuntime {
                 Ok(consumed) => consumed,
                 Err(PageError::Unreadable(read)) => {
                     self.turn_lifecycle_projection_off(read);
-                    return Ok(());
+                    return Ok(LaneEnd::Reached);
                 }
-                // Side effects on the page wait for a predecessor's backlog,
-                // which cannot run past them in this run: the page runs
-                // again at a later run, without the side effects that ran.
-                Err(PageError::Held) => {
+                // Side effects on the page follow a predecessor's backlog,
+                // which has not run past their identities yet: the page
+                // runs again once it has, without the side effects that
+                // ran, and the lane ends here.
+                Err(PageError::Held(held)) => {
                     if unwritten {
                         self.write_lifecycle_record(&incarnation).await?;
                     }
-                    return Ok(());
+                    return Ok(LaneEnd::Held(held));
                 }
                 Err(PageError::Failed(error)) => return Err(error),
             };
@@ -1782,7 +1885,9 @@ impl IdentityRuntime {
     /// recorded. A side effect that fails is recorded and reported, and the
     /// page goes on; a read the page depends on that fails fails the page,
     /// which runs again. The live lane runs an identity's side effects only
-    /// once the backlog lane ran those a predecessor still owed it.
+    /// once the backlog lane ran those a predecessor still owed it: until
+    /// then the page is held, after the side effects of the other
+    /// identities ran.
     async fn apply_lifecycle_page(
         &self,
         kind: LaneKind,
@@ -1898,8 +2003,8 @@ impl IdentityRuntime {
         let outcomes = stream::iter(jobs.into_iter().map(|(identity, effects)| {
             let customizer = customizer.clone();
             async move {
-                if kind == LaneKind::Live && !self.wait_for_owed_backlog(&identity).await {
-                    return (Vec::new(), Err(JobStop::Held));
+                if kind == LaneKind::Live && self.lifecycle_projection.still_owed(&identity) {
+                    return (Vec::new(), Err(JobStop::Held(identity)));
                 }
                 let mut ran = Vec::with_capacity(effects.len());
                 for (cursor, effect) in effects {
@@ -1922,22 +2027,26 @@ impl IdentityRuntime {
         .collect::<Vec<_>>()
         .await;
         let mut failure = None;
-        let mut held = false;
+        let mut held = BTreeSet::new();
         for (ran, outcome) in outcomes {
             done.extend(ran);
             match outcome {
                 Ok(()) => {}
-                Err(JobStop::Held) => held = true,
+                Err(JobStop::Held(identity)) => {
+                    held.insert(identity);
+                }
                 Err(JobStop::Failed(error)) => {
                     failure.get_or_insert(error);
                 }
             }
         }
-        match (failure, held) {
-            (Some(error), _) => Err(PageError::Failed(error)),
-            (None, true) => Err(PageError::Held),
-            (None, false) => Ok(consumed),
+        if let Some(error) = failure {
+            return Err(PageError::Failed(error));
         }
+        if !held.is_empty() {
+            return Err(PageError::Held(held));
+        }
+        Ok(consumed)
     }
 
     /// Read, once per start, which identities a predecessor's backlog owes
@@ -2013,46 +2122,6 @@ impl IdentityRuntime {
             }
         });
         Ok(())
-    }
-
-    /// Wait until the backlog lane ran every side effect a predecessor's
-    /// backlog owes `identity`: whether it did. `false` when it cannot get
-    /// there in this run (the runtime shuts down, the projection turned off,
-    /// or no backlog task runs and none can start): the identity's side
-    /// effects then wait for a later run.
-    async fn wait_for_owed_backlog(&self, identity: &AgentIdentity) -> bool {
-        let projection = &self.lifecycle_projection;
-        let mut owed = projection.owed.subscribe();
-        let mut stopping = projection.stopping.subscribe();
-        loop {
-            if !backlog_owes(&owed.borrow_and_update(), identity) {
-                return true;
-            }
-            if *stopping.borrow() || !matches!(projection.phase(), Phase::Ready { .. }) {
-                return false;
-            }
-            if !projection.backlog_running() {
-                self.start_lifecycle_projection();
-                if !projection.backlog_running() {
-                    // The backlog lane may have run past the identity just
-                    // before its task ended.
-                    return !backlog_owes(&owed.borrow(), identity);
-                }
-            }
-            tokio::select! {
-                changed = owed.changed() => {
-                    if changed.is_err() {
-                        return false;
-                    }
-                }
-                changed = stopping.changed() => {
-                    if changed.is_err() {
-                        return false;
-                    }
-                }
-                () = tokio::time::sleep(SWEEP_INTERVAL) => {}
-            }
-        }
     }
 
     /// The side effects of the seats and the unrecorded rotations of a page,
@@ -2386,18 +2455,15 @@ impl IdentityRuntime {
         };
         // What the step that ended the incarnation kept for the hook, taken
         // once the step answered: it holds the identity's lifecycle lock
-        // until then. What a step that holds the lock past the deadline kept
-        // may not be settled yet, so the hook then names no registration.
+        // until then. When a step holds the lock past the deadline, what was
+        // kept counts only if its step settled it already (another step may
+        // hold the lock); otherwise the hook names no registration.
         let registration = {
             let answered = self.answered_step(identity, limits).await;
-            let kept = self
-                .lifecycle_projection
-                .take_retiring(identity, retirement.generation);
-            if answered.is_some() {
-                kept.and_then(|kept| kept.registration)
-            } else {
-                None
-            }
+            self.lifecycle_projection
+                .take_retiring(identity, retirement.generation)
+                .filter(|kept| answered.is_some() || kept.settled)
+                .and_then(|kept| kept.member.registration)
         };
         let member = RetiredIdentityMember {
             identity: identity.clone(),
@@ -2474,7 +2540,17 @@ impl IdentityRuntime {
                     failed.effect.as_str(),
                     failed.identity
                 )
-            })
+            })?;
+        // A long run prunes as it records, not only at its start.
+        let recorded = self
+            .lifecycle_projection
+            .failures_recorded
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        if recorded.is_multiple_of(FAILURES_PRUNED_EVERY) {
+            self.prune_lifecycle_effect_failures().await;
+        }
+        Ok(())
     }
 
     /// Report `failed` on the error hook (`lifecycle_effect_failed`).
@@ -2535,7 +2611,10 @@ impl IdentityRuntime {
     /// Run the backlog lane once, as its task does at each sweep: whether it
     /// reached its end. Rows that need its runs now run them so.
     pub(crate) async fn run_lifecycle_backlog_once(&self) -> bool {
-        self.run_logged_lifecycle_lane(LaneKind::Backlog).await
+        matches!(
+            self.run_logged_lifecycle_lane(LaneKind::Backlog).await,
+            Some(LaneEnd::Reached)
+        )
     }
 }
 

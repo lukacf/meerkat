@@ -20,6 +20,9 @@ use super::bridge::{
 };
 use super::types::{AgentIdentity, AgentRuntimeId};
 
+/// The mob incarnation the journal of [`CoreTestMembers`] names.
+pub(crate) const JOURNAL_INCARNATION: &str = "core-test-members";
+
 #[derive(Clone)]
 struct TestMember {
     runtime_id: AgentRuntimeId,
@@ -148,7 +151,7 @@ impl CoreTestMembers {
         }
         let facts = self.facts.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(MemberLifecycleJournalHead {
-            incarnation: "core-test-members".to_string(),
+            incarnation: JOURNAL_INCARNATION.to_string(),
             cursor: facts.len() as u64,
         })
     }

@@ -4474,6 +4474,17 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// The incarnation of this bridge's mob, as the head of its member
+    /// lifecycle journal names it, known without a store read. When the head
+    /// does not read, the identity runtime lets a seat step go ahead past a
+    /// stored lifecycle projection cursor only if the cursor is of this
+    /// incarnation. `None`, the default, places no cursor: such a step is
+    /// refused, retryable, until the head reads. A bridge that wraps another
+    /// forwards it.
+    fn mob_incarnation(&self) -> Option<String> {
+        None
+    }
+
     /// One page of Core's member lifecycle journal of this bridge's mob
     /// (`MobHandle::member_lifecycle_events`): the facts of the journal
     /// events after `after`, reading at most `limit` events. A store read; it
@@ -8406,6 +8417,10 @@ impl SessionBridge for MobSessionBridge {
         ))
     }
 
+    fn mob_incarnation(&self) -> Option<String> {
+        Some(self.handle.incarnation().to_string())
+    }
+
     async fn member_lifecycle_journal_page(
         &self,
         after: u64,
@@ -9538,6 +9553,10 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
     ) -> Result<MemberLifecycleJournalHead, BridgeError> {
         self.bridge.member_lifecycle_journal_head().await
+    }
+
+    fn mob_incarnation(&self) -> Option<String> {
+        self.bridge.mob_incarnation()
     }
 
     async fn member_lifecycle_journal_page(

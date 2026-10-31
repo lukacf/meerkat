@@ -4273,6 +4273,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SessionUnbound",
                     "Retiring",
                     "MobNotRunning",
+                    "SpawnInFlight",
                 ],
             ),
             NamedTypeBinding::string_enum(

@@ -31315,7 +31315,11 @@ macro_rules! mob_catalog_machine_dsl {
         // no delivery yet: it is blocked until a write selects it again or it
         // is seated again. An unborn seat waits for the first wake that
         // creates its session (carrying the snapshot), a member without a
-        // session for its binding, and a retiring member for its retirement.
+        // session for its binding, a retiring member for its retirement, and
+        // a member whose spawn committed its membership but not yet its
+        // activation for that activation: a failed activation rolls the
+        // member back, and a session it had delivered to would keep a
+        // target no member holds.
         transition PrepareMemberInstructionDeliveryNotOwed {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
@@ -31394,6 +31398,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
                     != Some(MobMemberState::Retiring)
             }
+            guard "spawn_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {}
             to Running
             emit MemberInstructionDeliveryPrepared {
@@ -31401,6 +31406,26 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
                 generation: self.operator_instruction_generation
             }
+        }
+
+        // A bound member whose spawn has not settled defers until
+        // CommitSpawnActivationFinal ends its ladder; a failed activation's
+        // rollback retires it with its session untouched.
+        transition PrepareMemberInstructionDeliverySpawning {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "member_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                    != Some(MobMemberState::Retiring)
+            }
+            guard "spawn_in_flight" { self.spawn_exec_phase.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::SpawnInFlight }
         }
 
         transition PrepareMemberInstructionDeliveryMobNotRunning {
@@ -35445,8 +35470,9 @@ pub enum OperatorInstructionRefusal {
 
 /// Why the machine prepares no delivery for a member now
 /// (`MemberInstructionDeliveryDeferred`): nothing is owed, the member's
-/// seat has no session yet, its session is not bound, it is retiring, or
-/// the mob is completed or destroyed.
+/// seat has no session yet, its session is not bound, it is retiring, the
+/// mob is completed or destroyed, or the member's spawn has committed its
+/// membership but not yet its activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MemberInstructionDeferReason {
     #[default]
@@ -35455,6 +35481,7 @@ pub enum MemberInstructionDeferReason {
     SessionUnbound,
     Retiring,
     MobNotRunning,
+    SpawnInFlight,
 }
 
 /// Whether an operator-instruction record's target selects a member: the

@@ -404,8 +404,8 @@ pub(crate) enum MemberInstructionPreparation {
     /// Record this snapshot in the member's session.
     Deliver(MemberInstructionDelivery),
     /// Nothing to deliver now: the member is not owed, its seat or binding
-    /// has no session yet, it is retiring, it is blocked, or the mob is not
-    /// running.
+    /// has no session yet, it is retiring, its spawn has not activated yet,
+    /// it is blocked, or the mob is not running.
     NotNow,
 }
 
@@ -496,10 +496,10 @@ struct RetryState {
 }
 
 /// The members a scan may deliver to now, from one published machine state:
-/// owed, in a running or stopped mob, with a born and bound session, local
-/// and not retiring (a placed member is asked once, and the machine blocks
-/// it). MobMachine decides each delivery when it is prepared; this only
-/// schedules.
+/// owed, in a running or stopped mob, with a born and bound session, local,
+/// not retiring and with its spawn settled (a placed member is asked once,
+/// and the machine blocks it). MobMachine decides each delivery when it is
+/// prepared; this only schedules.
 fn deliverable_members(
     state: &mob_dsl::MobMachineState,
 ) -> Vec<(AgentIdentity, u64, DeliveryLane)> {
@@ -513,14 +513,15 @@ fn deliverable_members(
         .member_instruction_owed
         .iter()
         .filter(|(identity, _)| {
+            let placed = state.member_placement.contains_key(*identity);
             !state.member_seat_session_unborn.contains(*identity)
-                && (state.member_session_bindings.contains_key(*identity)
-                    || state.member_placement.contains_key(*identity))
+                && (state.member_session_bindings.contains_key(*identity) || placed)
                 && state
                     .identity_to_runtime
                     .get(*identity)
                     .and_then(|runtime| state.member_state_markers.get(runtime))
                     != Some(&mob_dsl::MobMemberState::Retiring)
+                && (placed || !state.spawn_exec_phase.contains_key(*identity))
         })
         .map(|(identity, generation)| {
             let lane = match state.member_materialization.get(identity) {

@@ -228,6 +228,7 @@ PrepareMemberInstructionDeliveryRetiringStopped the same arm in a stopped mob (t
 RecoverOperatorInstruction* the epoch replay of committed records and the generation reached at the last reset, before the seal; the audit drives the live writes, and the region rows pin the replay
 PrepareMemberInstructionDeliveryPlaced* a placed member's delivery blocks member_host_unsupported; placed members are outside this audit (identity_entry_audit's placed run binds hosts), and the region rows pin the block
 PrepareMemberInstructionDeliveryMobNotRunning* deliveries of a completed or destroyed mob defer; the audit keeps the mob Running
+PrepareMemberInstructionDeliverySpawning* a member whose spawn committed its membership but not its activation defers spawn_in_flight; the audit seats members by replay, which opens no spawn ladder, and the region rows pin the deferral
 RecordMemberInstructionTarget* record feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 RefuseMemberInstructionTarget* refusal feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 ResolveMemberInstructionRelease* the release verdict in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives both Running arms, and the region rows pin the verdict

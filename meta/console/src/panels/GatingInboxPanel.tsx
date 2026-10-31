@@ -53,6 +53,9 @@ interface GatingInboxPanelProps {
   hostAttention?: HostAttentionSnapshot;
   /** Attention sources whose `decide_href` a read-only session links to. */
   hostDecideSources?: readonly HostAttentionSourceConfig[];
+  /** Grows by one each time Needs you opens the inbox: each new value shows
+   *  the Pending tab, also in an inbox that is already open on another tab. */
+  showPending?: number;
 }
 
 type Tab = "pending" | "auto" | "audit" | "policies";
@@ -262,6 +265,7 @@ export function GatingInboxPanel({
   selectedPendingId,
   hostAttention,
   hostDecideSources,
+  showPending,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
   const tabIds = React.useId();
@@ -276,6 +280,9 @@ export function GatingInboxPanel({
   const pendingCount = pendingRequests ? pendingRequests.length : pending.length;
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
   React.useEffect(() => { if (selectedPendingId) { setSelectedId(selectedPendingId); setTab("pending"); } }, [selectedPendingId]);
+  // Needs you opens the inbox on Pending, where its items are listed: a pane
+  // that already shows the inbox would keep its tab otherwise.
+  React.useEffect(() => { if (showPending) setTab("pending"); }, [showPending]);
   React.useEffect(() => {
     if (tab !== "pending" || !selectedPendingId || !selectedRequestAvailable) return;
     const selected = Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-approval-id]") || [])

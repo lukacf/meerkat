@@ -2766,6 +2766,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     snapshot: PendingApprovalSnapshot;
   }>();
   const [selectedApprovalId, setSelectedApprovalId] = React.useState<string>();
+  // Each time Needs you opens the inbox: the inbox shows Pending again.
+  const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
   React.useEffect(() => {
@@ -2820,6 +2822,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }, [hostAttentionKey]);
   function openApproval(pendingId?: string) {
     setSelectedApprovalId(pendingId);
+    setApprovalOpens((count) => count + 1);
     dock.openTarget(buildControlTarget("gating"), "replace_focused");
   }
   const hasVoiceHost = experience?.voice?.readiness_method === "meta/console/voice/readiness";
@@ -5650,6 +5653,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide={() => {}}
           readOnly
           hostAttention={hostAttention || { status: "loading", items: [], failedSources: [] }}
+          showPending={approvalOpens}
         />
       );
     }
@@ -5685,6 +5689,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
+          showPending={approvalOpens}
         />
       );
     if (target.kind === "topology") {
@@ -5754,6 +5759,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
+          showPending={approvalOpens}
         />
       );
     if (target.kind === "logs")

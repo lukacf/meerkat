@@ -405,6 +405,19 @@ describe("GatingInboxPanel host-provided attention", () => {
       hostAttention={{ status: "ready", items: [], failedSources: [] }} />);
     expect(view.getByText("No pending approvals.").closest(".cc-panel-empty")?.classList.contains("cc-panel-empty--inline")).toBe(false);
   });
+  it("shows Pending again when Needs you opens an inbox that shows another tab", () => {
+    const props = { pending: [], audit: [], onDecide: vi.fn(), resource: { ...snapshot("ready"), requests: [] },
+      hostAttention: { status: "ready" as const, items: [item], failedSources: [] } };
+    const view = render(<GatingInboxPanel {...props} showPending={1} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.queryByTestId("host-attention-list") === null).toBe(true);
+    // Another render of the same open keeps the tab the viewer chose.
+    view.rerender(<GatingInboxPanel {...props} showPending={1} />);
+    expect(view.getByTestId("gating-tab:audit").getAttribute("aria-selected")).toBe("true");
+    view.rerender(<GatingInboxPanel {...props} showPending={2} />);
+    expect(view.getByTestId("gating-tab:pending").getAttribute("aria-selected")).toBe("true");
+    expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
+  });
   it("lists host items on Pending only, after requests without the shared resource too", () => {
     const pendingEntry = { pending_id: "pending-7", action_id: "deploy-release", actor_id: "release-manager", risk_tier: "r3" };
     const view = render(<GatingInboxPanel pending={[pendingEntry]} audit={[]} onDecide={vi.fn()}

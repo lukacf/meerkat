@@ -87,6 +87,21 @@ describe("host-provided attention in the console", () => {
     view.unmount();
   }, 30_000);
 
+  it("Needs you brings an inbox open on another tab back to Pending", async () => {
+    const view = render(<ConsoleApp baseUrl="" transport={transport("host-attention-runtime")} />);
+    await settle();
+    const needsYou = () => within(view.getByTestId("approval-attention")).getByRole("button");
+    await act(async () => { fireEvent.click(needsYou()); });
+    await settle();
+    await act(async () => { fireEvent.click(view.getByTestId("gating-tab:audit")); });
+    expect(view.queryByTestId("host-attention-list") === null).toBe(true);
+    await act(async () => { fireEvent.click(needsYou()); });
+    await settle();
+    expect(view.getByTestId("gating-tab:pending").getAttribute("aria-selected")).toBe("true");
+    expect(within(view.getByTestId("host-attention-list")).getByRole("link", { name: "Open: Confirm a setting" })).toBeTruthy();
+    view.unmount();
+  }, 30_000);
+
   it("an open aggregate inbox stays when the host items drop to zero", async () => {
     let answered = 0;
     window.fetch = vi.fn(async (url: RequestInfo | URL) => {

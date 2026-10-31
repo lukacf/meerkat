@@ -126,7 +126,12 @@ where it becomes a new ordered System row rather than an overwrite.
 
 Compaction retains active keyed and unkeyed System rows verbatim in relative
 order, while discarding superseded keyed versions from the compacted active
-head. This does not rewrite their retained revision history.
+head. This does not rewrite their retained revision history. Instruction
+activation rows keep their places too; the one change a compaction makes to
+one is to retire the body of an activation row that a later activation of its
+key superseded, which then reads as a header that names its key, revision and
+body length (see
+[Durable Instruction Activation](/architecture/durable-instruction-activation)).
 
 Provider adapters lower the active instruction view without rewriting durable
 history. Wires accepting ordered `role=system` messages normally preserve their

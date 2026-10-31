@@ -241,7 +241,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Approvals inbox after the approvals, as cards with one **Open** link to the
   host's page, which decides. A source that cannot be read is named there and
   hides nothing else; an aggregate console, which has no approvals, opens the
-  inbox for them too. See "Host-provided attention items" in the
+  inbox for them too. Items belong to the console scope (principal and
+  runtime) that read them and are hidden when it changes. The config types
+  `ConsoleAttentionUiConfig` and `ConsoleAttentionSourceConfig` are exported
+  at the crate root. See "Host-provided attention items" in the
   configuration reference.
 
 - A source may also name `decide_href`, a same-origin path where the host

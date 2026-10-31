@@ -48,3 +48,21 @@ fn configured_host_shell_fixture_preserves_stock_console_config_contract()
     assert_eq!(config.actions.show_reset, Some(false));
     Ok(())
 }
+
+#[test]
+fn attention_config_types_are_exported_at_the_crate_root() -> Result<(), Box<dyn std::error::Error>>
+{
+    let config = load_console_ui_config_from_toml(
+        "[[attention.sources]]\nid = \"host\"\nlabel = \"Host\"\nurl = \"/host/attention\"\ndecide_href = \"/host/decide/{decision_id}\"\n",
+    )?;
+    let expected = meerkat_meta::ConsoleAttentionUiConfig {
+        sources: vec![meerkat_meta::ConsoleAttentionSourceConfig {
+            id: "host".to_string(),
+            label: "Host".to_string(),
+            url: "/host/attention".to_string(),
+            decide_href: Some("/host/decide/{decision_id}".to_string()),
+        }],
+    };
+    assert_eq!(config.attention, expected);
+    Ok(())
+}

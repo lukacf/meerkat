@@ -92,7 +92,7 @@ fn a_document_with_an_entry_or_target_writes_envelope_5() {
         "once 5, always 5: a reloaded document writes the same bytes"
     );
 
-    let mut with_target = plain.clone();
+    let mut with_target = plain;
     with_target.set_metadata_unchecked(
         SESSION_INSTRUCTION_STATE_KEY,
         serde_json::json!({

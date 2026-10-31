@@ -772,7 +772,7 @@ fn release_empties_the_target_and_the_next_fresh_run_start_revokes_what_was_in_e
     // A prefix-only model after conversation rows defers the revoke, and a
     // compaction at the next run's first request folds the empty target.
     let mut authority =
-        seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect.clone()));
+        seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect));
     apply(&mut authority, release("mob-a"));
     assert_verdict_only(
         &mut authority,

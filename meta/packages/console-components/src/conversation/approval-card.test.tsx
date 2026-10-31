@@ -239,6 +239,13 @@ describe("host-provided attention", () => {
     expect(view.queryByRole("status") === null).toBe(true);
     expect(view.queryByText("Approval needed") === null).toBe(true);
   });
+  it("keeps a long source label whole in its chip's tooltip", () => {
+    const sourceLabel = "Regional operations approvals desk for plugin permissions";
+    const view = render(<HostAttentionCard item={{ ...item, sourceLabel }} />);
+    const source = view.getByText(`From ${sourceLabel}`);
+    expect(source.classList.contains("cc-chip")).toBe(true);
+    expect(source.getAttribute("title")).toBe(`From ${sourceLabel}`);
+  });
   it("names every Open link after its item", () => {
     const view = render(<>{[item, { ...item, id: "b", title: "Renew a token" }].map((entry) => <HostAttentionCard key={entry.id} item={entry} />)}</>);
     expect(view.getAllByRole("link").map((link) => link.getAttribute("aria-label"))).toEqual(["Open: Confirm a setting", "Open: Renew a token"]);

@@ -166,6 +166,8 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
  * console button. It has no status and no decision: the console never
  * decides it, and Open loads the host's own page top-level, which does. */
 export function HostAttentionCard({ item }: { item: HostAttentionItem }) {
+  // The chip cuts a long source label short; its tooltip keeps the whole one.
+  const source = item.sourceLabel ? `From ${item.sourceLabel}` : "";
   return (
     <article
       className="cc-approval cc-host-attention"
@@ -177,7 +179,7 @@ export function HostAttentionCard({ item }: { item: HostAttentionItem }) {
         <div className="cc-approval__heading">
           <strong className="cc-approval__title">{item.title}</strong>
         </div>
-        {item.sourceLabel ? <Chip className="cc-host-attention__source">{`From ${item.sourceLabel}`}</Chip> : null}
+        {source ? <Chip className="cc-host-attention__source" title={source}>{source}</Chip> : null}
       </header>
       <KeyValueList
         className="cc-approval__scope"

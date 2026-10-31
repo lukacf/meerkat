@@ -1305,6 +1305,9 @@ them.
   ranges the field over a constant that `ci.cfg` assigns the declared values
   and `deep.cfg` those together with the default `0..2`; a composition
   explores the Deep set, and the generated machine is unchanged.
+  `SessionDocumentMachine` samples its four instruction recovery fields this
+  way and bounds its CI sweep at five steps, so the canonical TLC lane's
+  `session_document` run stays within its per-run cap.
 
 ### Changed
 

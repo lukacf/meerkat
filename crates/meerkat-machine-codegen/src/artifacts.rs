@@ -5714,6 +5714,50 @@ mod tests {
         );
     }
 
+    /// SessionDocumentMachine's CI bound: the CI profile explores the four
+    /// instruction recovery samples it declares, under a step bound of 5; the
+    /// Deep profile keeps `0..2` for each of them and its step bound of 8.
+    #[test]
+    fn session_document_narrows_its_recovery_samples_in_ci_only() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+        let model = render_machine_semantic_model(&schema).expect("render SessionDocumentMachine");
+        let ci = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
+        let deep = render_machine_ci_cfg(&schema, true).expect("valid Deep CFG");
+        for (input, field, ci_values) in [
+            ("RecoverSessionInstructionState", "target_generation", "{0}"),
+            ("RecoverSessionInstructionState", "entry_sequence", "{0}"),
+            ("RecoverSessionInstructionEffective", "generation", "{0}"),
+            (
+                "RecoverSessionInstructionEffective",
+                "last_entry_sequence",
+                "{0, 1}",
+            ),
+        ] {
+            let constant = format!("InputSamples_{input}_{field}");
+            assert!(
+                next_disjunct_for(&model, input)
+                    .contains(&format!("\\E {field} \\in {constant} : ")),
+                "{input}.{field} ranges over {constant}"
+            );
+            assert!(
+                ci.contains(&format!("\n  {constant} = {ci_values}\n")),
+                "the CI config samples {input}.{field} as {ci_values}:\n{ci}"
+            );
+            assert!(
+                deep.contains(&format!("\n  {constant} = {{0, 1, 2}}\n")),
+                "the Deep config keeps 0..2 for {input}.{field}:\n{deep}"
+            );
+        }
+        assert!(
+            model.contains("\nCiStateConstraint == /\\ model_step_count <= 5 "),
+            "the CI step bound is 5"
+        );
+        assert!(
+            model.contains("\nDeepStateConstraint == /\\ model_step_count <= 8 "),
+            "the Deep step bound stays 8"
+        );
+    }
+
     #[test]
     fn substituted_compound_values_are_delimited_and_atoms_are_not() {
         for atom in [

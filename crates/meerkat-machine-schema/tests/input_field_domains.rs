@@ -112,6 +112,32 @@ fn ci_values_take_a_nonempty_in_range_set_for_a_bound_unsigned_field() {
 }
 
 #[test]
+fn session_document_samples_its_instruction_recovery_fields_in_ci() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+    schema
+        .validate()
+        .expect("the shipped declarations are valid");
+    let declared: [(&str, &str, &[u64]); 4] = [
+        ("RecoverSessionInstructionState", "target_generation", &[0]),
+        ("RecoverSessionInstructionState", "entry_sequence", &[0]),
+        ("RecoverSessionInstructionEffective", "generation", &[0]),
+        (
+            "RecoverSessionInstructionEffective",
+            "last_entry_sequence",
+            &[0, 1],
+        ),
+    ];
+    for (variant, field_name, samples) in declared {
+        assert_eq!(
+            schema.input_field_domain(variant, field_name),
+            Some(&ci_values(samples)),
+            "{variant}.{field_name}"
+        );
+    }
+    assert_eq!(schema.ci_step_limit, Some(5), "the CI step bound");
+}
+
+#[test]
 fn every_invalid_declaration_is_refused_with_its_reason() {
     assert_eq!(
         dsl_workgraph_lifecycle_machine()

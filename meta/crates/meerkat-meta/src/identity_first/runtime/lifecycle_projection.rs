@@ -240,6 +240,11 @@ const FAILURES_KEPT: usize = 1024;
 /// again: a long run keeps at most [`FAILURES_KEPT`] and this many more.
 const FAILURES_PRUNED_EVERY: usize = 256;
 
+/// How many retirements a Meta verb's record answered the projection keeps
+/// noted per identity: the latest ones. A legacy respawn's seat names the
+/// incarnation it follows, which is one of an identity's latest.
+const ANSWERED_PER_IDENTITY: usize = 8;
+
 /// The identity whose member's standing a preparation reads, only to learn
 /// whether the session bridge reads Core's standing at all: no member needs
 /// to hold it for that.
@@ -356,10 +361,11 @@ pub(super) struct LifecycleProjection {
     /// What the build of a seat-like step made, by identity and the session
     /// Core bound, for the `after_create` of that seat.
     built: StdMutex<BTreeMap<(AgentIdentity, SessionId), SessionCreatedContext>>,
-    /// The latest incarnation of each identity whose retirement a Meta
-    /// verb's record answered, as this process's pages read it: a host's
-    /// legacy respawn whose seat names that incarnation owes nothing more.
-    answered_retirements: StdMutex<BTreeMap<AgentIdentity, u64>>,
+    /// The latest incarnations of each identity whose retirement a Meta
+    /// verb's record answered, at most [`ANSWERED_PER_IDENTITY`], as this
+    /// process's pages read them (either lane, in either order): a host's
+    /// legacy respawn whose seat names one of them owes nothing more.
+    answered_retirements: StdMutex<BTreeMap<AgentIdentity, BTreeSet<u64>>>,
     limits: StdMutex<EffectLimits>,
     /// What failed in a row: the preparations, and each lane's runs.
     failed_runs: StdMutex<FailedRuns>,
@@ -619,15 +625,23 @@ impl LifecycleProjection {
     }
 
     /// A Meta verb's record answered the retirement of `identity`'s
-    /// incarnation `generation`.
+    /// incarnation `generation`. Past [`ANSWERED_PER_IDENTITY`] notes of the
+    /// identity, the oldest goes.
     fn note_answered(&self, identity: &AgentIdentity, generation: u64) {
-        lock(&self.answered_retirements).insert(identity.clone(), generation);
+        let mut answered = lock(&self.answered_retirements);
+        let generations = answered.entry(identity.clone()).or_default();
+        generations.insert(generation);
+        while generations.len() > ANSWERED_PER_IDENTITY {
+            generations.pop_first();
+        }
     }
 
     /// Whether a Meta verb's record answered the retirement of `identity`'s
     /// incarnation `generation`, as this process's pages read it.
     fn answered(&self, identity: &AgentIdentity, generation: u64) -> bool {
-        lock(&self.answered_retirements).get(identity) == Some(&generation)
+        lock(&self.answered_retirements)
+            .get(identity)
+            .is_some_and(|generations| generations.contains(&generation))
     }
 
     fn owed_events(&self) -> u64 {
@@ -3931,6 +3945,30 @@ mod tests {
         );
         assert!(projection.answered(&alice, 4));
         assert!(!projection.answered(&alice, 5));
+    }
+
+    /// An identity keeps at most [`ANSWERED_PER_IDENTITY`] notes of answered
+    /// retirements, the latest; another identity's are its own.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn answered_retirements_keep_the_latest_up_to_the_cap() {
+        let projection = LifecycleProjection::new();
+        let alice = AgentIdentity::parse("personal:alice").expect("identity");
+        let bob = AgentIdentity::parse("personal:bob").expect("identity");
+        projection.note_answered(&bob, 0);
+        let cap = ANSWERED_PER_IDENTITY as u64;
+        for generation in 0..=cap {
+            projection.note_answered(&alice, generation);
+        }
+        assert!(
+            !projection.answered(&alice, 0),
+            "the oldest goes past the cap"
+        );
+        assert!((1..=cap).all(|generation| projection.answered(&alice, generation)));
+        assert!(
+            projection.answered(&bob, 0),
+            "another identity's note stays"
+        );
     }
 
     /// A bounded side effect that never answers is attempted as often as

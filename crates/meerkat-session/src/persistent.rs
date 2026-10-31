@@ -8025,9 +8025,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// it: its host's operator-instruction writes are refused, and the mob's
     /// first snapshot takes over the target its host wrote before. A session
     /// that already names a binding, or whose comms name is not that
-    /// member's, is left as it is (its first wake admits or refuses it). A
-    /// live session is refused (`Busy`): a dormant seat binds a session no
-    /// runtime serves.
+    /// member's, is left as it is (its first wake admits or refuses it).
+    ///
+    /// It opens as a store-only operator-instruction control does, in the
+    /// same order, so it takes no lock in a new order: the session's turn
+    /// boundary and recovery gate, held until the save, so a host's write
+    /// to the same session lands wholly before or after the stamp; then a
+    /// live session is refused (`Busy`: a dormant seat binds a session no
+    /// runtime serves), the hosting claim refuses a session another runtime
+    /// owner hosts, an earlier incarnation's open run is settled, and the
+    /// strict read answers an absent or archived session not found.
     // Hidden from the docs as `record_mob_instruction_target` and
     // `release_mob_instruction_target` are: a mob-only store write, reached
     // only through the mob session service
@@ -8040,12 +8047,49 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         mob_id: &str,
         member: &str,
     ) -> Result<(), SessionError> {
-        let mut session = self
-            .load_durable_session_body(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
+        // The opening of `operator_instruction_control`, step for step.
+        let persistence_profile = self.runtime_store.session_persistence_profile();
+        let _turn_finalization_guard = self
+            .acquire_runtime_turn_finalization_guard(session_id)
+            .await;
+        let _projection_guard = self
+            .recovery_gate_for_session(session_id)
+            .await
+            .lock_owned()
+            .await;
+        if let Some(gate) = self.existing_gate_for_session(session_id).await {
+            let cancelled = *gate.cancelled.lock().await;
+            if cancelled {
+                return Err(SessionError::NotFound {
+                    id: session_id.clone(),
+                });
+            }
+        }
+        if self.inner.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
                 id: session_id.clone(),
-            })?;
+            });
+        }
+        let hosting = self.grant_session_hosting(session_id)?;
+        self.settle_earlier_run_before_store_only_write(session_id, &hosting)
+            .await?;
+        let Some(mut session) = self
+            .load_persisted_session_for_control(session_id, "seated member binding")
+            .await?
+        else {
+            self.checkpointer_gates.lock().await.remove(session_id);
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        };
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
         let Some(mut metadata) = session.try_session_metadata().map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to decode metadata while seating session {session_id}: {error}"
@@ -8067,18 +8111,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if name.mob_id() != mob_id || name.member() != member {
             return Ok(());
         }
-        if self.has_live_session(session_id).await? {
-            return Err(SessionError::Busy {
-                id: session_id.clone(),
-            });
-        }
         metadata.mob_member_binding = Some(name.to_member_binding());
         session.set_session_metadata(metadata).map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to stamp the member binding onto seated session {session_id}: {error}"
             )))
         })?;
-        match self.runtime_store.session_persistence_profile() {
+        match persistence_profile {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 self.save_normalized_session(session).await?;
             }

@@ -103,6 +103,12 @@ const RUNTIME_REGISTRATION_CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// [`SessionRuntime::refuse_admission_after_shutdown`]).
 pub(crate) const RUNTIME_SHUTTING_DOWN_KIND: &str = "runtime_shutting_down";
 
+/// `data.kind` of the refusal of an input to a session whose task ended with
+/// the host's runtime it ran on, once the session's registration waits for
+/// its reload: the input is not admitted, and the session's next start
+/// serves new input (see `SessionRuntime::host_runtime_stopped_rpc`).
+pub(crate) const HOST_RUNTIME_STOPPED_KIND: &str = "host_runtime_stopped";
+
 /// The admission and registration fence a runtime's shutdown closes (see
 /// [`SessionRuntime::refuse_admission_after_shutdown`]). The runtime shares it
 /// with its mob session service, which registers member sessions on the same
@@ -8357,6 +8363,30 @@ impl SessionRuntime {
         }
     }
 
+    /// The typed refusal of an input to a session whose task ended with the
+    /// host's runtime it ran on, once the session's registration waits for
+    /// its reload: `-32032` (session runtime unavailable) with `data.kind`
+    /// `host_runtime_stopped`. The first such input was admitted and its
+    /// pre-dequeue check degraded the registration; the registration admits
+    /// nothing until it reloads, and a reload in this process would only meet
+    /// the stopped runtime again. Nothing of the input was admitted, so
+    /// nothing is kept for it: it is sent again after the session's next
+    /// start.
+    fn host_runtime_stopped_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            message: format!(
+                "session {session_id} lost its session task to the runtime it ran on, and its \
+                 registration waits for a reload at the session's next start; the input was not \
+                 admitted"
+            ),
+            data: Some(serde_json::json!({
+                "kind": HOST_RUNTIME_STOPPED_KIND,
+                "session_id": session_id.to_string(),
+            })),
+        }
+    }
+
     /// Refuse a request that reaches admission after this runtime's shutdown
     /// began ([`Self::runtime_shutting_down_rpc`]).
     ///
@@ -8771,11 +8801,20 @@ impl SessionRuntime {
         match self.runtime_actor_witness(session_id) {
             Ok(actor_witness) => Ok(RpcExecutorActorAuthority::PersistentWitness(actor_witness)),
             Err(missing_authority) => {
-                let live_actor_exists = match self.service.has_live_session(session_id).await {
-                    Ok(exists) => exists,
-                    Err(SessionError::NotFound { .. }) => false,
-                    Err(error) => return Err(session_error_to_rpc(error)),
-                };
+                // An actor whose task ended with the host's runtime it ran on
+                // is not live: it takes no commands, and the live read asks
+                // it and fails. The executor attached here meets it at its
+                // pre-dequeue check, which leaves the input to the session's
+                // next registration.
+                let live_actor_exists = !self
+                    .service
+                    .session_task_ended_with_its_runtime(session_id)
+                    .await
+                    && match self.service.has_live_session(session_id).await {
+                        Ok(exists) => exists,
+                        Err(SessionError::NotFound { .. }) => false,
+                        Err(error) => return Err(session_error_to_rpc(error)),
+                    };
                 if live_actor_exists {
                     return Err(missing_authority);
                 }
@@ -8865,6 +8904,22 @@ impl SessionRuntime {
         {
             return Err(Self::runtime_shutting_down_rpc(session_id));
         }
+        // A session whose task ended with the host's runtime it ran on, and
+        // whose registration already waits for its reload, takes no input in
+        // this process: the registration admits nothing until it reloads, and
+        // a reload here would only meet the stopped runtime again. Refused,
+        // typed, before anything is attached (see `host_runtime_stopped_rpc`).
+        if self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && adapter
+                .durability_reload_required(session_id)
+                .await
+                .is_some()
+        {
+            return Err(Self::host_runtime_stopped_rpc(session_id));
+        }
         // An executor means agent work can run, and agent work can author
         // schedules against this runtime's store — the firing host must be
         // live in the same process (see arm_schedule_host_for_agent_tools).
@@ -8913,11 +8968,20 @@ impl SessionRuntime {
             .await?
             .is_some();
         let adapter_registration_exists = adapter.contains_session(session_id).await;
-        let live_session_exists = match self.service.has_live_session(session_id).await {
-            Ok(exists) => exists,
-            Err(SessionError::NotFound { .. }) => false,
-            Err(error) => return Err(session_error_to_rpc(error)),
-        };
+        // An actor whose task ended with the host's runtime it ran on is not
+        // live: the live read asks it and fails. A registration that already
+        // waited for its reload was refused above; for any other, the attach
+        // below proceeds, and the attached loop's pre-dequeue check leaves the
+        // input to the session's next registration.
+        let live_session_exists = !self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && match self.service.has_live_session(session_id).await {
+                Ok(exists) => exists,
+                Err(SessionError::NotFound { .. }) => false,
+                Err(error) => return Err(session_error_to_rpc(error)),
+            };
         let session_exists = adapter_registration_exists
             || self.staged_sessions.contains(session_id).await
             || live_session_exists

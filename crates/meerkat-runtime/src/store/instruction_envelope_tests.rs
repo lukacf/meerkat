@@ -3,8 +3,9 @@
 //! realms (the HeadCanonical head and rows), JSONL realms (the SQLite
 //! WholeBlob runtime store) and host store realms (the host store adapter
 //! over the in-memory test host). A document that carries an
-//! operator-instruction entry row is written at envelope 5 on each of them
-//! and reads back unchanged.
+//! operator-instruction entry row, or an instruction activation row whose
+//! body a compaction retired, is written at envelope 5 on each of them and
+//! reads back unchanged.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::sync::Arc;
@@ -207,4 +208,111 @@ async fn a_compaction_that_retires_nothing_keeps_the_document_byte_identical_on_
     let (head_version, loaded) = sqlite_head(&session).await;
     assert_eq!(head_version, 4, "a SQLite realm's head stays at envelope 4");
     assert_eq!(loaded.messages(), session.messages());
+}
+
+/// `[prompt, user, activation, user, activation, user]`, the second
+/// activation superseding the first, after a compaction that retired the
+/// superseded body: `[prompt, summary, retired activation, activation,
+/// user]`.
+fn session_with_a_retiring_compaction() -> Session {
+    let activation = |id: &str, supersedes: Option<&str>, body: &str| {
+        meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::types::InstructionRevisionRef {
+                namespace: meerkat_core::types::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::types::InstructionKey::new("tone").unwrap(),
+                revision_id: meerkat_core::types::InstructionRevisionId::new(format!("tone-{id}"))
+                    .unwrap(),
+                content_sha256: meerkat_core::types::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::types::InstructionActivationId::new(id).unwrap(),
+            expectation: supersedes.map_or(
+                meerkat_core::InstructionActivationExpectation::Absent,
+                |previous| {
+                    meerkat_core::InstructionActivationExpectation::Effective(
+                        meerkat_core::types::InstructionActivationId::new(previous).unwrap(),
+                    )
+                },
+            ),
+            supersedes: supersedes.map(|previous| {
+                meerkat_core::types::InstructionActivationId::new(previous).unwrap()
+            }),
+            body: body.to_string(),
+        }
+    };
+    let mut session = plain_session();
+    session
+        .activate_instruction(activation("act-1", None, "Answer in a formal tone."))
+        .expect("the first activation row");
+    session.push(Message::User(UserMessage::text("and then?")));
+    session
+        .activate_instruction(activation(
+            "act-2",
+            Some("act-1"),
+            "Answer in a friendly tone.",
+        ))
+        .expect("the superseding activation row");
+    session.push(Message::User(UserMessage::text("and after that?")));
+    let rows = session.messages().to_vec();
+    session
+        .stage_retiring_compaction_for_test(
+            vec![
+                rows[0].clone(),
+                Message::User(UserMessage::compaction_summary("summary")),
+                rows[2].clone(),
+                rows[4].clone(),
+                rows[5].clone(),
+            ],
+            1,
+        )
+        .expect("the retiring compaction commits");
+    session
+}
+
+/// A compaction that retires a superseded instruction activation body
+/// writes the document at envelope 5 on every store kind: a SQLite realm's
+/// head carries envelope 5 and its rows read back the retired row with its
+/// marker, and a JSONL realm and a host store realm keep the exact bytes,
+/// which reload to the same document and write back the same bytes.
+#[tokio::test]
+async fn a_retiring_compaction_round_trips_on_every_store_kind() {
+    let session = session_with_a_retiring_compaction();
+    assert!(
+        matches!(
+            &session.messages()[2],
+            Message::System(system)
+                if system.instruction_activation.is_some()
+                    && system.retired_instruction_body.is_some()
+        ),
+        "the compaction retired the superseded body"
+    );
+    let written = session.to_persisted_bytes().unwrap();
+    assert_eq!(envelope_version(&written), 5);
+
+    let jsonl = sqlite_whole_blob_bytes(&session).await;
+    assert_eq!(jsonl, written, "a JSONL realm keeps the exact bytes");
+    let host = host_store_bytes(&session).await;
+    assert_eq!(host, written, "a host store realm keeps the exact bytes");
+    for (kind, bytes) in [("jsonl", &jsonl), ("host store", &host)] {
+        let reloaded = Session::from_persisted_bytes(bytes)
+            .unwrap_or_else(|error| panic!("{kind}: the document reloads: {error}"));
+        assert_eq!(
+            reloaded.messages(),
+            session.messages(),
+            "{kind}: the retired row reads back with its marker"
+        );
+        assert_eq!(
+            reloaded.to_persisted_bytes().unwrap(),
+            written,
+            "{kind}: a reload writes back the same envelope-5 bytes"
+        );
+    }
+
+    let (head_version, loaded) = sqlite_head(&session).await;
+    assert_eq!(head_version, 5, "a SQLite realm's head is at envelope 5");
+    assert_eq!(
+        loaded.messages(),
+        session.messages(),
+        "the head's rows read back the retired row with its marker"
+    );
+    assert_eq!(envelope_version(&loaded.to_persisted_bytes().unwrap()), 5);
 }

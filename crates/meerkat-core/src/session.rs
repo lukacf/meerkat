@@ -5663,6 +5663,59 @@ impl Session {
         Ok((commit, intent))
     }
 
+    /// [`Self::stage_validated_compaction_for_test`] for a compaction that
+    /// retires the superseded instruction activation bodies the
+    /// session-document authority authorizes, as the agent loop's
+    /// compaction does: each activation row of `replacement` whose source
+    /// row the authority retires takes its exact retired form, and the
+    /// envelope-5 marker is recorded with the rewrite.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stage_retiring_compaction_for_test(
+        &mut self,
+        replacement: Vec<Message>,
+        summary_tokens: u64,
+    ) -> Result<
+        (
+            TranscriptRewriteCommit,
+            crate::memory::CompactionProjectionIntent,
+        ),
+        String,
+    > {
+        let retirement = self
+            .authorize_activation_body_retirement()
+            .map_err(|error| error.to_string())?;
+        let replacement = match retirement.as_ref() {
+            None => replacement,
+            Some(retirement) => {
+                let retired_rows = retirement
+                    .source_offsets()
+                    .filter_map(|offset| {
+                        Some((
+                            self.messages().get(offset)?.clone(),
+                            retirement.retired_row(offset)?.clone(),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                replacement
+                    .into_iter()
+                    .map(|message| {
+                        match retired_rows.iter().find(|(source, _)| *source == message) {
+                            Some((_, retired)) => Message::System(retired.clone()),
+                            None => message,
+                        }
+                    })
+                    .collect()
+            }
+        };
+        let staged = self.stage_validated_compaction_for_test(replacement, summary_tokens)?;
+        if let Some(retirement) = retirement.as_ref() {
+            self.record_activation_body_retirement(retirement)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(staged)
+    }
+
     /// Atomically refresh the synthetic runtime notices of one kind.
     ///
     /// This is the ONE transcript authority operation for synthetic-notice

@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [d5fde91c2854](https://github.com/lukacf/meerkat/commit/d5fde91c2854948d31f84a1f6e259ecd6db3e660) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [7ddc67a590ba](https://github.com/lukacf/meerkat/commit/7ddc67a590bad60c06c52c374fde290127cc2016) on 2026-10-31; MobKit version 0.9.6 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -653,6 +653,7 @@ from a hang.
 `actor_loop_recovered`, `actor_loop_terminated`, `host_loop_crash`, `rediscover_failure`,
 `event_log_flush_failure`, `identity_materialization_failure`,
 `mob_stop_proceeded_without_interrupt`, `retired_member_release_failed`,
+`lifecycle_effect_failed`, `lifecycle_projection_off`,
 `mob_announcement_escalated`, `mob_announcement_escalation_resolved`). The SDK source constants are kept
 in lockstep with the Rust enum by `tests/sdk_error_category_parity.rs`;
 `context` carries the variant's fields (`member_id`, `error`, and so on).

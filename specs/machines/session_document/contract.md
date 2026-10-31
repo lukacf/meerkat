@@ -23,6 +23,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_live_assistant_terminal_observation`: `Map<SessionId, LiveAssistantPlaybackTerminalObservation>`
 - `session_live_assistant_terminal_prefix_chars`: `Map<SessionId, u64>`
 - `session_live_assistant_terminal_prefix_digest`: `Map<SessionId, String>`
+- `session_instruction_owner`: `Map<SessionId, InstructionTargetOwner>`
+- `session_instruction_owner_mob`: `Map<SessionId, String>`
+- `session_instruction_target_generation`: `Map<SessionId, u64>`
+- `session_instruction_target_revision`: `Map<SessionId, Map<String, u64>>`
+- `session_instruction_target_effect`: `Map<SessionId, Map<String, InstructionEffect>>`
+- `session_instruction_target_digest`: `Map<SessionId, Map<String, String>>`
+- `session_instruction_target_bytes`: `Map<SessionId, Map<String, u64>>`
+- `session_instruction_effective_revision`: `Map<SessionId, Map<String, u64>>`
+- `session_instruction_effective_effect`: `Map<SessionId, Map<String, InstructionEffect>>`
+- `session_instruction_effective_digest`: `Map<SessionId, Map<String, String>>`
+- `session_instruction_effective_bytes`: `Map<SessionId, Map<String, u64>>`
+- `session_instruction_effective_generation`: `Map<SessionId, u64>`
+- `session_instruction_entry_sequence`: `Map<SessionId, u64>`
 
 ## Inputs
 - `MarkSessionInitialTurnPending`(session_id: SessionId)
@@ -76,6 +89,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
 - `ReviveArchivedSessionDocument`(session_id: SessionId)
 - `ArchiveSessionDocument`(session_id: SessionId, runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation)
+- `RecoverSessionInstructionState`(session_id: SessionId, owner: InstructionTargetOwner, owner_mob: String, target_generation: u64, entry_sequence: u64)
+- `RecoverSessionInstructionTarget`(session_id: SessionId, revision: Map<String, u64>, effect: Map<String, InstructionEffect>, digest: Map<String, String>, bytes: Map<String, u64>)
+- `RecoverSessionInstructionEffective`(session_id: SessionId, revision: Map<String, u64>, effect: Map<String, InstructionEffect>, digest: Map<String, String>, bytes: Map<String, u64>, generation: u64, last_entry_sequence: u64)
+- `RecordInstructionTarget`(session_id: SessionId, mob_id: String, generation: u64, revision: Map<String, u64>, effect: Map<String, InstructionEffect>, digest: Map<String, String>, bytes: Map<String, u64>)
+- `SetSessionInstruction`(session_id: SessionId, slot: String, revision: u64, effect: InstructionEffect, digest: String, body_bytes: u64)
+- `RebindInstructionOwner`(session_id: SessionId, owner: InstructionTargetOwner, mob_id: String)
+- `ReleaseInstructionTarget`(session_id: SessionId, mob_id: String)
+- `ResolveRunStartInstructions`(session_id: SessionId, run_start: InstructionRunStart, lowering: InstructionLowering, transcript_is_system_prefix: Bool)
+- `AuthorizeInstructionFold`(session_id: SessionId, at_run_start: Bool, lowering: InstructionLowering)
 
 ## Signals
 
@@ -123,6 +145,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionLifecycleTerminalRecovered`
 - `SessionRevivalResolved`
 - `SessionArchiveResolved`(disposition: SessionArchiveDisposition, write_document: Bool, retire_runtime: Bool)
+- `SessionInstructionStateRecovered`
+- `InstructionTargetRecorded`(generation: u64, outcome: InstructionWriteOutcome)
+- `InstructionTargetRefused`(refusal: InstructionWriteRefusal)
+- `InstructionOwnerRebound`(owner: InstructionTargetOwner)
+- `InstructionTargetReleased`(was_owned: Bool)
+- `InstructionEntryAuthorized`(entry_sequence: u64, generation: u64)
+- `InstructionEntryNotNeeded`
+- `InstructionApplicationDeferred`(reason: InstructionDeferReason)
+- `InstructionFoldAuthorized`(entry_sequence: u64, source: InstructionFoldSource, generation: u64)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -141,11 +172,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
 - `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool) -> `Bool`
 - `archive_should_retire_runtime`(runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation) -> `Bool`
+- `instruction_slot_maps_consistent`(revision: Map<String, u64>, effect: Map<String, InstructionEffect>, digest: Map<String, String>, bytes: Map<String, u64>) -> `Bool`
+- `instruction_slot_count_within_limit`(revision: Map<String, u64>) -> `Bool`
+- `instruction_slot_set_empty`(revision: Map<String, u64>) -> `Bool`
+- `instruction_change_pending`(target_revision: Map<String, u64>, target_effect: Map<String, InstructionEffect>, target_digest: Map<String, String>, effective_revision: Map<String, u64>, effective_effect: Map<String, InstructionEffect>, effective_digest: Map<String, String>) -> `Bool`
+- `instruction_entry_lowers`(lowering: InstructionLowering, transcript_is_system_prefix: Bool) -> `Bool`
 
 ## Invariants
 - `live_interaction_transcript_binding_is_complete`
 - `committed_live_transcript_had_provisional_admission`
 - `live_assistant_playback_target_is_complete_and_interaction_bound`
+- `instruction_state_maps_lockstep`
+- `instruction_owner_present_with_target`
+- `instruction_slot_count_bounded`
+- `instruction_active_bytes_bounded`
+- `instruction_entry_sequence_covers_effective`
+- `instruction_mob_owner_names_its_mob`
 
 ## Transitions
 ### `MarkSessionInitialTurnPendingInactiveOrPending`
@@ -1080,6 +1122,257 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionArchiveResolved`
 - To: `Ready`
 
+### `RecoverSessionInstructionState`
+- From: `Ready`
+- On: `RecoverSessionInstructionState`(session_id, owner, owner_mob, target_generation, entry_sequence)
+- Guards:
+  - ``
+- Emits: `SessionInstructionStateRecovered`
+- To: `Ready`
+
+### `RecoverSessionInstructionTarget`
+- From: `Ready`
+- On: `RecoverSessionInstructionTarget`(session_id, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `SessionInstructionStateRecovered`
+- To: `Ready`
+
+### `RecoverSessionInstructionEffective`
+- From: `Ready`
+- On: `RecoverSessionInstructionEffective`(session_id, revision, effect, digest, bytes, generation, last_entry_sequence)
+- Guards:
+  - ``
+- Emits: `SessionInstructionStateRecovered`
+- To: `Ready`
+
+### `RecordInstructionTargetAdvance`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+  - `within_budget`
+  - `owning_mob`
+- Emits: `InstructionTargetRecorded`
+- To: `Ready`
+
+### `RecordInstructionTargetActiveBudgetExceeded`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `RecordInstructionTargetSlotLimitExceeded`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `RecordInstructionTargetAlreadyRecorded`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRecorded`
+- To: `Ready`
+
+### `RecordInstructionTargetOwnedBySession`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `RecordInstructionTargetOwnedByOtherMob`
+- From: `Ready`
+- On: `RecordInstructionTarget`(session_id, mob_id, generation, revision, effect, digest, bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionNew`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+  - `within_budget`
+- Emits: `InstructionTargetRecorded`
+- To: `Ready`
+
+### `SetSessionInstructionAdvance`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+  - `within_budget`
+  - `higher_revision`
+- Emits: `InstructionTargetRecorded`
+- To: `Ready`
+
+### `SetSessionInstructionActiveBudgetExceeded`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionDuplicate`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRecorded`
+- To: `Ready`
+
+### `SetSessionInstructionConflict`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionStale`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionOwnedByMob`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionSlotLimitExceeded`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `SetSessionInstructionUnknownSlot`
+- From: `Ready`
+- On: `SetSessionInstruction`(session_id, slot, revision, effect, digest, body_bytes)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `RebindInstructionOwner`
+- From: `Ready`
+- On: `RebindInstructionOwner`(session_id, owner, mob_id)
+- Guards:
+  - ``
+  - `session_owned`
+- Emits: `InstructionOwnerRebound`
+- To: `Ready`
+
+### `RebindInstructionOwnerUnowned`
+- From: `Ready`
+- On: `RebindInstructionOwner`(session_id, owner, mob_id)
+- Guards:
+  - ``
+  - `unowned`
+- Emits: `InstructionOwnerRebound`
+- To: `Ready`
+
+### `ReleaseInstructionTarget`
+- From: `Ready`
+- On: `ReleaseInstructionTarget`(session_id, mob_id)
+- Guards:
+  - ``
+- Emits: `InstructionTargetReleased`
+- To: `Ready`
+
+### `ReleaseInstructionTargetAlreadyUnowned`
+- From: `Ready`
+- On: `ReleaseInstructionTarget`(session_id, mob_id)
+- Guards:
+  - ``
+- Emits: `InstructionTargetReleased`
+- To: `Ready`
+
+### `ReleaseInstructionTargetOwnedByOtherMob`
+- From: `Ready`
+- On: `ReleaseInstructionTarget`(session_id, mob_id)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `ReleaseInstructionTargetOwnedBySession`
+- From: `Ready`
+- On: `ReleaseInstructionTarget`(session_id, mob_id)
+- Guards:
+  - ``
+- Emits: `InstructionTargetRefused`
+- To: `Ready`
+
+### `ResolveRunStartInstructionsApply`
+- From: `Ready`
+- On: `ResolveRunStartInstructions`(session_id, run_start, lowering, transcript_is_system_prefix)
+- Guards:
+  - ``
+  - `fresh_run`
+  - `lowers`
+- Emits: `InstructionEntryAuthorized`
+- To: `Ready`
+
+### `ResolveRunStartInstructionsNoChange`
+- From: `Ready`
+- On: `ResolveRunStartInstructions`(session_id, run_start, lowering, transcript_is_system_prefix)
+- Guards:
+  - ``
+- Emits: `InstructionEntryNotNeeded`
+- To: `Ready`
+
+### `ResolveRunStartInstructionsDeferredLeadingPrefix`
+- From: `Ready`
+- On: `ResolveRunStartInstructions`(session_id, run_start, lowering, transcript_is_system_prefix)
+- Guards:
+  - ``
+- Emits: `InstructionApplicationDeferred`
+- To: `Ready`
+
+### `ResolveRunStartInstructionsDeferredUnavailable`
+- From: `Ready`
+- On: `ResolveRunStartInstructions`(session_id, run_start, lowering, transcript_is_system_prefix)
+- Guards:
+  - ``
+- Emits: `InstructionApplicationDeferred`
+- To: `Ready`
+
+### `AuthorizeInstructionFoldAtRunStart`
+- From: `Ready`
+- On: `AuthorizeInstructionFold`(session_id, at_run_start, lowering)
+- Guards:
+  - ``
+  - `at_run_start`
+  - `lowering_available`
+- Emits: `InstructionFoldAuthorized`
+- To: `Ready`
+
+### `AuthorizeInstructionFoldEffective`
+- From: `Ready`
+- On: `AuthorizeInstructionFold`(session_id, at_run_start, lowering)
+- Guards:
+  - ``
+- Emits: `InstructionFoldAuthorized`
+- To: `Ready`
+
 ## Coverage
 ### Code Anchors
 - `session_document_authority` (machine `SessionDocumentMachine`): `crates/meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized
@@ -1091,3 +1384,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
 - `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly
 - `session_durable_config_authorize_restore` — AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, and RestoreSessionBuildState decide durable-config persist/restore admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged
+- `session_operator_instruction_region` — RecoverSessionInstructionState, RecoverSessionInstructionTarget and RecoverSessionInstructionEffective recover the per-session owner and the mob it names, the target generation and the entry sequence, then the recorded target and the slots in effect per slot (revision, effect, digest, body bytes) with the generation they realize and the later entry-sequence high-water, and refuse a torn projection; RecordInstructionTargetAdvance, RecordInstructionTargetActiveBudgetExceeded, RecordInstructionTargetSlotLimitExceeded, RecordInstructionTargetAlreadyRecorded, RecordInstructionTargetOwnedBySession and RecordInstructionTargetOwnedByOtherMob record a mob snapshot by generation alone for the mob that owns the target, within the slot limit and the active budget, and refuse one over either; SetSessionInstructionNew, SetSessionInstructionAdvance, SetSessionInstructionActiveBudgetExceeded, SetSessionInstructionDuplicate, SetSessionInstructionStale, SetSessionInstructionConflict, SetSessionInstructionOwnedByMob, SetSessionInstructionSlotLimitExceeded and SetSessionInstructionUnknownSlot decide a session-owned write per slot from the recorded slot; RebindInstructionOwner attaches a mob to a session-owned target from the slots in effect and RebindInstructionOwnerUnowned starts a new owner of an unowned target from that empty target, each checking ownership in a guard of its own, and no rebind takes a mob-owned target; ReleaseInstructionTarget, ReleaseInstructionTargetAlreadyUnowned, ReleaseInstructionTargetOwnedByOtherMob and ReleaseInstructionTargetOwnedBySession let only the owning mob release its target, which empties it so that the next fresh run start revokes what the mob had in effect, and the release verdict says whether the mob owned it; ResolveRunStartInstructionsApply, ResolveRunStartInstructionsNoChange, ResolveRunStartInstructionsDeferredLeadingPrefix and ResolveRunStartInstructionsDeferredUnavailable decide at a run start, from the machine's own target and slots in effect, whether one coalesced entry applies the pending changes, which puts the target's Active slots in effect; AuthorizeInstructionFoldAtRunStart and AuthorizeInstructionFoldEffective decide the set a compaction fold renders. The shell persists the machine's state and decides nothing

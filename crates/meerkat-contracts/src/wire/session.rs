@@ -3137,7 +3137,7 @@ mod tests {
             "role": "system",
             "content": "[meerkat-operator-instructions-v1]\n",
             "created_at": "2026-10-30T00:00:00Z",
-            "instruction_entry": identity.clone(),
+            "instruction_entry": identity,
         });
 
         let history: WireSessionHistory = serde_json::from_value(serde_json::json!({
@@ -3145,7 +3145,7 @@ mod tests {
             "message_count": 1,
             "offset": 0,
             "has_more": false,
-            "messages": [row.clone()],
+            "messages": [row],
         }))
         .expect("a history page with a newer entry identity decodes");
         let reply: BridgeReply = serde_json::from_value(serde_json::json!({

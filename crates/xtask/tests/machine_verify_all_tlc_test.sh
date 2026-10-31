@@ -816,9 +816,12 @@ fi
 # revokes what the released mob had in effect, a rebind starts from the
 # right target, and the target stays within the active budget. It first
 # checks that the generated model defines every arm it drives, and requires
-# its five witnesses reached. --mutants refuses ten seeded defects, each by
-# the invariant it targets. Not yet measured on a hosted runner; it joins
-# this shard as the lightest one measured locally.
+# its five witnesses reached, one run each. --mutants refuses ten seeded
+# defects, each by the invariant it targets, run as the only invariant. No
+# run uses -continue, which prints a trace for every violating state TLC
+# checks: one run of the five witnesses hit the 900 s per-run cap in this
+# shard. Not yet measured on a hosted runner; it joins this shard as the
+# lightest one measured locally.
 instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
 if [[ ! -x "${instruction_boundary_audit}" ]]; then
   echo "error: instruction boundary audit runner is missing from workspace runfiles: ${instruction_boundary_audit}" >&2
@@ -1066,10 +1069,13 @@ run_machine_verify() {
 # distinct states at 14 steps), nine witness runs and nine single-worker
 # mutant runs took 100 s on a 4-worker local run; the SessionDocumentMachine
 # instruction boundary audit with --mutants joined it after these
-# measurements (twelve runs over a model that does not extend
-# meerkat_machine; not yet measured), and so did the SessionDocumentMachine
-# activation-body retirement audit with --mutants (seven runs over the same
-# model; not yet measured);
+# measurements: its sixteen runs (a safety run over 9203 distinct states,
+# five witness runs and ten mutant runs, over a model that does not extend
+# meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
+# 4-worker local run (2026-10-31); the SessionDocumentMachine
+# activation-body retirement audit with --mutants joined it later (nine
+# runs over the same model: a safety run, three witness runs and five
+# mutant runs; not yet measured);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

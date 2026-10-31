@@ -50864,6 +50864,7 @@ impl MobActor {
     /// incarnation `snapshot` names, previewed before anything is retired:
     /// a refused one (an identity entry's member) is answered typed, and a
     /// respawn no arm admits is an invalid transition.
+    #[allow(clippy::result_large_err)] // the respawn's typed refusal is its answer
     fn admit_fresh_life_respawn(
         &self,
         agent_identity: &AgentIdentity,

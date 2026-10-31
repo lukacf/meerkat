@@ -234,6 +234,12 @@ pub enum MobMachineCatalogInput {
     ClassifyMemberRelease,
     AdoptLegacyIdentityEntry,
     ResolveAgentLaneMemberAdmission,
+    DeclareIdentityEntry,
+    SealDeclaredRoster,
+    ForgetArchivedSession,
+    OpenDeclaredApply,
+    CloseDeclaredApply,
+    AdmitReset,
 }
 
 impl MobMachineCatalogInput {
@@ -468,6 +474,12 @@ impl MobMachineCatalogInput {
         Self::ClassifyMemberRelease,
         Self::AdoptLegacyIdentityEntry,
         Self::ResolveAgentLaneMemberAdmission,
+        Self::DeclareIdentityEntry,
+        Self::SealDeclaredRoster,
+        Self::ForgetArchivedSession,
+        Self::OpenDeclaredApply,
+        Self::CloseDeclaredApply,
+        Self::AdmitReset,
     ];
 
     #[must_use]
@@ -705,6 +717,12 @@ impl MobMachineCatalogInput {
             Self::ClassifyMemberRelease => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyMemberRelease,
             Self::AdoptLegacyIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptLegacyIdentityEntry,
             Self::ResolveAgentLaneMemberAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveAgentLaneMemberAdmission,
+            Self::DeclareIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::DeclareIdentityEntry,
+            Self::SealDeclaredRoster => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SealDeclaredRoster,
+            Self::ForgetArchivedSession => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ForgetArchivedSession,
+            Self::OpenDeclaredApply => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::OpenDeclaredApply,
+            Self::CloseDeclaredApply => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CloseDeclaredApply,
+            Self::AdmitReset => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitReset,
         }
     }
 
@@ -967,6 +985,12 @@ impl MobMachineCatalogInput {
             Self::ClassifyMemberRelease => "ClassifyMemberRelease",
             Self::AdoptLegacyIdentityEntry => "AdoptLegacyIdentityEntry",
             Self::ResolveAgentLaneMemberAdmission => "ResolveAgentLaneMemberAdmission",
+            Self::DeclareIdentityEntry => "DeclareIdentityEntry",
+            Self::SealDeclaredRoster => "SealDeclaredRoster",
+            Self::ForgetArchivedSession => "ForgetArchivedSession",
+            Self::OpenDeclaredApply => "OpenDeclaredApply",
+            Self::CloseDeclaredApply => "CloseDeclaredApply",
+            Self::AdmitReset => "AdmitReset",
         }
     }
 }

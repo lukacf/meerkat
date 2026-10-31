@@ -485,7 +485,9 @@ impl Drop for DeclaredApplyLease {
                 runtime.spawn(close);
             }
             Err(_) => {
-                tracing::warn!("a dropped declared apply could not close: no async runtime at drop")
+                tracing::warn!(
+                    "a dropped declared apply could not close: no async runtime at drop"
+                );
             }
         }
     }

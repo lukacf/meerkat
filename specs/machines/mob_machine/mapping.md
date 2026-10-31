@@ -14,7 +14,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_coordination_board_authority` (machine `MobMachine`): `crates/meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
-- `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
+- `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated or unseated with a typed cause, spared by the worker reconcile, and its custody belongs to an open spawn ladder, placed only for an entry hosted on its first use, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
+- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed and archived session forgotten effects
+- `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
+- `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
+- `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
@@ -3913,6 +3917,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnRunning`
   - anchors: (unclaimed)
   - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedRunning`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedStopped`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedCompleted`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
 - `CancelAllWorkRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4477,6 +4490,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginMemberRotationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
 - `CommitMemberRotationLiveRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4615,6 +4631,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeExplicitResumeMemberJoinRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeExplicitResumeMemberHeldRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExplicitResumeMemberHeldStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyMemberReleaseRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4627,6 +4649,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberReleaseDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleRunning`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleStopped`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleCompleted`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleDestroyed`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
 - `CommitMemberRotationLiveKickoffRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4638,6 +4672,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `CommitMemberRotationRetiredKickoffStopped`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentFreshSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentDestroyingRunning`
+  - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
 - `ResolveRuntimeBindingRefusalStaleRunning`
   - anchors: (unclaimed)
@@ -4823,6 +4878,111 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryKept`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntrySeatOwed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryHostedOnFirstUse`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryAwaitHeldCreation`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRuntimeModeRestamp`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleMigrate`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleRotate`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleMigrationHeld`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryLifecycleInFlight`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameHeldByWorker`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedHostAdopted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningStopped`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningCompleted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningDestroyed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterSealed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningStopped`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningCompleted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningDestroyed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryRetiringMarkedRunning`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryRetiringStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ForgetArchivedSession`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyOpened`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyBusy`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
@@ -5337,6 +5497,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AgentLaneMemberAdmissionResolved`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
+- `RespawnRefused`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
+- `IdentityEntryDeclared`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclaredRosterSealed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `ArchivedSessionForgotten`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `ExplicitResumeMemberHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclaredApplyOpenResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -5549,6 +5727,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `rotation_intent_is_a_retiring_member`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `rotation_target_recorded_with_its_intent`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `same_session_rotation_keeps_its_binding`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
 - `archive_only_retirement_is_retiring`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5570,7 +5754,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `entry_is_seated_or_has_an_unseated_cause`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
-- `identity_entry_is_local`
+- `unseated_entry_is_not_a_member`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `retiring_entry_is_a_declared_entry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `held_creation_entry_was_never_created`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `archived_session_record_is_unseated`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `role_hold_belongs_to_an_entry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `placed_entry_custody_is_hosted_on_first_use`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
 - `worker_reconcile_spares_entries`

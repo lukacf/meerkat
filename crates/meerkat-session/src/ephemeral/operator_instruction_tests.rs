@@ -29,7 +29,6 @@ use meerkat_core::{
 
 /// What every run of the probe agent saw as its request, and the gate a run
 /// waits on while it is held.
-#[derive(Default)]
 struct RunProbe {
     requests: StdMutex<Vec<Vec<Message>>>,
     entered: tokio::sync::Semaphore,
@@ -43,6 +42,20 @@ struct RunProbe {
     /// The next run fails once it started: its model read the request, then
     /// the call fails.
     fail_next_run_after_start: std::sync::atomic::AtomicBool,
+}
+
+impl Default for RunProbe {
+    fn default() -> Self {
+        Self {
+            requests: StdMutex::default(),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            gated: std::sync::atomic::AtomicBool::default(),
+            refuse_next_run: std::sync::atomic::AtomicBool::default(),
+            fail_next_system_append: std::sync::atomic::AtomicBool::default(),
+            fail_next_run_after_start: std::sync::atomic::AtomicBool::default(),
+        }
+    }
 }
 
 impl RunProbe {

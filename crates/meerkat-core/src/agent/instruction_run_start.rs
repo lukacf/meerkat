@@ -86,7 +86,7 @@ where
                 .and_then(|handle| handle.snapshot().active_run_id)
             {
                 Some(started) => (Some(started), false),
-                None => (Some(run_id.unwrap_or_else(RunId::new)), true),
+                None => (Some(run_id.unwrap_or_default()), true),
             }
         } else {
             (run_id, false)

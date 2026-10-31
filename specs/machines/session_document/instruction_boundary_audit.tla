@@ -57,17 +57,18 @@
 \*     active budget.
 \*
 \* The witnesses (NotAuditWitness*, expected violations, checked in one TLC
-\* run with -continue): an application happened, an applied revoke, a
-\* mob-owned target in effect, a target another mob bound after its owning
-\* mob released it, and a released mob's instructions revoked at a run
-\* start. The runner's --mutants mode seeds ten defects into a copy of the
+\* run each): an application happened, an applied revoke, a mob-owned
+\* target in effect, a target another mob bound after its owning mob
+\* released it, and a released mob's instructions revoked at a run start.
+\* The runner's --mutants mode seeds ten defects into a copy of the
 \* generated model and requires TLC to refuse each with the invariant it
-\* targets: apply on ResumeRun, keep a revoked slot in effect at an
-\* application, apply a mid-run fold from the target, accept a stale
-\* session write, skip the leading-prefix check, accept another mob's
-\* record, let a rebind take a mob-owned target (its ownership guard
-\* dropped), record a session write over the active budget, keep a released
-\* mob's instructions at a run start, and keep the target on a release.
+\* targets, run as the only invariant: apply on ResumeRun, keep a revoked
+\* slot in effect at an application, apply a mid-run fold from the target,
+\* accept a stale session write, skip the leading-prefix check, accept
+\* another mob's record, let a rebind take a mob-owned target (its
+\* ownership guard dropped), record a session write over the active budget,
+\* keep a released mob's instructions at a run start, and keep the target on
+\* a release.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* instruction_boundary_audit.sh (its constants, its invariants and its

@@ -17,6 +17,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
 - `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly
 - `session_durable_config_authorize_restore` — AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, and RestoreSessionBuildState decide durable-config persist/restore admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged
+- `session_operator_instruction_region` — RecoverSessionInstructionState, RecoverSessionInstructionTarget and RecoverSessionInstructionEffective recover the per-session owner and the mob it names, the target generation and the entry sequence, then the recorded target and the slots in effect per slot (revision, effect, digest, body bytes) with the generation they realize and the later entry-sequence high-water, and refuse a torn projection; RecordInstructionTargetAdvance, RecordInstructionTargetActiveBudgetExceeded, RecordInstructionTargetSlotLimitExceeded, RecordInstructionTargetAlreadyRecorded, RecordInstructionTargetOwnedBySession and RecordInstructionTargetOwnedByOtherMob record a mob snapshot by generation alone for the mob that owns the target, within the slot limit and the active budget, and refuse one over either; SetSessionInstructionNew, SetSessionInstructionAdvance, SetSessionInstructionActiveBudgetExceeded, SetSessionInstructionDuplicate, SetSessionInstructionStale, SetSessionInstructionConflict, SetSessionInstructionOwnedByMob, SetSessionInstructionSlotLimitExceeded and SetSessionInstructionUnknownSlot decide a session-owned write per slot from the recorded slot; RebindInstructionOwner attaches a mob to a session-owned target from the slots in effect and RebindInstructionOwnerUnowned starts a new owner of an unowned target from that empty target, each checking ownership in a guard of its own, and no rebind takes a mob-owned target; ReleaseInstructionTarget, ReleaseInstructionTargetAlreadyUnowned, ReleaseInstructionTargetOwnedByOtherMob and ReleaseInstructionTargetOwnedBySession let only the owning mob release its target, which empties it so that the next fresh run start revokes what the mob had in effect, and the release verdict says whether the mob owned it; ResolveRunStartInstructionsApply, ResolveRunStartInstructionsNoChange, ResolveRunStartInstructionsDeferredLeadingPrefix and ResolveRunStartInstructionsDeferredUnavailable decide at a run start, from the machine's own target and slots in effect, whether one coalesced entry applies the pending changes, which puts the target's Active slots in effect; AuthorizeInstructionFoldAtRunStart and AuthorizeInstructionFoldEffective decide the set a compaction fold renders. The shell persists the machine's state and decides nothing
 
 ### Transitions
 - `MarkSessionInitialTurnPendingInactiveOrPending`
@@ -370,6 +371,96 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ArchiveSessionDocumentCompleteRetire`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverSessionInstructionState`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecoverSessionInstructionTarget`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecoverSessionInstructionEffective`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetAdvance`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetActiveBudgetExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetSlotLimitExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetAlreadyRecorded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetOwnedBySession`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetOwnedByOtherMob`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionNew`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionAdvance`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionActiveBudgetExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionDuplicate`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionConflict`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionStale`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionOwnedByMob`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionSlotLimitExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionUnknownSlot`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RebindInstructionOwner`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RebindInstructionOwnerUnowned`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ReleaseInstructionTarget`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ReleaseInstructionTargetAlreadyUnowned`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ReleaseInstructionTargetOwnedByOtherMob`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ReleaseInstructionTargetOwnedBySession`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ResolveRunStartInstructionsApply`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ResolveRunStartInstructionsNoChange`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ResolveRunStartInstructionsDeferredLeadingPrefix`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `ResolveRunStartInstructionsDeferredUnavailable`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `AuthorizeInstructionFoldAtRunStart`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `AuthorizeInstructionFoldEffective`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
 
 ### Effects
 - `RealtimeAssistantSnapshotMaterializationAuthorized`
@@ -501,6 +592,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionArchiveResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SessionInstructionStateRecovered`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionTargetRecorded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionTargetRefused`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionOwnerRebound`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionTargetReleased`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionEntryAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionEntryNotNeeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionApplicationDeferred`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `InstructionFoldAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
 
 ### Invariants
 - `live_interaction_transcript_binding_is_complete`
@@ -512,6 +630,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_assistant_playback_target_is_complete_and_interaction_bound`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `instruction_state_maps_lockstep`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `instruction_owner_present_with_target`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `instruction_slot_count_bounded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `instruction_active_bytes_bounded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `instruction_entry_sequence_covers_effective`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `instruction_mob_owner_names_its_mob`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
 
 
 <!-- GENERATED_COVERAGE_END -->

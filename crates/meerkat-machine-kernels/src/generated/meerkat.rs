@@ -6244,6 +6244,58 @@ impl std::fmt::Display for MobOperatorAccessRequestKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobOperatorIdentityCreationVerdict {
+    #[default]
+    #[serde(rename = "TemplateNotAllowed")]
+    TemplateNotAllowed,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl MobOperatorIdentityCreationVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TemplateNotAllowed => "TemplateNotAllowed",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobOperatorIdentityCreationVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TemplateNotAllowed" => Ok(Self::TemplateNotAllowed),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid MobOperatorIdentityCreationVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobOperatorIdentityCreationVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobOperatorIdentityCreationVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobPeerOverlayCommandKind {
     #[default]
     #[serde(rename = "Wire")]
@@ -10128,12 +10180,15 @@ pub enum RunStartHoldReason {
     MobStop,
     #[serde(rename = "ToolsNotPublished")]
     ToolsNotPublished,
+    #[serde(rename = "HostPreparation")]
+    HostPreparation,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
+            Self::HostPreparation => "HostPreparation",
         }
     }
 }
@@ -10143,6 +10198,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
         match value {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
+            "HostPreparation" => Ok(Self::HostPreparation),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -14179,6 +14235,8 @@ pub struct State {
     pub mob_operator_managed_mob_scope: std::collections::BTreeSet<String>,
     pub mob_operator_spawn_profile_scope:
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub mob_operator_identity_creation_scope:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     pub mob_operator_mob_incarnations: std::collections::BTreeMap<String, MobIncarnationId>,
     pub mob_operator_caller_provenance: Option<MobToolCallerProvenance>,
     pub mob_operator_audit_invocation_id: Option<String>,
@@ -14925,6 +14983,10 @@ impl std::fmt::Debug for State {
             .field(
                 "mob_operator_spawn_profile_scope",
                 &self.mob_operator_spawn_profile_scope,
+            )
+            .field(
+                "mob_operator_identity_creation_scope",
+                &self.mob_operator_identity_creation_scope,
             )
             .field(
                 "mob_operator_mob_incarnations",
@@ -16476,6 +16538,8 @@ pub mod inputs {
         pub managed_mob_scope: std::collections::BTreeSet<String>,
         pub spawn_profile_scope:
             std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        pub identity_creation_scope:
+            std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
         pub mob_incarnations: std::collections::BTreeMap<String, MobIncarnationId>,
         pub caller_provenance: Option<MobToolCallerProvenance>,
         pub audit_invocation_id: Option<String>,
@@ -16488,6 +16552,7 @@ pub mod inputs {
                 .field("can_mutate_profiles", &self.can_mutate_profiles)
                 .field("managed_mob_scope", &self.managed_mob_scope)
                 .field("spawn_profile_scope", &self.spawn_profile_scope)
+                .field("identity_creation_scope", &self.identity_creation_scope)
                 .field(
                     "mob_incarnations",
                     &format_args!("<redacted; {} entries>", self.mob_incarnations.len()),
@@ -16722,6 +16787,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestUntilChangedSwitchTurn {
@@ -16733,6 +16799,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteUntilChangedSwitchTurnReconfigure {
@@ -19034,6 +19101,36 @@ pub mod inputs {
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetMobOperatorIdentityCreationInMob {
+        pub mob_id: String,
+        pub mob_incarnation: MobIncarnationId,
+        pub templates: std::collections::BTreeSet<String>,
+    }
+    impl std::fmt::Debug for SetMobOperatorIdentityCreationInMob {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SetMobOperatorIdentityCreationInMob")
+                .field("mob_id", &self.mob_id)
+                .field("mob_incarnation", &"<redacted>")
+                .field("templates", &self.templates)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMobOperatorIdentityCreation {
+        pub mob_id: String,
+        pub mob_incarnation: MobIncarnationId,
+        pub template: String,
+    }
+    impl std::fmt::Debug for ResolveMobOperatorIdentityCreation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResolveMobOperatorIdentityCreation")
+                .field("mob_id", &self.mob_id)
+                .field("mob_incarnation", &"<redacted>")
+                .field("template", &self.template)
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19467,6 +19564,8 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    SetMobOperatorIdentityCreationInMob(inputs::SetMobOperatorIdentityCreationInMob),
+    ResolveMobOperatorIdentityCreation(inputs::ResolveMobOperatorIdentityCreation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20064,6 +20163,12 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::SetMobOperatorIdentityCreationInMob(_) => {
+                InputKind::SetMobOperatorIdentityCreationInMob
+            }
+            Self::ResolveMobOperatorIdentityCreation(_) => {
+                InputKind::ResolveMobOperatorIdentityCreation
+            }
         }
     }
 }
@@ -20486,6 +20591,8 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    SetMobOperatorIdentityCreationInMob,
+    ResolveMobOperatorIdentityCreation,
 }
 
 pub mod signals {
@@ -22267,6 +22374,10 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InputControllerReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobOperatorIdentityCreationResolved {
+        pub verdict: MobOperatorIdentityCreationVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22545,6 +22656,7 @@ pub enum Effect {
     RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
+    MobOperatorIdentityCreationResolved(effects::MobOperatorIdentityCreationResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22810,6 +22922,7 @@ pub enum EffectKind {
     RuntimeRegistrationReleased,
     EmptyResumeRetirementResolved,
     InputControllerReleased,
+    MobOperatorIdentityCreationResolved,
 }
 
 pub mod command_capabilities {
@@ -23383,6 +23496,12 @@ pub enum TransitionId {
     SetModelRoutingBaselineAttached,
     SetModelRoutingBaselineRunning,
     SetModelRoutingBaselineRetired,
+    RequestFiniteSwitchTurnTranscriptUnsupportedIdle,
+    RequestFiniteSwitchTurnTranscriptUnsupportedAttached,
+    RequestFiniteSwitchTurnTranscriptUnsupportedRunning,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
     RequestFiniteSwitchTurnApprovalUnavailableIdle,
     RequestFiniteSwitchTurnApprovalUnavailableAttached,
     RequestFiniteSwitchTurnApprovalUnavailableRunning,
@@ -26009,6 +26128,11 @@ pub enum TransitionId {
     ApplyToolGrantOpenSetUnchangedRunning,
     ApplyToolGrantOpenSetUnchangedRetired,
     ApplyToolGrantOpenSetUnchangedStopped,
+    SetMobOperatorIdentityCreationInMob,
+    RebindMobOperatorIdentityCreationInMob,
+    ResolveMobOperatorIdentityCreationAdmitted,
+    ResolveMobOperatorIdentityCreationUnbound,
+    ResolveMobOperatorIdentityCreationTemplateNotInScope,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26187,6 +26311,7 @@ pub fn initial_state() -> State {
         mob_operator_can_mutate_profiles: false,
         mob_operator_managed_mob_scope: Default::default(),
         mob_operator_spawn_profile_scope: Default::default(),
+        mob_operator_identity_creation_scope: Default::default(),
         mob_operator_mob_incarnations: Default::default(),
         mob_operator_caller_provenance: None,
         mob_operator_audit_invocation_id: None,

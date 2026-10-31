@@ -1,0 +1,552 @@
+# DurableDecisionMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `DurableDecisionMachine`
+
+### Code Anchors
+- `durable_decision` (machine `DurableDecisionMachine`): `crates/meerkat-runtime/src/decision/dsl.rs` — DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, and the requester notice an ended decision owes; ended decisions are terminal
+
+### Scenarios
+- `durable_decision_hold` — durable_decision_machine.rs::hold_seals_the_binding_and_opens_by_stage and hold_replays_the_same_binding_and_refuses_another hold a decision by stage with its sealed binding, refuse a past or empty window and a self review, replay the same hold in every held phase and refuse a hold that changes any sealed field
+- `durable_decision_human_decision` — durable_decision_machine.rs::each_decide_conjunct_alone_refuses, the_first_valid_decision_wins_and_end_phases_latch, a_human_decision_is_ordered_after_its_first_presentation and a_presentation_time_of_zero_is_no_presentation refuse a human decision for each missing conjunct alone (evidence, digest, approver, eligibility, the requester as decider, presentation, presentation order, stage), record a complete presentation with the earliest time it reached the approver, refuse a presentation at 0 recorded or carried, refuse a decision observed before that first presentation and accept one in the same millisecond, and let the first valid decision win
+- `durable_decision_review` — durable_decision_machine.rs::review_allows_denies_escalates_and_refuses_another_reviewer lets the sealed reviewer allow, deny or escalate a presented decision, hands an escalation to the human approver, and refuses another reviewer, missing evidence, a changed subject, a missing presentation and a verdict in the human stage
+- `durable_decision_deadline` — durable_decision_machine.rs::a_touch_at_the_deadline_records_expiry and an_approved_decision_expires_at_its_deadline_unless_a_permit_is_outstanding record the expiry of an open decision at any touch at or after its deadline, let an approved decision with no outstanding permit lapse at its deadline, and hold the expiry off while a permit is outstanding
+- `durable_decision_withdrawal` — durable_decision_machine.rs::withdraw_is_open_only_by_requester_or_host withdraws an open decision by its requester or the host before its deadline and refuses another withdrawer and a decided decision
+- `durable_decision_execution` — durable_decision_machine.rs::execution_is_authorized_only_while_approved_with_the_held_binding, executed_replays_and_a_mismatched_binding_is_refused, a_permit_outstanding_across_the_deadline_settles_executed_or_expired and close_refused_never_follows_executed authorize a permit only for the held binding of an approved decision, record the execution only under an outstanding permit, replay it, release a permit with no commit, and close a permanent refusal
+- `durable_decision_notice` — durable_decision_machine.rs::notice_is_owed_once_at_the_end_for_routable_decisions owes one requester notice at every end of a routable decision, settles it delivered or failed, replays the same receipt and refuses a contradicting one, an unroutable requester's and a notice before the end
+- `durable_decision_terminal_latch` — durable_decision_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended and recover_from_state_refuses_each_torn_shape refuse every input an ended or approved decision does not accept with its typed refusal and a byte-identical state, and refuse a recovered row that breaks any invariant
+
+### Transitions
+- `HoldHuman`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReview`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldRefusedWindow`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldRefusedSelfReview`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldConflictExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `PresentAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `PresentRefusedSubjectChanged`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `PresentRefusedIncomplete`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `PresentToApprover`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `PresentRefusedUntimed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `PresentRefusedWrongApproverAudience`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `PresentToReviewer`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `PresentRefusedWrongReviewerAudience`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `PresentRefusedNotOpenApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `PresentRefusedNotOpenRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `PresentRefusedNotOpenExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `PresentRefusedNotOpenWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `PresentRefusedNotOpenExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `PresentRefusedNotOpenExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `DecideRefusedReviewStage`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedEvidenceRequired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedSubjectChanged`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedNotEligible`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedSelfApproval`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedPresentationIncomplete`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedDecidedBeforePresentation`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`
+- `DecideRefusedNotOpenApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideRefusedNotOpenRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideRefusedNotOpenExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideRefusedNotOpenWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideRefusedNotOpenExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `DecideRefusedNotOpenExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ReviewRefusedHumanStage`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewRefusedWrongReviewer`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewRefusedEvidenceRequired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewRefusedSubjectChanged`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewRefusedPresentationIncomplete`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewAllowed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewDenied`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewEscalated`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `ReviewRefusedNotOpenApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewRefusedNotOpenRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewRefusedNotOpenExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewRefusedNotOpenWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewRefusedNotOpenExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReviewRefusedNotOpenExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `WithdrawByHost`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_withdrawal`
+- `WithdrawByRequester`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_withdrawal`
+- `WithdrawRefusedNotRequester`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_withdrawal`
+- `WithdrawRefusedNotOpenApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawRefusedNotOpenRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawRefusedNotOpenExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawRefusedNotOpenWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawRefusedNotOpenExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `WithdrawRefusedNotOpenExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ExpireOpenDue`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ExpireOpenNotDue`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ExpireApprovedDue`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ExpireApprovedSettlementOwed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ExpireApprovedNotDue`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ExpireSettledRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ExpireSettledExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ExpireSettledWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ExpireSettledExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ExpireSettledExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecution`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `AuthorizeExecutionAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `AuthorizeExecutionRefusedSettlementOwed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `AuthorizeExecutionRefusedBinding`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `AuthorizeExecutionRefusedNotApprovedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecutionRefusedNotApprovedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecutionRefusedNotApprovedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecutionRefusedNotApprovedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecutionRefusedNotApprovedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `AuthorizeExecutionRefusedNotApprovedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecution`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `ReleaseExecutionAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `ReleaseExecutionRefusedNotAuthorized`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `ReleaseExecutionRefusedNotApprovedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecutionRefusedNotApprovedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecutionRefusedNotApprovedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecutionRefusedNotApprovedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecutionRefusedNotApprovedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `ReleaseExecutionRefusedNotApprovedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `RecordExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `RecordExecutedRefusedNotAuthorized`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `RecordExecutedRefusedBinding`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `RecordExecutedReplayed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `RecordExecutedReplayRefusedBinding`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `RecordExecutedRefusedNotApprovedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `RecordExecutedRefusedNotApprovedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `RecordExecutedRefusedNotApprovedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `RecordExecutedRefusedNotApprovedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `RecordExecutedRefusedNotApprovedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `CloseRefusedWithPermit`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `CloseRefusedAtDeadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `CloseRefusedNotApprovedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefusedNotApprovedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefusedNotApprovedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefusedNotApprovedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefusedNotApprovedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `CloseRefusedNotApprovedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_terminal_latch`
+- `SettleNoticeDeliveredRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeDeliveredExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeDeliveredWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeDeliveredExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeDeliveredExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeFailedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeFailedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeFailedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeFailedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeFailedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeReplayedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeReplayedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeReplayedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeReplayedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeReplayedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedNotEndedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `SettleNoticeRefusedNotEndedApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+
+### Effects
+- `Held`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `HoldReplayed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`
+- `Presented`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_review`
+- `Escalated`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`
+- `Approved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_review`
+- `Rejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_review`
+- `Expired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`
+- `Withdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_withdrawal`
+- `ExecutionAuthorized`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `ExecutionReleased`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`, `durable_decision_execution`
+- `Executed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `ExecutionReplayed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `ExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`
+- `NoticeSettled`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`
+- `Refused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`, `durable_decision_human_decision`, `durable_decision_review`, `durable_decision_deadline`, `durable_decision_withdrawal`, `durable_decision_execution`, `durable_decision_notice`, `durable_decision_terminal_latch`
+
+### Invariants
+- `unheld_is_empty`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`, `durable_decision_terminal_latch`
+- `held_records_are_named`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`, `durable_decision_terminal_latch`
+- `review_stage_names_another_reviewer`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_hold`, `durable_decision_review`, `durable_decision_terminal_latch`
+- `reviewer_presentation_needs_a_reviewer`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_review`, `durable_decision_terminal_latch`
+- `first_presentation_is_a_reading`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_terminal_latch`
+- `open_has_no_outcome`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_terminal_latch`
+- `approved_has_not_ended`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
+- `evidence_and_decision_time_agree`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_terminal_latch`
+- `decided_decisions_are_attested`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_human_decision`, `durable_decision_terminal_latch`
+- `permit_is_outstanding_only_while_approved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
+- `executed_names_its_held_request`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
+- `only_executed_records_an_execution`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
+- `ended_decisions_record_their_end`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`, `durable_decision_terminal_latch`
+- `expiry_never_precedes_its_deadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_deadline`, `durable_decision_terminal_latch`
+- `withdrawal_precedes_the_deadline`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_withdrawal`, `durable_decision_terminal_latch`
+- `ended_decisions_owe_their_notice`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_notice`, `durable_decision_terminal_latch`
+
+
+<!-- GENERATED_COVERAGE_END -->

@@ -558,10 +558,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     then a seat that names the incarnation it follows, owes what a rotation
     no Meta verb asked for owes: the hook hears `rotated` (`role_move` when
     the seat takes another role) and the session the respawn left is
-    distilled, as before. That is read from the seat's fact (and the
-    retired incarnation's session and role from Core's member history),
-    never from where the two steps sit in the journal; a respawn onto the
-    same session owes nothing;
+    distilled, as before. That is read from the seat's fact (the retired
+    incarnation's session and role by its exact generation, from Core's
+    member history, else from the retirement Core journaled for it), never
+    from where the two steps sit in the journal; a respawn onto the same
+    session owes nothing;
   - an identity runtime that no identity context serves is bound by the
     public view an embedder hands the RPC handler, or by its restore, and so
     runs the side effects of its steps; one that nothing binds records

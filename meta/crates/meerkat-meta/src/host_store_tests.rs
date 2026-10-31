@@ -3193,11 +3193,15 @@ fn announcement_options(
 }
 
 /// What `declarations/get` reports once the declarations' revision is
-/// `revision` and every record they manage is applied.
+/// `revision` and every record they manage is applied: `declared` records,
+/// one per declared source and subscription. A record a reconcile has not
+/// made yet has no entry, so a view that lists fewer is not settled, however
+/// its listed records stand.
 async fn applied_declarations(
     service: &crate::mob_announcements::AnnouncementService,
     mob_id: &str,
     revision: u64,
+    declared: usize,
 ) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     loop {
@@ -3211,7 +3215,7 @@ async fn applied_declarations(
         if let Ok(view) = &view
             && view["revision"] == serde_json::json!(revision)
             && view["records"].as_array().is_some_and(|records| {
-                !records.is_empty()
+                records.len() == declared
                     && records
                         .iter()
                         .all(|record| record["status"] == serde_json::json!("applied"))
@@ -3221,7 +3225,7 @@ async fn applied_declarations(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "revision {revision} was never applied: {view:?}"
+            "revision {revision} was never applied with its {declared} records: {view:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -3304,7 +3308,7 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
     let provider = Arc::new(fixture.open(&fixture.process()).await.expect("open"));
     let (runtime, _cache) = start(provider, options(1, &["declared-a"])).await;
     let service = announcements_of(&runtime);
-    let first = applied_declarations(&service, &mob_id, 1).await;
+    let first = applied_declarations(&service, &mob_id, 1, 2).await;
     assert_eq!(announcement_records(&service, &mob_id).await, (1, 1));
     stop(runtime).await;
 
@@ -3312,7 +3316,7 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
     let (runtime, _cache) = start(reopen(&fixture).await, options(1, &["declared-a"])).await;
     let service = announcements_of(&runtime);
     assert_eq!(
-        applied_declarations(&service, &mob_id, 1).await,
+        applied_declarations(&service, &mob_id, 1, 2).await,
         first,
         "the same revision and records"
     );
@@ -3330,7 +3334,7 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
     )
     .await;
     let service = announcements_of(&runtime);
-    let second = applied_declarations(&service, &mob_id, 2).await;
+    let second = applied_declarations(&service, &mob_id, 2, 3).await;
     assert_eq!(announcement_records(&service, &mob_id).await, (1, 2));
     stop(runtime).await;
     let (runtime, _cache) = start(
@@ -3340,7 +3344,7 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
     .await;
     let service = announcements_of(&runtime);
     assert_eq!(
-        applied_declarations(&service, &mob_id, 2).await,
+        applied_declarations(&service, &mob_id, 2, 3).await,
         second,
         "applied once"
     );
@@ -3375,7 +3379,7 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
         refused.data,
         Some(serde_json::json!({ "kind": "declaration_rollback", "applied": 2 }))
     );
-    assert_eq!(applied_declarations(&service, &mob_id, 2).await, second);
+    assert_eq!(applied_declarations(&service, &mob_id, 2, 3).await, second);
     stop(runtime).await;
 }
 
@@ -3561,7 +3565,7 @@ async fn a_declared_runner_is_left_to_the_host_and_one_step_is_one_batch() {
     )
     .await;
     let service = announcements_of(&runtime);
-    applied_declarations(&service, &mob_id, 1).await;
+    applied_declarations(&service, &mob_id, 1, 1).await;
     let source = announcement_call(
         &service,
         &mob_id,

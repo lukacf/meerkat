@@ -578,6 +578,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `shutdown` now returns only once that actor's task has returned (within
   the root mob's terminal shutdown budget), so after a teardown that settled
   every member, dropping the runtime releases the custody at once.
+- `meta/mob_announcements/declarations/get` waits for a declarations
+  reconcile in progress (at startup, at an apply, after a change in the
+  gateway's set of mobs, or at a health pass retry) and answers with what
+  it settled: one record per declared source and subscription. Before, a
+  host polling it right after a start could see a new revision reported as
+  applied, with every listed record applied, before the subscriptions that
+  revision adds existed: the read listed only the records the reconcile had
+  reached so far.
+- A declarations reconcile that a storage failure stopped is finished at
+  the next health pass. Before, the health pass reconciled again only while
+  a declared record was pending, so the records the stopped reconcile had
+  not reached stayed unmade, and missing from `declarations/get`, until the
+  next start, apply or change in the gateway's set of mobs. A dropped record
+  whose end or cancel was refused for now is retried there too. The health
+  pass never waits for a reconcile in progress, and after a retry fails, it
+  is tried again at the first health pass after the dispatcher's
+  failed-round pause (30 seconds by default).
 
 ### Known limitations
 

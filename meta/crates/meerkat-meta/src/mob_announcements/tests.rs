@@ -4082,7 +4082,10 @@ async fn a_round_full_of_held_members_does_not_starve_the_next_one() {
 
 /// The SQLite store with injected faults: batch transitions fail for one
 /// member, as a storage fault would, and the first retention passes
-/// report more work, as a long backlog would. It counts what it is asked.
+/// report more work, as a long backlog would. A put of one subscription can
+/// be held before it reaches the store, so a test acts while the owner is
+/// between two of its writes, or fail once, as a storage fault would. It
+/// counts what it is asked.
 struct FaultyStore {
     inner: SqliteAnnouncementStore,
     failing: Option<Member>,
@@ -4096,7 +4099,46 @@ struct FaultyStore {
     pass_times: Mutex<Vec<std::time::Instant>>,
     /// Panics the next backlog read, as a fault inside a round would.
     panic_next_round: std::sync::atomic::AtomicBool,
+    /// The next put of this subscription waits until the test releases it.
+    held_put: Mutex<Option<HeldPut>>,
+    /// The next put of this subscription fails as a storage fault would,
+    /// before anything of it reaches the store.
+    failing_put: Mutex<Option<SubscriptionId>>,
+    /// Off, the escalation cursor read is refused as by a store that keeps
+    /// no escalations, and a round's health pass ends at it. On, it reads
+    /// the SQLite store's cursor, and the health pass goes on to its
+    /// declarations retry.
+    health_passes: std::sync::atomic::AtomicBool,
 }
+
+/// A put a [`FaultyStore`] holds before it reaches the store: the
+/// subscription it puts, and the signals the store and the test exchange.
+#[derive(Clone)]
+struct HeldPut {
+    id: SubscriptionId,
+    /// Notified once the put arrived and waits.
+    arrived: Arc<tokio::sync::Notify>,
+    /// Notified by the test to let the put go on.
+    released: Arc<tokio::sync::Notify>,
+}
+
+impl HeldPut {
+    /// Whether the held put arrived within `bound`.
+    async fn reached(&self, bound: std::time::Duration) -> bool {
+        tokio::time::timeout(bound, self.arrived.notified())
+            .await
+            .is_ok()
+    }
+
+    /// Let the held put go on to the store.
+    fn release(&self) {
+        self.released.notify_one();
+    }
+}
+
+/// How long a held put waits for its release before it goes on anyway: a
+/// test that fails before it releases never leaves the put waiting.
+const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl FaultyStore {
     fn new(inner: SqliteAnnouncementStore, failing: Option<&str>) -> Self {
@@ -4109,6 +4151,43 @@ impl FaultyStore {
             backlog_reads: AtomicU64::new(0),
             pass_times: Mutex::new(Vec::new()),
             panic_next_round: std::sync::atomic::AtomicBool::new(false),
+            held_put: Mutex::new(None),
+            failing_put: Mutex::new(None),
+            health_passes: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Fail the next put of the subscription `id` with a storage fault,
+    /// before anything of it reaches the store.
+    fn fail_put(&self, id: &str) {
+        *self.failing_put.lock().unwrap() = Some(sid(id));
+    }
+
+    /// Let a round's health pass run on this store (see `health_passes`).
+    fn run_health_passes(&self) {
+        self.health_passes.store(true, Ordering::SeqCst);
+    }
+
+    /// Hold the next put of the subscription `id`: the owner has made every
+    /// check and holds whatever it holds, and the store has written nothing
+    /// of the put, until the test releases it.
+    fn hold_put(&self, id: &str) -> HeldPut {
+        let held = HeldPut {
+            id: sid(id),
+            arrived: Arc::new(tokio::sync::Notify::new()),
+            released: Arc::new(tokio::sync::Notify::new()),
+        };
+        *self.held_put.lock().unwrap() = Some(held.clone());
+        held
+    }
+
+    /// Wait here while the put of `id` is held, for at most
+    /// [`HELD_PUT_BOUND`].
+    async fn wait_if_held(&self, id: &SubscriptionId) {
+        let held = self.held_put.lock().unwrap().take_if(|held| held.id == *id);
+        if let Some(held) = held {
+            held.arrived.notify_one();
+            let _ = tokio::time::timeout(HELD_PUT_BOUND, held.released.notified()).await;
         }
     }
 }
@@ -4135,6 +4214,31 @@ impl AnnouncementStore for FaultyStore {
     ) -> Result<Subscription> {
         self.inner
             .put_subscription(operation, request, now_ms)
+            .await
+    }
+
+    /// The owner's put: held here when the test holds it, or failed when the
+    /// test fails it, before anything of it reaches the store.
+    async fn put_subscription_with_facts(
+        &self,
+        operation: &OperationId,
+        request: PutSubscription,
+        facts: Option<super::sources::MemberFacts>,
+        now_ms: u64,
+    ) -> Result<Subscription> {
+        self.wait_if_held(&request.id).await;
+        let failing = self
+            .failing_put
+            .lock()
+            .unwrap()
+            .take_if(|failing| *failing == request.id);
+        if failing.is_some() {
+            return Err(AnnouncementStoreError::Storage(
+                "injected put failure".into(),
+            ));
+        }
+        self.inner
+            .put_subscription_with_facts(operation, request, facts, now_ms)
             .await
     }
 
@@ -4171,6 +4275,47 @@ impl AnnouncementStore for FaultyStore {
         now_ms: u64,
     ) -> Result<Vec<SubscriptionId>> {
         self.inner.end_member(member, end, now_ms).await
+    }
+
+    async fn applied_declarations(&self) -> Result<Option<super::store::AppliedDeclarations>> {
+        self.inner.applied_declarations().await
+    }
+
+    async fn record_declarations(&self, applied: super::store::AppliedDeclarations) -> Result<()> {
+        self.inner.record_declarations(applied).await
+    }
+
+    async fn declaration_marks(&self) -> Result<Vec<super::store::DeclarationMark>> {
+        self.inner.declaration_marks().await
+    }
+
+    async fn put_declaration_mark(
+        &self,
+        mark: super::store::DeclarationMark,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.inner.put_declaration_mark(mark, now_ms).await
+    }
+
+    async fn remove_declaration_mark(
+        &self,
+        kind: super::declarations::DeclarationRecordKind,
+        id: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.inner.remove_declaration_mark(kind, id, now_ms).await
+    }
+
+    /// The SQLite store's cursor when the test runs health passes on this
+    /// store; otherwise refused as the trait's default refuses it.
+    async fn last_escalation_cursor(&self) -> Result<u64> {
+        if self.health_passes.load(Ordering::SeqCst) {
+            self.inner.last_escalation_cursor().await
+        } else {
+            Err(AnnouncementStoreError::Storage(
+                "this announcement store keeps no escalations".to_string(),
+            ))
+        }
     }
 
     async fn known_mobs(&self) -> Result<BTreeSet<MobId>> {

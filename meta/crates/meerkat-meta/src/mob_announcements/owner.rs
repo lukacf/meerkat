@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -520,8 +520,15 @@ struct Inner {
     /// the first pass, so events from before a restart are not pushed again.
     pushed_cursor: std::sync::Mutex<Option<u64>>,
     /// Applies and reconciles of declarations pass one at a time, each
-    /// reading the applied declarations and marks as they stand then.
+    /// reading the applied declarations and marks as they stand then, and
+    /// holding the gate from the revision it records to the last record it
+    /// writes. `declarations/get` reads under it too, so it never sees a
+    /// reconcile between its writes. The health pass only tries it.
     declarations_gate: tokio::sync::Mutex<()>,
+    /// The clock reading before which the health pass does not retry the
+    /// declarations: the slowest settle pause after a retry that failed, 0
+    /// otherwise.
+    declarations_retry_after: AtomicU64,
     /// Whether this boot warned that its options declare the applied
     /// revision with other content.
     options_conflict_warned: AtomicBool,
@@ -717,6 +724,7 @@ impl AnnouncementService {
                 error_sink: std::sync::Mutex::new(None),
                 pushed_cursor: std::sync::Mutex::new(None),
                 declarations_gate: tokio::sync::Mutex::new(()),
+                declarations_retry_after: AtomicU64::new(0),
                 options_conflict_warned: AtomicBool::new(false),
                 quiesced_candidate: AtomicBool::new(false),
             }),
@@ -750,7 +758,8 @@ impl AnnouncementService {
         self.apply_declared(declarations).await
     }
 
-    /// What the declarations manage now (contract 4.6).
+    /// What the declarations manage now (contract 4.6), once a reconcile in
+    /// flight has finished.
     pub async fn declarations(
         &self,
     ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
@@ -798,7 +807,8 @@ impl AnnouncementService {
     }
 
     /// Hold the declarations gate a reconcile takes, so a test can keep one
-    /// waiting.
+    /// waiting. A `declarations/get` waits for it too, so a test asks none
+    /// while it holds the gate.
     #[cfg(test)]
     pub(crate) async fn hold_declarations(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.inner.declarations_gate.lock().await
@@ -2282,9 +2292,10 @@ impl AnnouncementService {
                 BTreeSet::new()
             }
         };
-        // A pending declared record is retried at every health pass, and
+        // Declarations that owe a reconcile (a pending record, or a
+        // reconcile a failure stopped) are retried at the health pass, and
         // what it raised or resolved is pushed with the rest.
-        self.retry_pending_declared().await;
+        self.retry_declarations().await;
         let pass = EscalationPass {
             renotify_after_ms: self.inner.config.renotify_after_ms,
             health_audience: self.inner.config.health_audience.clone(),

@@ -1506,6 +1506,201 @@ async fn the_dispatcher_starts_once_the_declarations_are_reconciled() {
     );
 }
 
+/// A service over `store` with `native`, whose gateway's options declare
+/// `declarations` inline, as a gateway started with them composes it.
+fn declaring_over(
+    store: &Arc<FaultyStore>,
+    native: &Arc<ScriptedNative>,
+    declarations: serde_json::Value,
+) -> AnnouncementService {
+    let config = AnnouncementConfig {
+        declarations: Some(Arc::new(
+            super::super::declarations::DeclarationsSource::Inline(
+                serde_json::from_value(declarations).unwrap(),
+            ),
+        )),
+        ..AnnouncementConfig::default()
+    };
+    AnnouncementService::new(
+        Arc::clone(store) as Arc<dyn AnnouncementStore>,
+        Arc::clone(native) as Arc<dyn NativeDelivery>,
+        config,
+    )
+    .unwrap()
+}
+
+/// The revision a `declarations/get` answer reports, and the id and status
+/// of each record it lists, as a host polling it reads them.
+fn revision_and_records(view: &serde_json::Value) -> (serde_json::Value, Vec<(String, String)>) {
+    let records = view["records"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|record| {
+            (
+                record["id"].as_str().unwrap_or_default().to_string(),
+                record["status"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    (view["revision"].clone(), records)
+}
+
+/// `declarations/get` is a settled read. The startup reconcile of revision 2,
+/// which adds declared-b, is held after it recorded the revision and before
+/// declared-b's subscription is written. A read asked then waits for the
+/// reconcile and lists every declared record applied: never revision 2 with
+/// only the records the reconcile had reached.
+#[tokio::test]
+async fn a_declarations_read_waits_for_the_reconcile_in_flight() {
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+    // The time a read asked while the reconcile is held gets to answer on its
+    // own: one that answers within it did not wait for the reconcile.
+    const ANSWER_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+    let declaring = |revision: u64, ids: &[&str]| {
+        serde_json::json!({
+            "revision": revision,
+            "subscriptions": ids
+                .iter()
+                .zip(["ops.one", "ops.two"])
+                .map(|(id, topic)| declared_subscription(id, "agent:a", &[topic]))
+                .collect::<Vec<_>>(),
+        })
+    };
+    let settled = (
+        serde_json::json!(2),
+        vec![
+            ("declared-a".to_string(), "applied".to_string()),
+            ("declared-b".to_string(), "applied".to_string()),
+        ],
+    );
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    let native = Arc::new(native_serving(&[]));
+    declaring_over(&store, &native, declaring(1, &["declared-a"]))
+        .reconcile_declarations()
+        .await
+        .unwrap();
+
+    // The next start's options declare revision 2. Its startup reconcile runs
+    // on a task of its own, as `start_after_reconcile` runs it, and the store
+    // holds it at declared-b's put: revision 2 is recorded, declared-b is not.
+    let service = declaring_over(&store, &native, declaring(2, &["declared-a", "declared-b"]));
+    let held = store.hold_put("declared-b");
+    let reconciling = tokio::spawn({
+        let service = service.clone();
+        async move { service.reconcile_declarations().await }
+    });
+    assert!(
+        held.reached(BOUND).await,
+        "the reconcile reaches declared-b's put"
+    );
+
+    // A host reads the declarations meanwhile.
+    let mut reading = tokio::spawn({
+        let service = service.clone();
+        async move { try_host_call(&service, DECLARATIONS_GET, serde_json::json!({})).await }
+    });
+    if let Ok(answered) = tokio::time::timeout(ANSWER_WINDOW, &mut reading).await {
+        assert_eq!(
+            revision_and_records(&answered.unwrap().unwrap()),
+            settled,
+            "declarations/get answered while the reconcile of revision 2 was held before \
+             declared-b's put: a settled read lists every declared record"
+        );
+        panic!("declarations/get answered before the held reconcile was released");
+    }
+    held.release();
+    let answered = tokio::time::timeout(BOUND, reading)
+        .await
+        .expect("the read answers once the reconcile ends");
+    assert_eq!(
+        revision_and_records(&answered.unwrap().unwrap()),
+        settled,
+        "the read waited for the reconcile"
+    );
+    tokio::time::timeout(BOUND, reconciling)
+        .await
+        .expect("the reconcile ends")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        subscription_state(&service, "declared-b").await.as_deref(),
+        Some("active")
+    );
+}
+
+/// A reconcile a store failure stops leaves the records it had not reached
+/// without a mark, and nothing is pending. The health pass finishes it: the
+/// next round makes the record and marks it applied, so the declarations
+/// read whole again without waiting for another start, apply or change in
+/// the gateway's set of mobs.
+#[tokio::test]
+async fn a_reconcile_a_store_failure_stopped_is_finished_at_the_health_pass() {
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+    let declaring = |revision: u64, ids: &[&str]| {
+        serde_json::json!({
+            "revision": revision,
+            "subscriptions": ids
+                .iter()
+                .zip(["ops.one", "ops.two"])
+                .map(|(id, topic)| declared_subscription(id, "agent:a", &[topic]))
+                .collect::<Vec<_>>(),
+        })
+    };
+    let applied = |ids: &[&str]| {
+        (
+            serde_json::json!(2),
+            ids.iter()
+                .map(|id| ((*id).to_string(), "applied".to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    store.run_health_passes();
+    let native = Arc::new(native_serving(&[]));
+    declaring_over(&store, &native, declaring(1, &["declared-a"]))
+        .reconcile_declarations()
+        .await
+        .unwrap();
+
+    // The next start's reconcile of revision 2 records the revision, then
+    // the store fails declared-b's put, and the reconcile stops there.
+    let service = declaring_over(&store, &native, declaring(2, &["declared-a", "declared-b"]));
+    store.fail_put("declared-b");
+    let stopped = tokio::time::timeout(BOUND, service.reconcile_declarations())
+        .await
+        .expect("the reconcile ends");
+    assert!(
+        matches!(
+            stopped,
+            Err(AnnouncementError::Store(AnnouncementStoreError::Storage(_)))
+        ),
+        "the store failure stops the reconcile: {stopped:?}"
+    );
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a"]),
+        "the stopped reconcile left declared-b without a mark"
+    );
+
+    // The next round's health pass finishes the reconcile.
+    tokio::time::timeout(BOUND, service.run_round())
+        .await
+        .expect("the round ends")
+        .unwrap();
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a", "declared-b"]),
+        "the health pass reconciles a declared record a stopped reconcile left without a mark"
+    );
+    assert_eq!(
+        subscription_state(&service, "declared-b").await.as_deref(),
+        Some("active")
+    );
+}
+
 /// Options naming the applied revision with other declarations change
 /// nothing, as an apply at runtime moved the gateway past them: the gateway
 /// warns once per boot, naming the revision and both digests, and keeps the

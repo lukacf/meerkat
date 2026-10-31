@@ -1,7 +1,8 @@
 import React from "react";
-import { ApprovalCard } from "../../../packages/console-components/src/conversation/approval-card";
+import { ApprovalCard, HostAttentionCard } from "../../../packages/console-components/src/conversation/approval-card";
 import { normalizeGatingAuditEntry } from "../../../packages/console-core/src/control-plane";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
+import type { HostAttentionSnapshot } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import {
   Button,
@@ -48,6 +49,8 @@ interface GatingInboxPanelProps {
   /** Why the last refresh of the recorded approvals failed, if it did. */
   auditError?: string | null;
   selectedPendingId?: string;
+  /** Host-provided attention items, listed on Pending after the approvals. */
+  hostAttention?: HostAttentionSnapshot;
 }
 
 type Tab = "pending" | "auto" | "audit" | "policies";
@@ -255,6 +258,7 @@ export function GatingInboxPanel({
   auditUpdatedAtMs,
   auditError,
   selectedPendingId,
+  hostAttention,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
   const tabIds = React.useId();
@@ -263,6 +267,9 @@ export function GatingInboxPanel({
   const listRef = React.useRef<HTMLDivElement>(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
   const pendingKnown = !resource || resource.status === "ready";
+  // A connection without approvals (an aggregate console) says so instead of
+  // showing counts that cannot apply to it.
+  const approvalsUnsupported = resource?.status === "unsupported";
   const pendingCount = pendingRequests ? pendingRequests.length : pending.length;
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
   React.useEffect(() => { if (selectedPendingId) { setSelectedId(selectedPendingId); setTab("pending"); } }, [selectedPendingId]);
@@ -280,6 +287,24 @@ export function GatingInboxPanel({
 
   const toggle = (key: string) => setExpandedId((current) => (current === key ? null : key));
 
+  // Host-provided attention items follow the approvals on Pending: link cards
+  // that the host decides on its own page, then the sources that could not be
+  // read. Neither hides an approval. While they show, an empty approval list
+  // says so in one line, so the items stay in view.
+  const hostItems = tab === "pending" ? hostAttention?.items ?? [] : [];
+  const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  const hostList = hostShown ? (
+    <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
+      {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
+      {hostFailedSources.length ? (
+        <Notice tone="warn" role="status" className="gating-inbox__host-note">
+          {`Could not read: ${hostFailedSources.join(", ")}`}
+        </Notice>
+      ) : null}
+    </div>
+  ) : null;
+
   let content: React.ReactNode;
   if (tab === "pending" && resource) {
     const state = resource.status === "ready" ? null : RESOURCE_STATE[resource.status];
@@ -288,12 +313,12 @@ export function GatingInboxPanel({
         {state && resource.requests.length === 0 ? (
           resource.status === "loading"
             ? <LoadingState variant="cards" rows={2} label={state.text} />
-            : <EmptyState kind={state.empty} role="status" title={state.text} />
+            : <EmptyState kind={state.empty} role="status" title={state.text} inline={hostShown} />
         ) : state ? (
           <Notice tone={state.tone} role="status">{state.text}</Notice>
         ) : null}
         {resource.status === "ready" && pendingRequests?.length === 0 ? (
-          <EmptyState title="No pending approvals." body="Requests that need a decision appear here." />
+          <EmptyState title="No pending approvals." body="Requests that need a decision appear here." inline={hostShown} />
         ) : null}
         {resource.requests.length ? (
           <div className="gating-inbox__cards">
@@ -316,6 +341,7 @@ export function GatingInboxPanel({
             ))}
           </div>
         ) : null}
+        {hostList}
       </>
     );
   } else if (tab === "policies") {
@@ -331,7 +357,7 @@ export function GatingInboxPanel({
           <Notice className="gating-inbox__note">Approval records do not confirm execution.</Notice>
         ) : null}
         {rows.length === 0 ? (
-          <EmptyState title={`No ${tab} items.`} />
+          <EmptyState title={`No ${tab} items.`} inline={hostShown} />
         ) : (
           <RowList>
             {rows.map(({ raw, record }, index) => {
@@ -378,6 +404,7 @@ export function GatingInboxPanel({
             })}
           </RowList>
         )}
+        {hostList}
       </>
     );
   }
@@ -396,9 +423,11 @@ export function GatingInboxPanel({
       <PanelHeader
         className="gating__head"
         title="Approvals"
-        subtitle={pendingKnown
-          ? `${pendingCount} pending · ${automaticCount} allowed automatically`
-          : `${automaticCount} allowed automatically`}
+        subtitle={approvalsUnsupported
+          ? "Not available on this connection"
+          : pendingKnown
+            ? `${pendingCount} pending · ${automaticCount} allowed automatically`
+            : `${automaticCount} allowed automatically`}
         divider={false}
         actions={refreshShown ? (
           <Button icon={<KitGlyph name="refresh" />} onClick={refreshShown}>Refresh approvals</Button>

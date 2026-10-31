@@ -307,3 +307,66 @@ describe("GatingInboxPanel audit refresh errors", () => {
     expect(view.container.querySelectorAll(".gitem").length).toBe(1);
   });
 });
+
+describe("GatingInboxPanel host-provided attention", () => {
+  const item = { sourceId: "host", sourceLabel: "Host", id: "a", title: "Confirm a setting", href: "/host/items/a", details: [] };
+  it("lists the approvals first and host items after them", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      hostAttention={{ status: "ready", items: [item], failedSources: ["Other"] }} />);
+    const host = view.getByTestId("host-attention-list");
+    expect(within(host).getByRole("link", { name: "Open: Confirm a setting" }).getAttribute("href")).toBe("/host/items/a");
+    // A source that could not be read is named in a kit notice, by its label.
+    const failed = within(host).getByText("Could not read: Other").closest(".cc-notice");
+    expect(failed?.getAttribute("role")).toBe("status");
+    expect(failed?.getAttribute("data-tone")).toBe("warn");
+    expect(view.getByText("Publish reviewed changes")).toBeTruthy();
+    expect(host.compareDocumentPosition(view.getByText("Publish reviewed changes")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // The host's cards sit in the same card column as the approvals.
+    expect(host.classList.contains("gating-inbox__cards")).toBe(true);
+  });
+  it.each(["forbidden", "unsupported"] as const)("shows the %s note and the host items together", (status) => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot(status), requests: [] }}
+      hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
+    expect(view.getByText(status === "forbidden" ? "Approval access denied" : "Approvals are not available for this connection")).toBeTruthy();
+    expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
+  });
+  it("shows nothing extra without host items", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      hostAttention={{ status: "ready", items: [], failedSources: [] }} />);
+    expect(view.queryByTestId("host-attention-list") === null).toBe(true);
+  });
+  it("says approvals are not available on this connection instead of counting them", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} readOnly
+      resource={{ ...snapshot("unsupported"), requests: [], readOnly: true }}
+      hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
+    const head = view.container.querySelector(".gating__head")?.textContent || "";
+    expect(head.includes("Not available on this connection")).toBe(true);
+    expect(head.includes("pending")).toBe(false);
+    expect(head.includes("allowed automatically")).toBe(false);
+    expect(view.getByTestId("gating-tab:pending").textContent).toBe("Pending");
+  });
+  it("keeps an empty approval list to one line while host items show", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
+    const empty = view.getByText("No pending approvals.").closest(".cc-panel-empty");
+    expect(empty?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("unsupported"), requests: [] }}
+      hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
+    const unsupported = view.getByText("Approvals are not available for this connection").closest(".cc-panel-empty");
+    expect(unsupported?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      hostAttention={{ status: "ready", items: [], failedSources: [] }} />);
+    expect(view.getByText("No pending approvals.").closest(".cc-panel-empty")?.classList.contains("cc-panel-empty--inline")).toBe(false);
+  });
+  it("lists host items on Pending only, after requests without the shared resource too", () => {
+    const pendingEntry = { pending_id: "pending-7", action_id: "deploy-release", actor_id: "release-manager", risk_tier: "r3" };
+    const view = render(<GatingInboxPanel pending={[pendingEntry]} audit={[]} onDecide={vi.fn()}
+      hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
+    const host = view.getByTestId("host-attention-list");
+    expect(host.compareDocumentPosition(view.getByTestId("gating-pending:pending-7")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.queryByTestId("host-attention-list") === null).toBe(true);
+    fireEvent.click(view.getByTestId("gating-tab:pending"));
+    expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
+  });
+});

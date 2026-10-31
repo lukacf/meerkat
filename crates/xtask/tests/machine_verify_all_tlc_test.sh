@@ -841,6 +841,38 @@ if run_part audits-h; then
   TLC_WORKERS="${tlc_workers}" "${instruction_boundary_audit}" --mutants
 fi
 
+# The MobMachine operator-instruction region (the mob's desired records, the
+# owed computation and each member's delivery facts: owed, recorded,
+# blocked) is empty in the MobMachine ci sweep, whose AgentIdentityValues
+# are {}, so its member arms and member invariants hold there only
+# vacuously. A hand-written audit over the same generated model
+# (operator_instruction_delivery_audit.tla) checks two runs over their whole
+# reachable space under a mob generation bound and a VIEW without the step
+# and topology counters: the write run (two bound Dormant members under two
+# profiles; every write, revoke, preparation, record and refusal arm its
+# domains reach for a mob, a profile and a member target) and the seat run
+# (two identities seated, bound, made unborn seats, born and unseated around
+# writes). Beside every generated invariant it checks that a committed write
+# owes the new generation to exactly the members the slot's old or new
+# target selects, a seat owes the mob's generation, an unseat leaves no
+# delivery fact, a delivery is prepared only for an owed, bound, born, local
+# member, and no region step touches residency or wakes. It first checks
+# that the generated model defines every arm it drives, requires each run's
+# covered arms to fire and its ten witnesses reached, one run each, and with
+# --mutants refuses four seeded defects, each by the property it targets run
+# as the only property, and requires a live-only delivery to leave the
+# Dormant delivery witness unreachable. No run uses -continue. Not yet
+# measured; it joins this shard as the lightest one measured locally.
+operator_instruction_delivery_audit="${workspace_root}/specs/machines/mob_machine/operator_instruction_delivery_audit.sh"
+if [[ ! -x "${operator_instruction_delivery_audit}" ]]; then
+  echo "error: operator-instruction delivery audit runner is missing from workspace runfiles: ${operator_instruction_delivery_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded operator-instruction delivery TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${operator_instruction_delivery_audit}" --mutants
+fi
+
 # MobMachine created identity entries (an identity an agent created, as
 # opposed to one the host declared) are recorded by the boot's scan of the
 # identity store's created entry rows, which the ci profile cannot reach
@@ -1109,7 +1141,13 @@ run_machine_verify() {
 # measurements: its sixteen runs (a safety run over 9203 distinct states,
 # five witness runs and ten mutant runs, over a model that does not extend
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
-# 4-worker local run (2026-10-31);
+# 4-worker local run (2026-10-31); the MobMachine operator-instruction
+# delivery audit with --mutants joined it after these measurements (not yet
+# measured: two whole-space runs, ten witness runs and five mutant runs over
+# the MobMachine model, whose JVM start and model parse are about 5 s a run
+# in audits-i, so an estimated 110-200 s locally with its small spaces, and
+# the shard about 230-320 s; if the first hosted run takes the shard past 10
+# minutes, the audit moves to a shard of its own);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

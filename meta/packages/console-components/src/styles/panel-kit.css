@@ -324,6 +324,25 @@ textarea.cc-input {
   padding-left: 28px;
 }
 .cc-search__input::-webkit-search-cancel-button { cursor: pointer; }
+/* The key that focuses the search ("/"), shown while it is empty. */
+.cc-search--shortcut .cc-search__input { padding-right: 28px; }
+.cc-search__key {
+  position: absolute;
+  right: 7px;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-xs);
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--_cc-foreground-meta);
+  pointer-events: none;
+}
 .cc-select {
   position: relative;
   display: inline-flex;
@@ -345,6 +364,27 @@ textarea.cc-input {
   height: 12px;
   color: var(--_cc-foreground-meta);
   pointer-events: none;
+}
+/* The scope chip next to a panel title (spec A3.1): a quiet pill that is
+   still the native select with its accessible name. */
+.cc-field--chip .cc-select__control {
+  height: 22px;
+  padding: 0 22px 0 9px;
+  border-color: var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.cc-field--chip .cc-select__control:hover {
+  border-color: var(--_cc-border-strong);
+  color: var(--_cc-foreground);
+}
+.cc-field--chip .cc-select__chevron {
+  right: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 /* Segmented control: mutually exclusive views or filters. */
@@ -380,6 +420,14 @@ textarea.cc-input {
 .cc-seg__btn:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
+}
+.cc-seg__btn:disabled { opacity: 0.45; cursor: default; }
+.cc-seg__glyph {
+  width: 13px;
+  height: 13px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  stroke-width: 1.75;
 }
 
 /* ── Buttons ───────────────────────────────────────────────────── */
@@ -1350,6 +1398,179 @@ button.cc-tile:focus-visible,
   transform: rotate(45deg);
 }
 
+/* ── Popovers, menus and view options (spec A3.2) ──────────────────
+   Elevation e2: a 1 px rule, the md shadow and the overlay surface. The
+   popover lives in the browser top layer where the Popover API exists
+   (so no pane clips it) and is a fixed layer otherwise; either way it
+   stays inside the theme scope. */
+.cc-popover {
+  position: fixed;
+  inset: auto;
+  z-index: 1000;
+  box-sizing: border-box;
+  max-height: 60vh;
+  margin: 0;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-overlay);
+  color: var(--_cc-foreground);
+  box-shadow: var(--_cc-shadow-md);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  line-height: 1.4;
+  text-align: left;
+  outline: none;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
+.cc-popover[data-state="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
+}
+@keyframes cc-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-pop-in-above {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.cc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 12px 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.cc-menu__item:hover,
+.cc-menu__item:focus { background: var(--_cc-surface-hover); outline: none; }
+.cc-menu__item:focus-visible { box-shadow: inset 0 0 0 2px var(--_cc-focus-ring); }
+.cc-menu__item[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.cc-menu__item.is-destructive { color: var(--_cc-negative-ink); }
+.cc-menu__lead {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--_cc-foreground-muted);
+}
+.cc-menu__lead .cc-glyph { width: 14px; height: 14px; stroke-width: 1.75; }
+.cc-menu__item[aria-checked="true"] .cc-menu__lead { color: var(--_cc-foreground); }
+.cc-menu__radio {
+  position: relative;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--_cc-radius-round);
+  box-shadow: inset 0 0 0 1.5px var(--_cc-border-strong);
+}
+.cc-menu__radio.is-checked { box-shadow: inset 0 0 0 1.5px var(--_cc-member-accent); }
+.cc-menu__radio.is-checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+}
+.cc-menu__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-menu__shortcut {
+  flex: none;
+  margin-left: 12px;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-menu__sep {
+  height: 1px;
+  margin: 4px -4px;
+  background: var(--_cc-border-soft);
+}
+.cc-menu__group { padding: 2px 0; }
+.cc-menu__label {
+  padding: 6px 8px 4px 32px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+/* A view switch folded into the menu shows only in a pane under 480 px. */
+.cc-menu__fold { display: none; }
+.cc-panel[data-density="compact"] .cc-menu__item { height: 26px; }
+
+.cc-view-options { padding: 12px 12px 8px; }
+.cc-view-options__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-view-options__label {
+  margin-bottom: 6px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__seg { display: flex; width: 100%; }
+.cc-view-options__seg .cc-seg__btn { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
+.cc-view-options__hint {
+  margin-top: 6px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__foot {
+  margin: 12px -12px -8px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--_cc-border-soft);
+}
+.cc-view-options__reset {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+}
+.cc-view-options__reset:hover:not(:disabled) { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-view-options__reset:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.cc-view-options__reset:disabled { color: var(--_cc-foreground-meta); opacity: 0.6; cursor: default; }
+
 /* ── Hover reveal (spec A4.1) ──────────────────────────────────────
    Secondary controls fade in when their container is hovered or holds
    focus, is selected, or the control is open; opacity only, so they stay
@@ -1392,6 +1613,7 @@ button.cc-tile:focus-visible,
 
 @container cc-panel (max-width: 479px) {
   .cc-reveal { opacity: 1; }
+  .cc-menu__fold { display: block; }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
     --_cc-card-pad: 8px 10px;
@@ -1421,6 +1643,7 @@ button.cc-tile:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .cc-dot.is-live,
   .cc-skeleton__row { animation: none; }
+  .cc-popover { animation: cc-fade-in 120ms linear; }
   .cc-mark[data-tone="live"]:not(.cc-chip__mark),
   .cc-dot.is-live {
     animation: none;
@@ -1429,6 +1652,7 @@ button.cc-tile:focus-visible,
 }
 .reduced-motion .cc-dot.is-live,
 .reduced-motion .cc-skeleton__row { animation: none; }
+.reduced-motion .cc-popover { animation: cc-fade-in 120ms linear; }
 .reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
 .reduced-motion .cc-dot.is-live {
   animation: none;

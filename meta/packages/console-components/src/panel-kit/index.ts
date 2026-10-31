@@ -64,3 +64,17 @@ export { TechnicalDetails } from "./technical-details";
 export type { TechnicalDetail } from "./technical-details";
 export { SearchField, SegmentedControl, SelectField, Toolbar } from "./toolbar";
 export type { SegmentOption, SelectOption } from "./toolbar";
+export { Popover } from "./popover";
+export type { PopoverCloseReason, PopoverPlacement, PopoverProps } from "./popover";
+export { OverflowMenu } from "./menu";
+export type {
+  MenuCheckboxEntry,
+  MenuCommandEntry,
+  MenuEntry,
+  MenuRadioEntry,
+  MenuRadioOption,
+  MenuSeparatorEntry,
+  MenuTriggerProps,
+} from "./menu";
+export { ViewOptions, ViewOptionsMenu } from "./view-options";
+export type { ViewOptionsControl, ViewOptionsProps } from "./view-options";

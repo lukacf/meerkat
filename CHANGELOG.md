@@ -116,10 +116,14 @@ them.
   These turns end when the host's runtime stops. A stop in the middle of a
   turn is crash-equivalent: the interrupted input and the queued ones stay
   non-terminal, nothing is written for them after the stop, and the next
-  start resumes them. An input that reaches the session after the stop, from
-  a part of the process that outlives the host's runtime, waits for the next
-  start the same way. On an RPC session runtime, a governed input is refused
-  instead, and so is an input to a help session
+  start resumes them. An input that reaches an idle session after the stop,
+  from a part of the process that outlives the host's runtime, waits for the
+  next start the same way. Once the session's runtime takes such an input
+  up, as after a stop in the middle of a turn, the session's registration
+  waits for its reload, and a later input is refused until the next start,
+  with nothing kept for it (an RPC session runtime refuses it with
+  `host_runtime_stopped`, `-32032`). On an RPC session runtime, a governed
+  input is refused instead of waiting, and so is an input to a help session
   (`help_session_not_resumable`), which is never rebuilt from storage. A
   turn whose session task panicked, or whose actor the service retired,
   still fails with its error, and so does a turn its caller drives directly
@@ -243,7 +247,11 @@ them.
   to the session's next registration. The RPC session runtime's check that
   refuses an input which would rebuild a help session asks it as well, and
   counts such a session as not live, so an input to a help session whose
-  actor ended that way is refused there (`help_session_not_resumable`).
+  actor ended that way is refused there (`help_session_not_resumable`). Its
+  executor attachment asks it too: an input to such a session whose
+  registration already waits for its reload is refused there, typed
+  (`-32032`, `data.kind` `host_runtime_stopped`), and otherwise such an actor
+  counts as not live, so the attachment does not ask it.
 
 - `meerkat-runtime`, `meerkat`:
   `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the

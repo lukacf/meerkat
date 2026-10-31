@@ -299,9 +299,13 @@ it. Size the workers of that runtime for the tools you compose. A host runtime
 that stops in the middle of a turn ends the turn as a crash would: the
 interrupted input and the queued ones stay non-terminal, nothing more is
 written for them, and the session's next start resumes them. An input that
-reaches the session after the stop waits for that start too. On an RPC session
-runtime two such inputs are refused instead: a governed input, and an input to
-a help session, which is never rebuilt from storage and is refused with
+reaches an idle session after the stop waits for that start too. Once the
+session's runtime takes such an input up, as after a stop in the middle of a
+turn, the session's registration waits for its reload, and a later input is
+refused until the next start, with nothing kept for it; an RPC session runtime
+refuses it with `host_runtime_stopped`. On an RPC session runtime two more
+inputs are refused instead of waiting: a governed input, and an input to a help
+session, which is never rebuilt from storage and is refused with
 `help_session_not_resumable`. A turn whose task
 panicked, or whose session the service retired, fails with its error, as does
 a turn its caller drives directly. When `RKAT_WORKER_STACK_BYTES` is unset the

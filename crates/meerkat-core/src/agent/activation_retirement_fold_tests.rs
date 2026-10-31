@@ -1061,3 +1061,64 @@ async fn no_curator_window_carries_a_superseded_body() {
     );
     assert!(window.contains(CALENDAR_TWO), "the effective body stays");
 }
+
+/// `session` decoded again with the activation row `activation` retired by
+/// hand: a torn document, since no compaction retires a key's newest row.
+fn decoded_with_retired(session: &Session, activation: &str, body_bytes: usize) -> Session {
+    let index = index_of(session.messages(), activation);
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&session.to_persisted_bytes().unwrap()).unwrap();
+    document["messages"][index] =
+        serde_json::to_value(retired_by_hand(&session.messages()[index], body_bytes)).unwrap();
+    Session::from_persisted_bytes(&serde_json::to_vec(&document).unwrap())
+        .expect("the row validator cannot tell an own row from a copied one")
+}
+
+/// A torn document whose own newest activation row of a key holds a retired
+/// body fails closed: the session-document authority refuses its rows (a
+/// compaction would be skipped and keep the history), and the model boundary
+/// refuses to project it, so no request reaches the model and the history
+/// stays as it was.
+#[tokio::test]
+async fn a_torn_own_retired_head_fails_the_model_request_closed() {
+    let mut session = prompted_session();
+    session
+        .activate_instruction(request("calendar", "act-1", None, CALENDAR_ONE))
+        .unwrap();
+    exchange(&mut session, "first question", "first answer");
+    let torn = decoded_with_retired(&session, "act-1", CALENDAR_ONE.len());
+    let rows = activation_rows(torn.messages());
+    assert_eq!(marker_of(&rows[0]), marker(CALENDAR_ONE.len()));
+
+    assert!(
+        matches!(
+            torn.authorize_activation_body_retirement(),
+            Err(InstructionActivationError::MalformedHistory(_))
+        ),
+        "the session-document authority refuses an own retired head"
+    );
+    let refusal = torn
+        .messages_for_model_boundary()
+        .expect_err("the model boundary refuses an own retired head");
+    assert!(
+        refusal.to_string().contains("retired"),
+        "the refusal names the retired head: {refusal}"
+    );
+
+    let client = Arc::new(RecordingClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(torn, &client, &compactor, None).await;
+    compactor.arm(1);
+    let outcome = agent.run("the next question".into()).await;
+    assert!(outcome.is_err(), "the run fails closed: {outcome:?}");
+    assert!(
+        client.requests().is_empty() && client.summaries().is_empty(),
+        "no request reaches the model"
+    );
+    assert_eq!(compactor.rebuilds(), 0, "nothing is compacted");
+    assert_eq!(
+        activation_rows(agent.session().messages()),
+        rows,
+        "the history stays as it was"
+    );
+}

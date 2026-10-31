@@ -552,3 +552,45 @@ fn a_prune_after_the_last_activation_row_stays_at_envelope_4() {
     );
     assert_reloaded_graph_validates(&session);
 }
+
+/// A retiring prune in a session whose stored operator-instruction state
+/// does not read is refused before anything changes: the envelope-5 marker
+/// a retired body needs is checked before the commit is installed, so the
+/// prune is all or nothing.
+#[test]
+fn a_retiring_prune_that_cannot_record_envelope_5_changes_nothing() {
+    let mut session = Session::new();
+    session
+        .activate_instruction(activation("calendar", "act-1", None, CALENDAR_ONE))
+        .unwrap();
+    session.push(user("first question"));
+    session
+        .activate_instruction(activation("calendar", "act-2", Some("act-1"), CALENDAR_TWO))
+        .unwrap();
+    session.push(user("second question"));
+    session.set_metadata_unchecked_for_test(
+        super::SESSION_INSTRUCTION_STATE_KEY,
+        serde_json::json!({ "owner": "a state this release cannot read" }),
+    );
+    let before = session.messages().to_vec();
+
+    let mut retiring = request(Vec::new());
+    retiring.retire_superseded_activation_bodies = true;
+    let refused = session.prune_system_rows(retiring);
+    assert!(
+        matches!(&refused, Err(TranscriptEditError::HistoryStateMalformed(_))),
+        "the prune is refused: {refused:?}"
+    );
+    assert_eq!(
+        session.messages(),
+        before.as_slice(),
+        "the refused prune changes no row"
+    );
+    assert!(
+        session
+            .validated_transcript_history_state()
+            .unwrap()
+            .is_none(),
+        "nor records a rewrite"
+    );
+}

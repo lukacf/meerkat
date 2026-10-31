@@ -412,3 +412,41 @@ fn a_rewrite_that_keeps_every_activation_offset_stays_at_envelope_4() {
     assert_eq!(session.persisted_envelope_version(), 4);
     assert_eq!(envelope_version(&session), 4);
 }
+
+/// A rewrite that would move an activation row to another offset, in a
+/// session whose stored operator-instruction state does not read, is refused
+/// before anything changes: the envelope-5 marker it must record is checked
+/// before the commit is installed, so the rewrite is all or nothing.
+#[test]
+fn a_rewrite_that_cannot_record_envelope_5_changes_nothing() {
+    let mut session = session_with_a_stale_prompt_before_an_activation();
+    session.set_metadata_unchecked_for_test(
+        super::SESSION_INSTRUCTION_STATE_KEY,
+        serde_json::json!({ "owner": "a state this release cannot read" }),
+    );
+    let before = session.messages().to_vec();
+    let revision = session.transcript_revision().unwrap();
+
+    let refused = rewrite(&mut session, 0, 1, Vec::new());
+    assert!(
+        matches!(&refused, Err(TranscriptEditError::HistoryStateMalformed(_))),
+        "the rewrite is refused: {refused:?}"
+    );
+    assert_eq!(
+        session.messages(),
+        before.as_slice(),
+        "the refused rewrite changes no row"
+    );
+    assert_eq!(
+        session.transcript_revision().unwrap(),
+        revision,
+        "nor the revision"
+    );
+    assert!(
+        session
+            .validated_transcript_history_state()
+            .unwrap()
+            .is_none(),
+        "nor records a rewrite"
+    );
+}

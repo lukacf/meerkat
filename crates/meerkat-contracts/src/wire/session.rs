@@ -3111,6 +3111,70 @@ mod tests {
         );
     }
 
+    /// A reader never fails a history page or a bridge message on a
+    /// retired-body marker whose form it does not know (a later render
+    /// version with a field this reader does not know): the marker reads as
+    /// it was sent.
+    #[test]
+    fn wire_history_tolerates_a_newer_retired_marker() {
+        use crate::wire::supervisor_bridge::BridgeReply;
+
+        let marker = serde_json::json!({
+            "render_version": 2,
+            "body_bytes": 13,
+            "retired_by": "a field this reader does not know",
+        });
+        let row = serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-retired-instruction-v2]\nnamespace=\"app.skills\"\nkey=\"calendar\"\nstatus=superseded\nbody_bytes=13",
+            "created_at": "2026-10-31T00:00:00Z",
+            "instruction_activation": {
+                "activation_id": "act-0003",
+                "revision": {
+                    "namespace": "app.skills",
+                    "key": "calendar",
+                    "revision_id": "calendar-r3",
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("calendar body"),
+                },
+                "supersedes": "act-0002",
+                "origin_session_id": SessionId::new().to_string(),
+                "render_version": 1,
+            },
+            "retired_instruction_body": marker,
+        });
+
+        let history: WireSessionHistory = serde_json::from_value(serde_json::json!({
+            "session_id": SessionId::new().to_string(),
+            "message_count": 1,
+            "offset": 0,
+            "has_more": false,
+            "messages": [row],
+        }))
+        .expect("a history page with a newer retired marker decodes");
+        let reply: BridgeReply = serde_json::from_value(serde_json::json!({
+            "result": "member_history_page",
+            "generation": 1,
+            "page": {
+                "from_index": 0,
+                "messages": [row],
+                "message_count": 1,
+                "complete": true,
+            },
+        }))
+        .expect("a bridge history page with a newer retired marker decodes");
+        let BridgeReply::MemberHistoryPage(bridge_page) = reply else {
+            panic!("expected a member history page");
+        };
+
+        for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            let json = serde_json::to_value(message).expect("the row serializes");
+            assert_eq!(
+                json["retired_instruction_body"], marker,
+                "the marker reads as it was sent"
+            );
+        }
+    }
+
     /// A reader never fails a history page or a bridge message on an
     /// operator-instruction entry identity whose form it does not know (a
     /// newer entry kind, change kind or field): the identity reads raw, as

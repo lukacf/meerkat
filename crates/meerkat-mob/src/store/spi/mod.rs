@@ -419,9 +419,9 @@ where
 }
 
 /// The identity intents group's entries as this build holds them: the
-/// host-adopted intents, the created entries' rows, and every entry this
-/// build cannot decode, as stored (so a rewrite of the group writes it back
-/// untouched).
+/// host-adopted intents, the created entries' rows, and every identity's row
+/// this build cannot decode, as stored (so a rewrite of the group writes it
+/// back untouched).
 fn intent_group_entries(
     identity: &super::in_memory::IdentityAuthorityState,
 ) -> Result<Vec<(String, EntryBytes)>, MobStoreError> {
@@ -430,19 +430,19 @@ fn intent_group_entries(
     for (key, raw) in &identity.unreadable_intents {
         entries.push((hashed_name(G_INTENT, key)?, Arc::new(raw.stored.clone())));
     }
-    for (name, stored) in &identity.unattributed_intent_entries {
-        entries.push((name.clone(), Arc::new(stored.clone())));
-    }
     Ok(entries)
 }
 
-/// Decode the identity intents group one entry at a time, so one entry this
-/// build cannot read fails closed for its identity alone and never the whole
-/// mob: a host-adopted intent and a created entry's row are kept as such; an
-/// entry whose key reads but whose row does not (a later build's format, an
-/// unknown field, a broken seal) is kept as stored for its identity, which
-/// reads unreadable; an entry whose key does not read, or does not name its
-/// entry, is kept as stored by name and never read.
+/// Decode the identity intents group one entry at a time, so one identity's
+/// row this build cannot read fails closed for that identity alone and never
+/// the whole mob: a host-adopted intent and a created entry's row are kept
+/// as such; an entry whose key reads but whose row does not (a later build's
+/// format, an unknown field, a broken seal) is kept as stored for its
+/// identity, which reads unreadable. An entry this build cannot attribute to
+/// an identity (an envelope of a format it does not read, a key it cannot
+/// decode, a name its key does not hash to) refuses the open, as an entry of
+/// any other group does: no read could report it, so a name it may hold would
+/// read free.
 fn import_intent_entries(
     body: &BTreeMap<String, EntryBytes>,
     identity: &mut super::in_memory::IdentityAuthorityState,
@@ -450,24 +450,14 @@ fn import_intent_entries(
     identity.intents.clear();
     identity.created.clear();
     identity.unreadable_intents.clear();
-    identity.unattributed_intent_entries.clear();
     let prefix = format!("{G_INTENT}/");
     for (name, bytes) in entries_with_prefix(body, &prefix) {
-        let keyed = check_version(bytes).and_then(|()| {
-            serde_json::from_slice::<
-                KeyedOwned<(MobId, AgentIdentity), Box<serde_json::value::RawValue>>,
-            >(bytes)
-            .map_err(serialization)
-        });
-        let keyed = match keyed {
-            Ok(keyed) if hashed_name(G_INTENT, &keyed.k)? == *name => keyed,
-            Ok(_) | Err(_) => {
-                identity
-                    .unattributed_intent_entries
-                    .insert(name.clone(), bytes.to_vec());
-                continue;
-            }
-        };
+        check_version(bytes)?;
+        let keyed: KeyedOwned<(MobId, AgentIdentity), Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(bytes).map_err(serialization)?;
+        if hashed_name(G_INTENT, &keyed.k)? != *name {
+            return Err(corrupt(format!("entry {name} does not name its key")));
+        }
         let row = keyed.d.get().as_bytes();
         match crate::identity::classify_created_identity_row(row) {
             Some(crate::identity::CreatedIdentityObservation::Created(record)) => {
@@ -839,6 +829,8 @@ impl Bundle {
             let identity = &aggregate.identity;
             vec![
                 len(identity.intents.len()),
+                len(identity.created.len()),
+                len(identity.unreadable_intents.len()),
                 len(identity.leases.len()),
                 len(identity.receipts.len()),
                 len(identity.mutation_receipts.len()),

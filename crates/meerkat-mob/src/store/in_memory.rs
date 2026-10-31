@@ -524,9 +524,6 @@ pub(super) struct IdentityAuthorityState {
     pub(super) created: BTreeMap<(MobId, AgentIdentity), crate::identity::CreatedIdentityRecord>,
     /// Intents-table rows this build cannot decode, by identity.
     pub(super) unreadable_intents: BTreeMap<(MobId, AgentIdentity), RawIntentRow>,
-    /// Intents-table entries of a host store whose key this build cannot
-    /// decode, by entry name: never read, written back untouched.
-    pub(super) unattributed_intent_entries: BTreeMap<String, Vec<u8>>,
     pub(super) leases: BTreeMap<(MobId, AgentIdentity), IdentityLeaseRecord>,
     pub(super) receipts: BTreeMap<(MobId, String, String), IdentityOperationReceipt>,
     pub(super) mutation_receipts:

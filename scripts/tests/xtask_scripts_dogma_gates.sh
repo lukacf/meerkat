@@ -581,6 +581,9 @@ printf '%s\n' \
   'echo "Error: Invariant AuditSupersededRowsRetired is violated."' \
   'echo "Error: Invariant AuditRetiredChangesOnlyAtTheDecision is violated."' \
   'echo "Error: Invariant AuditDecisionNeverLowersACount is violated."' \
+  'echo "Error: Invariant AuditDecisionKeepsRowsAndHeads is violated."' \
+  'echo "Error: Invariant activation_body_maps_lockstep is violated."' \
+  'echo "Error: Invariant activation_effective_body_live is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

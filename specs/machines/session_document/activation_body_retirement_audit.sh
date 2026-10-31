@@ -16,7 +16,7 @@
 # fails the run instead of a vacuous pass. It then checks the invariants
 # (safety), and reruns once per reachability witness, with that witness's
 # negation as an extra invariant, requiring TLC to report exactly that
-# violation. With --mutants it seeds five defects into a copy of the
+# violation. With --mutants it seeds eight defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
 # targets, checked as the run's only invariant:
 #   - retire every row (the decision takes the row counts);
@@ -24,9 +24,16 @@
 #   - drop the own-head clause from the recovery guard;
 #   - retire inside the recovery;
 #   - lower a recovered count (the decision takes the row counts less one,
-#     whatever was retired).
+#     whatever was retired);
+#   - let the decision rewrite the heads (every head of the session copied,
+#     its head map freed from the arm's unchanged frame), refused by
+#     AuditDecisionKeepsRowsAndHeads;
+#   - drop the rows >= 1 clause from the recovery guard, refused by the
+#     generated activation_body_maps_lockstep;
+#   - drop the retired <= rows clause from the recovery guard, refused by
+#     the generated activation_effective_body_live.
 # Every mutant keeps the three activation maps of the session over one key
-# set (each mutated update ranges over the keys of the rows map, and the
+# set (each mutated update ranges over the keys of the rows map, and each
 # weakened recovery guard keeps the key-set clauses), so no mutant leaves a
 # map lookup outside its domain for TLC to abort on (exit 75).
 # No run uses -continue. TLC checks the invariants of every new state and of
@@ -187,26 +194,47 @@ for witness in ${witnesses}; do
 done
 
 if [[ "${run_mutants}" == "true" ]]; then
-  # usage: mutate <name> <target invariant> <arm> <anchor> <new line>
-  # Copies the specs, replaces the one line of <arm> that contains <anchor>
-  # with <new line>, runs the target as the only invariant, and requires TLC
-  # to report it violated.
+  # usage: mutate <name> <target invariant> <arm> [--free <variable>]
+  #          <anchor> <new line> [<anchor> <new line>...]
+  # Copies the specs, replaces the one line of <arm> that contains each
+  # <anchor> with its <new line>, runs the target as the only invariant, and
+  # requires TLC to report it violated. --free takes <variable> out of the
+  # arm's unchanged frame (the generated UnchangedFrame_* operator it names,
+  # written out as an UNCHANGED tuple without it), so a new line may update
+  # it.
   mutate() {
-    local name="$1" target="$2" arm="$3" anchor="$4" line="$5"
+    local name="$1" target="$2" arm="$3"
+    shift 3
+    local free=""
+    if [[ "${1:-}" == "--free" ]]; then
+      free="$2"
+      shift 2
+    fi
     local dir="${work_dir}/mutant-${name}"
     mkdir -p "${dir}"
     cp "${spec_dir}/model.tla" "${spec_dir}/activation_body_retirement_audit.tla" "${dir}/"
-    MODEL="${dir}/model.tla" ARM="${arm}" ANCHOR="${anchor}" LINE="${line}" python3 - <<'PY'
-import os
-path = os.environ["MODEL"]
-arm, anchor, line = os.environ["ARM"], os.environ["ANCHOR"], os.environ["LINE"]
+    MODEL="${dir}/model.tla" ARM="${arm}" FREE="${free}" python3 - "$@" <<'PY'
+import os, re, sys
+path, arm, free = os.environ["MODEL"], os.environ["ARM"], os.environ["FREE"]
+edits = sys.argv[1:]
+assert edits and len(edits) % 2 == 0, "edits come in (anchor, new line) pairs"
 text = open(path).read()
 start = text.index("\n" + arm + "(") + 1
 end = text.index("\n\n", start)
 lines = text[start:end].split("\n")
-hits = [i for i, current in enumerate(lines) if anchor in current]
-assert len(hits) == 1, f"expected one line with {anchor!r} in {arm}, found {len(hits)}"
-lines[hits[0]] = line
+for anchor, line in zip(edits[0::2], edits[1::2]):
+    hits = [i for i, current in enumerate(lines) if anchor in current]
+    assert len(hits) == 1, f"expected one line with {anchor!r} in {arm}, found {len(hits)}"
+    lines[hits[0]] = line
+if free:
+    frames = [i for i, current in enumerate(lines) if re.fullmatch(r"\s*/\\ UnchangedFrame_[0-9a-f]+", current)]
+    assert len(frames) == 1, f"expected one unchanged frame in {arm}, found {len(frames)}"
+    frame = lines[frames[0]].split("/\\", 1)[1].strip()
+    definition = re.search(r"(?m)^" + frame + r" == UNCHANGED << (.*) >>$", text)
+    assert definition, f"model.tla does not define {frame}"
+    names = [name.strip() for name in definition.group(1).split(",")]
+    assert free in names, f"{frame} does not hold {free}"
+    lines[frames[0]] = "    /\\ UNCHANGED << " + ", ".join(name for name in names if name != free) + " >>"
 text = text[:start] + "\n".join(lines) + text[end:]
 open(path, "w").write(text)
 PY
@@ -239,5 +267,17 @@ PY
   mutate lower_a_recovered_count AuditDecisionNeverLowersACount \
     AuthorizeActivationBodyRetirement "session_activation_retired' =" \
     "    /\\ session_activation_retired' = MapSet(session_activation_retired, session_id, [activation_key \\in DOMAIN session_activation_rows[session_id] |-> IF session_activation_rows[session_id][activation_key] > 0 THEN session_activation_rows[session_id][activation_key] - 1 ELSE 0])"
+  # The decision also marks every head of the session copied, over the keys
+  # of its rows map, so the three maps stay over one key set.
+  mutate decision_rewrites_the_heads AuditDecisionKeepsRowsAndHeads \
+    AuthorizeActivationBodyRetirement --free session_activation_head_origin \
+    "session_activation_retired' =" \
+    "    /\\ session_activation_retired' = MapSet(session_activation_retired, session_id, session_document_activation_retired_after(session_activation_rows[session_id], session_activation_retired[session_id])) /\\ session_activation_head_origin' = MapSet(session_activation_head_origin, session_id, [activation_key \\in DOMAIN session_activation_rows[session_id] |-> \"Copied\"])"
+  mutate rows_clause_dropped activation_body_maps_lockstep \
+    RecoverSessionActivationBodies 'activation_body_maps_consistent(' \
+    '    /\ (DOMAIN rows = DOMAIN retired) /\ (DOMAIN rows = DOMAIN head_origin) /\ (\A activation_key \in DOMAIN rows : retired[activation_key] <= rows[activation_key] /\ (head_origin[activation_key] # "Own" \/ retired[activation_key] < rows[activation_key]))'
+  mutate retired_clause_dropped activation_effective_body_live \
+    RecoverSessionActivationBodies 'activation_body_maps_consistent(' \
+    '    /\ (DOMAIN rows = DOMAIN retired) /\ (DOMAIN rows = DOMAIN head_origin) /\ (\A activation_key \in DOMAIN rows : rows[activation_key] >= 1 /\ (head_origin[activation_key] # "Own" \/ retired[activation_key] < rows[activation_key]))'
 fi
 echo "activation body retirement audit passed"

@@ -843,7 +843,7 @@ fi
 # changes nothing else, and an own newest row keeps its body. It first
 # checks that the generated model defines both arms it drives, and requires
 # its three witnesses reached, each in a capped run of its own without
-# -continue. --mutants refuses five seeded defects, each run with the
+# -continue. --mutants refuses eight seeded defects, each run with the
 # invariant it targets as its only invariant. Not yet measured; it joins the
 # shard of the other session-document audit as a small one.
 activation_body_retirement_audit="${workspace_root}/specs/machines/session_document/activation_body_retirement_audit.sh"
@@ -1073,8 +1073,8 @@ run_machine_verify() {
 # five witness runs and ten mutant runs, over a model that does not extend
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
 # 4-worker local run (2026-10-31); the SessionDocumentMachine
-# activation-body retirement audit with --mutants joined it later (nine
-# runs over the same model: a safety run, three witness runs and five
+# activation-body retirement audit with --mutants joined it later (twelve
+# runs over the same model: a safety run, three witness runs and eight
 # mutant runs; not yet measured);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start

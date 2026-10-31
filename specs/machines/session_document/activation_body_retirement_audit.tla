@@ -32,13 +32,17 @@
 \* The witnesses (NotAuditWitness*, expected violations, each checked in a
 \* TLC run of its own without -continue): a decision retired a body, a
 \* decision kept a copied retired head as it was, and a key with three rows
-\* retired two. The runner's --mutants mode seeds five defects into a copy of
-\* the generated model and requires TLC to refuse each with the invariant it
-\* targets, run as its only invariant:
+\* retired two. The runner's --mutants mode seeds eight defects into a copy
+\* of the generated model and requires TLC to refuse each with the invariant
+\* it targets, run as its only invariant:
 \* retire every row (the decision's count taken as the rows), retire nothing
 \* new (the decision's update dropped), drop the own-head clause from the
-\* recovery guard, retire inside the recovery, and lower a recovered count
-\* (the decision's count taken as the rows less one, whatever was retired).
+\* recovery guard, retire inside the recovery, lower a recovered count (the
+\* decision's count taken as the rows less one, whatever was retired), let
+\* the decision rewrite the heads (AuditDecisionKeepsRowsAndHeads), and drop
+\* the rows >= 1 or the retired <= rows clause from the recovery guard (the
+\* generated activation_body_maps_lockstep and activation_effective_body_live
+\* refuse those).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* activation_body_retirement_audit.sh (its constants, its invariants and

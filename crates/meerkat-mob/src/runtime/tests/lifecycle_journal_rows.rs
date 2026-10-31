@@ -144,6 +144,36 @@ fn seated(
     })
 }
 
+/// The identity entry `name`'s `Spawned` fact of `generation` names.
+fn seat_entry(
+    records: &[MemberLifecycleRecord],
+    name: &str,
+    generation: Generation,
+) -> Option<IdentityEntryOrigin> {
+    records.iter().find_map(|record| match &record.event {
+        MemberLifecycleEvent::Spawned {
+            agent_identity,
+            generation: seated,
+            identity_entry,
+            ..
+        } if agent_identity.as_str() == name && *seated == generation => *identity_entry,
+        _ => None,
+    })
+}
+
+/// The link of `name`'s rotation from its first incarnation to its second:
+/// the rotation its retirement at G0 names, and the one its seat at G1
+/// names.
+fn rotation_link_of(
+    records: &[MemberLifecycleRecord],
+    name: &str,
+) -> (Option<RetiredRotation>, Option<SeatRotation>) {
+    (
+        retired(records, name, G0).and_then(|(_, facts)| facts.rotation),
+        seated(records, name, G1).and_then(|(_, seat)| seat.rotation),
+    )
+}
+
 /// The journal event right after `name`'s `MemberRetired` row of
 /// `generation`.
 fn event_after_retirement<'a>(
@@ -343,6 +373,33 @@ impl JournalMob {
 
     async fn lifecycle(&self) -> Vec<MemberLifecycleRecord> {
         lifecycle(&self.handle).await
+    }
+
+    /// The journal read's facts once `done` holds of them, within one step:
+    /// `what` names what the row waits for.
+    async fn lifecycle_until(
+        &self,
+        what: &str,
+        done: impl Fn(&[MemberLifecycleRecord]) -> bool,
+    ) -> Vec<MemberLifecycleRecord> {
+        let deadline = tokio::time::Instant::now() + STEP;
+        loop {
+            let records = self.lifecycle().await;
+            if done(&records) {
+                return records;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what}: not journaled within a step; {records:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Crash the mob and resume its own storage.
+    async fn restart(&mut self) {
+        let storage = self.storage.clone();
+        self.restart_into(storage).await;
     }
 }
 
@@ -675,8 +732,9 @@ async fn a_retire_then_a_reset_of_the_unseated_identity_is_not_one_rotation() {
 /// Separate appends carry no rotation link, wherever they sit in the
 /// journal: a retire, then a seat of the same identity
 /// (`seat_dormant_members`) at the very next journal event, names no
-/// rotation on either row. A worker's respawn, a retirement and then a
-/// spawn, each its own machine step, names none either.
+/// rotation on either row. (A respawn's seat names the retirement it
+/// follows from MobMachine's respawn hold, never from its position: see
+/// `a_respawn_names_the_incarnation_it_follows`.)
 ///
 /// Guard: holds before and after the rows record the facts; it fails when a
 /// writer links rows by their positions instead of the machine step that
@@ -707,25 +765,459 @@ async fn separate_appends_carry_no_rotation_link() {
         "the seat is the journal event right after the retirement"
     );
 
+    let records = mob.lifecycle().await;
+    assert_eq!(
+        retired(&records, "reseated", G0).map(|(_, facts)| facts.rotation),
+        Some(None),
+        "the retirement names no rotation"
+    );
+    assert_eq!(
+        seated(&records, "reseated", G1).map(|(_, seat)| seat.rotation),
+        Some(None),
+        "the next seat names no rotation"
+    );
+}
+
+/// A host's respawn of a member no identity entry holds is two machine
+/// steps, a retirement and then a seat, so its retirement names no
+/// rotation; its seat names the incarnation the respawn retired
+/// (`SeatRotation::RespawnAfter`): MobMachine's respawn hold, which the
+/// retirement left for its successor and the seat's step took. A reader
+/// tells a respawn from a retire followed by an unrelated seat from the
+/// facts alone.
+///
+/// RED (before the seat records the hold): the respawn's seat names no
+/// rotation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawn_names_the_incarnation_it_follows() {
+    let mob = JournalMob::new("respawn-after").await;
     mob.spawn_worker("respawned").await;
     tokio::time::timeout(STEP, mob.handle.respawn(id("respawned"), None))
         .await
         .expect("the respawn answers")
         .expect("the worker is respawned");
-
     let records = mob.lifecycle().await;
-    for name in ["reseated", "respawned"] {
+    assert_eq!(
+        rotation_link_of(&records, "respawned"),
+        (None, Some(SeatRotation::respawn_after(G0))),
+        "the respawn's seat names the incarnation it follows, and its retirement no rotation"
+    );
+}
+
+/// A placed member's seat and its retirement name the same session: the
+/// one its member host keeps, which the seat's journal effect named (the
+/// row's member ref is the host peer's, with no session) and the
+/// retirement's journal effect names.
+///
+/// RED (before the seat row records the effect's session): the placed
+/// seat reads no session, though its retirement names one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_member_journals_one_session_on_its_seat_and_its_retirement() {
+    use super::placement_support as placement;
+    let _guard = placement::REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = placement::spawn_scripted_host_peer("journal-placed-host").await;
+    let member =
+        Arc::new(placement::spawn_peer_comms_endpoint("journal-placed-member", true, None).await);
+    scripted.script_member_identity("placed", placement::member_identity_of(&member));
+    scripted.bind_member_endpoint("placed", Arc::clone(&member));
+    let responder = placement::spawn_scripted_member_turn_responder(member);
+    let controlling = placement::create_controlling_mob("journal-placed").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .spawn_placed("worker", "placed", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+    tokio::time::timeout(STEP, controlling.handle.retire(id("placed")))
+        .await
+        .expect("the retire answers")
+        .expect("the placed member is retired");
+    let records = lifecycle(&controlling.handle).await;
+    let (_, retirement) =
+        retired(&records, "placed", G0).expect("the placed retirement is journaled");
+    let (_, seat) = seated(&records, "placed", G0).expect("the placed seat is journaled");
+    assert!(
+        retirement.session_id.is_some(),
+        "the placed retirement names its member host's session"
+    );
+    assert_eq!(
+        seat.session_id, retirement.session_id,
+        "the placed seat names the session its retirement names"
+    );
+    responder.shutdown();
+    scripted.shutdown();
+}
+
+/// A mob reset ends every incarnation's standing, and with it the
+/// generation MobMachine retains for an identity: a fresh life after a
+/// reset follows no pre-reset incarnation, right after the reset as after
+/// a restart, which replays only the reset's epoch. Either way the fresh
+/// life mints above the identity's last generation (the reset folds it
+/// into the identity's high-water).
+///
+/// RED (before the reset folds the retained generation into the
+/// high-water): right after the reset, the fresh life names the pre-reset
+/// incarnation (`FreshLifeAfter(G0)`), while after a restart it names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_life_after_a_mob_reset_follows_no_pre_reset_incarnation() {
+    for (label, restart) in [
+        ("reset-fresh-life", false),
+        ("reset-restart-fresh-life", true),
+    ] {
+        let leg = if restart {
+            "with a restart between the reset and the fresh life"
+        } else {
+            "right after the reset"
+        };
+        let mut mob = JournalMob::new(label).await;
+        mob.spawn_worker("reset-member").await;
+        mob.retire("reset-member").await;
+        tokio::time::timeout(STEP, mob.handle.reset())
+            .await
+            .expect("the reset answers")
+            .expect("the reset succeeds");
+        if restart {
+            mob.restart().await;
+        }
+        mob.rotate(worker_spec("reset-member")).await;
+        let records = mob.lifecycle().await;
         assert_eq!(
-            retired(&records, name, G0).map(|(_, facts)| facts.rotation),
+            seated(&records, "reset-member", G1).map(|(_, seat)| seat.rotation),
             Some(None),
-            "{name}'s retirement names no rotation"
-        );
-        assert_eq!(
-            seated(&records, name, G1).map(|(_, seat)| seat.rotation),
-            Some(None),
-            "{name}'s next seat names no rotation"
+            "{leg}: the fresh life mints above the pre-reset generation and follows no \
+             pre-reset incarnation"
         );
     }
+}
+
+/// A rotation interrupted between its durable start and its terminal step
+/// is finished by the restarted mob, whose terminal journals the link on
+/// both rows from the state the replay rebuilt: the target the start row's
+/// rotation record recovers (`RecoverMemberRotationIntent`), and the
+/// incarnation and role the restarted terminal seats.
+///
+/// Pins the facts a restarted mob writes from replayed machine state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_rotation_finished_after_a_restart_journals_its_link() {
+    let mut mob = JournalMob::new("restart-rotation-link").await;
+    mob.spawn_worker("rotated").await;
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("rotated"),
+        "retire-runtime-quiesce",
+    );
+    let rotating = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move { handle.rotate_member(worker_spec("rotated")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the rotation's retirement starts");
+    mob.restart().await;
+    hold.release();
+    let _ = tokio::time::timeout(STEP, rotating).await;
+    let records = mob
+        .lifecycle_until("the restarted mob seats the successor", |records| {
+            seated(records, "rotated", G1).is_some()
+        })
+        .await;
+    assert_eq!(
+        rotation_link_of(&records, "rotated"),
+        (
+            Some(RetiredRotation::new(
+                RotationTarget::FreshSession,
+                G1,
+                ProfileName::from("worker"),
+            )),
+            Some(SeatRotation::successor(G0, RotationTarget::FreshSession)),
+        ),
+        "the restarted terminal journals the rotation's link on both rows"
+    );
+}
+
+/// An unlisted retirement interrupted between its durable start and its
+/// end is finished by the restarted mob, whose terminal names the cause
+/// `Unlisted` (the mark the start row's cause recovers,
+/// `RecoverIdentityEntryRetiring`), the entry it ended and the session the
+/// incarnation was bound to.
+///
+/// Pins the facts a restarted mob writes from replayed machine state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_unlisted_retirement_finished_after_a_restart_journals_its_cause() {
+    let mut mob = JournalMob::new("restart-unlisted-facts").await;
+    mob.apply(DeclaredRoster::complete([
+        declared("listed"),
+        declared("unlisted"),
+    ]))
+    .await;
+    let session = mob.session("unlisted").await;
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("unlisted"),
+        "retire-runtime-quiesce",
+    );
+    let sealing = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::complete([declared("listed")]))
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the unlisted retirement starts");
+    mob.restart().await;
+    hold.release();
+    let _ = tokio::time::timeout(STEP, sealing).await;
+    let records = mob
+        .lifecycle_until(
+            "the restarted mob ends the unlisted retirement",
+            |records| retired(records, "unlisted", G0).is_some(),
+        )
+        .await;
+    assert_eq!(
+        retired(&records, "unlisted", G0).map(|(_, facts)| facts),
+        Some(RetiredFacts {
+            identity_entry: Some(IdentityEntryOrigin::Declared),
+            cause: Some(MemberRetirementCause::Unlisted),
+            ..RetiredFacts::plain(Some(session))
+        }),
+        "the restarted terminal names the recovered cause, the entry it ended and the session"
+    );
+    assert!(
+        matches!(
+            mob.handle.identity_entry(&id("unlisted")),
+            Ok(IdentityEntryRead::NotAnEntry { worker: None })
+        ),
+        "the end of the unlisted retirement ended the entry"
+    );
+}
+
+/// A seal-marked identity's spawn rollback records the seal's cause on its
+/// start row, so a restarted mob marks the identity again from it and the
+/// end of the retirement ends the entry, as it does live. The row: a host's
+/// resumed spawn of an identity entry's member fails after its membership
+/// step (its role wiring fan-out is refused), so the actor rolls it back;
+/// while the rollback is held before its start row, a complete declared
+/// apply that does not list the identity seals it (marks it unlisted). The
+/// mob crashes once the start row is durable, before the rollback's end.
+///
+/// RED (before the rollback's start row reads the seal's mark): the start
+/// row records no cause, the restarted mob does not mark the identity, and
+/// the end of its retirement names no cause and keeps the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart() {
+    let definition = with_unique_mob_id(sample_definition_with_role_wiring(), "rollback-cause");
+    let mob_id = definition.id.clone();
+    let mut mob = JournalMob::over(definition, MobStorage::in_memory()).await;
+    mob.spawn_worker("w-peer").await;
+    let seeded = mob
+        .service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(test_comms_name_for(&mob_id, "worker", "sealed")),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed the durable member session");
+    let session = seeded.session_id.clone();
+    MobSessionService::discard_live_session(mob.service.as_ref(), &session)
+        .await
+        .expect("keep only the durable snapshot");
+    // The wiring fan-out to the peer is refused after the membership step.
+    mob.service
+        .set_comms_behavior(
+            &test_comms_name_for(&mob_id, "worker", "w-peer"),
+            MockCommsBehavior {
+                fail_add_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let rollback_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
+    let spawned = tokio::time::timeout(
+        STEP,
+        mob.handle.spawn_spec(
+            worker_spec("sealed")
+                .with_entry_custody(true)
+                .with_resume_bridge_session_id(session),
+        ),
+    )
+    .await
+    .expect("the spawn answers");
+    assert!(
+        spawned.is_err(),
+        "the resumed spawn fails after its membership step: {spawned:?}"
+    );
+    tokio::time::timeout(STEP, rollback_held.entered())
+        .await
+        .expect("the spawn's rollback starts");
+
+    // The seal marks the seated entry the complete roster does not list.
+    let sealing = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::complete(Vec::<DeclaredEntry>::new()))
+                .await
+        })
+    };
+    let marked = dsl::AgentIdentity::from_domain(&id("sealed"));
+    let mut state = mob.handle.machine_state_watch_rx.clone();
+    tokio::time::timeout(
+        STEP,
+        state.wait_for(|state| state.identity_entry_retiring.contains(&marked)),
+    )
+    .await
+    .expect("the seal marks the identity")
+    .expect("the state watch outlives the row");
+
+    // The rollback's start row is appended, and its end held.
+    let start_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
+    rollback_held.release();
+    tokio::time::timeout(STEP, start_held.entered())
+        .await
+        .expect("the rollback reaches its start row");
+    let end_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
+    start_held.release();
+    tokio::time::timeout(STEP, end_held.entered())
+        .await
+        .expect("the rollback's start row is durable");
+
+    mob.restart().await;
+    end_held.release();
+    sealing.abort();
+    let _ = sealing.await;
+
+    let records = mob
+        .lifecycle_until(
+            "the restarted mob ends the rolled-back incarnation",
+            |records| retired(records, "sealed", G0).is_some(),
+        )
+        .await;
+    assert_eq!(
+        retired(&records, "sealed", G0).and_then(|(_, facts)| facts.cause),
+        Some(MemberRetirementCause::Unlisted),
+        "the restarted mob marked the identity again from the start row, and the end names the \
+         cause"
+    );
+    assert!(
+        matches!(
+            mob.handle.identity_entry(&id("sealed")),
+            Ok(IdentityEntryRead::NotAnEntry { worker: None })
+        ),
+        "the end of the marked retirement ended the entry"
+    );
+}
+
+/// A rotation of a seated member that owes a kickoff (an `AutonomousHost`
+/// member: MobMachine's `CommitMemberRotation*Kickoff` arms, which record
+/// the kickoff the next incarnation owes in the same step) journals its
+/// link on both rows, as a rotation that owes none does.
+///
+/// Pins the kickoff arms' rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_that_owes_a_kickoff_journals_its_link() {
+    let mob = JournalMob::new("kickoff-rotation-link").await;
+    tokio::time::timeout(STEP, mob.handle.spawn_spec(autonomous_spec("kicked")))
+        .await
+        .expect("the spawn answers")
+        .expect("the autonomous member is spawned");
+    mob.rotate(autonomous_spec("kicked")).await;
+    let records = mob.lifecycle().await;
+    assert_eq!(
+        rotation_link_of(&records, "kicked"),
+        (
+            Some(RetiredRotation::new(
+                RotationTarget::FreshSession,
+                G1,
+                ProfileName::from("worker"),
+            )),
+            Some(SeatRotation::successor(G0, RotationTarget::FreshSession)),
+        ),
+        "the rotation that owes a kickoff journals its link on both rows"
+    );
+}
+
+/// A rotation of an identity entry's member under another role (the
+/// rotation a declared apply's `RoleRotate` makes: `rotate_member` with the
+/// entry's custody) journals the entry on both rows, and the role the same
+/// step seated, which is not the retired incarnation's, on the
+/// retirement's link and on the seat.
+///
+/// Pins the entry and the role of a rotation's rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_of_an_entrys_member_journals_the_entry_and_its_new_role() {
+    let mut definition = with_unique_mob_id(sample_definition(), "entry-role-rotation");
+    let worker = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .cloned()
+        .expect("the worker profile");
+    definition
+        .profiles
+        .insert(ProfileName::from("reviewer"), worker);
+    let mob = JournalMob::over(definition, MobStorage::in_memory()).await;
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .spawn_spec(worker_spec("migrated").with_entry_custody(true)),
+    )
+    .await
+    .expect("the spawn answers")
+    .expect("the host declares a spawned entry");
+    mob.rotate(
+        SpawnMemberSpec::new("reviewer", id("migrated"))
+            .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+            .with_entry_custody(true),
+    )
+    .await;
+    let records = mob.lifecycle().await;
+    let (_, retirement) =
+        retired(&records, "migrated", G0).expect("the rotation's retirement is journaled");
+    assert_eq!(
+        (
+            retirement.role,
+            retirement.identity_entry,
+            retirement.rotation
+        ),
+        (
+            ProfileName::from("worker"),
+            Some(IdentityEntryOrigin::Declared),
+            Some(RetiredRotation::new(
+                RotationTarget::FreshSession,
+                G1,
+                ProfileName::from("reviewer"),
+            )),
+        ),
+        "the retirement names the entry and the successor's role"
+    );
+    let (_, seat) = seated(&records, "migrated", G1).expect("the successor is journaled");
+    assert_eq!(
+        (seat.role, seat.rotation),
+        (
+            ProfileName::from("reviewer"),
+            Some(SeatRotation::successor(G0, RotationTarget::FreshSession)),
+        ),
+        "the seat names its new role and the incarnation it succeeds"
+    );
+    assert_eq!(
+        seat_entry(&records, "migrated", G1),
+        Some(IdentityEntryOrigin::Declared),
+        "the seat keeps the entry"
+    );
 }
 
 /// Every kind of fact the journal read records, written on `mob`: a

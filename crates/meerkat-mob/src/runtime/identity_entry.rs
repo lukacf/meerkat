@@ -1858,6 +1858,100 @@ mod tests {
         );
     }
 
+    /// The journal read answers a seat's session from its member ref, or,
+    /// when the ref carries none (a placed member's: its ref is the host
+    /// peer's), from the session the row records for it (`seat_session`,
+    /// the session the seat's journal effect named).
+    ///
+    /// RED (before the read takes the recorded session): the placed seat
+    /// reads no session.
+    #[test]
+    fn the_lifecycle_page_reads_a_placed_seats_session() {
+        let mob = MobId::from("lifecycle-mob");
+        let identity = AgentIdentity::from("placed");
+        let session = SessionId::new();
+        let spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::new(0),
+            FenceToken::new(1),
+            AgentRuntimeId::new(identity, Generation::new(0)),
+            ProfileName::from("worker"),
+        )
+        .with_bridge_member_ref(Some(crate::event::MemberRef::BackendPeer {
+            peer_id: "placed-peer".to_string(),
+            address: "tcp://127.0.0.1:1".to_string(),
+            pubkey: [7; 32],
+            bootstrap_token: None,
+            session_id: None,
+        }))
+        .with_seat_session(Some(session.clone()));
+        let page = member_lifecycle_page(
+            &mob,
+            MobJournalCursor::START,
+            &[MobEvent {
+                cursor: 1,
+                timestamp: chrono::Utc::now(),
+                mob_id: mob.clone(),
+                kind: MobEventKind::MemberSpawned(spawned),
+            }],
+        );
+        let read = page.records.iter().find_map(|record| match &record.event {
+            MemberLifecycleEvent::Spawned { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            read,
+            Some(Some(session)),
+            "the placed seat reads the session its row records"
+        );
+    }
+
+    /// The plain terminal records the identity entry and the seal's cause
+    /// only for the incarnation MobMachine binds the identity to before the
+    /// step: the stale-runtime terminal arms end a retiring runtime whose
+    /// identity is bound to a later incarnation and touch no entry state,
+    /// so the row of such an end names neither the later incarnation's
+    /// entry nor its mark. The session is the journal effect's either way.
+    ///
+    /// RED (before the facts check the binding): the stale end records the
+    /// bound incarnation's entry and cause.
+    #[test]
+    fn a_stale_runtime_terminal_records_no_entry_or_cause() {
+        let identity = AgentIdentity::from("rebound");
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        let bound = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let mut state = mob_dsl::MobMachineState::default();
+        state
+            .identity_entry_origins
+            .insert(dsl_identity.clone(), mob_dsl::IdentityEntryOrigin::Declared);
+        state.identity_entry_retiring.insert(dsl_identity.clone());
+        state
+            .identity_to_runtime
+            .insert(dsl_identity, mob_dsl::AgentRuntimeId::from_domain(&bound));
+        let stale = plain_retirement_facts(
+            &state,
+            &identity,
+            &AgentRuntimeId::new(identity.clone(), Generation::new(0)),
+            None,
+        )
+        .expect("the stale end's facts");
+        assert_eq!(
+            (stale.identity_entry, stale.cause),
+            (None, None),
+            "a stale runtime's end names no entry and no cause"
+        );
+        let current = plain_retirement_facts(&state, &identity, &bound, None)
+            .expect("the bound incarnation's facts");
+        assert_eq!(
+            (current.identity_entry, current.cause),
+            (
+                Some(IdentityEntryOrigin::Declared),
+                Some(MemberRetirementCause::Unlisted)
+            ),
+            "the bound incarnation's end names both"
+        );
+    }
+
     /// The journal read maps exactly the six member lifecycle row kinds
     /// (`member_lifecycle_event`): a row kind dropped from it, or one added
     /// to it without a decision on what it records, fails here.

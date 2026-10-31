@@ -567,6 +567,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   customizer (`MobBootstrapSpec::with_agent_customizer`, see Added). The
   builder, the stdio gateway and the bootstrap now wire their members'
   builds with one shared construction.
+- A host that shuts a runtime down (`UnifiedRuntime::shutdown`) and composes
+  it again on the same state directory in the same process, once it has
+  dropped the old one, is no longer refused as in use
+  (`StorageLayoutError::RuntimeInUse`). The root mob's actor answers its
+  terminal Shutdown first and drops what it owns afterwards, Core's
+  execution custody of `runtime.sqlite` among it; `shutdown` now returns
+  only once that actor's task has returned (within the root mob's terminal
+  shutdown budget), so dropping the runtime releases the custody at once.
 
 ### Known limitations
 

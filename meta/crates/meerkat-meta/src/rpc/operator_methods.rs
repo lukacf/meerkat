@@ -3791,7 +3791,7 @@ comms = true
     /// carrying the `durable_resume_hold`.
     #[test]
     fn a_prune_on_a_held_session_answers_the_wake_held_kinds() {
-        let identity = AgentIdentity::from("worker:main");
+        let identity = AgentIdentity::parse("worker:main").expect("identity");
         let session_id = meerkat_core::SessionId::new();
         for hold in [
             meerkat_core::service::DurableResumeHold::TailHeldForRecovery,
@@ -3828,7 +3828,7 @@ comms = true
     /// it: an archived or missing session, a malformed document.
     #[test]
     fn other_prune_failures_answer_the_catch_all() {
-        let identity = AgentIdentity::from("worker:main");
+        let identity = AgentIdentity::parse("worker:main").expect("identity");
         let session_id = meerkat_core::SessionId::new();
         for err in [
             SessionError::NotFound {

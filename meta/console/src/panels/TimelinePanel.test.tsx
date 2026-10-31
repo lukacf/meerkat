@@ -2,6 +2,8 @@ import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { TimelinePanel, describeTodayFrame } from "./TimelinePanel";
+import { __chatPaneTest } from "./ChatPane";
+import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
 import { rememberOwnSend } from "../lib/turn-origin";
 import type { ConsoleFrame } from "../types";
 
@@ -61,5 +63,37 @@ describe("Today rows", () => {
     errors.mockRestore();
     expect(collisions.length).toBe(0);
     expect(view.container.querySelectorAll(".today__row").length).toBe(2);
+  });
+
+  it("shows each event's time on the chat's 24-hour clock, in a 12-hour locale too", () => {
+    // A browser whose locale reads clock times in 12 hours (en-US).
+    const localeTime = Date.prototype.toLocaleTimeString;
+    vi.spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(function (
+      this: Date,
+      locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ) {
+      return localeTime.call(this, locales ?? "en-US", options);
+    });
+    const todayAt = (hours: number, minutes: number) => new Date().setHours(hours, minutes, 0, 0);
+    const instants = [todayAt(14, 52), todayAt(9, 5)];
+    const frames: ConsoleFrame[] = instants.map((timestampMs, index) => ({
+      id: `clock-${index}`, event: "member_ready", identity: "identity:coordinator", timestampMs, data: {},
+    }));
+    // The time the chat shows on a message sent at the same instant.
+    const chatTime = (timestampMs: number) => __chatPaneTest.buildChatMessages([{
+      id: `chat-${timestampMs}`,
+      kind: "message",
+      variant: "plain",
+      identity: { id: "agent", label: "Agent", role: "assistant" },
+      createdAt: new Date(timestampMs).toISOString(),
+      text: "Ready.",
+    }])[0]?.time;
+
+    const view = render(<TimelinePanel frames={frames} />);
+    const shown = Array.from(view.container.querySelectorAll(".today__time"), (time) => time.textContent);
+    expect(shown).toEqual(["14:52", "09:05"]);
+    expect(shown).toEqual(instants.map(chatTime));
+    expect(shown).toEqual(instants.map((timestampMs) => formatClockTime(timestampMs)));
   });
 });

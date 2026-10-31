@@ -400,15 +400,47 @@ elif name in ("attestation-main-only", "attestation-any-release-branch", "attest
         f"             {rules[name]} and\n"
         "             ((.schema_version == 1",
     )
-elif name in ("evidence-main-only", "evidence-any-release-branch", "evidence-run-any-branch", "evidence-branch-reordered"):
+elif name in ("ci-run-main-only", "ci-run-any-release-branch", "ci-run-branches-reordered"):
+    # The exact-commit CI lookup's branches: the pre-maintenance-release
+    # rule (main only), any release branch instead of the tag's version's (no
+    # branch in the query, any release/ branch in the filter), and an
+    # equivalent spelling that queries the release branch first.
+    branches = '            const branches = ["main", releaseBranch];\n'
+    if name == "ci-run-main-only":
+        replace_once(branches, '            const branches = ["main"];\n')
+    elif name == "ci-run-any-release-branch":
+        replace_once(
+            '                  workflow_id: "ci.yml",\n                  branch,\n',
+            '                  workflow_id: "ci.yml",\n',
+        )
+        replace_once(
+            "                      run.head_branch === branch &&\n",
+            '                      (run.head_branch === "main" || run.head_branch.startsWith("release/")) &&\n',
+        )
+    else:
+        replace_once(branches, '            const branches = [releaseBranch, "main"];\n')
+elif name in (
+    "evidence-main-only",
+    "evidence-any-release-branch",
+    "evidence-run-any-branch",
+    "evidence-pick-any-branch",
+    "evidence-branch-reordered",
+):
     # The readiness evidence's ref and run-branch rules: the
     # pre-maintenance-release rule (main only), any release branch, a run
-    # branch left unchecked, and an equivalent spelling.
+    # branch checked neither where the artifact is picked nor where its run
+    # is read, a pick of the tree's newest artifact from any branch, and an
+    # equivalent spelling.
     attested = (
         '             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and\n'
         "             .result == \"success\"'"
     )
     run_branch = '             (.head_branch == "main" or .head_branch == $release_branch) and\n'
+    pick_branch = (
+        "            '[.artifacts[] | select(.expired == false and\n"
+        '               (.workflow_run.head_branch == "main" or .workflow_run.head_branch == $release_branch))]\n'
+    )
+    pick_any = "            '[.artifacts[] | select(.expired == false)]\n"
     if name == "evidence-main-only":
         replace_once(attested, '             .ref == "refs/heads/main" and\n             .result == "success"\'')
         replace_once(run_branch, '             .head_branch == "main" and\n')
@@ -419,7 +451,10 @@ elif name in ("evidence-main-only", "evidence-any-release-branch", "evidence-run
             "             .result == \"success\"'",
         )
     elif name == "evidence-run-any-branch":
+        replace_once(pick_branch, pick_any)
         replace_once(run_branch, "")
+    elif name == "evidence-pick-any-branch":
+        replace_once(pick_branch, pick_any)
     else:
         replace_once(run_branch, '             (.head_branch == $release_branch or .head_branch == "main") and\n')
 elif name == "prebuild-publishes":
@@ -1037,6 +1072,8 @@ mutate tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml"
 expect_pass tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml" tag-validation
 mutate attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml"
 expect_pass attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml" tag-validation
+mutate ci-run-branches-reordered "${TEST_ROOT}/ci-run-branches-reordered.yml"
+expect_pass ci-run-branches-reordered "${TEST_ROOT}/ci-run-branches-reordered.yml" tag-validation
 mutate evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml"
 expect_pass evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml" semver-evidence
 mutate prebuild-lookup-if-reflowed "${TEST_ROOT}/prebuild-lookup-if-reflowed.yml"
@@ -1121,6 +1158,12 @@ expect_fail_named tag-validation-ignores-sdk-host "${TEST_ROOT}/tag-validation-i
 
 # A maintenance release is tagged on release/<version>: CI and semver
 # evidence from that branch qualifies next to main's, and from no other.
+mutate ci-run-main-only "${TEST_ROOT}/ci-run-main-only.yml"
+expect_fail_named ci-run-main-only "${TEST_ROOT}/ci-run-main-only.yml" \
+  "refuses the successful CI run of a push to release/0.0.0 (a maintenance release of the tag's version)" tag-validation
+mutate ci-run-any-release-branch "${TEST_ROOT}/ci-run-any-release-branch.yml"
+expect_fail_named ci-run-any-release-branch "${TEST_ROOT}/ci-run-any-release-branch.yml" \
+  "accepts the successful CI run of a push to release/9.9.9 (another version's release branch)" tag-validation
 mutate attestation-main-only "${TEST_ROOT}/attestation-main-only.yml"
 expect_fail_named attestation-main-only "${TEST_ROOT}/attestation-main-only.yml" \
   "refuses the CI attestation of a push to release/0.0.0 (a maintenance release of the tag's version)" tag-validation
@@ -1136,6 +1179,9 @@ expect_fail_named evidence-any-release-branch "${TEST_ROOT}/evidence-any-release
 mutate evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml"
 expect_fail_named evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml" \
   "accepts the readiness evidence of a main-push attestation whose run ran on release/9.9.9" semver-evidence
+mutate evidence-pick-any-branch "${TEST_ROOT}/evidence-pick-any-branch.yml"
+expect_fail_named evidence-pick-any-branch "${TEST_ROOT}/evidence-pick-any-branch.yml" \
+  "refuses the readiness evidence of a push to main once a push of the same tree to release/9.9.9 (another version's release branch) uploaded newer evidence" semver-evidence
 
 mutate prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml"
 expect_fail_named prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml" \

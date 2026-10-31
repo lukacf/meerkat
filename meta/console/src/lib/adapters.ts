@@ -77,6 +77,7 @@ export type MetaDockTarget =
   | AccessPanelTarget
   | MemoryPanelTarget
   | WorkGraphPanelTarget
+  | SchedulesPanelTarget
   | OperatorPanelTarget
   | import("@console-core").ConsoleCustomPanelTarget;
 
@@ -168,6 +169,11 @@ export interface WorkGraphPanelTarget extends ConsoleDockTarget {
   kind: "workgraph";
 }
 
+/** The Schedules workbench panel: what runs automatically, and when. */
+export interface SchedulesPanelTarget extends ConsoleDockTarget {
+  kind: "schedules";
+}
+
 export function buildPanelConversationKey(
   panelId: string,
   target: Pick<ConsoleDockTarget, "kind" | "id"> & Partial<Pick<AgentChatTarget, "identity" | "memberId" | "addressingMode">> | null,
@@ -236,7 +242,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
 
 export type ControlTargetKind =
   | "routing" | "gating" | "topology" | "health"
-  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph";
+  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph" | "schedules";
 
 export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
   switch (kind) {
@@ -262,6 +268,8 @@ export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
       return { id: "memory", kind, title: "Memory", subtitle: "Records, quarantine, dreams", iconName: "i-archive" };
     case "workgraph":
       return { id: "workgraph", kind, title: "WorkGraph", subtitle: "Goals, work items, and attention", iconName: "i-cube" };
+    case "schedules":
+      return { id: "schedules", kind, title: "Schedules", subtitle: "What runs automatically, and when", iconName: "i-clock" };
     default:
       return { id: "health", kind: "health", title: "Health" };
   }

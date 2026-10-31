@@ -64,7 +64,7 @@ export {
   writeSidebarStringSet,
 };
 
-export type NavKind = "topology" | "timeline" | "gating" | "roster" | "routing" | "logs" | "health" | "access" | "memory" | "workgraph";
+export type NavKind = "topology" | "timeline" | "gating" | "roster" | "routing" | "logs" | "health" | "access" | "memory" | "workgraph" | "schedules";
 
 interface SidebarProps {
   agents: ConsoleAgent[];
@@ -103,8 +103,9 @@ interface SidebarProps {
 ///
 /// Embedders can drop the query string into the iframe URL without
 /// touching the React tree. Reads once on mount; reload to change.
-export const ALL_NAV: NavKind[] = ["topology", "timeline", "gating", "roster", "routing", "logs", "health", "access", "memory", "workgraph"];
-const NAV_LABEL: Record<NavKind, string> = {
+export const ALL_NAV: NavKind[] = ["topology", "timeline", "gating", "roster", "routing", "logs", "health", "access", "memory", "workgraph", "schedules"];
+/** Each nav kind's label: the nav button's accessible name, and the pane menu's. */
+export const NAV_LABEL: Record<NavKind, string> = {
   topology: "Topology",
   timeline: "Today",
   gating: "Approvals",
@@ -115,6 +116,7 @@ const NAV_LABEL: Record<NavKind, string> = {
   access: "Access",
   memory: "Memory",
   workgraph: "WorkGraph",
+  schedules: "Schedules",
 };
 
 export function normalizeNavKind(value: unknown): NavKind | null {

@@ -2117,6 +2117,65 @@ mod tests {
         );
     }
 
+    /// A keyed system-prompt slot's current version is a prompt row: a resume
+    /// whose explicit prompt is exactly that version appends nothing. The
+    /// slot's superseded version is not the newest prompt row, so a resume
+    /// with it appends it.
+    #[tokio::test]
+    async fn explicit_resume_prompt_equal_to_the_current_keyed_version_appends_nothing() {
+        let update = |expected_version: Option<u64>,
+                      target_message_index: Option<usize>,
+                      content: &str| crate::SystemPromptUpdateRequest {
+            key: crate::types::SystemPromptKey::new("primary").unwrap(),
+            expected_version: expected_version
+                .map(|version| crate::types::SystemPromptVersion::new(version).unwrap()),
+            target_message_index,
+            content: content.to_string(),
+            actor: Some("host-test".to_string()),
+            expected_parent_revision: None,
+        };
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session
+            .update_system_prompt(update(None, Some(0), "Prompt version one"))
+            .expect("the head prompt is adopted in place");
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session
+            .update_system_prompt(update(Some(1), None, "Prompt version two"))
+            .expect("a later version commits");
+        let before = existing_session.messages().to_vec();
+
+        for (prompt, appends) in [("Prompt version two", false), ("Prompt version one", true)] {
+            let agent = AgentBuilder::new()
+                .resume_session(existing_session.clone())
+                .system_prompt(prompt)
+                .build_standalone(
+                    Arc::new(MockClient),
+                    Arc::new(MockTools),
+                    Arc::new(MockStore),
+                )
+                .await;
+            let messages = agent.session().messages();
+            if appends {
+                assert_eq!(
+                    messages.len(),
+                    before.len() + 1,
+                    "a superseded version is not the newest prompt row: it is appended"
+                );
+                assert!(matches!(
+                    messages.last(),
+                    Some(Message::System(system)) if system.content == prompt
+                ));
+            } else {
+                assert_eq!(
+                    messages,
+                    before.as_slice(),
+                    "the current keyed version appends nothing"
+                );
+            }
+        }
+    }
+
     /// Regression test: Resumed sessions without explicit system_prompt should keep their original
     #[tokio::test]
     async fn test_builder_preserves_existing_system_prompt_on_resume() {

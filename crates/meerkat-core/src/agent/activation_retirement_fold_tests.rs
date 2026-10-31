@@ -1122,3 +1122,177 @@ async fn a_torn_own_retired_head_fails_the_model_request_closed() {
         "the history stays as it was"
     );
 }
+
+/// A second compaction of a session that already retired a body retires
+/// only what a later activation superseded since: the row the first
+/// compaction retired stays byte-identical, the newly superseded row is
+/// retired, and each key's newest row keeps its body. The first retirement
+/// recorded the unowned instruction state, so the second compaction runs the
+/// operator-instruction fold (an empty one, which writes no row) and the
+/// retirement in one pass, from recovered counts that already hold a retired
+/// row. Both compaction records validate on reload, and no summary request
+/// carries a body its compaction retires.
+#[tokio::test]
+async fn a_second_compaction_retires_only_newly_superseded_rows() {
+    let client = Arc::new(RecordingClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        session_with_a_superseded_activation(),
+        &client,
+        &compactor,
+        None,
+    )
+    .await;
+    compactor.arm(1);
+    agent.run("the next question".into()).await.unwrap();
+    assert_eq!(compactor.rebuilds(), 1, "the first run compacts");
+    let first_retired = {
+        let messages = agent.session().messages();
+        messages[index_of(messages, "act-1")].clone()
+    };
+    assert_eq!(marker_of(&first_retired), marker(CALENDAR_ONE.len()));
+    assert!(
+        agent.session().carries_operator_instruction_facts(),
+        "the first retirement recorded the instruction state"
+    );
+
+    agent
+        .session_mut()
+        .activate_instruction(request("calendar", "act-4", Some("act-2"), CALENDAR_THREE))
+        .unwrap();
+    let (newest_calendar, billing) = {
+        let messages = agent.session().messages();
+        (
+            messages[index_of(messages, "act-4")].clone(),
+            messages[index_of(messages, "act-3")].clone(),
+        )
+    };
+    compactor.arm(1);
+    agent.run("another question".into()).await.unwrap();
+    assert_eq!(compactor.rebuilds(), 2, "the second run compacts");
+
+    let messages = agent.session().messages().to_vec();
+    assert_eq!(
+        messages[index_of(&messages, "act-1")],
+        first_retired,
+        "the row the first compaction retired is byte-identical"
+    );
+    let second = &messages[index_of(&messages, "act-2")];
+    assert_eq!(
+        marker_of(second),
+        marker(CALENDAR_TWO.len()),
+        "the newly superseded row is retired"
+    );
+    assert_eq!(
+        system_of(second).content,
+        retired_header(&identity_of(second), CALENDAR_TWO.len())
+    );
+    assert_eq!(
+        messages[index_of(&messages, "act-4")],
+        newest_calendar,
+        "the newest calendar row keeps its body"
+    );
+    assert_eq!(
+        messages[index_of(&messages, "act-3")],
+        billing,
+        "the billing row keeps its body"
+    );
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            Message::System(system) if system.instruction_entry.is_some()
+        )),
+        "the empty fold writes no entry row"
+    );
+
+    let reloaded = Session::from_persisted_bytes(&agent.session().to_persisted_bytes().unwrap())
+        .expect("the reloaded graph validates both compaction records");
+    assert_eq!(reloaded.messages(), agent.session().messages());
+    let history = reloaded
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("the session holds a rewrite graph");
+    let retained = history
+        .commits()
+        .skip(history.retired_count())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(retained.len() >= 2, "both compaction records are retained");
+    for commit in &retained {
+        let parent = history.materialize_rewrite_parent(commit).unwrap();
+        let child = history.materialize_rewrite_child(commit).unwrap();
+        crate::TranscriptRewriteRecord::new(commit.clone(), parent, child)
+            .expect("each rewrite record validates with both of its bodies");
+    }
+
+    let summaries = client.summaries();
+    assert_eq!(summaries.len(), 2, "one summary request per compaction");
+    assert!(!text_of(&summaries[0]).contains(CALENDAR_ONE));
+    let second_source = text_of(&summaries[1]);
+    assert!(
+        !second_source.contains(CALENDAR_ONE) && !second_source.contains(CALENDAR_TWO),
+        "the second summary request carries no retired body: {second_source}"
+    );
+    assert!(
+        second_source.contains(CALENDAR_THREE),
+        "the effective body stays"
+    );
+}
+
+/// Two keys with three rows each: one compaction retires the two
+/// superseded rows of each key, and each key's newest row keeps its body.
+#[tokio::test]
+async fn two_keys_with_three_rows_each_retire_two_each() {
+    const BILLING_TWO: &str = "BILLING-TWO: send invoices on the fifteenth.";
+    const BILLING_THREE: &str = "BILLING-THREE: send invoices weekly.";
+    let mut session = prompted_session();
+    for (key, activation, supersedes, body) in [
+        ("calendar", "act-1", None, CALENDAR_ONE),
+        ("billing", "act-2", None, BILLING_ONE),
+        ("calendar", "act-3", Some("act-1"), CALENDAR_TWO),
+        ("billing", "act-4", Some("act-2"), BILLING_TWO),
+        ("calendar", "act-5", Some("act-3"), CALENDAR_THREE),
+        ("billing", "act-6", Some("act-4"), BILLING_THREE),
+    ] {
+        session
+            .activate_instruction(request(key, activation, supersedes, body))
+            .unwrap();
+        exchange(&mut session, "a question", "an answer");
+    }
+    let before = session.messages().to_vec();
+
+    let (agent, client) = compacted(session).await;
+    let after = agent.session().messages();
+    for (activation, body) in [
+        ("act-1", CALENDAR_ONE),
+        ("act-3", CALENDAR_TWO),
+        ("act-2", BILLING_ONE),
+        ("act-4", BILLING_TWO),
+    ] {
+        let row = &after[index_of(after, activation)];
+        assert_eq!(
+            marker_of(row),
+            marker(body.len()),
+            "{activation} is retired"
+        );
+        assert_eq!(
+            system_of(row).content,
+            retired_header(&identity_of(row), body.len())
+        );
+    }
+    for activation in ["act-5", "act-6"] {
+        assert_eq!(
+            after[index_of(after, activation)],
+            before[index_of(&before, activation)],
+            "{activation}, its key's newest row, keeps its body"
+        );
+    }
+    let model_request = text_of(client.requests().last().unwrap());
+    for body in [CALENDAR_ONE, CALENDAR_TWO, BILLING_ONE, BILLING_TWO] {
+        assert!(
+            !model_request.contains(body),
+            "the request carries no superseded body: {body}"
+        );
+    }
+    assert!(model_request.contains(CALENDAR_THREE) && model_request.contains(BILLING_THREE));
+}

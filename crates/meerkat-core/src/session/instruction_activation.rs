@@ -2612,4 +2612,108 @@ mod tests {
             "a turn reads the refusal as malformed activation history"
         );
     }
+
+    /// `[A1, A2]` of one key, A2 superseding A1, as the stored rows.
+    fn superseded_pair() -> (SystemMessage, SystemMessage) {
+        let mut session = Session::new();
+        session
+            .activate_instruction(request(
+                "policy one",
+                "act-1",
+                InstructionActivationExpectation::Absent,
+                None,
+            ))
+            .unwrap();
+        session
+            .activate_instruction(request(
+                "policy two",
+                "act-2",
+                InstructionActivationExpectation::Effective(
+                    InstructionActivationId::new("act-1").unwrap(),
+                ),
+                Some("act-1"),
+            ))
+            .unwrap();
+        let rows = session
+            .messages()
+            .iter()
+            .map(|message| match message {
+                Message::System(system) => system.clone(),
+                other => panic!("an activation row is a System row: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        (rows[0].clone(), rows[1].clone())
+    }
+
+    fn validated(rows: &[SystemMessage]) -> Result<(), String> {
+        validate_instruction_activation_messages(
+            &rows
+                .iter()
+                .cloned()
+                .map(Message::System)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The row validator accepts a retired row only in its exact form: beside
+    /// an activation identity, before every live row of its key, at a render
+    /// version it knows, holding the header its identity and marker render,
+    /// for a body within the body limit.
+    #[test]
+    fn the_row_validator_refuses_every_malformed_retired_row() {
+        let (first, second) = superseded_pair();
+        let retired_first =
+            retired_activation_row(&first).expect("a live activation row has a retired form");
+        assert_eq!(
+            validated(&[retired_first.clone(), second.clone()]),
+            Ok(()),
+            "the exact retired form before the live row of its key is accepted"
+        );
+
+        let mut ordinary = SystemMessage::new("an ordinary System row");
+        ordinary.retired_instruction_body = retired_first.retired_instruction_body;
+        let retired_second =
+            retired_activation_row(&second).expect("a live activation row has a retired form");
+        let mut unknown_version = retired_first.clone();
+        if let Some(marker) = unknown_version.retired_instruction_body.as_mut() {
+            marker.render_version = RETIRED_INSTRUCTION_RENDER_VERSION_V1 + 1;
+        }
+        let mut altered_header = retired_first.clone();
+        altered_header.content.push('x');
+        let mut over_the_limit = retired_first.clone();
+        if let Some(marker) = over_the_limit.retired_instruction_body.as_mut() {
+            marker.body_bytes = MAX_INSTRUCTION_BODY_BYTES as u64 + 1;
+        }
+
+        for (case, rows, expected) in [
+            (
+                "a marker without an activation identity",
+                vec![ordinary],
+                "needs an instruction activation identity",
+            ),
+            (
+                "a retired row after a live row of its key",
+                vec![first.clone(), retired_second],
+                "carries a retired body after a live row of its key",
+            ),
+            (
+                "an unknown retired render version",
+                vec![unknown_version, second.clone()],
+                "unsupported retired instruction render version",
+            ),
+            (
+                "a header the identity and the marker do not render",
+                vec![altered_header, second.clone()],
+                "header bytes do not match typed identity",
+            ),
+            (
+                "a body over the body limit",
+                vec![over_the_limit, second.clone()],
+                "exceeds",
+            ),
+        ] {
+            let refused = validated(&rows).expect_err(case);
+            assert!(refused.contains(expected), "{case}: {refused}");
+        }
+    }
 }

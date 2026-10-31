@@ -450,3 +450,93 @@ fn a_rewrite_that_cannot_record_envelope_5_changes_nothing() {
         "nor records a rewrite"
     );
 }
+
+/// A keyed system-prompt update that inserts a later version before an
+/// activation row moves that row to another offset: the update commits and
+/// writes the document at envelope 5, as a generic rewrite that shifts one
+/// does.
+#[test]
+fn update_system_prompt_after_an_activation_writes_envelope_5() {
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    session
+        .update_system_prompt(prompt_update(None, Some(0), "Prompt version one."))
+        .expect("the head prompt is adopted in place");
+    session
+        .activate_instruction(activation(
+            "tone",
+            "act-1",
+            None,
+            "Answer in a formal tone.",
+        ))
+        .unwrap();
+    session.push(Message::User(UserMessage::text("hello")));
+    assert_eq!(
+        envelope_version(&session),
+        4,
+        "an adoption in place moves no activation row"
+    );
+
+    session
+        .update_system_prompt(prompt_update(Some(1), None, "Prompt version two."))
+        .unwrap_or_else(|error| panic!("a later prompt version commits: {error}"));
+    assert!(
+        session.carries_operator_instruction_facts(),
+        "the shifted offset records the envelope-5 marker"
+    );
+    assert_eq!(envelope_version(&session), 5);
+    assert_reloaded_graph_validates(&session);
+}
+
+/// A restore that moves an activation row to another offset, at the same
+/// place, writes the document at envelope 5. The compaction before it moved
+/// the row without the marker (a compaction record is validated its own
+/// way); the restore of the revision before that compaction moves it back.
+#[test]
+fn a_restore_that_shifts_an_activation_offset_writes_envelope_5() {
+    // [stale prompt, prompt, activation, user, user]
+    let mut session = session_with_a_stale_prompt_before_an_activation();
+    session.push(Message::User(UserMessage::text("and then?")));
+    let before_compaction = session.transcript_revision().unwrap();
+    let rows = session.messages().to_vec();
+    // [prompt, activation, summary, user]: the activation moves from offset
+    // 2 to 1 and keeps its place, before every conversation row.
+    session
+        .stage_validated_compaction_for_test(
+            vec![
+                rows[1].clone(),
+                rows[2].clone(),
+                Message::User(UserMessage::compaction_summary("summary")),
+                rows[4].clone(),
+            ],
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        envelope_version(&session),
+        4,
+        "the compaction records no marker"
+    );
+
+    let restored = session
+        .retained_transcript_revision_rows(&before_compaction)
+        .unwrap()
+        .expect("the revision before the compaction is retained");
+    session
+        .commit_transcript_revision_restore(
+            restored,
+            TranscriptRewriteReason::new("restore before the compaction"),
+            Some("unit-test".to_string()),
+            None,
+        )
+        .unwrap_or_else(|error| {
+            panic!("a restore that keeps the activation's place commits: {error}")
+        });
+    assert_eq!(session.messages(), rows.as_slice());
+    assert!(
+        session.carries_operator_instruction_facts(),
+        "the shifted offset records the envelope-5 marker"
+    );
+    assert_eq!(envelope_version(&session), 5);
+    assert_reloaded_graph_validates(&session);
+}

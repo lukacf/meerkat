@@ -1301,6 +1301,27 @@ pub(crate) fn fresh_life_rotation(
         .map(|generation| SeatRotation::fresh_life_after(Generation::new(generation.0)))
 }
 
+/// What the row of a spawn that takes MobMachine's respawn hold names
+/// ([`SeatRotation::RespawnAfter`]): the incarnation the respawn retired,
+/// the generation MobMachine retains for the identity in `state`, the
+/// machine state before the spawn's membership step, which takes the hold
+/// (`pending_respawn_topology`: a respawn's retirement installs it at its
+/// start and keeps it at its end, for its successor). None when the machine
+/// holds no respawn for the identity.
+pub(crate) fn respawn_rotation(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Option<SeatRotation> {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    if !state.pending_respawn_topology.contains(&dsl_identity) {
+        return None;
+    }
+    state
+        .identity_runtime_generations
+        .get(&dsl_identity)
+        .map(|generation| SeatRotation::respawn_after(Generation::new(generation.0)))
+}
+
 /// The link a rotation's terminal step journals on both of its rows, as
 /// MobMachine decided it: the rotation's target, which the machine recorded
 /// at the rotation's start and the step consumes (`member_rotation_targets`

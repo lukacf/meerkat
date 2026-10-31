@@ -41123,6 +41123,12 @@ impl MobActor {
         );
 
         if let Some(remote) = ctx.remote.as_ref() {
+            // A respawn's successor names the incarnation the respawn retired:
+            // MobMachine's respawn hold, which this membership step takes,
+            // read from the state before the step (the row is appended after
+            // it).
+            let seat_rotation =
+                super::identity_entry::respawn_rotation(self.dsl_authority.state(), &identity);
             let persist_result = boxed_arm_future(|| {
                 self.persist_placed_spawn_commit_exact(
                     &remote.pending_carrier,
@@ -41211,7 +41217,8 @@ impl MobActor {
             // ACK's, checked against the effect above): the placed row's
             // member ref is the host peer's and carries none, so the row
             // records it for the journal read.
-            .with_seat_session(Some(remote.ack.session_id.clone()));
+            .with_seat_session(Some(remote.ack.session_id.clone()))
+            .with_seat_rotation(seat_rotation);
             spawned.creation = creation.clone();
             spawned.runtime_mode = runtime_mode;
             spawned.labels = labels.clone();
@@ -41398,15 +41405,18 @@ impl MobActor {
         // A fresh seat embodied after the loss of the identity's archived
         // session records the notice, as a dormant seat's row does.
         spawned_event = spawned_event.with_history_unavailable(ctx.history_unavailable.clone());
-        // A fresh life `rotate_member` embodied for an identity no member
-        // held names the incarnation it follows, as its seat's row would:
-        // the generation MobMachine retains for the identity before this
-        // membership step.
-        if ctx.fresh_life {
-            spawned_event = spawned_event.with_seat_rotation(
-                super::identity_entry::fresh_life_rotation(self.dsl_authority.state(), &identity),
-            );
-        }
+        // What seated this incarnation when a rotation did, read from the
+        // machine state before this membership step: a fresh life
+        // `rotate_member` embodied for an identity no member held names the
+        // incarnation it follows, as its seat's row would (the generation
+        // MobMachine retains for the identity); a respawn's successor names
+        // the incarnation the respawn retired (MobMachine's respawn hold,
+        // which this step takes).
+        spawned_event = spawned_event.with_seat_rotation(if ctx.fresh_life {
+            super::identity_entry::fresh_life_rotation(self.dsl_authority.state(), &identity)
+        } else {
+            super::identity_entry::respawn_rotation(self.dsl_authority.state(), &identity)
+        });
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(

@@ -25,13 +25,13 @@ class SelectedProtectedRuntime:
     _route_bytes: bytes = field(default=b"", init=False, repr=False)
 
     def __post_init__(self):
-        from . import guide_sdk
+        from . import receiver_sdk
         from .bootstrap import GatewayInstallError
 
         selection = (self.version, self.core_version, self.meta_source, self.core_source)
         if (any(type(value) is not str for value in selection)
-                or self.version != guide_sdk.SELECTED_VERSION
-                or self.core_version != guide_sdk.declared_core_version()
+                or self.version != receiver_sdk.SELECTED_VERSION
+                or self.core_version != receiver_sdk.declared_core_version()
                 or any(re.fullmatch("[0-9a-f]{40}", value) is None
                        for value in (self.meta_source, self.core_source))):
             raise GatewayInstallError("Protected startup needs its exact selected SDK and source tuple.")

@@ -3,18 +3,46 @@ import asyncio
 import json
 from pathlib import Path
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 import pytest
 
-from launchkit import bootstrap, guide_runtime, guide_sdk
+from launchkit import bootstrap, guide_runtime, receiver_sdk
 from launchkit.blueprint import starter_blueprint
 from launchkit.guide_transport import SelectedGuideTransport
 from test_implementation_worker import team
 
 
+
+class InertTransportBuilder:
+    """State/transport interface specimen; not an implementation of either SDK."""
+    def __init__(self):
+        self._config = SimpleNamespace(persistent_state=None)
+        self.factory = None
+
+    def persistent_state(self, path):
+        self._config.persistent_state = path
+        return self
+
+    def gateway_transport(self, factory):
+        self.factory = factory
+        return self
+
+    def mob_inline(self, value): return self
+    def roster(self, value): return self
+    def topology_provider(self, value): return self
+    def agent_memory(self, value): return self
+    def session_service(self, value): return self
+    def http_listen(self, value): return self
+    def console_auth_required(self, value): return self
+
+    async def build(self):
+        raise AssertionError("A state-order specimen must stop before runtime startup.")
+
+
 def selection(**kwargs):
-    return SelectedGuideTransport(Mock(name="original_factory"), guide_sdk.SELECTED_VERSION,
-        guide_sdk.declared_core_version(), "a" * 40, "b" * 40,
+    return SelectedGuideTransport(Mock(name="original_factory"), receiver_sdk.SELECTED_VERSION,
+        receiver_sdk.declared_core_version(), "a" * 40, "b" * 40,
         {"provider": "openai", "model": "gpt-6.1-sol"}, **kwargs)
 
 
@@ -66,15 +94,13 @@ def test_conflicting_legacy_state_is_preserved_and_refused(tmp_path, kind, suffi
 
 
 def test_transport_configuration_does_not_override_builder_state(tmp_path):
-    from meerkat_meta import Meta
-
     selected = selection(persistent_state=str(tmp_path / "protected/native/state"))
-    builder = Meta.builder().persistent_state("/already-selected/by-caller")
+    builder = InertTransportBuilder().persistent_state("/already-selected/by-caller")
     guide_runtime.configure_builder(builder, selected)
     assert builder._config.persistent_state == "/already-selected/by-caller"
     selected.factory.assert_not_called()
     with pytest.raises(bootstrap.GatewayInstallError, match="one builder"):
-        guide_runtime.configure_builder(Meta.builder(), selected)
+        guide_runtime.configure_builder(InertTransportBuilder(), selected)
 
 
 def test_unreadable_legacy_state_refuses_instead_of_assuming_absence(tmp_path, monkeypatch):
@@ -90,8 +116,8 @@ def test_unreadable_legacy_state_refuses_instead_of_assuming_absence(tmp_path, m
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["implementation", "rehearsal"])
 @pytest.mark.parametrize("explicit", [False, True])
-async def test_actual_workers_select_exact_sdk_path_before_transport_binding(tmp_path, monkeypatch, request, kind, explicit):
-    from meerkat_meta.builder import MetaBuilder
+async def test_actual_workers_select_exact_state_path_before_transport_binding(tmp_path, monkeypatch, request, kind, explicit):
+    from meerkat_meta import Meta
     from launchkit import implementation_worker, rehearsal_worker
 
     selected = selection(**({"persistent_state": str(tmp_path / "protected/native/state")} if explicit else {}))
@@ -116,7 +142,8 @@ async def test_actual_workers_select_exact_sdk_path_before_transport_binding(tmp
         observed.append(builder._config.persistent_state)
         assert selected._bound, "the original transport was configured on this builder"
         raise RuntimeError("fixture stopped before native startup")
-    monkeypatch.setattr(MetaBuilder, "build", reached_builder)
+    monkeypatch.setattr(InertTransportBuilder, "build", reached_builder)
+    monkeypatch.setattr(Meta, "builder", staticmethod(InertTransportBuilder))
     if kind == "rehearsal":
         # Rehearsal's outer run() owns the failure receipt; execute propagates.
         with pytest.raises(RuntimeError, match="fixture stopped before native startup"):

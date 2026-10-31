@@ -88,7 +88,7 @@ test('mounted overview requests all setups, exposes unknown status, and performs
     assert.doesNotMatch(document.body.textContent, /No recorded deployments/);
     assert.ok(calls.some(call => call.url === '/api/guide/list?include_all=true'));
     assert.ok(calls.every(call => call.method === 'GET'));
-    await click('Close'); assert.equal(document.querySelector('dialog'), null);
+    await click('Close'); assert.equal(document.querySelector('dialog') === null, true);
     assert.equal(document.activeElement.id, 'opener');
   });
 });
@@ -101,7 +101,7 @@ test('closing during setup read discards the response and does not mount action 
   }, async ({ document, calls, click, settle }) => {
     await click('Open and manage'); await click('Close');
     await act(async () => { release({ id: setup.id, version: 1 }); await settle(); });
-    assert.equal(document.querySelector('dialog'), null); assert.ok(calls.every(call => call.method === 'GET'));
+    assert.equal(document.querySelector('dialog') === null, true); assert.ok(calls.every(call => call.method === 'GET'));
   });
 });
 test('management detail reuses lifecycle controls without offering a fresh installation', async () => {
@@ -178,10 +178,10 @@ test('an unreadable overview opens an explicit failure state and refresh can est
     if (unavailable) throw new Error('offline');
     return null;
   }, async ({ document, calls, click, button }) => {
-    assert.equal(button('Open and manage'), undefined);
+    assert.equal(button('Open and manage') === undefined, true);
     await click('Check deployment records');
     assert.match(document.body.textContent, /Some deployment records could not be checked/);
-    assert.equal(document.querySelector('[aria-label="Installation and operation"]'), null);
+    assert.equal(document.querySelector('[aria-label="Installation and operation"]') === null, true);
     unavailable = false;
     await click('Refresh deployment records');
     assert.match(document.body.textContent, /No saved deployments/);

@@ -421,7 +421,7 @@ test('previous turns remain visible in chronological order through a terminal ha
   const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
     { state: saved, snapshot: { frames: [], bindings: [], available: true }, collapseCompleted: true }));
   const dom = new JSDOM(html), document = dom.window.document;
-  assert.equal(document.querySelector('details'), null, 'Historical prose is never hidden in a disclosure.');
+  assert.equal(document.querySelector('details') === null, true, 'Historical prose is never hidden in a disclosure.');
   const turns = [...document.querySelectorAll('[data-guide-turn]')];
   assert.equal(turns.length, 2);
   assert.deepEqual(turns.map(turn => turn.querySelector('.cc-conversation-turn').getAttribute('aria-label')), ['Turn 1', 'Turn 2']);
@@ -470,11 +470,11 @@ test('technical work stays collapsed with its own turn while both saved answers 
   const activity = document.querySelector('[data-guide-technical-activity]');
   assert.ok(activity);
   assert.equal(activity.open, false);
-  assert.equal(activity.closest('[data-guide-turn]'), turns[0]);
+  assert.equal(activity.closest('[data-guide-turn]') === turns[0], true);
   assert.match(turns[0].textContent, /First answer/);
   assert.match(turns[1].textContent, /Second answer/);
   for (const transcript of document.querySelectorAll('[data-guide-turn] > .cc-conversation-transcript'))
-    assert.equal(transcript.closest('details'), null);
+    assert.equal(transcript.closest('details') === null, true);
   dom.window.close();
 });
 
@@ -488,7 +488,7 @@ test("expired sign-in stops native recovery and checks only saved timeline witho
     assert.equal(calls.length, 1, "401 does not probe or start the native setup team");
     assertPreserved();
     await act(async () => button("Check sign-in").click());
-    assert.equal(document.querySelector(".setup-error"), null);
+    assert.equal(document.querySelector(".setup-error") === null, true);
     assert.equal(calls.length, 2);
     assert.ok(calls.every(call => call.url.includes("/timeline?")));
     assertPreserved();
@@ -503,7 +503,7 @@ test("returning to the original expired tab checks its timeline once and never r
       view.dispatchEvent(new view.Event('focus'));
       document.dispatchEvent(new view.Event('visibilitychange'));
     });
-    assert.equal(document.querySelector('.setup-error'), null);
+    assert.equal(document.querySelector('.setup-error') === null, true);
     assert.equal(calls.length, 2);
     assert.ok(calls.every(call => call.method === 'GET' && call.url.includes('/timeline?')));
     assertPreserved();

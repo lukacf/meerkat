@@ -94,7 +94,9 @@ test('current guide keeps the answer and failures visible while native technical
       const current = document.querySelector('[data-current-guide-transcript]');
       assert.match(current.textContent, /Your repository needs a protected connection/);
       assert.match(current.textContent, /The connection needs attention/);
-      assert.doesNotMatch(current.textContent, /inspect_repository|Compaction started/);
+      const conversation = current.cloneNode(true);
+      conversation.querySelectorAll('[data-guide-technical-activity]').forEach(node => node.remove());
+      assert.doesNotMatch(conversation.textContent, /inspect_repository|Compaction started/);
       const details = document.querySelector('[data-guide-technical-activity]');
       assert.equal(details.open, false);
       assert.match(details.textContent, /inspect_repository/);

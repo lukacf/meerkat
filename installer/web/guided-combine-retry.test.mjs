@@ -366,7 +366,7 @@ test('current-question navigation preserves the unsent note and selection withou
     const navigation=document.querySelector('.setup-question-return');
     assert.ok(navigation,'The current saved question has a persistent return action');
     assert.ok(navigation.closest('.setup-journey-now'),'The pending action has one stable location above the conversation');
-    assert.equal(document.querySelector('.setup-composer-area .setup-question-return'),null,'The composer does not duplicate the active widget');
+    assert.equal(document.querySelector('.setup-composer-area .setup-question-return') === null, true,'The composer does not duplicate the active widget');
     assert.equal(navigation.getAttribute('aria-label'),`Show current question: ${current.question.title}`);
     const before=values.get(input.key);
     assert.equal(document.querySelector('#setup-message').value,input.draft);
@@ -460,7 +460,7 @@ test('busy following keeps current native activity visible above long saved setu
     assert.ok(document.querySelector('#setup-trial') && document.querySelector('.implementation-panel') &&
       document.querySelector('#setup-deployment'),'The actual saved Try/Build/Run panels remain below the conversation');
     assert.match(document.querySelector('.setup-journey-now').textContent,/Using tool: inspect blueprint/);
-    assert.equal(native.querySelector('.setup-native-phase'),null,'Running status has one stable owner above the transcript');
+    assert.equal(native.querySelector('.setup-native-phase') === null, true,'Running status has one stable owner above the transcript');
     assert.equal(scroll.scrollTop,416);
     assert.equal(follow() === null,true,'Following the live transcript needs no redundant navigation');
     assert.ok(movements.some(move=>move.behavior==='smooth' && move.top===416),'The initial busy reveal follows native activity');
@@ -809,8 +809,8 @@ test('opening another saved conversation shows a loading step instead of the old
     await clickPackageNavigation(document, 'Your setups');
     await clickPackageNavigation(document, 'Second package setup');
     assert.match(document.querySelector('.setup-journey-now').textContent, /Opening saved conversation/);
-    assert.equal(document.querySelector('.setup-journey-now .setup-question-return'), null);
-    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait'), null);
+    assert.equal(document.querySelector('.setup-journey-now .setup-question-return') === null, true);
+    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait') === null, true);
     await act(async () => { release(structuredClone(second)); await settle(); });
     await waitPackage(() => document.querySelector('.setup-journey-now').textContent.includes(second.question.title));
     assert.equal(document.querySelector('#setup-message').value, inputs[1].draft);
@@ -1171,7 +1171,7 @@ test('a fully ready saved refinement offers explicit acceptance with one exact-v
     await act(async () => { button.click(); await settle(); });
     assert.match(document.querySelector('.setup-journey-now').textContent, /Saving your plan/);
     assert.doesNotMatch(document.querySelector('.setup-journey-now').textContent, /Plan accepted|saved/);
-    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait'), null, 'A pending plan save is not a running guide request');
+    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait') === null, true, 'A pending plan save is not a running guide request');
     await act(async () => { releaseApply(structuredClone(accepted)); await settle(); });
     await waitPackage(() => document.body.textContent.includes('ACCEPTED PLAN'));
     assert.deepEqual(calls.filter(call => call.method === 'POST'), [{ url: apply, method: 'POST', body: { version: state.version } }]);

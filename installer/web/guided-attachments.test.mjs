@@ -141,7 +141,7 @@ test('the narrow Menu retains existing controls and closes with Escape without c
     await act(async () => menu.click());
     assert.equal(menu.getAttribute('aria-expanded'), 'true');
     assert.equal(actions.classList.contains('is-open'), true);
-    for (const label of ['Your setups', 'Guide settings', 'Saved tools', 'Configuration'])
+    for (const label of ['Your setups', 'Guide settings', 'Advanced configuration'])
       assert.ok([...actions.querySelectorAll('button')].some(button => button.textContent.includes(label)), label);
     assert.equal(actions.querySelector('.setup-provider-model').textContent, 'gpt-6.1-sol');
     const histories = actions.querySelector('.setup-history-control > button');
@@ -230,7 +230,7 @@ test('mobile New response sits above the conversation and only opening the exact
     const scroll = document.querySelector('.setup-chat-scroll'), before = local.get(input.key);
     assert.ok(scroll.querySelector('.cc-message--assistant'), 'The real native transcript contains the saved reply');
     assert.ok(notice(), 'Automatic decision arrival does not claim the off-screen reply was read');
-    assert.equal(notice().parentElement.className, 'setup-mobile-response');
+    assert.equal(notice().closest('.setup-journey-now') !== null, true);
     assert.ok(notice().parentElement.compareDocumentPosition(scroll) & window.Node.DOCUMENT_POSITION_FOLLOWING);
     assert.equal(document.querySelector('.setup-composer-area .setup-new-response') === null, true);
     await act(async () => {
@@ -272,13 +272,13 @@ test('the real composer uploads multipart files, previews and removes them, then
 
 test('a fresh anonymous setup keeps Saved tools closed and never reads a null guide', async () => {
   await mount({ state: { ...structuredClone(guide), id: null } }, async ({ document, calls, input }) => {
-    const button = [...document.querySelectorAll('button')].find(node => node.textContent === 'Saved tools');
-    assert.ok(button);
-    assert.equal(button.disabled, true);
-    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    const disclosure = document.querySelector('.setup-advanced-tools');
+    assert.ok(disclosure);
+    assert.equal(disclosure.open, false);
+    assert.equal([...document.querySelectorAll('button')].some(node => node.textContent === 'Import saved tool'), false);
     assert.equal(document.querySelector('.setup-saved-tools') === null, true);
-    await act(async () => { button.click(); await pause(); });
-    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    await act(async () => { disclosure.querySelector('summary').click(); await pause(); });
+    assert.equal([...document.querySelectorAll('button')].some(node => node.textContent === 'Import saved tool'), false);
     assert.equal(document.querySelector('.setup-saved-tools') === null, true);
     assert.equal(calls.some(call => call.url.includes('/toolkit-saved')), false);
     assert.equal(document.querySelector('#setup-message').value, input.draft);
@@ -293,7 +293,8 @@ test('discussing an approved saved-tool review preserves the real unsent note, c
     selection: { request_id: '1'.repeat(32), request_sha256: 'a'.repeat(64), version: guide.version },
     review: { status: 'review_required', profile: 'gmail', values: {}, prior_operations: ['old_operation'], unapplied: [] } };
   await mount({ session, savedToolkit }, async ({ document, calls, input }) => {
-    await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Saved tools').click(); await pause(); });
+    await act(async () => { document.querySelector('.setup-advanced-tools summary').click(); await pause(); });
+    await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Import saved tool').click(); await pause(); });
     assert.equal(calls.filter(call => call.method === 'POST').length, 0);
     await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Discuss how this fits my mob').click(); await pause(); });
     const posted = calls.find(call => call.url.endsWith('/respond')).body;
@@ -1059,7 +1060,7 @@ test('expired-session send refusal offers host sign-in and preserves draft witho
       assert.equal(JSON.parse(local.get(input.key)).draft,draft);
       assert.equal(calls.filter(c=>c.method==='POST').length,1);
       await act(async () => {[...alert.querySelectorAll('button')].find(b=>b.textContent==='Check sign-in').click(); await pause();});
-      assert.equal(document.querySelector('.setup-sign-in-anchor[role="alert"]'),null);
+      assert.equal(document.querySelector('.setup-sign-in-anchor[role="alert"]') === null, true);
       assert.equal(document.querySelector('#setup-send').disabled,false);
       assert.equal(document.querySelector('#setup-message').value,draft);
       assert.equal(calls.filter(c=>c.method==='POST').length,1,'Authentication recovery never resends the correction.');
@@ -1087,7 +1088,7 @@ for (const mode of ['mobile Escape', 'mobile Close', 'resized desktop Escape']) 
       else dialog.dispatchEvent(new window.Event('cancel', { bubbles: true, cancelable: true }));
       await pause();
     });
-    assert.equal(document.querySelector('dialog'), null);
+    assert.equal(document.querySelector('dialog') === null, true);
     assert.ok(document.activeElement === (mode.startsWith('resized') ? trigger : menu));
     assert.ok(document.querySelector('#setup-message') === textarea);
     assert.equal(textarea.value, input.draft);

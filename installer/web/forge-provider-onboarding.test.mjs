@@ -357,7 +357,7 @@ test("configured first-run model settings stay optional, and editing a key canno
     await act(async () => detail.querySelector("summary").click());
     assert.equal(detail.open, true);
     await enter("synthetic-unsaved-provider-key");
-    assert.equal(document.querySelector(".setup-provider-return"), null,
+    assert.equal(document.querySelector(".setup-provider-return") === null, true,
       "An unsaved replacement key cannot be skipped through Continue.");
     assert.equal(button("Save locally").disabled, false);
     assert.equal(button("Save locally").classList.contains("setup-provider-primary"), true);
@@ -667,7 +667,7 @@ test("confirmed first-run save offers primary Continue without starting the guid
     assert.equal(call.method, "GET");
     return { status: "stopped", available: true };
   } }, async ({ document, calls, button, click, enter, closes }) => {
-    assert.equal(document.querySelector(".setup-provider-return"), null);
+    assert.equal(document.querySelector(".setup-provider-return") === null, true);
     await enter("synthetic-continue-key");
     await click("Save locally");
     const action = button("Continue");

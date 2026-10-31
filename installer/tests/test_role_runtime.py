@@ -12,10 +12,10 @@ import weakref
 
 import pytest
 
-from launchkit import bootstrap, guide_sdk, role_runtime as roles
+from launchkit import bootstrap, receiver_sdk, role_runtime as roles
 from launchkit.guide_transport import SelectedGuideTransport
 
-king = pytest.importorskip("workspace_runtime_admission_client")
+host = pytest.importorskip("workspace_runtime_admission_client")
 transport = pytest.importorskip("workspace_gateway_transport")
 
 
@@ -29,7 +29,7 @@ def reset(monkeypatch):
 @pytest.fixture
 def original(monkeypatch, request):
     from launchkit.protected_startup import SelectedProtectedRuntime
-    args = (guide_sdk.SELECTED_VERSION, guide_sdk.declared_core_version(),
+    args = (receiver_sdk.SELECTED_VERSION, receiver_sdk.declared_core_version(),
             "a" * 40, "b" * 40, {"provider": "openai", "model": "gpt-6.1-sol"})
     selected = (SelectedProtectedRuntime(*args) if getattr(request, "param", None) == "metadata"
                 else SelectedGuideTransport(Mock(), *args))
@@ -39,7 +39,7 @@ def original(monkeypatch, request):
 
 def admitted(role="planner", state="/protected/planner/state", *, close=None):
     # Actual nominal types, with no claim to protocol/native evidence here.
-    value = object.__new__(king.AdmittedGatewayRuntime)
+    value = object.__new__(host.AdmittedGatewayRuntime)
     value.role, value.persistent_state = role, state
     value.factory = object.__new__(transport.RestrictedGatewayTransportFactory)
     value.check = Mock()

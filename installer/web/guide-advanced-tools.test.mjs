@@ -20,13 +20,15 @@ test('saved tool entry needs this guide capability; late reads cannot enable ano
   const render=id=>act(async()=>root.render(React.createElement(GuideAdvancedTools,{guideId:id,active:true,onSavedTools(){assert.fail('read must not import');}})));
   try{
     await render('a');assert.doesNotMatch(document.body.textContent,/Import saved tool/);
+    assert.deepEqual(calls, [], 'A closed Advanced menu does not read saved-tool availability');
+    await act(async()=>{const node=document.querySelector('details');node.open=true;node.dispatchEvent(new dom.window.Event('toggle'));});
     await render('b');await act(async()=>pending[0]({available:true}));
     assert.doesNotMatch(document.body.textContent,/Import saved tool/);
     await act(async()=>pending[1]({available:false}));assert.doesNotMatch(document.body.textContent,/Import saved tool/);
     await render('c');await act(async()=>pending[2]({available:true}));assert.match(document.body.textContent,/Import saved tool/);
     const disclosure=document.querySelector('details');disclosure.open=true;
     await act(async()=>disclosure.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
-    assert.equal(disclosure.open,false);assert.equal(document.activeElement,document.querySelector('summary'));
+    assert.equal(disclosure.open,false);assert.equal(document.activeElement===document.querySelector('summary'),true);
     assert.ok(calls.every(call=>call.method==='GET'));
   }finally{
     await act(async()=>root.unmount());dom.window.close();

@@ -79,7 +79,7 @@ test("server native mode projects only native choices and Continue never submits
     assert.doesNotMatch(document.body.textContent, /gpt-6|claude-sonnet/);
     assert.equal(document.querySelector('option[value="disabled"]').disabled, true);
     await input("select", "offered"); await click("Continue");
-    assert.equal(button("Sign in"), undefined);
+    assert.equal(button("Sign in") === undefined, true);
     await click("Use this model");
     assert.match(document.body.textContent, /Live model access has not been checked/);
     await click("Continue"); assert.equal(closed.length, 1);
@@ -103,18 +103,18 @@ test("target review, offered sign-in, device code, notices and native refusal st
     assert.equal(document.querySelector("details summary").textContent, "Exact configuration");
     assert.match(document.querySelector(".native-provider-model-summary").textContent, /exact-native-model/);
     assert.ok(button("Confirm model setup").compareDocumentPosition(document.querySelector("details")) & 4);
-    await click("Confirm model setup"); assert.equal(button("Enter API key"), undefined);
+    await click("Confirm model setup"); assert.equal(button("Enter API key") === undefined, true);
     await click("Sign in");
     assert.match(document.body.textContent, /EXACT-CODE/);
     assert.equal(document.querySelector("a").href, "https://provider.invalid/device");
-    assert.equal(button("Continue"), undefined);
+    assert.equal(button("Continue") === undefined, true);
     state = { status: "failed", joined: true, notices: [{ kind: "target_saved", exact: "native-observation" }],
       terminal: { kind: "failed", reason: "native_refusal_or_unavailable", native_effects: "reobserve" } };
     await click("Check setup");
     assert.match(document.body.textContent, /native_refusal_or_unavailable/);
     assert.doesNotMatch(document.querySelector('[role="alert"]').textContent, /native_refusal_or_unavailable/);
     assert.match(document.body.textContent, /native-observation/);
-    assert.equal(document.querySelector("a"), null);
+    assert.equal(document.querySelector("a") === null, true);
   });
 });
 
@@ -131,7 +131,7 @@ test("explicit retry preserves draft and observes a lost response without submit
   }, async ({ click, input, document, calls, button }) => {
     assert.match(document.body.textContent, /My unsent idea/);
     await click("Start a new setup");
-    assert.equal(button("Start a new setup"), undefined);
+    assert.equal(button("Start a new setup") === undefined, true);
     await click("Check setup");
     await input("select", "offered");
     assert.equal(button("Continue").disabled, false);
@@ -145,7 +145,7 @@ test("explicit retry preserves draft and observes a lost response without submit
 test("joined failure without a confirmed terminal outcome cannot offer a new attempt", async () => {
   await mounted(() => ({ attempt: 0, status: "failed", joined: true, restart_available: false }),
     async ({ button, document }) => {
-      assert.equal(button("Start a new setup"), undefined);
+      assert.equal(button("Start a new setup") === undefined, true);
       assert.match(document.body.textContent, /contact the Forge host operator/);
     });
 });
@@ -161,7 +161,7 @@ for (const kind of ["key", "browser_manual"]) test(`${kind} clears secrets and p
     await input("input", "private-secret-canary");
     const submit = kind === "key" ? "Save API key" : "Submit return URL";
     await click(submit);
-    assert.equal(document.querySelector("input"), null);
+    assert.equal(document.querySelector("input") === null, true);
     assert.doesNotMatch(document.body.textContent, /private-secret-canary/);
     await click("Check setup");
     assert.equal(document.querySelector("input").value, "");
@@ -169,7 +169,7 @@ for (const kind of ["key", "browser_manual"]) test(`${kind} clears secrets and p
     await click("Cancel setup");
     assert.match(document.body.textContent, /cancelled and closed/);
     assert.equal(calls.filter(call => call.url.endsWith("/answer")).length, 1);
-    assert.equal(button("Continue"), undefined);
+    assert.equal(button("Continue") === undefined, true);
   });
 });
 
@@ -186,7 +186,7 @@ test("an obsolete read cannot resurrect a prompt after an accepted answer", asyn
     await click("Continue");
     assert.match(document.body.textContent, /Use this model/);
     await act(async () => resolve(choices)); await tick();
-    assert.equal(document.querySelector("select"), null);
+    assert.equal(document.querySelector("select") === null, true);
   });
 });
 
@@ -197,7 +197,7 @@ test("authentication failure hides private prompts and never echoes server error
       failed = true; await click("Check setup");
       assert.doesNotMatch(document.body.textContent, /PRIVATE-CODE|private-error-canary/);
       assert.match(document.body.textContent, /Sign in again/);
-      assert.equal(document.querySelector("a"), null);
+      assert.equal(document.querySelector("a") === null, true);
     });
 });
 
@@ -213,7 +213,7 @@ test("provider failure keeps polling until the original child has joined", async
     assert.match(document.body.textContent, /Setup has not finished closing/);
     await act(async () => poll()); await tick();
     assert.equal(reads, 2, "failure is not evidence that native cleanup finished");
-    assert.equal(button("Cancel setup"), undefined);
+    assert.equal(button("Cancel setup") === undefined, true);
     assert.doesNotMatch(document.body.textContent, /Native cleanup is not confirmed yet/);
     await act(async () => poll()); await tick();
     assert.equal(reads, 2, "polling ends after the same child is observed joined");
@@ -225,16 +225,16 @@ test("StrictMode reads do not start native work, and unknown prompts offer no in
   await mounted(() => snapshot({ kind: "future_prompt", detail: "native-detail" }), async ({ document, calls, button }) => {
     assert.match(document.body.textContent, /not supported by this Forge version/);
     assert.equal(calls.filter(call => call.method === "POST").length, 0);
-    assert.equal(button("Continue"), undefined);
+    assert.equal(button("Continue") === undefined, true);
     assert.ok(button("Cancel setup"));
   }, { strict: true });
 });
 
 test("browser presentation refuses executable URLs and has no callback answer without manual transport", async () => {
   await mounted(() => { throw Error("No HTTP expected"); }, async ({ document, button }) => {
-    assert.equal(document.querySelector("a"), null);
-    assert.equal(document.querySelector("input"), null);
-    assert.equal(button("Continue"), undefined);
+    assert.equal(document.querySelector("a") === null, true);
+    assert.equal(document.querySelector("input") === null, true);
+    assert.equal(button("Continue") === undefined, true);
     assert.match(document.body.textContent, /cannot be opened/);
   }, { Component: NativeProviderPrompt, props: { prompt: { kind: "browser", authorization_url: "javascript:alert(1)", redirect: "http://localhost/callback" } } });
 });

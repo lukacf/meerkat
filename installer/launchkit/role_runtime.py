@@ -121,8 +121,14 @@ class PreparedRuntime:
         return self
 
     async def _prepare(self):
-        from workspace_runtime_admission_client import AdmittedGatewayRuntime
-        from workspace_gateway_transport import RestrictedGatewayTransportFactory
+        try:
+            from workspace_runtime_admission_client import AdmittedGatewayRuntime
+            from workspace_gateway_transport import RestrictedGatewayTransportFactory
+        except ModuleNotFoundError as error:
+            if error.name not in {"workspace_runtime_admission_client", "workspace_gateway_transport"}:
+                raise
+            from .bootstrap import GatewayInstallError
+            raise GatewayInstallError("The restricted runtime needs its host-supplied admission modules.") from error
 
         value = await asyncio.to_thread(self.manager.preparer, role=self.role, timeout=60)
         if type(value) is not AdmittedGatewayRuntime:

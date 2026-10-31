@@ -29,7 +29,13 @@ class RemoteProtectedWorker:
     _observation: object = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        from workspace_worker_client import RestrictedWorkerClient
+        try:
+            from workspace_worker_client import RestrictedWorkerClient
+        except ModuleNotFoundError as error:
+            if error.name != "workspace_worker_client":
+                raise
+            from .bootstrap import GatewayInstallError
+            raise GatewayInstallError("The restricted worker needs its host-supplied client module.") from error
 
         if type(self.client) is not RestrictedWorkerClient:
             raise TypeError("The trusted launcher must supply its original restricted worker client.")

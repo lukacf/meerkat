@@ -643,7 +643,7 @@ test('the mounted guide retains saved choices beside a timed wait and editable d
     await act(async()=>document.querySelector('#setup-send').click());
     assert.equal(composer().value,'','only the admitted text is consumed');
     assert.equal(strip().dataset.requestId,pending.operation.request_id);
-    assert.ok(strip().closest('.setup-composer-area'));
+    assert.ok(strip().closest('.setup-journey-now'));
     assert.equal(strip().closest('.setup-chat-scroll') === null,true,'the status remains outside transcript scrolling');
     assert.match(question().textContent,/SAVED QUESTION/);
     assert.match(question().textContent,/Your guide is responding\. Choices are paused/);

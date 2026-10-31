@@ -42,14 +42,14 @@ class SelectedGuideTransport:
     _original_state: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
-        from . import guide_sdk
+        from . import receiver_sdk
         from .bootstrap import GatewayInstallError
 
-        if (not callable(self.factory) or self.version != guide_sdk.SELECTED_VERSION
-                or self.core_version != guide_sdk.declared_core_version()
+        if (not callable(self.factory) or self.version != receiver_sdk.SELECTED_VERSION
+                or self.core_version != receiver_sdk.declared_core_version()
                 or any(type(value) is not str or re.fullmatch("[0-9a-f]{40}", value) is None
                        for value in (self.meta_source, self.core_source))):
-            raise GatewayInstallError("The guide needs its selected SDK and original transport factory.")
+            raise GatewayInstallError("The protected receiver needs its selected application SDK and original transport factory.")
         route = deepcopy(self._model_route)
         if (type(route) is not dict or set(route) != {"provider", "model"}
                 or any(type(value) is not str or not value or len(value) > 4096
@@ -118,7 +118,10 @@ class SelectedGuideTransport:
             # Retain this choice even if SDK configuration fails. No retry on
             # another builder, factory invocation here, or local spawn fallback.
             object.__setattr__(self, "_bound", True)
-            builder.gateway_transport(self.factory)
+            transport = getattr(builder, "gateway_transport", None)
+            if not callable(transport):
+                raise GatewayInstallError("The selected receiver SDK does not support borrowed gateway transports.")
+            transport(self.factory)
         return builder
 
     def __reduce_ex__(self, protocol):

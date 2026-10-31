@@ -6,15 +6,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from launchkit import bootstrap, guide_runtime, guide_sdk, guide_transport, planner
+from launchkit import bootstrap, guide_runtime, receiver_sdk, guide_transport, planner
 from launchkit.guide_transport import SelectedGuideTransport
 
 
 @pytest.fixture
 def selected(monkeypatch):
     value = SelectedGuideTransport(
-        Mock(name="original_factory"), guide_sdk.SELECTED_VERSION,
-        guide_sdk.declared_core_version(), "a" * 40, "b" * 40,
+        Mock(name="original_factory"), receiver_sdk.SELECTED_VERSION,
+        receiver_sdk.declared_core_version(), "a" * 40, "b" * 40,
         {"provider": "openai", "model": "gpt-6.1-sol"},
     )
     monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
@@ -50,7 +50,7 @@ def test_configuration_failure_cannot_retry_or_fall_back(selected, missing_api):
         def gateway_transport(self, factory):
             raise RuntimeError("SDK refused fixture transport")
     first = object() if missing_api else RefusedBuilder()
-    with pytest.raises(AttributeError if missing_api else RuntimeError):
+    with pytest.raises(bootstrap.GatewayInstallError if missing_api else RuntimeError):
         guide_runtime.configure_builder(first, selected)
     with pytest.raises(bootstrap.GatewayInstallError, match="one builder"):
         guide_runtime.configure_builder(Builder(), selected)
@@ -111,7 +111,7 @@ def test_only_public_model_route_enters_restricted_selection(selected, extra):
     {"meta_source": "not-a-commit"}, {"core_source": "not-a-commit"},
 ])
 def test_invalid_sdk_tuple_or_factory_refuses(selected, changes):
-    with pytest.raises(bootstrap.GatewayInstallError, match="selected SDK"):
+    with pytest.raises(bootstrap.GatewayInstallError, match="selected application SDK"):
         replace(selected, **changes)
 
 
@@ -119,8 +119,8 @@ def test_route_reads_are_copies_and_declaration_is_checked(selected, monkeypatch
     route = guide_runtime.selected_model_configuration()
     route["model"] = "changed"
     assert selected.model_configuration["model"] == "gpt-6.1-sol"
-    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.6")
-    monkeypatch.setattr(guide_sdk, "CORE_REQUIREMENT", "=0.9.7")
+    monkeypatch.setattr(receiver_sdk, "SELECTED_VERSION", "0.9.6")
+    monkeypatch.setattr(receiver_sdk, "CORE_REQUIREMENT", "=0.9.7")
     assert replace(selected, version="0.9.6", core_version="0.9.7").core_version == "0.9.7"
     with pytest.raises(bootstrap.GatewayInstallError):
         replace(selected, version="0.9.6", core_version="0.9.6")

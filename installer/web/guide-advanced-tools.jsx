@@ -4,16 +4,17 @@ import { request } from "./state.mjs";
 export function GuideAdvancedTools({ guideId, active, disabled, savedToolsOpen, onSavedTools, children }) {
   const [capability, setCapability] = useState(null), [revision, setRevision] = useState(0);
   const summary = useRef(null);
+  const [open, setOpen] = useState(false);
   useEffect(() => {
-    if (!guideId || !active) return;
+    if (!guideId || !active || !open) return;
     const controller = new AbortController();
     setCapability(null);
     request(`/api/guide/${encodeURIComponent(guideId)}/toolkit-saved`, { signal: controller.signal, timeoutMs: 30000 })
       .then(value => { if (!controller.signal.aborted) setCapability({ guideId, available: value?.available === true }); })
       .catch(() => { if (!controller.signal.aborted) setCapability({ guideId, failed: true }); });
     return () => controller.abort();
-  }, [guideId, active, revision]);
-  return <details className="setup-advanced-tools" onKeyDown={event => {
+  }, [guideId, active, open, revision]);
+  return <details className="setup-advanced-tools" onToggle={event => setOpen(event.currentTarget.open)} onKeyDown={event => {
     if (event.key === "Escape") {
       event.preventDefault(); event.stopPropagation(); event.currentTarget.open = false; summary.current?.focus();
     }

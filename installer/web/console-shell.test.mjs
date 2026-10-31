@@ -115,7 +115,7 @@ test('captured native root and IIFE are retained; closed shell does not initiali
   assert.equal(f.doc.querySelector('#root') === f.native, true);
   assert.equal(f.doc.querySelector('script').getAttribute('src'), '/console/assets/console-app.js?v=250bc27b79ec');
   assert.equal(f.drawer.hidden, true); assert.equal(f.calls.length, 0);
-  assert.equal(f.doc.querySelector('.forge-console-shell__native').getAttribute('inert'), null);
+  assert.equal(f.doc.querySelector('.forge-console-shell__native').getAttribute('inert') === null, true);
   f.shell.dispose(); assert.equal(f.native.parentNode === f.doc.body, true); f.dom.window.close();
 });
 

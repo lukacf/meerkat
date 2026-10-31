@@ -127,7 +127,7 @@ test('a reviewed pipeline class reorder reaches the guide with the exact edited 
     const document = dom.window.document;
     await waitFor(() => document.querySelector('[data-class-order-preview]'));
     assert.deepEqual(JSON.parse(document.querySelector('[data-class-order-preview]').dataset.classOrderPreview), original);
-    const configuration = [...document.querySelectorAll('button')].find(button => button.textContent.includes('Configuration'));
+    const configuration = [...document.querySelectorAll('button')].find(button => button.textContent.includes('Advanced configuration'));
     assert.ok(configuration && !configuration.disabled);
     await act(async () => { configuration.click(); await settle(); });
     const editor = document.querySelector('#setup-config-source');

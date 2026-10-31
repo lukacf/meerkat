@@ -102,7 +102,7 @@ test("preparation needs an explicit bodyless POST, rapid clicks admit once and p
     assert.equal(view.find("Prepare app checks"), undefined);
     finish = true; await view.poll();
     assert.equal(view.readiness.at(-1).status, "ready");
-    assert.match(view.document.body.textContent, /App checks ready\./);
+    assert.match(view.document.body.textContent, /Application checker configured\./);
     assert.doesNotMatch(view.document.body.textContent, /app has been built|tested live|private Node runtime/);
     assert.equal(view.find("Check status"), undefined);
     assert.equal(view.timers.size, 0);

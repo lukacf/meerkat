@@ -5,12 +5,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from launchkit import bootstrap, guide_sdk, guide_runtime, planner, role_runtime
+from launchkit import bootstrap, receiver_sdk, guide_runtime, planner, role_runtime
 from launchkit.protected_startup import SelectedProtectedRuntime
 
 
 def selection(**changes):
-    fields = dict(version=guide_sdk.SELECTED_VERSION, core_version=guide_sdk.declared_core_version(),
+    fields = dict(version=receiver_sdk.SELECTED_VERSION, core_version=receiver_sdk.declared_core_version(),
         meta_source='a' * 40, core_source='b' * 40,
         _model_route={'provider': 'openai', 'model': 'gpt-6.1-sol'})
     fields.update(changes)

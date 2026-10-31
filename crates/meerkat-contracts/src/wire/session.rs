@@ -3038,6 +3038,69 @@ mod tests {
         );
     }
 
+    /// A wire history read carries the typed marker of an instruction
+    /// activation row whose body a compaction retired, beside the row's
+    /// activation identity and its retired header. Rewrite input cannot
+    /// express the marker.
+    #[test]
+    fn wire_history_carries_the_retired_marker() {
+        let origin = SessionId::new();
+        let marker = serde_json::json!({ "render_version": 1, "body_bytes": 13 });
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-retired-instruction-v1]\nnamespace=\"app.skills\"\nkey=\"calendar\"\nstatus=superseded\nbody_bytes=13",
+            "created_at": "2026-10-29T08:00:00Z",
+            "instruction_activation": {
+                "activation_id": "act-0003",
+                "revision": {
+                    "namespace": "app.skills",
+                    "key": "calendar",
+                    "revision_id": "calendar-r3",
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("calendar body"),
+                },
+                "supersedes": "act-0002",
+                "origin_session_id": origin.to_string(),
+                "render_version": 1,
+            },
+            "retired_instruction_body": marker.clone(),
+        }))
+        .expect("a retired activation row decodes");
+        let page = SessionHistoryPage {
+            session_id: origin,
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![message],
+        };
+
+        let wire: WireSessionHistory = page.into();
+        let json = serde_json::to_value(&wire.messages[0]).unwrap();
+        assert_eq!(
+            json["retired_instruction_body"], marker,
+            "the history read carries the retired-body marker"
+        );
+        assert_eq!(json["instruction_activation"]["activation_id"], "act-0003");
+
+        // Rewrite input has no marker field: one sent anyway is ignored.
+        let forged = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+            "retired_instruction_body": marker,
+        }))
+        .expect("rewrite input ignores a field it does not define");
+        let Ok(Message::System(system)) = forged.into_core() else {
+            panic!("rewrite input decodes to a System row");
+        };
+        assert!(
+            serde_json::to_value(&system)
+                .unwrap()
+                .get("retired_instruction_body")
+                .is_none(),
+            "rewrite input never mints a retired-body marker"
+        );
+    }
+
     /// A reader never fails a history page or a bridge message on an
     /// operator-instruction entry identity whose form it does not know (a
     /// newer entry kind, change kind or field): the identity reads raw, as

@@ -153,3 +153,58 @@ async fn documents_without_instruction_facts_stay_byte_identical_on_every_store_
     assert_eq!(head_version, 5);
     assert_eq!(loaded.messages(), with_entry.messages());
 }
+
+/// A compaction that retires no instruction activation body (the session's
+/// only activation row is its key's newest) keeps the document at envelope
+/// 4 and byte-identical on every store kind.
+#[tokio::test]
+async fn a_compaction_that_retires_nothing_keeps_the_document_byte_identical_on_every_store_kind() {
+    let body = "Answer in a formal tone.";
+    let mut session = plain_session();
+    session.push(Message::User(UserMessage::text("and then?")));
+    session
+        .activate_instruction(meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::types::InstructionRevisionRef {
+                namespace: meerkat_core::types::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::types::InstructionKey::new("tone").unwrap(),
+                revision_id: meerkat_core::types::InstructionRevisionId::new("tone-r1").unwrap(),
+                content_sha256: meerkat_core::types::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::types::InstructionActivationId::new("act-1").unwrap(),
+            expectation: meerkat_core::InstructionActivationExpectation::Absent,
+            supersedes: None,
+            body: body.to_string(),
+        })
+        .expect("an activation row");
+    session.push(Message::User(UserMessage::text("and after that?")));
+    // [prompt, user, user, activation, user] -> [prompt, summary, activation, user]
+    let rows = session.messages().to_vec();
+    session
+        .stage_validated_compaction_for_test(
+            vec![
+                rows[0].clone(),
+                Message::User(UserMessage::compaction_summary("summary")),
+                rows[3].clone(),
+                rows[4].clone(),
+            ],
+            1,
+        )
+        .expect("the compaction commits");
+    assert_eq!(session.messages()[2], rows[3], "the activation row stays");
+
+    let written = session.to_persisted_bytes().unwrap();
+    assert_eq!(envelope_version(&written), 4);
+    assert_eq!(
+        sqlite_whole_blob_bytes(&session).await,
+        written,
+        "a JSONL realm keeps the exact bytes"
+    );
+    assert_eq!(
+        host_store_bytes(&session).await,
+        written,
+        "a host store realm keeps the exact bytes"
+    );
+    let (head_version, loaded) = sqlite_head(&session).await;
+    assert_eq!(head_version, 4, "a SQLite realm's head stays at envelope 4");
+    assert_eq!(loaded.messages(), session.messages());
+}

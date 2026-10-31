@@ -666,9 +666,20 @@ impl UnifiedRuntime {
     /// outcome after it. A candidate launch's teardown keeps every member's
     /// work as the store holds it
     /// ([`crate::MobRuntime::mob_shutdown_options`]).
+    ///
+    /// The actor answers the Shutdown first and drops what it owns after,
+    /// Core's execution custody of the runtime store among it
+    /// (`MobHandle::actor_task_watch`). A teardown that completed, or found
+    /// the actor already ended, waits within the same budget for the actor's
+    /// task to return: once shutdown returns, nothing of the mob holds that
+    /// custody, so the runtime's own drop releases it and a successor that
+    /// composes on the same state directory in this process is not refused
+    /// as in use.
     async fn shutdown_mob_actor(&self, budget: Duration) -> MobTerminalShutdownOutcome {
         let deadline = std::time::Instant::now() + budget;
-        match self
+        // Taken before the Shutdown, so an actor that already ended is seen.
+        let mut actor_task = self.mob_handle().actor_task_watch();
+        let outcome = match self
             .mob_handle()
             .shutdown_with_report(self.mob_runtime.mob_shutdown_options(deadline))
             .await
@@ -703,6 +714,36 @@ impl UnifiedRuntime {
                     error: error.to_string(),
                 }
             }
+        };
+        if matches!(
+            outcome,
+            MobTerminalShutdownOutcome::Completed(_) | MobTerminalShutdownOutcome::AlreadyShutDown
+        ) {
+            Self::await_mob_actor_exit(&mut actor_task, deadline).await;
+        }
+        outcome
+    }
+
+    /// Wait until `deadline` for the mob actor's task to return after its
+    /// terminal Shutdown: it has then dropped every store handle it owned.
+    /// An actor still exiting at the deadline, or a task that ended without
+    /// returning, is logged, and shutdown goes on.
+    async fn await_mob_actor_exit(
+        actor_task: &mut meerkat_mob::MobActorTaskWatch,
+        deadline: std::time::Instant,
+    ) {
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), actor_task.wait())
+            .await
+        {
+            Ok(meerkat_mob::MobActorTaskWait::Returned) => {}
+            Ok(meerkat_mob::MobActorTaskWait::Lost) => tracing::warn!(
+                "the mob actor's task ended without returning after its terminal Shutdown; \
+                 what it held is not attested"
+            ),
+            Ok(_) | Err(_) => tracing::warn!(
+                "the mob actor was still exiting when its terminal teardown budget ran out; \
+                 the runtime store's execution custody is released once it has exited"
+            ),
         }
     }
 

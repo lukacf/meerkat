@@ -3,7 +3,10 @@
 // agents. Fed with every console frame (before any panel filters them) and
 // with history backfills; panels read it through useActivityLedger() for
 // sparklines, live state and traffic. Counting reads the shared frame
-// classifier, so a frame and its saved history copy count once.
+// classifier, so a frame and its saved history copy count once, and a
+// message is one message however many of its ends the console sees: the
+// sender's call, its receipt (the envelope id) and the recipient's notice
+// (the same id as its delivery id).
 
 import React from "react";
 import { stripAgentKeyPrefix } from "../../../packages/console-core/src/agent-title";
@@ -20,8 +23,7 @@ const MAX_PAIRS = 2_000;
 const MAX_RUNS_PER_IDENTITY = 500;
 const MAX_TOOLS_PER_IDENTITY = 1_000;
 const MAX_SEEN_EVENTS = 50_000;
-/** One message seen from both ends (the sender's call, the recipient's notice) within this window counts once. */
-const MESSAGE_MATCH_MS = 60_000;
+const MAX_MESSAGES = 20_000;
 const DEFAULT_NOTIFY_MS = 250;
 
 /** What the ledger counts per agent per minute. */
@@ -145,17 +147,27 @@ interface IdentityRecord {
   openModelCalls: Map<string, number>;
 }
 
-interface MessageGroup {
+/** One message between agents, as the ledger knows it so far. An end is a
+ * console identity (`resolved`) or a peer's reference (a comms name or an
+ * opaque peer id) that may resolve later. */
+interface MessageRecord {
   atMs: number;
-  sources: Set<string>;
+  from: string;
+  fromResolved: boolean;
+  to: string;
+  toResolved: boolean;
 }
 
-interface PairRecord {
-  from: string;
-  to: string;
-  buckets: Map<number, number>;
-  lastMs: number;
-  recent: MessageGroup[];
+/** One end of a message a frame shows, keyed so its other ends find it. */
+interface MessageFact {
+  key: string;
+  record: MessageRecord;
+}
+
+/** Messages each agent sent, per minute, derived once per version. */
+interface DerivedSent {
+  version: number;
+  sent: Map<string, Map<number, number>>;
 }
 
 type Data = Record<string, unknown>;
@@ -244,18 +256,47 @@ function peersFromResult(data: Data): Array<[string, string]> {
   return out;
 }
 
-/** A message one frame records, from one of its ends. */
-interface MessageFact {
-  from: string;
-  to: string;
-  /** Which end saw it: the sender's call, the sender's or the recipient's notice. */
-  source: "call" | "sent-notice" | "received-notice";
+/** The envelope id a send tool's receipt names: the id the recipient's notice carries as its delivery id. */
+function sentEnvelopeId(data: Data): string {
+  for (const candidate of [data.result, data.content]) {
+    const texts = Array.isArray(candidate)
+      ? candidate.map((block) => textValue(recordOf(block).text))
+      : [typeof candidate === "string" ? candidate : candidate && typeof candidate === "object" ? JSON.stringify(candidate) : ""];
+    for (const text of texts) {
+      if (!text || !text.includes("envelope_id")) continue;
+      try {
+        const parsed = recordOf(JSON.parse(text));
+        const id = textValue(recordOf(parsed.receipt).envelope_id) || textValue(parsed.envelope_id);
+        if (id) return id;
+      } catch {
+        // Not a JSON receipt.
+      }
+    }
+  }
+  return "";
+}
+
+/** The comms blocks of a notice frame (or of a saved message carrying one). */
+function commsBlocksOf(data: Data): Data[] {
+  const blocks: Data[] = [];
+  for (const candidate of [data, recordOf(data.message)]) {
+    if (textValue(candidate.type) === "comms") blocks.push(candidate);
+    for (const block of Array.isArray(candidate.blocks) ? candidate.blocks : []) {
+      const record = recordOf(block);
+      if (textValue(record.type) === "comms") blocks.push(record);
+    }
+  }
+  return blocks;
 }
 
 class Ledger implements ActivityLedger {
   version = 0;
   private identityRecords = new Map<string, IdentityRecord>();
-  private pairs = new Map<string, PairRecord>();
+  /** Messages by key, and the keys of their other ends. */
+  private messages = new Map<string, MessageRecord>();
+  private messageAliases = new Map<string, string>();
+  private derived: DerivedSent | null = null;
+  /** Peer ids to the names (or identities) they stand for. */
   private peerNames = new Map<string, string>();
   private seen = new Set<string>();
   private resolver: LedgerResolver | null = null;
@@ -287,7 +328,8 @@ class Ledger implements ActivityLedger {
 
   reset(): void {
     this.identityRecords.clear();
-    this.pairs.clear();
+    this.messages.clear();
+    this.messageAliases.clear();
     this.peerNames.clear();
     this.seen.clear();
     this.changed();
@@ -320,12 +362,11 @@ class Ledger implements ActivityLedger {
     const classified = classifyFrame(frame);
     const identity = this.canonical(frame.identity);
     changed = this.applySpan(classified, identity, atMs, frame.event) || changed;
+    // Messages merge by their own keys, whichever copy of a frame shows them.
+    changed = this.applyMessages(frame, data, identity, atMs) || changed;
     if (this.seen.has(classified.eventKey)) return changed;
     this.remember(classified.eventKey);
     if (identity) changed = this.count(identity, classified, frame, atMs) || changed;
-    for (const message of this.messagesOf(frame, data, classified, identity)) {
-      changed = this.recordMessage(message, atMs) || changed;
-    }
     return changed;
   }
 
@@ -368,11 +409,22 @@ class Ledger implements ActivityLedger {
     if (oldest) this.identityRecords.delete(oldest[0]);
   }
 
+  /** Learn peer ids' names: from the `peers` tool's results, and from every
+   * comms notice, which names its peer by id and comms name. */
   private capturePeers(frame: ConsoleFrame, data: Data): boolean {
-    if (frame.event !== "tool_execution_completed" && frame.event !== "tool_result_received") return false;
-    if ((textValue(data.name) || textValue(data.tool_name)) !== "peers") return false;
+    const learned: Array<[string, string]> = [];
+    if (frame.event === "tool_execution_completed" || frame.event === "tool_result_received") {
+      if ((textValue(data.name) || textValue(data.tool_name)) === "peers") learned.push(...peersFromResult(data));
+    } else if (frame.event === "system_notice") {
+      for (const block of commsBlocksOf(data)) {
+        const peer = recordOf(block.peer);
+        const id = textValue(peer.id);
+        const name = textValue(peer.display_name);
+        if (id && name) learned.push([id, name]);
+      }
+    }
     let changed = false;
-    for (const [id, name] of peersFromResult(data)) {
+    for (const [id, name] of learned) {
       if (this.peerNames.get(id) === name) continue;
       this.peerNames.set(id, name);
       changed = true;
@@ -501,80 +553,136 @@ class Ledger implements ActivityLedger {
     }
   }
 
-  private messagesOf(frame: ConsoleFrame, data: Data, classified: ClassifiedFrame, identity: string): MessageFact[] {
-    if (!identity) return [];
+  /** The ends of messages this frame shows: a send call, a send's receipt
+   * (which ties the call to its envelope id), or comms notices. */
+  private applyMessages(frame: ConsoleFrame, data: Data, identity: string, atMs: number): boolean {
+    if (!identity) return false;
+    const name = textValue(data.name) || textValue(data.tool_name);
+    const callId = textValue(data.id) || textValue(data.tool_call_id);
     if (frame.event === "tool_call_requested" || frame.event === "tool_call") {
-      const name = textValue(data.name) || textValue(data.tool_name);
-      if (!PEER_TOOLS.has(name)) return [];
+      if (!PEER_TOOLS.has(name)) return false;
       const args = recordOf(data.args);
-      const reference = textValue(args.display_name) || textValue(args.to) || textValue(args.identity)
+      const to = textValue(args.display_name) || textValue(args.to) || textValue(args.identity)
         || textValue(args.target_identity) || textValue(args.recipient) || textValue(args.peer_id);
-      const to = reference ? this.peerIdentity(reference) : "";
-      return to && to !== identity ? [{ from: identity, to, source: "call" }] : [];
+      if (!to) return false;
+      return this.recordMessage({
+        key: `call:${identity}:${callId || frame.id}`,
+        record: { atMs, from: identity, fromResolved: true, to, toResolved: false },
+      });
     }
-    if (frame.event !== "system_notice" || classified.family !== "message" || classified.internal) return [];
-    const blocks: Data[] = [];
-    for (const candidate of [data, recordOf(data.message)]) {
-      if (textValue(candidate.type) === "comms") blocks.push(candidate);
-      for (const block of Array.isArray(candidate.blocks) ? candidate.blocks : []) {
-        const record = recordOf(block);
-        if (textValue(record.type) === "comms") blocks.push(record);
-      }
+    if ((frame.event === "tool_result_received" || frame.event === "tool_execution_completed") && PEER_TOOLS.has(name) && callId) {
+      const envelope = sentEnvelopeId(data);
+      return envelope ? this.linkMessages(`call:${identity}:${callId}`, `envelope:${envelope}`) : false;
     }
-    const facts: MessageFact[] = [];
-    for (const block of blocks) {
+    if (frame.event !== "system_notice") return false;
+    let changed = false;
+    commsBlocksOf(data).forEach((block, index) => {
       const kind = textValue(block.kind);
-      if (kind === "lifecycle" || kind === "response_progress") continue;
+      if (kind === "lifecycle" || kind === "response_progress") return;
+      if (/^mob\.kickoff_/.test(textValue(block.intent))) return;
       const peer = recordOf(block.peer);
-      const reference = textValue(peer.display_name) || textValue(peer.id);
-      const other = reference ? this.peerIdentity(reference) : "";
-      if (!other || other === identity) continue;
+      const other = textValue(peer.display_name) || textValue(peer.id);
+      if (!other) return;
       const outgoing = textValue(block.direction) === "outgoing";
-      facts.push(outgoing
-        ? { from: identity, to: other, source: "sent-notice" }
-        : { from: other, to: identity, source: "received-notice" });
-    }
-    return facts;
+      // An incoming notice's delivery id is the sender's envelope id.
+      const delivery = textValue(block.delivery_id);
+      const key = delivery && !outgoing
+        ? `envelope:${delivery}`
+        : `notice:${identity}:${outgoing ? "out" : "in"}:${delivery || textValue(block.request_id) || frame.id}:${index}`;
+      changed = this.recordMessage({
+        key,
+        record: outgoing
+          ? { atMs, from: identity, fromResolved: true, to: other, toResolved: false }
+          : { atMs, from: other, fromResolved: false, to: identity, toResolved: true },
+      }) || changed;
+    });
+    return changed;
   }
 
-  private recordMessage(message: MessageFact, atMs: number): boolean {
-    const pairKey = `${message.from}\u0000${message.to}`;
-    let pair = this.pairs.get(pairKey);
-    if (!pair) {
-      if (this.pairs.size >= MAX_PAIRS) this.evictOldestPair();
-      pair = { from: message.from, to: message.to, buckets: new Map(), lastMs: atMs, recent: [] };
-      this.pairs.set(pairKey, pair);
+  private messageKey(key: string): string {
+    let current = key;
+    for (let hops = 0; hops < 8; hops++) {
+      const next = this.messageAliases.get(current);
+      if (!next || next === current) break;
+      current = next;
     }
-    // The other end of a message already counted joins it instead of counting again.
-    const match = pair.recent
-      .filter((group) => !group.sources.has(message.source) && Math.abs(group.atMs - atMs) <= MESSAGE_MATCH_MS)
-      .sort((a, b) => a.atMs - b.atMs)[0];
-    if (match) {
-      match.sources.add(message.source);
-      return false;
-    }
-    pair.recent.push({ atMs, sources: new Set([message.source]) });
-    pair.recent = pair.recent.filter((group) => Math.abs(group.atMs - atMs) <= MESSAGE_MATCH_MS * 4).slice(-64);
-    const minute = minuteOf(atMs);
-    pair.buckets.set(minute, (pair.buckets.get(minute) ?? 0) + 1);
-    if (pair.buckets.size > MAX_BUCKETS) pair.buckets.delete(Math.min(...pair.buckets.keys()));
-    if (atMs > pair.lastMs) pair.lastMs = atMs;
-    const sender = this.record(message.from, atMs);
-    let counts = sender.buckets.get(minute);
-    if (!counts) {
-      counts = emptyCounts();
-      sender.buckets.set(minute, counts);
-    }
-    counts.messagesSent += 1;
+    return current;
+  }
+
+  private recordMessage(fact: MessageFact): boolean {
+    const key = this.messageKey(fact.key);
+    const known = this.messages.get(key);
+    if (known) return this.mergeMessage(known, fact.record);
+    this.messages.set(key, { ...fact.record });
+    if (this.messages.size > MAX_MESSAGES) this.messages.delete(this.messages.keys().next().value!);
     return true;
   }
 
-  private evictOldestPair(): void {
-    let oldest: [string, number] | null = null;
-    for (const [key, pair] of this.pairs) {
-      if (!oldest || pair.lastMs < oldest[1]) oldest = [key, pair.lastMs];
+  /** Two keys name one message (a call and its receipt's envelope): one record, its ends merged. */
+  private linkMessages(a: string, b: string): boolean {
+    const first = this.messageKey(a);
+    const second = this.messageKey(b);
+    if (first === second) return false;
+    const kept = this.messages.get(first);
+    const merged = this.messages.get(second);
+    this.messageAliases.set(second, first);
+    if (this.messageAliases.size > MAX_MESSAGES * 2) this.messageAliases.delete(this.messageAliases.keys().next().value!);
+    if (!merged) return false;
+    this.messages.delete(second);
+    if (!kept) {
+      this.messages.set(first, merged);
+      return true;
     }
-    if (oldest) this.pairs.delete(oldest[0]);
+    this.mergeMessage(kept, merged);
+    return true;
+  }
+
+  /** Keep the known ends: a console identity over a peer reference. When a
+   * peer id meets the identity it stands for, remember it. */
+  private mergeMessage(kept: MessageRecord, other: MessageRecord): boolean {
+    let changed = false;
+    if (!kept.toResolved && other.toResolved) {
+      if (kept.to !== other.to) this.peerNames.set(kept.to, other.to);
+      kept.to = other.to;
+      kept.toResolved = true;
+      changed = true;
+    }
+    if (!kept.fromResolved && other.fromResolved) {
+      if (kept.from !== other.from) this.peerNames.set(kept.from, other.from);
+      kept.from = other.from;
+      kept.fromResolved = true;
+      changed = true;
+    }
+    if (other.atMs < kept.atMs) {
+      kept.atMs = other.atMs;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** A message end as an agent's identity: a console identity through the resolver; a peer reference through its name first. */
+  private messageEnd(reference: string, resolved: boolean): string {
+    return resolved ? this.canonical(reference) || reference : this.peerIdentity(reference);
+  }
+
+  /** Messages each agent sent, per minute, rebuilt when the ledger changed. */
+  private derivedSent(): Map<string, Map<number, number>> {
+    if (this.derived && this.derived.version === this.version) return this.derived.sent;
+    const sent = new Map<string, Map<number, number>>();
+    for (const message of this.messages.values()) {
+      const from = this.messageEnd(message.from, message.fromResolved);
+      const to = this.messageEnd(message.to, message.toResolved);
+      if (!from || !to || from === to) continue;
+      const minute = minuteOf(message.atMs);
+      let byMinute = sent.get(from);
+      if (!byMinute) {
+        byMinute = new Map();
+        sent.set(from, byMinute);
+      }
+      byMinute.set(minute, (byMinute.get(minute) ?? 0) + 1);
+    }
+    this.derived = { version: this.version, sent };
+    return sent;
   }
 
   private prune(nowMs: number): void {
@@ -591,9 +699,8 @@ class Ledger implements ActivityLedger {
         this.identityRecords.delete(identity);
       }
     }
-    for (const [key, pair] of this.pairs) {
-      for (const minute of pair.buckets.keys()) if (minute < oldestMinute) pair.buckets.delete(minute);
-      if (pair.buckets.size === 0) this.pairs.delete(key);
+    for (const [key, message] of this.messages) {
+      if (message.atMs < nowMs - LEDGER_WINDOW_MS) this.messages.delete(key);
     }
   }
 
@@ -643,27 +750,46 @@ class Ledger implements ActivityLedger {
     const out = new Array<number>(bins).fill(0);
     if (bins === 0) return out;
     const startMs = endMs - bins * binMs;
+    const add = (minute: number, n: number) => {
+      const atMs = minute * LEDGER_BUCKET_MS;
+      if (atMs < startMs || atMs >= endMs) return;
+      out[Math.min(bins - 1, Math.floor((atMs - startMs) / binMs))] += n;
+    };
+    if (metric === "messagesSent") {
+      for (const byMinute of this.sentFor(identity)) for (const [minute, n] of byMinute) add(minute, n);
+      return out;
+    }
     for (const record of this.recordsFor(identity)) {
-      for (const [minute, counts] of record.buckets) {
-        const atMs = minute * LEDGER_BUCKET_MS;
-        if (atMs < startMs || atMs >= endMs) continue;
-        const index = Math.min(bins - 1, Math.floor((atMs - startMs) / binMs));
-        out[index] += counts[metric];
-      }
+      for (const [minute, counts] of record.buckets) add(minute, counts[metric]);
     }
     return out;
+  }
+
+  /** The per-minute counts of messages the agent sent (every agent's for null). */
+  private sentFor(identity: string | null): Array<Map<number, number>> {
+    const sent = this.derivedSent();
+    if (identity === null) return [...sent.values()];
+    const canonical = this.canonical(identity) || identity;
+    const byMinute = sent.get(canonical);
+    return byMinute ? [byMinute] : [];
   }
 
   totals(identity: string | null, window: LedgerWindow = {}): LedgerCounts {
     const sinceMs = window.sinceMs ?? Number.NEGATIVE_INFINITY;
     const untilMs = window.untilMs ?? Number.POSITIVE_INFINITY;
     const out = emptyCounts();
+    const inWindow = (minute: number) => {
+      const atMs = minute * LEDGER_BUCKET_MS;
+      return atMs >= minuteOf(sinceMs) * LEDGER_BUCKET_MS && atMs <= untilMs;
+    };
     for (const record of this.recordsFor(identity)) {
       for (const [minute, counts] of record.buckets) {
-        const atMs = minute * LEDGER_BUCKET_MS;
-        if (atMs < minuteOf(sinceMs) * LEDGER_BUCKET_MS || atMs > untilMs) continue;
-        for (const metric of METRICS) out[metric] += counts[metric];
+        if (!inWindow(minute)) continue;
+        for (const metric of METRICS) if (metric !== "messagesSent") out[metric] += counts[metric];
       }
+    }
+    for (const byMinute of this.sentFor(identity)) {
+      for (const [minute, n] of byMinute) if (inWindow(minute)) out.messagesSent += n;
     }
     return out;
   }
@@ -718,33 +844,27 @@ class Ledger implements ActivityLedger {
   }
 
   traffic(window: LedgerWindow = {}): LedgerTraffic[] {
-    const sinceMinute = minuteOf(window.sinceMs ?? Number.MIN_SAFE_INTEGER);
+    const sinceMs = window.sinceMs ?? Number.NEGATIVE_INFINITY;
     const untilMs = window.untilMs ?? Number.POSITIVE_INFINITY;
-    const merged = new Map<string, LedgerTraffic>();
-    for (const pair of this.pairs.values()) {
-      let count = 0;
-      let lastMs = 0;
-      for (const [minute, n] of pair.buckets) {
-        if (minute < sinceMinute || minute * LEDGER_BUCKET_MS > untilMs) continue;
-        count += n;
-        lastMs = Math.max(lastMs, minute * LEDGER_BUCKET_MS);
-      }
-      if (count === 0) continue;
-      // A name that resolves now merges with the pair it belongs to.
-      const from = this.canonical(pair.from) || pair.from;
-      const to = this.canonical(pair.to) || pair.to;
-      if (from === to) continue;
+    const out: LedgerTraffic[] = [];
+    // Ends resolve when read: a name the roster learned since counts with its agent.
+    const pairs = new Map<string, LedgerTraffic>();
+    for (const message of this.messages.values()) {
+      if (message.atMs < sinceMs || message.atMs > untilMs) continue;
+      const from = this.messageEnd(message.from, message.fromResolved);
+      const to = this.messageEnd(message.to, message.toResolved);
+      if (!from || !to || from === to) continue;
       const key = `${from}\u0000${to}`;
-      const known = merged.get(key);
-      const pairLast = Math.min(pair.lastMs, untilMs);
+      const known = pairs.get(key);
       if (known) {
-        known.count += count;
-        known.lastMs = Math.max(known.lastMs, pairLast);
+        known.count += 1;
+        if (message.atMs > known.lastMs) known.lastMs = message.atMs;
       } else {
-        merged.set(key, { from, to, count, lastMs: Math.max(lastMs, pairLast) });
+        pairs.set(key, { from, to, count: 1, lastMs: message.atMs });
       }
     }
-    return [...merged.values()].sort((a, b) => b.count - a.count || b.lastMs - a.lastMs);
+    out.push(...pairs.values());
+    return out.sort((a, b) => b.count - a.count || b.lastMs - a.lastMs).slice(0, MAX_PAIRS);
   }
 }
 

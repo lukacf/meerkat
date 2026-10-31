@@ -56,8 +56,12 @@ describe("per agent per minute", () => {
     ledger.ingest(frame("tool_call_requested", NOW - MIN + 5, { id: "t9", name: "web_search" }, { sourceKind: "session_history" }));
     ledger.ingest(frame("interaction_complete", NOW - MIN, {}, { runId: "r5" }));
     ledger.ingest(frame("run_completed", NOW - MIN, {}, { runId: "r5" }));
+    ledger.ingest(frame("user_input", NOW - 2 * MIN, { content: "Go" }, { sourceKind: "send", interactionId: "i-5" }));
+    ledger.ingest(frame("user_input", NOW - 2 * MIN + 80, { content: "Go" }, { sourceKind: "session_history", interactionId: "i-5" }));
     expect(ledger.totals("domain:billing").toolCalls).toBe(1);
     expect(ledger.totals("domain:billing").turnsFinished).toBe(1);
+    // The tool call, the turn's end and the input: three events.
+    expect(ledger.totals("domain:billing").events).toBe(3);
   });
 
   it("keeps a day: older frames are not counted", () => {
@@ -119,38 +123,58 @@ describe("peer traffic per ordered pair", () => {
     { identity: "router:main", member_id: "router-member", agent_id: "router-member", label: "Router" },
   ];
 
-  it("counts a message once when both its ends are seen, and every message", () => {
+  /** A send tool's receipt: the envelope id the recipient's notice carries as its delivery id. */
+  const receipt = (callId: string, name: string, envelope: string, atMs: number, identity = "domain:billing") => frame("tool_result_received", atMs, {
+    id: callId, name, is_error: false,
+    content: [{ type: "text", text: JSON.stringify({ kind: "peer_message", receipt: { envelope_id: envelope, kind: "peer_message_sent" } }) }],
+  }, { identity });
+  const notice = (identity: string, atMs: number, block: Record<string, unknown>, extra: Partial<ConsoleFrame> = {}) =>
+    frame("system_notice", atMs, { blocks: [{ type: "comms", direction: "incoming", ...block }] }, { identity, ...extra });
+
+  it("counts a message once however many of its ends are seen", () => {
     const ledger = ledgerAt();
     ledger.setResolver(createAgentResolver(agents));
-    // The peers tool names the opaque peer ids the send tools use.
-    ledger.ingest(frame("tool_result_received", NOW - 10 * MIN, {
-      id: "p0", name: "peers", is_error: false,
-      content: [{ type: "text", text: JSON.stringify({ peers: [{ peer_id: "peer-7", name: "reference-mob/lead/support-member" }] }) }],
-    }));
+    // Billing asks a peer by its opaque id; the receipt names the envelope.
     ledger.ingest(frame("tool_call_requested", NOW - 5 * MIN, { id: "m1", name: "send_request", args: { peer_id: "peer-7", body: "Refund?" } }));
-    // The recipient's notice of the same request.
-    ledger.ingest(frame("system_notice", NOW - 5 * MIN + 800, {
-      blocks: [{ type: "comms", kind: "request", direction: "incoming", peer: { id: "peer-1", display_name: "reference-mob/lead/billing-member" } }],
-    }, { identity: "domain:support" }));
-    // Support replies: a call and the requester's notice.
-    ledger.ingest(frame("tool_call_requested", NOW - 4 * MIN, { id: "m2", name: "send_response", args: { display_name: "reference-mob/lead/billing-member" } }, { identity: "domain:support" }));
-    ledger.ingest(frame("system_notice", NOW - 4 * MIN + 500, {
-      blocks: [{ type: "comms", kind: "response_terminal", direction: "incoming", peer: { id: "peer-7", display_name: "reference-mob/lead/support-member" } }],
-    }));
-    // A second request, seen from the sender only.
+    ledger.ingest(receipt("m1", "send_request", "env-1", NOW - 5 * MIN + 100));
+    // Support's notice of it, live and as the session's saved copy.
+    const request = { kind: "request", peer: { id: "peer-1", display_name: "reference-mob/lead/billing-member" }, delivery_id: "env-1" };
+    ledger.ingest(notice("domain:support", NOW - 5 * MIN + 800, request, { sourceKind: "console_event" }));
+    ledger.ingest(notice("domain:support", NOW - 5 * MIN + 900, request, { sourceKind: "session_history" }));
+    // Support replies; Billing's notice of the reply arrives before Support's receipt.
+    ledger.ingest(frame("tool_call_requested", NOW - 4 * MIN, { id: "m2", name: "send_response", args: { peer_id: "peer-1" } }, { identity: "domain:support" }));
+    ledger.ingest(notice("domain:billing", NOW - 4 * MIN + 500, { kind: "response_terminal", peer: { id: "peer-7", display_name: "reference-mob/lead/support-member" }, delivery_id: "env-2" }));
+    ledger.ingest(receipt("m2", "send_response", "env-2", NOW - 4 * MIN + 600, "domain:support"));
+    // Two more messages: one seen by its sender only, one from an agent outside the console.
     ledger.ingest(frame("tool_call_requested", NOW - 2 * MIN, { id: "m3", name: "send_message", args: { to: "Support" } }));
+    ledger.ingest(notice("domain:billing", NOW - 90_000, { kind: "message", peer: { id: "peer-x", display_name: "partner-mob/lead/carrier" }, delivery_id: "env-9" }));
     // A kickoff notice is no message.
-    ledger.ingest(frame("system_notice", NOW - MIN, {
-      blocks: [{ type: "comms", kind: "lifecycle", direction: "incoming", intent: "mob.kickoff_started", peer: { id: "peer-9", display_name: "router-member" } }],
-    }));
+    ledger.ingest(notice("domain:billing", NOW - MIN, { kind: "lifecycle", intent: "mob.kickoff_started", peer: { id: "peer-9", display_name: "router-member" } }));
     expect(ledger.traffic({ sinceMs: NOW - 60 * MIN })).toEqual([
       { from: "domain:billing", to: "domain:support", count: 2, lastMs: NOW - 2 * MIN },
+      { from: "carrier", to: "domain:billing", count: 1, lastMs: NOW - 90_000 },
       { from: "domain:support", to: "domain:billing", count: 1, lastMs: NOW - 4 * MIN },
     ]);
     expect(ledger.totals("domain:billing").messagesSent).toBe(2);
     expect(ledger.totals("domain:support").messagesSent).toBe(1);
-    expect(ledger.traffic({ sinceMs: NOW - 3 * MIN })).toEqual([{ from: "domain:billing", to: "domain:support", count: 1, lastMs: NOW - 2 * MIN }]);
+    // Busiest first, then the most recent.
+    expect(ledger.traffic({ sinceMs: NOW - 3 * MIN })).toEqual([
+      { from: "carrier", to: "domain:billing", count: 1, lastMs: NOW - 90_000 },
+      { from: "domain:billing", to: "domain:support", count: 1, lastMs: NOW - 2 * MIN },
+    ]);
     expect(ledger.series("domain:billing", "messagesSent", { bins: 6, endMs: NOW })).toEqual([0, 1, 0, 0, 1, 0]);
+  });
+
+  it("learns an opaque peer id from the notice its message became", () => {
+    const ledger = ledgerAt();
+    ledger.setResolver(createAgentResolver(agents));
+    // No peers list and no name: only the message ties peer-5 to Router.
+    ledger.ingest(frame("tool_call_requested", NOW - 3 * MIN, { id: "m1", name: "send_message", args: { peer_id: "peer-5" } }));
+    ledger.ingest(receipt("m1", "send_message", "env-5", NOW - 3 * MIN + 50));
+    ledger.ingest(notice("router:main", NOW - 3 * MIN + 400, { kind: "message", peer: { id: "peer-1", display_name: "billing-member" }, delivery_id: "env-5" }));
+    // A later message to the same peer id, seen from its sender only.
+    ledger.ingest(frame("tool_call_requested", NOW - MIN, { id: "m2", name: "send_message", args: { peer_id: "peer-5" } }));
+    expect(ledger.traffic()).toEqual([{ from: "domain:billing", to: "router:main", count: 2, lastMs: NOW - MIN }]);
   });
 
   it("merges a pair recorded under a name once the agents resolve it", () => {

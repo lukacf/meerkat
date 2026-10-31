@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const INSTRUCTION_ACTIVATION_RENDER_VERSION_V1: u16 = 1;
+/// The render version of the retired header of an activation row whose body
+/// a compaction retired ([`crate::types::RetiredInstructionBody`]).
+pub const RETIRED_INSTRUCTION_RENDER_VERSION_V1: u16 = 1;
 pub const MAX_INSTRUCTION_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES: usize = 1024 * 1024;
 
@@ -326,6 +329,12 @@ pub enum ForkInstructionRefusalCause {
     /// The member host that holds a placed source predates the policy and
     /// refused the request that carried it, so nothing was forked there.
     MemberHostUnsupported,
+    /// Re-activation was asked for, but the last copied row of a key holds
+    /// no body: a compaction of the source retired it, because a later row
+    /// of the key superseded it, and the fork's prefix ends before that row.
+    /// A fork at a later boundary copies the superseding row with its body;
+    /// a host can also activate the key in the child itself.
+    HeadBodyRetired,
 }
 
 /// A durable fork refused before commit because of inherited activation rows.
@@ -458,6 +467,11 @@ fn fork_instruction_refusal_message(
              that holds the source does not support the fork instruction policy, so \
              reactivate_inherited cannot be carried to it"
             .to_string(),
+        ForkInstructionRefusalCause::HeadBodyRetired => format!(
+            "fork refused: the fork's prefix ends on rows of instruction keys [{keys}] whose \
+             bodies a compaction of the source retired, so there is no body to re-activate in \
+             the child; fork at a later boundary, or activate the keys in the child"
+        ),
     }
 }
 
@@ -507,9 +521,11 @@ fn message_created_at(message: &Message) -> MessageTimestamp {
 
 /// Each key a fork child inherited, with its head row at the fork boundary
 /// (the key's last copied row) and that row's body, in (namespace, key)
-/// order.
-type InheritedActivationHeads =
-    BTreeMap<(InstructionNamespace, InstructionKey), (InstructionActivationIdentity, String)>;
+/// order. The body is `None` when a compaction of the source retired it.
+type InheritedActivationHeads = BTreeMap<
+    (InstructionNamespace, InstructionKey),
+    (InstructionActivationIdentity, Option<String>),
+>;
 
 fn json_string(value: &str) -> String {
     serde_json::Value::String(value.to_owned()).to_string()
@@ -535,13 +551,37 @@ fn render_origin_v1(identity: &InstructionActivationIdentity, body: &str) -> Str
     )
 }
 
+/// An activation row whose body a compaction retired, as it is stored and
+/// as the model of the session that activated it reads it: the v1 header
+/// lines of its identity, `status=superseded` and the retired body's length,
+/// and no body. LF separators, no trailing newline, no blank line.
+fn render_retired_v1(identity: &InstructionActivationIdentity, body_bytes: u64) -> String {
+    let supersedes = identity
+        .supersedes
+        .as_ref()
+        .map(|value| json_string(value.as_str()))
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        "[meerkat-retired-instruction-v1]\nnamespace={}\nkey={}\nrevision={}\nactivation={}\nsupersedes={}\norigin_session_id={}\ncontent_sha256={}\nstatus=superseded\nbody_bytes={}",
+        json_string(identity.revision.namespace.as_str()),
+        json_string(identity.revision.key.as_str()),
+        json_string(identity.revision.revision_id.as_str()),
+        json_string(identity.activation_id.as_str()),
+        supersedes,
+        json_string(&identity.origin_session_id.to_string()),
+        identity.revision.content_sha256,
+        body_bytes,
+    )
+}
+
 /// An activation row a fork child copied, as the child's model reads it:
 /// a header that names the key and the row, never the body, which is
-/// effective only in the session that activated it.
+/// effective only in the session that activated it. It is the same for a
+/// copied row whose body the source retired.
 fn render_inherited_v2(
     identity: &InstructionActivationIdentity,
     child_session_id: &SessionId,
-    body_bytes: usize,
+    body_bytes: u64,
 ) -> String {
     let supersedes = identity
         .supersedes
@@ -590,14 +630,136 @@ fn body_from_origin_envelope<'a>(
     Ok(body)
 }
 
-/// Validate activation envelopes, predecessor chronology, uniqueness, revision
-/// immutability, and the bounded retained-body budget, the exclusivity of the
-/// System row semantic identities, and every operator-instruction entry row
+/// What an instruction activation row holds of its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivationRowBody<'a> {
+    /// The row holds its body in the v1 envelope.
+    Live(&'a str),
+    /// A compaction retired the body; the row keeps its length.
+    Retired { body_bytes: u64 },
+}
+
+impl<'a> ActivationRowBody<'a> {
+    /// The UTF-8 byte length of the body, live or retired.
+    pub(crate) fn byte_len(self) -> u64 {
+        match self {
+            Self::Live(body) => body.len() as u64,
+            Self::Retired { body_bytes } => body_bytes,
+        }
+    }
+
+    /// The body, unless a compaction retired it.
+    pub(crate) fn live(self) -> Option<&'a str> {
+        match self {
+            Self::Live(body) => Some(body),
+            Self::Retired { .. } => None,
+        }
+    }
+}
+
+/// The body `system`, an activation row with `identity`, holds, checked
+/// against the identity: a live row holds exactly the v1 envelope of its
+/// identity and body; a row with a retired-body marker holds exactly the
+/// retired header its identity and marker render, at a known render version,
+/// for a body within the body bound.
+pub(crate) fn activation_row_body<'a>(
+    identity: &InstructionActivationIdentity,
+    system: &'a SystemMessage,
+) -> Result<ActivationRowBody<'a>, String> {
+    let Some(retired) = system.retired_instruction_body else {
+        return body_from_origin_envelope(identity, &system.content).map(ActivationRowBody::Live);
+    };
+    if identity.render_version != INSTRUCTION_ACTIVATION_RENDER_VERSION_V1 {
+        return Err(format!(
+            "unsupported instruction activation render version {}",
+            identity.render_version
+        ));
+    }
+    if retired.render_version != RETIRED_INSTRUCTION_RENDER_VERSION_V1 {
+        return Err(format!(
+            "unsupported retired instruction render version {}",
+            retired.render_version
+        ));
+    }
+    if retired.body_bytes > MAX_INSTRUCTION_BODY_BYTES as u64 {
+        return Err(format!(
+            "retired instruction body of {} bytes exceeds {MAX_INSTRUCTION_BODY_BYTES} bytes",
+            retired.body_bytes
+        ));
+    }
+    if render_retired_v1(identity, retired.body_bytes) != system.content {
+        return Err(
+            "retired instruction activation header bytes do not match typed identity".to_string(),
+        );
+    }
+    Ok(ActivationRowBody::Retired {
+        body_bytes: retired.body_bytes,
+    })
+}
+
+/// The retired form of a live instruction activation row: the same row,
+/// with the same identity and timestamp, holding the retired header in
+/// place of its body and the marker of the body's length. `None` for a row
+/// that is not a live activation row whose bytes match its identity.
+pub(crate) fn retired_activation_row(system: &SystemMessage) -> Option<SystemMessage> {
+    let identity = system.instruction_activation.as_ref()?;
+    let ActivationRowBody::Live(body) = activation_row_body(identity, system).ok()? else {
+        return None;
+    };
+    let body_bytes = body.len() as u64;
+    let mut retired = system.clone();
+    retired.content = render_retired_v1(identity, body_bytes);
+    retired.retired_instruction_body = Some(crate::types::RetiredInstructionBody {
+        render_version: RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+        body_bytes,
+    });
+    Some(retired)
+}
+
+/// The (namespace, key, activation id) of every instruction activation row
+/// of `messages` that a later activation row of its key follows: the rows a
+/// retirement may retire. Each key's newest row is never among them.
+pub(crate) fn superseded_activation_rows(
+    messages: &[Message],
+) -> BTreeSet<(
+    InstructionNamespace,
+    InstructionKey,
+    InstructionActivationId,
+)> {
+    let mut newest = BTreeMap::new();
+    let mut every = BTreeSet::new();
+    for message in messages {
+        let Message::System(system) = message else {
+            continue;
+        };
+        let Some(identity) = system.instruction_activation.as_ref() else {
+            continue;
+        };
+        let key = (
+            identity.revision.namespace.clone(),
+            identity.revision.key.clone(),
+        );
+        every.insert((key.0.clone(), key.1.clone(), identity.activation_id.clone()));
+        newest.insert(key, identity.activation_id.clone());
+    }
+    for ((namespace, key), activation) in newest {
+        every.remove(&(namespace, key, activation));
+    }
+    every
+}
+
+/// Validate activation envelopes and retired headers, predecessor
+/// chronology, uniqueness, revision immutability (a revision binds one
+/// digest and body length; the digest binds the body), that a key's retired
+/// rows precede its live ones, and the bounded budget of live bodies, the
+/// exclusivity of the System row semantic identities, and every
+/// operator-instruction entry row
 /// ([`super::validate_operator_instruction_messages`]).
 pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<(), String> {
     let mut activations = BTreeSet::new();
     let mut revisions = BTreeMap::new();
     let mut predecessors = BTreeMap::new();
+    let mut keys_with_a_live_row = BTreeSet::new();
     let mut retained_body_bytes = 0usize;
     for message in messages {
         let Message::System(system) = message else {
@@ -613,21 +775,41 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
             );
         }
         let Some(identity) = system.instruction_activation.as_ref() else {
+            if system.retired_instruction_body.is_some() {
+                return Err(
+                    "a retired instruction body marker needs an instruction activation identity"
+                        .to_string(),
+                );
+            }
             continue;
         };
-        let body = body_from_origin_envelope(identity, &system.content)?;
-        retained_body_bytes = retained_body_bytes.checked_add(body.len()).ok_or_else(|| {
-            "instruction activation retained-body byte count overflowed".to_string()
-        })?;
-        if retained_body_bytes > MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES {
-            return Err(format!(
-                "instruction activation lineage exceeds {MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES} retained UTF-8 body bytes"
-            ));
-        }
+        let body = activation_row_body(identity, system)?;
         let lineage_key = (
             identity.revision.namespace.clone(),
             identity.revision.key.clone(),
         );
+        match body {
+            ActivationRowBody::Live(live) => {
+                retained_body_bytes =
+                    retained_body_bytes.checked_add(live.len()).ok_or_else(|| {
+                        "instruction activation retained-body byte count overflowed".to_string()
+                    })?;
+                if retained_body_bytes > MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES {
+                    return Err(format!(
+                        "instruction activation lineage exceeds {MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES} retained UTF-8 body bytes"
+                    ));
+                }
+                keys_with_a_live_row.insert(lineage_key.clone());
+            }
+            ActivationRowBody::Retired { .. } => {
+                if keys_with_a_live_row.contains(&lineage_key) {
+                    return Err(format!(
+                        "instruction activation {} carries a retired body after a live row of its key",
+                        identity.activation_id
+                    ));
+                }
+            }
+        }
         let predecessor = predecessors.get(&lineage_key).cloned();
         if identity.supersedes != predecessor {
             return Err(format!(
@@ -649,7 +831,9 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
             identity.revision.key.clone(),
             identity.revision.revision_id.clone(),
         );
-        let value = (identity.revision.content_sha256.clone(), body.to_string());
+        // The digest binds the body, and a retired row keeps the digest
+        // and the body's length: a revision binds one of each.
+        let value = (identity.revision.content_sha256.clone(), body.byte_len());
         if let Some(existing) = revisions.insert(revision_key, value.clone())
             && existing != value
         {
@@ -660,8 +844,9 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
 }
 
 /// Project inherited rows as headers without their bodies, preserving
-/// order. A row whose bytes are not the envelope its identity names fails
-/// the projection.
+/// order. A row the session activated itself reads as it is stored: its
+/// envelope, or the retired header of a body a compaction retired. A row
+/// whose bytes do not match its identity fails the projection.
 pub fn materialize_instruction_activation_messages(
     session_id: &SessionId,
     messages: &[Message],
@@ -675,12 +860,15 @@ pub fn materialize_instruction_activation_messages(
             let Some(identity) = system.instruction_activation.as_ref() else {
                 return Ok(message.clone());
             };
-            let body = body_from_origin_envelope(identity, &system.content)?;
+            let body = activation_row_body(identity, system)?;
             if &identity.origin_session_id == session_id {
                 return Ok(message.clone());
             }
+            // A copied row reads the same whether the source retired its
+            // body or not: the header names the body's length only.
             let mut inherited = system.clone();
-            inherited.content = render_inherited_v2(identity, session_id, body.len());
+            inherited.content = render_inherited_v2(identity, session_id, body.byte_len());
+            inherited.retired_instruction_body = None;
             Ok(Message::System(inherited))
         })
         .collect()
@@ -840,6 +1028,19 @@ impl Session {
                         not_effective,
                     ));
                 }
+                // A head whose body a compaction of the source retired has
+                // no body to carry into the child.
+                let retired = heads
+                    .iter()
+                    .filter(|(_, (_, body))| body.is_none())
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                if !retired.is_empty() {
+                    return Err(ForkInstructionRefusal::new(
+                        ForkInstructionRefusalCause::HeadBodyRetired,
+                        retired,
+                    ));
+                }
                 let mut child = self.clone();
                 let appended = child.append_fork_reactivations(&heads).map_err(|error| {
                     let cause = match error {
@@ -912,14 +1113,14 @@ impl Session {
             if identity.origin_session_id == *self.id() {
                 continue;
             }
-            let body = body_from_origin_envelope(identity, &system.content)
+            let body = activation_row_body(identity, system)
                 .map_err(InstructionActivationError::MalformedHistory)?;
             heads.insert(
                 (
                     identity.revision.namespace.clone(),
                     identity.revision.key.clone(),
                 ),
-                (identity.clone(), body.to_string()),
+                (identity.clone(), body.live().map(str::to_string)),
             );
         }
         Ok(heads)
@@ -935,6 +1136,12 @@ impl Session {
             return Ok(0);
         };
         for (head, body) in heads.values() {
+            let Some(body) = body else {
+                return Err(InstructionActivationError::MalformedHistory(format!(
+                    "the inherited head {} holds a retired body and cannot be re-activated",
+                    head.activation_id
+                )));
+            };
             let request = InstructionActivationRequest {
                 revision: head.revision.clone(),
                 activation_id: fork_reactivation_activation_id(self.id(), &head.activation_id)?,
@@ -1089,6 +1296,8 @@ impl Session {
                  session"
             )));
         }
+        // The budget counts live bodies: a body a compaction retired stops
+        // counting at the commit that retired it.
         let retained_body_bytes = self.messages().iter().try_fold(0usize, |total, message| {
             let Message::System(system) = message else {
                 return Ok(total);
@@ -1096,8 +1305,11 @@ impl Session {
             let Some(identity) = system.instruction_activation.as_ref() else {
                 return Ok(total);
             };
-            let body = body_from_origin_envelope(identity, &system.content)
+            let body = activation_row_body(identity, system)
                 .map_err(InstructionActivationError::MalformedHistory)?;
+            let Some(body) = body.live() else {
+                return Ok(total);
+            };
             total.checked_add(body.len()).ok_or_else(|| {
                 InstructionActivationError::MalformedHistory(
                     "instruction activation retained-body byte count overflowed".to_string(),
@@ -1149,8 +1361,18 @@ impl Session {
                 origin_session_id: self.id().clone(),
                 render_version: INSTRUCTION_ACTIVATION_RENDER_VERSION_V1,
             };
-            let exact = **identity == requested_identity
-                && system.content == render_origin_v1(&requested_identity, &request.body);
+            // A retired row is compared through its witness: the identity
+            // carries the digest the request's body was checked against, and
+            // the marker carries the body's length.
+            let stored_matches = match system.retired_instruction_body {
+                None => system.content == render_origin_v1(&requested_identity, &request.body),
+                Some(retired) => {
+                    retired.body_bytes == request.body.len() as u64
+                        && system.content
+                            == render_retired_v1(&requested_identity, retired.body_bytes)
+                }
+            };
+            let exact = **identity == requested_identity && stored_matches;
             if !exact {
                 return Err(InstructionActivationError::ActivationIdentityConflict);
             }
@@ -1180,10 +1402,13 @@ impl Session {
         }
 
         for (_, system, identity) in &rows {
+            // The digest binds the body; a retired row keeps its digest.
             if identity.revision.revision_id == request.revision.revision_id
                 && (identity.revision.content_sha256 != request.revision.content_sha256
-                    || body_from_origin_envelope(identity, &system.content)
-                        .is_ok_and(|body| body != request.body))
+                    || activation_row_body(identity, system)
+                        .ok()
+                        .and_then(ActivationRowBody::live)
+                        .is_some_and(|body| body != request.body))
             {
                 return Err(InstructionActivationError::ImmutableRevisionConflict);
             }
@@ -1240,6 +1465,7 @@ impl Session {
             prompt_version: None,
             instruction_activation: Some(identity.clone()),
             instruction_entry: None,
+            retired_instruction_body: None,
         }));
         self.mark_content_mutated(crate::time_compat::SystemTime::now());
         let transcript_revision = self
@@ -1661,7 +1887,7 @@ mod tests {
                         activation_id: InstructionActivationId::new(activation_id).unwrap(),
                         expectation: InstructionActivationExpectation::Absent,
                         supersedes: Some(head.activation_id.clone()),
-                        body: body.clone(),
+                        body: body.clone().expect("a live head"),
                     },
                     created_at,
                 )

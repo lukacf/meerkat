@@ -280,6 +280,7 @@ fn wire_session_history_required_fields() {
                 prompt_version: None,
                 instruction_activation: None,
                 instruction_entry: None,
+                retired_instruction_body: None,
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),

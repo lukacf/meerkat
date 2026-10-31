@@ -690,6 +690,7 @@ mod tests {
             prompt_version: None,
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         })
     }
 
@@ -713,6 +714,7 @@ mod tests {
             prompt_version: None,
             instruction_activation: Some(identity),
             instruction_entry: None,
+            retired_instruction_body: None,
         })
     }
 

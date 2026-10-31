@@ -1702,7 +1702,9 @@ impl Session {
     /// fact only envelope 5 reads ([`Session::carries_operator_instruction_facts`]),
     /// so every such fact records it: a session that receives entry rows by
     /// copy (a fork child: the copied rows name another origin, and this
-    /// session's own entry sequence starts at zero), and a session whose
+    /// session's own entry sequence starts at zero), a session whose
+    /// transcript holds an instruction activation row with a retired body
+    /// (a compaction retired it, or a fork copied it), and a session whose
     /// rewrite graph retains a record that moved an instruction activation
     /// row to another offset.
     pub(crate) fn record_unowned_instruction_state(&mut self) -> Result<(), InstructionStateError> {

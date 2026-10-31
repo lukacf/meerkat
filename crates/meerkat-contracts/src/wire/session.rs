@@ -1297,6 +1297,7 @@ impl TranscriptRewriteMessage {
                 prompt_version,
                 instruction_activation: None,
                 instruction_entry: None,
+                retired_instruction_body: None,
             })),
             Self::SystemNotice {
                 kind,
@@ -1525,6 +1526,13 @@ pub enum WireSessionMessage {
         /// not know reads raw instead of failing the read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instruction_entry: Option<WireInstructionEntryIdentity>,
+        /// The marker of an instruction activation row whose body a
+        /// compaction retired, because a later activation row of its key
+        /// superseded it: `content` is then the retired header, which names
+        /// the key, the revision and the body's length. Read-only: no write
+        /// accepts it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retired_instruction_body: Option<meerkat_core::RetiredInstructionBody>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1648,6 +1656,7 @@ impl From<Message> for WireSessionMessage {
                 prompt_version: message.prompt_version,
                 instruction_activation: message.instruction_activation,
                 instruction_entry: message.instruction_entry.map(Into::into),
+                retired_instruction_body: message.retired_instruction_body,
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2612,6 +2621,7 @@ mod tests {
                     prompt_version: None,
                     instruction_activation: None,
                     instruction_entry: None,
+                    retired_instruction_body: None,
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),

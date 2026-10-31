@@ -380,6 +380,7 @@ impl Session {
             }),
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         });
         let commit = self.commit_transcript_rewrite_authorized(
             selection,
@@ -544,6 +545,7 @@ mod tests {
             }),
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         });
 
         let error = expected_error(
@@ -603,6 +605,7 @@ mod tests {
                 }),
                 instruction_activation: None,
                 instruction_entry: None,
+                retired_instruction_body: None,
             }));
         }));
         let payload = match outcome {

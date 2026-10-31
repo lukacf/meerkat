@@ -106,16 +106,25 @@ fn checked_offset(kind: &str, offset: u64, upper_bound: usize) -> Result<usize, 
     Ok(offset)
 }
 
-/// What a rebuilt transcript inserts besides its summary.
+/// What a rebuilt transcript inserts or changes besides its summary.
 #[derive(Debug, Clone, Copy)]
 enum RebuildInsertions<'a> {
     /// A compactor's own rebuild: only the summary is new, and every ordinary
-    /// System row, operator-instruction entry rows included, stays verbatim.
+    /// System row, operator-instruction entry rows and instruction activation
+    /// rows included, stays verbatim.
     Summary,
-    /// The rebuild after the operator-instruction fold: every entry row is
-    /// taken out, and the fold's snapshot (none for an empty set) is the last
-    /// row of the leading System prefix, before the summary.
-    Fold { snapshot: Option<&'a SystemMessage> },
+    /// The rebuild after the instruction-row fold. With `folds_entries` every
+    /// operator-instruction entry row is taken out, and the fold's snapshot
+    /// (none for an empty set) is the last row of the leading System prefix,
+    /// before the summary. Each instruction activation row whose body the
+    /// session-document authority retires (`retirement`) holds the exact
+    /// retired form of its source row; every other retained row stays
+    /// verbatim.
+    Fold {
+        folds_entries: bool,
+        snapshot: Option<&'a SystemMessage>,
+        retirement: Option<&'a crate::session::ActivationRetirement>,
+    },
 }
 
 fn validate_compaction_rebuild(
@@ -153,11 +162,49 @@ fn validate_compaction_rebuild_with(
     }
 
     let superseded_system_prompts = crate::types::superseded_system_prompt_offsets(messages);
-    let folds_entries = matches!(insertions, RebuildInsertions::Fold { .. });
-    let snapshot = match insertions {
-        RebuildInsertions::Fold { snapshot } => snapshot,
-        RebuildInsertions::Summary => None,
+    let (folds_entries, snapshot, retirement) = match insertions {
+        RebuildInsertions::Fold {
+            folds_entries,
+            snapshot,
+            retirement,
+        } => (folds_entries, snapshot, retirement),
+        RebuildInsertions::Summary => (false, None, None),
     };
+    // Each authorized retirement must retire a superseded body of its own
+    // source row, exactly: never a key's newest row, never a row that is not
+    // a live instruction activation row, never with another header or body
+    // length.
+    if let Some(retirement) = retirement {
+        let superseded = crate::session::superseded_activation_rows(messages);
+        for source_offset in retirement.source_offsets() {
+            let Some(Message::System(source)) = messages.get(source_offset) else {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "a retired instruction body names source offset {source_offset}, which is not a System row"
+                )));
+            };
+            let Some(identity) = source.instruction_activation.as_ref() else {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "a retired instruction body names source offset {source_offset}, which is not an instruction activation row"
+                )));
+            };
+            if !superseded.contains(&(
+                identity.revision.namespace.clone(),
+                identity.revision.key.clone(),
+                identity.activation_id.clone(),
+            )) {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "the instruction activation at source offset {source_offset} is its key's newest row and keeps its body"
+                )));
+            }
+            if crate::session::retired_activation_row(source).as_ref()
+                != retirement.retired_row(source_offset)
+            {
+                return Err(CompactionError::InvalidRebuild(format!(
+                    "the retired instruction body at source offset {source_offset} is not the exact retired form of its source row"
+                )));
+            }
+        }
+    }
     let folded_entry = |source_offset: u64| {
         folds_entries
             && usize::try_from(source_offset)
@@ -236,7 +283,16 @@ fn validate_compaction_rebuild_with(
                 retention.source_offset
             )));
         }
-        if rebuilt[rebuilt_offset] != retention.message {
+        // A retained row is verbatim, unless its body is authorized for
+        // retirement: then it is exactly the retired form of its source row.
+        let rebuilt_matches =
+            match retirement.and_then(|retirement| retirement.retired_row(source_offset)) {
+                Some(retired) => {
+                    matches!(&rebuilt[rebuilt_offset], Message::System(row) if row == retired)
+                }
+                None => rebuilt[rebuilt_offset] == retention.message,
+            };
+        if !rebuilt_matches {
             return Err(CompactionError::InvalidRebuild(format!(
                 "retention from source offset {} does not match rebuilt offset {}",
                 retention.source_offset, retention.rebuilt_offset
@@ -267,6 +323,18 @@ fn validate_compaction_rebuild_with(
     if let Some(missing_offset) = source_dispositions.iter().position(Option::is_none) {
         return Err(CompactionError::InvalidRebuild(format!(
             "source offset {missing_offset} is neither retained nor discarded"
+        )));
+    }
+    if let Some(retirement) = retirement
+        && let Some(discarded_offset) = retirement.source_offsets().find(|source_offset| {
+            !matches!(
+                source_dispositions.get(*source_offset),
+                Some(Some(SourceDisposition::Retained))
+            )
+        })
+    {
+        return Err(CompactionError::InvalidRebuild(format!(
+            "the instruction activation at source offset {discarded_offset} has its body retired, so it must be retained"
         )));
     }
     // The shrink rule counts the rows other than operator-instruction
@@ -405,21 +473,25 @@ fn validate_compaction_rebuild_with(
     Ok(())
 }
 
-/// The operator-instruction fold of a validated rebuild: every entry row the
-/// compactor retained (as it retains every System row) joins the discarded
-/// rows, and the fold's snapshot (none for an empty set) becomes the last row
-/// of the leading System prefix, before the summary. Retained and summary
-/// offsets move with their rows. The folded rebuild is validated again in
-/// its folded form; without a fold the rebuild is returned as it is.
-fn fold_operator_instruction_entries(
+/// The instruction-row fold of a validated rebuild, as the session-document
+/// authority authorized it. With an operator-instruction fold, every entry
+/// row the compactor retained (as it retains every System row) joins the
+/// discarded rows, and the fold's snapshot (none for an empty set) becomes
+/// the last row of the leading System prefix, before the summary; retained
+/// and summary offsets move with their rows. With an activation-body
+/// retirement, every retained activation row whose body it retires takes its
+/// retired form in place. The folded rebuild is validated again in its
+/// folded form; without either the rebuild is returned as it is.
+fn fold_instruction_rows(
     messages: &[Message],
     result: crate::compact::CompactionResult,
     summary_text: &str,
     fold: Option<&crate::session::InstructionFold>,
+    retirement: Option<&crate::session::ActivationRetirement>,
 ) -> Result<crate::compact::CompactionResult, CompactionError> {
-    let Some(fold) = fold else {
+    if fold.is_none() && retirement.is_none() {
         return Ok(result);
-    };
+    }
     let crate::compact::CompactionResult {
         messages: rebuilt,
         summary,
@@ -446,13 +518,22 @@ fn fold_operator_instruction_entries(
                 "rebuilt offset {offset} has no retained source message"
             )));
         };
-        if crate::session::is_operator_instruction_entry(&message) {
+        if fold.is_some() && crate::session::is_operator_instruction_entry(&message) {
             discarded.push(CompactionDiscard::new(
                 retention.source_offset,
                 retention.message,
             ));
             continue;
         }
+        let retired = usize::try_from(retention.source_offset)
+            .ok()
+            .and_then(|source_offset| {
+                retirement.and_then(|retirement| retirement.retired_row(source_offset))
+            });
+        let message = match retired {
+            Some(retired) => Message::System(retired.clone()),
+            None => message,
+        };
         folded_retained.push(CompactionRetained::new(
             retention.source_offset,
             u64::try_from(folded.len()).unwrap_or(u64::MAX),
@@ -464,7 +545,8 @@ fn fold_operator_instruction_entries(
         CompactionError::InvalidRebuild("summary offset is outside the rebuilt transcript".into())
     })?;
     discarded.sort_by_key(|discard| discard.source_offset);
-    if let Some(snapshot) = fold.snapshot() {
+    let snapshot = fold.and_then(crate::session::InstructionFold::snapshot);
+    if let Some(snapshot) = snapshot {
         let at = folded
             .iter()
             .take_while(|message| matches!(message, Message::System(_)))
@@ -497,7 +579,9 @@ fn fold_operator_instruction_entries(
         &folded.retained,
         &folded.discarded,
         RebuildInsertions::Fold {
-            snapshot: fold.snapshot(),
+            folds_entries: fold.is_some(),
+            snapshot,
+            retirement,
         },
     )?;
     Ok(folded)
@@ -857,7 +941,9 @@ pub(crate) struct CompactionInvocation<'a> {
     /// the durable `window` for rewrite validation but never enter forecasts
     /// or the summarization request. Operator-instruction entry rows are in
     /// it as the model reads them; no summarizer reads them
-    /// (`without_operator_instruction_entries`).
+    /// (`without_operator_instruction_entries`), and no summarizer reads an
+    /// activation body this attempt retires
+    /// (`crate::session::with_retired_activation_bodies`).
     pub(crate) model_messages: &'a [Message],
     /// Unmeasured dialogue must reach a generated summary or remain intact
     /// when a mechanical rebuild would discard its unsummarized details.
@@ -892,6 +978,11 @@ pub(crate) struct CompactionInvocation<'a> {
     /// authorized for this attempt (`Session::authorize_instruction_fold`);
     /// `None` for a session without operator-instruction facts.
     pub(crate) instruction_fold: Option<crate::session::InstructionFold>,
+    /// The superseded instruction activation bodies the session-document
+    /// authority authorized this attempt to retire
+    /// (`Session::authorize_activation_body_retirement`); `None` when there
+    /// is none to retire. No summarizer reads a body it retires.
+    pub(crate) activation_retirement: Option<crate::session::ActivationRetirement>,
 }
 
 /// What a compaction folds, given the run in flight.
@@ -1586,6 +1677,7 @@ where
         projection,
         earlier_folded_calls,
         instruction_fold,
+        activation_retirement,
     } = invocation;
     let CompactionWindow {
         messages,
@@ -1600,11 +1692,17 @@ where
     // No summarizer reads an operator-instruction entry row, a delta or a
     // snapshot: a summary is a user row, so a body it paraphrased would
     // outlive the entry that superseded or revoked it. The fold carries what
-    // is in effect into its snapshot instead. Taken out once, here, before
-    // the host curator and the compactor's own preparation, which a host
-    // implements and cannot be relied on to do it; the counts above keep the
-    // rows the model reads.
-    let summarizer_input = without_operator_instruction_entries(model_messages);
+    // is in effect into its snapshot instead. Likewise no summarizer reads
+    // an instruction activation body this compaction retires: it reads the
+    // retired header, so a summary cannot restate a superseded body. Both
+    // are done once, here, before the host curator and the compactor's own
+    // preparation, which a host implements and cannot be relied on to do
+    // it; the counts above keep the rows the model reads.
+    let without_entries = without_operator_instruction_entries(model_messages);
+    let summarizer_input = crate::session::with_retired_activation_bodies(
+        &without_entries,
+        activation_retirement.as_ref(),
+    );
 
     // 1. Emit CompactionStarted
     if event_stream_open
@@ -1902,9 +2000,11 @@ where
             compactor.rebuild_history_under_pressure(messages, &summary_text, request_pressure)
         }
     };
-    // 5. Validate the compactor's rebuild, then fold the operator-instruction
-    // entry rows: the compactor keeps them as it keeps every System row, and
-    // the fold takes them out and inserts the authorized snapshot.
+    // 5. Validate the compactor's rebuild, then fold the instruction rows:
+    // the compactor keeps the operator-instruction entry rows and every
+    // activation row verbatim, as it keeps every System row; the fold takes
+    // the entry rows out, inserts the authorized snapshot, and puts each
+    // activation row whose body the authority retires in its retired form.
     let validated = validate_compaction_rebuild(
         messages,
         &result.messages,
@@ -1914,11 +2014,12 @@ where
         &result.discarded,
     )
     .and_then(|()| {
-        fold_operator_instruction_entries(
+        fold_instruction_rows(
             messages,
             result,
             &summary_text,
             instruction_fold.as_ref(),
+            activation_retirement.as_ref(),
         )
     });
     let result = match validated {
@@ -1969,6 +2070,7 @@ where
         rewrite_authority,
         folded_run_calls: folded_calls,
         instruction_fold,
+        activation_retirement,
     })
 }
 
@@ -2141,6 +2243,10 @@ pub struct CompactionOutcome {
     /// the caller records it in the same prepared session value as the
     /// rewrite (`Session::record_instruction_fold`).
     pub(crate) instruction_fold: Option<crate::session::InstructionFold>,
+    /// The activation bodies the rewrite retired: the caller records the
+    /// envelope-5 marker in the same prepared session value as the rewrite
+    /// (`Session::record_activation_body_retirement`).
+    pub(crate) activation_retirement: Option<crate::session::ActivationRetirement>,
 }
 
 #[cfg(test)]
@@ -2426,6 +2532,7 @@ mod tests {
                 projection: &model_messages,
                 earlier_folded_calls: FoldedCalls::default(),
                 instruction_fold: None,
+                activation_retirement: None,
             },
             &None,
             &crate::event_tap::new_event_tap(),
@@ -2940,6 +3047,7 @@ mod tests {
                 projection: &model_messages,
                 earlier_folded_calls: FoldedCalls::default(),
                 instruction_fold: None,
+                activation_retirement: None,
             },
             &None,
             &crate::event_tap::new_event_tap(),
@@ -3477,6 +3585,174 @@ mod tests {
         .expect_err("a chronological instruction activation must survive compaction");
 
         assert!(error.to_string().contains("must be retained verbatim"));
+    }
+
+    fn activation_request(
+        activation: &str,
+        supersedes: Option<&str>,
+        body: &str,
+    ) -> crate::InstructionActivationRequest {
+        crate::InstructionActivationRequest {
+            revision: crate::types::InstructionRevisionRef {
+                namespace: crate::types::InstructionNamespace::new("app.skills").unwrap(),
+                key: crate::types::InstructionKey::new("calendar").unwrap(),
+                revision_id: crate::types::InstructionRevisionId::new(format!("rev-{activation}"))
+                    .unwrap(),
+                content_sha256: crate::types::InstructionContentDigest::for_body(body),
+            },
+            activation_id: crate::types::InstructionActivationId::new(activation).unwrap(),
+            expectation: supersedes.map_or(
+                crate::InstructionActivationExpectation::Absent,
+                |previous| {
+                    crate::InstructionActivationExpectation::Effective(
+                        crate::types::InstructionActivationId::new(previous).unwrap(),
+                    )
+                },
+            ),
+            supersedes: supersedes
+                .map(|previous| crate::types::InstructionActivationId::new(previous).unwrap()),
+            body: body.to_string(),
+        }
+    }
+
+    /// `[prompt, A1, turn, A2, turn]`, A2 superseding A1, and a compactor's
+    /// rebuild of it that keeps every System row and the last turn.
+    fn superseded_activation_rebuild() -> (Vec<Message>, crate::compact::CompactionResult) {
+        let mut session = Session::new();
+        session.append_system_message("prompt");
+        session
+            .activate_instruction(activation_request("act-1", None, "first body"))
+            .unwrap();
+        session.push(Message::User(UserMessage::text("first turn")));
+        session
+            .activate_instruction(activation_request("act-2", Some("act-1"), "second body"))
+            .unwrap();
+        session.push(Message::User(UserMessage::text("second turn")));
+        let source = session.messages().to_vec();
+        let (summary_message, _) = valid_summary("summary");
+        let rebuilt = vec![
+            source[0].clone(),
+            source[1].clone(),
+            summary_message.clone(),
+            source[3].clone(),
+            source[4].clone(),
+        ];
+        let result = crate::compact::CompactionResult {
+            messages: rebuilt,
+            summary: CompactionSummary::new(2, summary_message),
+            retained: vec![
+                CompactionRetained::new(0, 0, source[0].clone()),
+                CompactionRetained::new(1, 1, source[1].clone()),
+                CompactionRetained::new(3, 3, source[3].clone()),
+                CompactionRetained::new(4, 4, source[4].clone()),
+            ],
+            discarded: vec![CompactionDiscard::new(2, source[2].clone())],
+        };
+        (source, result)
+    }
+
+    fn system_row(message: &Message) -> &crate::types::SystemMessage {
+        let Message::System(system) = message else {
+            panic!("a System row: {message:?}");
+        };
+        system
+    }
+
+    /// The fold puts exactly the authorized retired form in place of a
+    /// superseded row, and refuses a retirement the session-document
+    /// authority did not authorize: one naming a key's newest row, one with
+    /// an inexact retired form, one naming a row that is not an activation
+    /// row, and a rebuild that retires a row the set does not name.
+    #[test]
+    fn the_fold_refuses_an_unauthorized_or_newest_retirement() {
+        let (source, result) = superseded_activation_rebuild();
+        validate_compaction_rebuild(
+            &source,
+            &result.messages,
+            &result.summary,
+            "summary",
+            &result.retained,
+            &result.discarded,
+        )
+        .expect("the compactor's rebuild keeps every row verbatim");
+        let retire = |offset: usize| {
+            crate::session::retired_activation_row(system_row(&source[offset]))
+                .expect("a live activation row has a retired form")
+        };
+
+        let authorized =
+            crate::session::ActivationRetirement::from_rows([(1, retire(1))].into_iter().collect());
+        let folded =
+            fold_instruction_rows(&source, result.clone(), "summary", None, Some(&authorized))
+                .expect("the authorized retirement folds");
+        assert_eq!(folded.messages[1], Message::System(retire(1)));
+        assert_eq!(
+            folded.messages[3], source[3],
+            "the newest row keeps its body"
+        );
+
+        let newest =
+            crate::session::ActivationRetirement::from_rows([(3, retire(3))].into_iter().collect());
+        let error = fold_instruction_rows(&source, result.clone(), "summary", None, Some(&newest))
+            .expect_err("a key's newest row keeps its body");
+        assert!(
+            error.to_string().contains("is its key's newest row"),
+            "{error}"
+        );
+
+        let mut inexact = retire(1);
+        inexact.retired_instruction_body = Some(crate::types::RetiredInstructionBody {
+            render_version: crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+            body_bytes: 1,
+        });
+        let inexact =
+            crate::session::ActivationRetirement::from_rows([(1, inexact)].into_iter().collect());
+        let error = fold_instruction_rows(&source, result.clone(), "summary", None, Some(&inexact))
+            .expect_err("an inexact retired form is refused");
+        assert!(
+            error.to_string().contains("is not the exact retired form"),
+            "{error}"
+        );
+
+        let not_an_activation =
+            crate::session::ActivationRetirement::from_rows([(0, retire(1))].into_iter().collect());
+        let error = fold_instruction_rows(
+            &source,
+            result.clone(),
+            "summary",
+            None,
+            Some(&not_an_activation),
+        )
+        .expect_err("a row that is not an activation row has no body to retire");
+        assert!(
+            error
+                .to_string()
+                .contains("not an instruction activation row"),
+            "{error}"
+        );
+
+        let mut unauthorized = result.clone();
+        unauthorized.messages[1] = Message::System(retire(1));
+        let nothing =
+            crate::session::ActivationRetirement::from_rows(std::collections::BTreeMap::new());
+        let error = validate_compaction_rebuild_with(
+            &source,
+            &unauthorized.messages,
+            &unauthorized.summary,
+            "summary",
+            &unauthorized.retained,
+            &unauthorized.discarded,
+            RebuildInsertions::Fold {
+                folds_entries: false,
+                snapshot: None,
+                retirement: Some(&nothing),
+            },
+        )
+        .expect_err("a retirement the authority did not authorize is refused");
+        assert!(
+            error.to_string().contains("does not match rebuilt offset"),
+            "{error}"
+        );
     }
 
     #[test]

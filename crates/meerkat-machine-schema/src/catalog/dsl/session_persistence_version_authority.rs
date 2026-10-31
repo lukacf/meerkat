@@ -19,10 +19,13 @@ machine! {
             // The envelope a session document is written with when it carries
             // no fact only the current version can read. An operator
             // instruction fact (an entry row, current or retained in the
-            // rewrite graph, or the recorded target state) needs the current
-            // version; every other document stays at the baseline, so a host
-            // that never uses operator instructions keeps the older reader's
-            // downgrade.
+            // rewrite graph, or the recorded target state), an instruction
+            // activation row whose body a compaction retired, and a rewrite
+            // record that moved an activation row to another offset need the
+            // current version (the shell records the instruction state for
+            // each, so one per-document fact answers); every other document
+            // stays at the baseline, so a host that uses none of them keeps
+            // the older reader's downgrade.
             session_envelope_baseline_version: u64,
             session_envelope_released_v3: u64,
             stored_input_state_version: u64,

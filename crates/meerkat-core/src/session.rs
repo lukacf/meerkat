@@ -118,6 +118,7 @@ impl SessionGeneration {
 
 #[cfg(test)]
 mod activation_places_tests;
+mod activation_retirement;
 #[cfg(test)]
 mod assistant_message_identity_tests;
 pub mod context_control;
@@ -140,6 +141,7 @@ mod operator_instructions_tests;
 mod system_prompt_update;
 mod transcript_history;
 
+pub(crate) use activation_retirement::{ActivationRetirement, with_retired_activation_bodies};
 pub use digest_accumulator::TranscriptDigestMidstate;
 pub(crate) use digest_accumulator::TranscriptMessages;
 pub use head_metadata::{
@@ -161,11 +163,13 @@ pub use instruction_activation::{
     InstructionActivationProjectionWitness, InstructionActivationReadPage,
     InstructionActivationReadQuery, InstructionActivationReceipt, InstructionActivationRecord,
     InstructionActivationRequest, MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES,
-    MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
-    materialize_instruction_activation_messages, validate_instruction_activation_messages,
+    MAX_INSTRUCTION_BODY_BYTES, RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+    inherited_instruction_keys_requiring_activation, materialize_instruction_activation_messages,
+    validate_instruction_activation_messages,
 };
 pub(crate) use instruction_activation::{
-    instruction_activation_offsets, instruction_activation_places,
+    instruction_activation_offsets, instruction_activation_places, retired_activation_row,
+    superseded_activation_rows,
 };
 pub(crate) use instruction_target::InstructionFold;
 pub use instruction_target::{
@@ -5403,13 +5407,17 @@ impl Session {
     /// recorded operator-instruction state. Every path that puts an
     /// operator-instruction entry row in a session records it (a run start's
     /// application, a compaction fold, any entry append, a fork that copies
-    /// entry rows), and so does a rewrite that moves an instruction
-    /// activation row to another offset, whose record releases before
-    /// activation places refuse. Decode carries it with the rows, so the key
-    /// alone answers, in O(1) and without reading the transcript. Entry rows
-    /// leave the live transcript only through a compaction fold, which
-    /// records the state in the same rewrite, so a document whose rewrite
-    /// graph retains an entry row always carries it too: once 5, always 5.
+    /// entry rows). So does a compaction that retires an instruction
+    /// activation body, and a fork that copies a retired one, since releases
+    /// before retirement read a retired row as a malformed envelope, and a
+    /// rewrite that moves an instruction activation row to another offset,
+    /// whose record releases before activation places refuse. Decode carries
+    /// it with the rows, so the key alone answers, in O(1) and without
+    /// reading the transcript. Entry rows leave the live transcript only
+    /// through a compaction fold, which records the state in the same
+    /// rewrite, so a document whose rewrite graph retains an entry row always
+    /// carries it too; an activation row is never erased and a retired body
+    /// never turns live again: once 5, always 5.
     pub fn carries_operator_instruction_facts(&self) -> bool {
         self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
     }
@@ -6891,6 +6899,7 @@ impl Session {
             prompt_version: None,
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         }));
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
@@ -9527,7 +9536,7 @@ impl Session {
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
         };
-        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked.record_instruction_state_of_copied_rows(self.carries_operator_instruction_facts());
         forked
     }
 
@@ -9726,7 +9735,7 @@ impl Session {
         };
         // A source without the instruction state holds no entry row, so a
         // fork of one stays O(1).
-        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked.record_instruction_state_of_copied_rows(self.carries_operator_instruction_facts());
         forked
     }
 }

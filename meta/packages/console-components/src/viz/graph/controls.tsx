@@ -86,7 +86,7 @@ export function ZoomControls({ scale, onZoom, minimap, testIdOf }: ZoomControlsP
 function RelationSample({ relation }: { relation: VizRelation }): React.JSX.Element {
   const directed = relation === "route" || relation === "lineage" || relation === "blocks";
   return (
-    <svg className="cc-viz-legend__sample" viewBox="0 0 24 10" width="24" height="10" aria-hidden="true" focusable="false">
+    <svg className="cc-viz-legend__sample" viewBox="0 0 24 10" width="24" height="10" style={{ width: 24, height: 10 }} aria-hidden="true" focusable="false">
       <g className={`cc-viz-edge cc-viz-edge--${relation}`}>
         <path className="cc-viz-edge__line" d={directed ? "M1 5H20" : "M1 5H23"} />
         {relation === "cross" ? <path className="cc-viz-edge__gap" d="M1 5H23" /> : null}
@@ -100,7 +100,7 @@ function RelationSample({ relation }: { relation: VizRelation }): React.JSX.Elem
 function KindSample({ kind }: { kind: VizNodeKind }): React.JSX.Element {
   if (kind === "item" || kind === "goal") {
     return (
-      <svg className="cc-viz-legend__sample" viewBox="0 0 24 14" width="24" height="14" aria-hidden="true" focusable="false">
+      <svg className="cc-viz-legend__sample" viewBox="0 0 24 14" width="24" height="14" style={{ width: 24, height: 14 }} aria-hidden="true" focusable="false">
         {kind === "item" ? (
           <rect className="cc-viz-card" x="3" y="2" width="18" height="10" rx="2" />
         ) : (
@@ -110,7 +110,7 @@ function KindSample({ kind }: { kind: VizNodeKind }): React.JSX.Element {
     );
   }
   return (
-    <svg className="cc-viz-legend__sample" viewBox="-12 -7 24 14" width="24" height="14" aria-hidden="true" focusable="false">
+    <svg className="cc-viz-legend__sample" viewBox="-12 -7 24 14" width="24" height="14" style={{ width: 24, height: 14 }} aria-hidden="true" focusable="false">
       <g className={`cc-viz-node cc-viz-node--${kind}`}>
         <MarkShape kind={kind} r={kind === "store" ? 5.5 : kind === "coordinator" ? 4 : 4.5} />
       </g>
@@ -180,7 +180,7 @@ export function Legend(props: LegendProps): React.JSX.Element {
           return (
             <li key={kind} className="cc-viz-legend__row is-static" data-testid={props.itemTestId?.(`kind:${kind}`)} data-kind={kind}>
               {props.dots && (kind === "agent" || kind === "helper") ? (
-                <svg className="cc-viz-legend__sample" viewBox="-12 -7 24 14" width="24" height="14" aria-hidden="true" focusable="false">
+                <svg className="cc-viz-legend__sample" viewBox="-12 -7 24 14" width="24" height="14" style={{ width: 24, height: 14 }} aria-hidden="true" focusable="false">
                   <g className={`cc-viz-node cc-viz-node--${kind} is-dot`}>
                     <circle className={kind === "helper" ? "cc-viz-mark cc-viz-mark--hollow cc-viz-mark--dot" : "cc-viz-mark cc-viz-mark--fill cc-viz-mark--dot"} r={kind === "helper" ? CLUSTER_DOT.hollow + 0.6 : CLUSTER_DOT.filled + 0.6} />
                   </g>
@@ -250,6 +250,7 @@ export function Minimap(props: MinimapProps): React.JSX.Element {
       <svg
         width={MINIMAP.width}
         height={MINIMAP.height}
+        style={{ width: MINIMAP.width, height: MINIMAP.height }}
         viewBox={`0 0 ${MINIMAP.width} ${MINIMAP.height}`}
         role="img"
         aria-label="Overview of the whole graph"

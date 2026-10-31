@@ -1,8 +1,9 @@
 // The lanes layout (Topology's default, design spec A3.9): one horizontal
 // band per group, the label at the band's left edge, nodes spread across the
 // width like the brand's household picture. Within a band the order is the
-// manual order, else the label; a band with more than 12 nodes wraps to a
-// second row; helpers hang off their host, right of its label and 36 px
+// manual order, else the label; a band wraps to another row after 12 nodes
+// or where the width runs out, and bands share spare height (up to twice
+// their minimum); helpers hang off their host, right of its label and 36 px
 // down. An edge between two nodes of one row arcs above the row (its height
 // by the span), so it never runs through the marks between them.
 
@@ -71,6 +72,7 @@ export function layoutLanes(
 
   // Rows per band: helpers attach to a host in the same band.
   const bandRows = new Map<string, LaneRowMember[][]>();
+  const available = options.width > 0 ? options.width - gutter - LANES.pad : Number.POSITIVE_INFINITY;
   let widest = 0;
   for (const band of bands) {
     const members = byLane.get(band.id) ?? [];
@@ -92,19 +94,29 @@ export function layoutLanes(
       }
     }
     main.sort(compareNodes);
+    const sized = main.map((node): LaneRowMember => {
+      const helpers = (helpersOf.get(node.id) ?? []).sort(compareNodes);
+      // Helpers start right of the host's label, so their link clears it.
+      const helperDx = Math.max(LANES.helperDx, node.labelWidth / 2 + 14);
+      const helperReach = helpers.length > 0 ? helperDx + (helpers.length - 1) * LANES.helperStep + 18 : 0;
+      const slot = Math.max(LANES.minSlot, node.labelWidth + LANES.slotLabelPad, helperReach * 2);
+      return { node, helpers, slot, helperDx };
+    });
+    // A row holds at most 12 nodes, and wraps earlier where the width runs out.
     const rows: LaneRowMember[][] = [];
-    for (let start = 0; start < main.length; start += LANES.rowCap) {
-      const row = main.slice(start, start + LANES.rowCap).map((node) => {
-        const helpers = (helpersOf.get(node.id) ?? []).sort(compareNodes);
-        // Helpers start right of the host's label, so their link clears it.
-        const helperDx = Math.max(LANES.helperDx, node.labelWidth / 2 + 14);
-        const helperReach = helpers.length > 0 ? helperDx + (helpers.length - 1) * LANES.helperStep + 18 : 0;
-        const slot = Math.max(LANES.minSlot, node.labelWidth + LANES.slotLabelPad, helperReach * 2);
-        return { node, helpers, slot, helperDx };
-      });
-      rows.push(row);
-      widest = Math.max(widest, row.reduce((sum, member) => sum + member.slot, 0));
+    let row: LaneRowMember[] = [];
+    let used = 0;
+    for (const member of sized) {
+      if (row.length > 0 && (row.length >= LANES.rowCap || used + member.slot > available)) {
+        rows.push(row);
+        row = [];
+        used = 0;
+      }
+      row.push(member);
+      used += member.slot;
     }
+    if (row.length > 0) rows.push(row);
+    for (const line of rows) widest = Math.max(widest, line.reduce((sum, member) => sum + member.slot, 0));
     bandRows.set(band.id, rows);
   }
 
@@ -115,12 +127,27 @@ export function layoutLanes(
   const boxes = new Map<string, VizNodeBox>();
   /** Row key -> its row members (id and x), for the same-row arcs. */
   const rowOf = new Map<string, { id: string; x: number }[]>();
-  let top = 0;
-  for (const band of bands) {
+  // Band heights: the rows they hold; spare frame height is shared out, a
+  // band growing to twice the minimum at most (the bands fill the canvas).
+  const blocks = bands.map((band) => {
     const rows = bandRows.get(band.id) ?? [];
     const hasHelpers = rows.length > 0 && rows[rows.length - 1].some((member) => member.helpers.length > 0);
-    const block = rows.length * pitch + (hasHelpers ? LANES.helperDy : 0);
-    const height = Math.max(LANES.minHeight[density], block + 24);
+    return rows.length * pitch + (hasHelpers ? LANES.helperDy : 0);
+  });
+  const heights = blocks.map((block) => Math.max(LANES.minHeight[density], block + 24));
+  const spare = options.height > 0 ? options.height - heights.reduce((sum, value) => sum + value, 0) : 0;
+  if (spare > 0 && heights.length > 0) {
+    const share = spare / heights.length;
+    const cap = LANES.minHeight[density] * 2;
+    heights.forEach((height, index) => {
+      heights[index] = height + Math.max(0, Math.min(share, cap - height));
+    });
+  }
+  let top = 0;
+  for (const [bandIndex, band] of bands.entries()) {
+    const rows = bandRows.get(band.id) ?? [];
+    const block = blocks[bandIndex];
+    const height = heights[bandIndex];
     const rowTop = top + (height - block) / 2;
     rows.forEach((row, rowIndex) => {
       const used = row.reduce((sum, member) => sum + member.slot, 0);
@@ -152,6 +179,7 @@ export function layoutLanes(
   }
 
   const routes = sameRowArcs(edges, boxes, rowOf);
+  for (const [id, route] of bowAroundMarks(edges, boxes, routes)) routes.set(id, route);
   let apex = 0;
   for (const route of routes.values()) apex = Math.min(apex, route[1].y * 0.75 + route[0].y * 0.25 - 4);
 
@@ -199,4 +227,55 @@ export function sameRowArcs(
     ]);
   }
   return routes;
+}
+
+/** How close (px) a straight edge may pass another mark before it bows around it. */
+const MARK_CLEARANCE = 12;
+
+/**
+ * Straight edges that would run through another node's mark (a node lined
+ * up between two lanes the edge joins) bow sideways around it instead.
+ */
+export function bowAroundMarks(
+  edges: readonly LayoutEdge[],
+  boxes: ReadonlyMap<string, { id: string; x: number; y: number; w: number; h: number }>,
+  routed: ReadonlyMap<string, EdgeRoute>,
+): Map<string, EdgeRoute> {
+  const bowed = new Map<string, EdgeRoute>();
+  const all = [...boxes.values()];
+  for (const edge of edges) {
+    if (routed.has(edge.id) || edge.from === edge.to) continue;
+    const a = boxes.get(edge.from);
+    const b = boxes.get(edge.to);
+    if (!a || !b) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length2 = dx * dx + dy * dy;
+    if (length2 < 1) continue;
+    const length = Math.sqrt(length2);
+    let worst: { t: number; side: number; distance: number; reach: number } | null = null;
+    for (const c of all) {
+      if (c.id === a.id || c.id === b.id) continue;
+      const t = ((c.x - a.x) * dx + (c.y - a.y) * dy) / length2;
+      if (t <= 0.06 || t >= 0.94) continue;
+      const cross = (dx * (c.y - a.y) - dy * (c.x - a.x)) / length;
+      const reach = Math.max(c.w, c.h) / 2 + MARK_CLEARANCE;
+      if (Math.abs(cross) >= reach) continue;
+      if (!worst || reach - Math.abs(cross) > worst.reach - worst.distance) worst = { t, side: Math.sign(cross) || 1, distance: Math.abs(cross), reach };
+    }
+    if (!worst) continue;
+    // Bow away from the mark: the curve's peak clears it by the clearance.
+    const nx = -dy / length;
+    const ny = dx / length;
+    const away = -worst.side;
+    const peak = (worst.reach + worst.distance) / 0.75;
+    const offset = away * peak;
+    bowed.set(edge.id, [
+      { x: a.x, y: a.y },
+      { x: a.x + dx * 0.3 + nx * offset, y: a.y + dy * 0.3 + ny * offset },
+      { x: a.x + dx * 0.7 + nx * offset, y: a.y + dy * 0.7 + ny * offset },
+      { x: b.x, y: b.y },
+    ]);
+  }
+  return bowed;
 }

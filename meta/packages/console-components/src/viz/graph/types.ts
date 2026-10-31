@@ -283,8 +283,11 @@ export interface GraphViewProps {
   messages?: readonly VizMessage[];
   memoryEvents?: readonly VizMemoryEvent[];
 
-  /** `auto`: shown when two or more relations or node kinds are drawn. */
-  legend?: "auto" | "on" | "off";
+  /**
+   * `auto`: shown when two or more relations or node kinds are drawn.
+   * `collapsed`: shown, starting folded to its "Legend" chip.
+   */
+  legend?: "auto" | "on" | "off" | "collapsed";
   /**
    * One meta line at the foot of the legend ("Routes need routing access").
    * Shown whenever the legend is not "off", even where "auto" would hide it.

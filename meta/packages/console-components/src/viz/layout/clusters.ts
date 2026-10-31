@@ -1,7 +1,8 @@
 // The clusters layout (large teams, design spec A3.9; the brand's engineering
 // picture): each group drawn as concentric rings of member dots around its
 // lead. Long-lived members fill the inner rings, helpers the outer ones; the
-// groups pack in rows; edges between groups bundle into one line per pair.
+// groups pack in rows (as many per row as lets them be drawn largest in the
+// frame); edges between groups bundle into one line per pair.
 
 import { CLUSTER_DOT } from "./geometry";
 import type { ClusterBundle, GraphLayout, LayoutEdge, LayoutLaneInput, LayoutNode, LayoutOptions, PlacedCluster } from "./types";
@@ -109,22 +110,32 @@ export function layoutClusters(
     return { id, lead, members: rest, radii, slots, r: Math.max(leadR + 6, outer + CLUSTER_DOT.filled + 6) };
   });
 
-  // Shelf packing: rows of clusters inside the width, each row centred.
-  const usable = Math.max(options.width > 0 ? options.width - 2 * CLUSTERS.pad : 900, ...shapes.map((shape) => shape.r * 2));
-  const rows: Shape[][] = [];
-  let row: Shape[] = [];
-  let rowWidth = 0;
-  for (const shape of shapes) {
-    const w = shape.r * 2;
-    if (row.length > 0 && rowWidth + CLUSTERS.groupGap + w > usable) {
-      rows.push(row);
-      row = [];
-      rowWidth = 0;
+  // Rows of clusters, as many per row as lets them be drawn largest in the
+  // frame (its aspect), each row centred.
+  const frameW = options.width > 0 ? options.width : 960;
+  const frameH = options.height > 0 ? options.height : 560;
+  const arrange = (columns: number): Shape[][] => {
+    const result: Shape[][] = [];
+    for (let start = 0; start < shapes.length; start += columns) result.push(shapes.slice(start, start + columns));
+    return result;
+  };
+  const extent = (arranged: Shape[][]) => {
+    const width = Math.max(...arranged.map((line) => line.reduce((sum, shape) => sum + shape.r * 2, 0) + (line.length - 1) * CLUSTERS.groupGap));
+    const height = arranged.reduce((sum, line) => sum + Math.max(...line.map((shape) => shape.r * 2)) + CLUSTERS.labelRoom, 0) + (arranged.length - 1) * (CLUSTERS.groupGap / 2);
+    return { width: width + 2 * CLUSTERS.pad, height: height + 2 * CLUSTERS.pad };
+  };
+  let rows = arrange(shapes.length);
+  let best = -Infinity;
+  for (let columns = 1; columns <= shapes.length; columns += 1) {
+    const arranged = arrange(columns);
+    const { width, height } = extent(arranged);
+    const scale = Math.min(frameW / width, frameH / height);
+    if (scale > best + 1e-6) {
+      best = scale;
+      rows = arranged;
     }
-    rowWidth += (row.length > 0 ? CLUSTERS.groupGap : 0) + w;
-    row.push(shape);
   }
-  if (row.length > 0) rows.push(row);
+  const usable = extent(rows).width - 2 * CLUSTERS.pad;
 
   const boxes = new Map<string, VizNodeBox>();
   const clusters: PlacedCluster[] = [];

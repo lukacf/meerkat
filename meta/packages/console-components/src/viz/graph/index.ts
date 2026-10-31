@@ -27,6 +27,7 @@ export {
   clampScale,
   contentOverflows,
   fitViewport,
+  needsMinimap,
   revealViewport,
   viewportTransform,
   visibleWorld,

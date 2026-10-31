@@ -130,13 +130,13 @@ export function connectionsSummary(row: GraphListRow, limit = 3): string {
 function RowMark({ node }: { node: VizNode }): React.JSX.Element {
   if (isCardKind(node.kind)) {
     return (
-      <svg className="cc-viz-list__mark" viewBox="-9 -9 18 18" width="18" height="18" aria-hidden="true" focusable="false">
+      <svg className="cc-viz-list__mark" viewBox="-9 -9 18 18" width="18" height="18" style={{ width: 18, height: 18 }} aria-hidden="true" focusable="false">
         <StatusSquareShape status={itemStatusOf(node.status)} live={Boolean(node.live)} />
       </svg>
     );
   }
   return (
-    <svg className="cc-viz-list__mark" viewBox="-9 -9 18 18" width="18" height="18" aria-hidden="true" focusable="false">
+    <svg className="cc-viz-list__mark" viewBox="-9 -9 18 18" width="18" height="18" style={{ width: 18, height: 18 }} aria-hidden="true" focusable="false">
       <g className={cx("cc-viz-node", `cc-viz-node--${node.kind}`, (node.live || node.tone === "live") && "is-live is-hot", node.retired && "is-retired")}>
         <MarkShape kind={node.kind} r={node.kind === "store" ? 6 : node.kind === "coordinator" ? 4.5 : 5} />
       </g>

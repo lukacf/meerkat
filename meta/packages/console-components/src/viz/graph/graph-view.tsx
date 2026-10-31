@@ -72,14 +72,15 @@ function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-function useElementSize(ref: React.RefObject<HTMLElement | null>): { width: number; height: number } {
-  const [size, setSize] = React.useState({ width: 0, height: 0 });
+/** The element's size; `measured` turns true once it has been read (zero in jsdom). */
+function useElementSize(ref: React.RefObject<HTMLElement | null>): { width: number; height: number; measured: boolean } {
+  const [size, setSize] = React.useState({ width: 0, height: 0, measured: false });
   React.useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return undefined;
     const apply = (width: number, height: number) => {
-      const next = { width: Math.round(width), height: Math.round(height) };
-      setSize((previous) => (previous.width === next.width && previous.height === next.height ? previous : next));
+      const next = { width: Math.round(width), height: Math.round(height), measured: true };
+      setSize((previous) => (previous.measured && previous.width === next.width && previous.height === next.height ? previous : next));
     };
     const rect = element.getBoundingClientRect();
     apply(rect.width, rect.height);
@@ -124,7 +125,8 @@ function useMeasures(ref: React.RefObject<HTMLElement | null>): Measures {
     setFamily((previous) => (previous === next ? previous : next));
   });
   React.useEffect(() => {
-    if (typeof document === "undefined" || !document.fonts?.ready) return undefined;
+    // Widths change once web fonts arrive; nothing to redo when they already have.
+    if (typeof document === "undefined" || !document.fonts?.ready || document.fonts.status === "loaded") return undefined;
     let live = true;
     void document.fonts.ready.then(() => {
       if (live) setEpoch((value) => value + 1);
@@ -1247,6 +1249,9 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     >
       {useCanvas ? <canvas ref={canvasRef} className="cc-viz-graph__canvas" aria-hidden="true" /> : null}
       <svg ref={svgRef} className="cc-viz-graph__svg" data-testid={testIds.svg} width="100%" height="100%">
+        {/* The drawing waits for the frame's first measure (one layout, not two). */}
+        {size.measured ? (
+        <>
         {kind === "lanes" ? (
           <LanesLayer
             part="rules"
@@ -1392,6 +1397,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
         </g>
         {kind === "lanes" ? (
           <LanesLayer part="labels" lanes={layout.lanes} viewport={viewport} width={size.width} compact={size.width > 0 && size.width < 600} />
+        ) : null}
+        </>
         ) : null}
       </svg>
       <div className="cc-viz-chrome">

@@ -267,7 +267,8 @@ describe("TechnicalDetails", () => {
     const details = view.getByTestId("details") as HTMLDetailsElement;
     expect(details.tagName).toBe("DETAILS");
     expect(details.open).toBe(false);
-    expect(details.querySelector("summary")?.textContent).toBe("Technical details");
+    // The summary counts the fields it holds (console v2 spec A3.6).
+    expect(details.querySelector("summary")?.textContent).toBe("Technical details · 2");
     const labels = Array.from(details.querySelectorAll("dt")).map((node) => node.textContent);
     expect(labels).toEqual(["Identity", "Generation"]);
     expect(details.querySelectorAll(".cc-tech-id").length).toBe(1);

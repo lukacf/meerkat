@@ -1163,6 +1163,36 @@ textarea.cc-input {
   border-radius: var(--_cc-radius-md);
   background: var(--_cc-surface-soft);
 }
+.cc-tech__count {
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-tech__tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px -6px 4px 0;
+}
+.cc-tech__copy-all[data-copied="true"] { color: var(--_cc-positive-ink); }
+/* "Show technical IDs" on: the ids in a row, no disclosure (A3.6). */
+.cc-tech--inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+.cc-tech__pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.cc-tech__key {
+  flex: none;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
 
 /* ── Names and times ───────────────────────────────────────────── */
 
@@ -1197,6 +1227,17 @@ textarea.cc-input {
 }
 .cc-agent__avatar[data-size="22"] { width: 22px; height: 22px; font-size: 10.5px; }
 .cc-agent__avatar[data-size="28"] { width: 28px; height: 28px; font-size: 12px; }
+.cc-agent__avatar[data-size="36"] { width: 36px; height: 36px; font-size: 14px; }
+/* Working now: the accent ring around the avatar, pulsing (a static ring
+   under reduced motion). */
+.cc-agent__avatar.is-live {
+  box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent);
+  animation: cc-avatar-pulse var(--_cc-dur-pulse) ease-in-out infinite;
+}
+@keyframes cc-avatar-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent), 0 0 0 3.5px color-mix(in oklch, var(--_cc-member-accent) 30%, transparent); }
+  50%      { box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent), 0 0 0 7px color-mix(in oklch, var(--_cc-member-accent) 0%, transparent); }
+}
 
 .cc-time {
   font-variant-numeric: tabular-nums;
@@ -1367,6 +1408,35 @@ button.cc-tile:focus-visible,
   color: var(--_cc-foreground-muted);
 }
 .cc-panel-empty__mark .cc-glyph { width: 16px; height: 16px; }
+.cc-panel-empty__art { margin-bottom: 6px; }
+.cc-panel-empty--art { gap: 6px; padding-top: 32px; }
+.cc-panel-empty--inline .cc-panel-empty__art { margin-bottom: 4px; }
+.cc-panel-empty__details { align-self: stretch; max-width: 46ch; margin: 6px auto 0; text-align: left; }
+.cc-panel-empty--inline .cc-panel-empty__details { margin-left: 0; }
+
+/* Illustrations (spec A3.7): the brand's graph grammar, 1.25 px. */
+.cc-illus {
+  display: block;
+  flex: none;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+}
+.cc-illus__line {
+  fill: none;
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.cc-illus__bold { stroke: var(--_cc-viz-ink); stroke-width: 1.75; }
+.cc-illus__dash { stroke-dasharray: 3 3; }
+.cc-illus__plate { fill: var(--_cc-surface-card); }
+.cc-illus__ink { fill: var(--_cc-viz-ink); stroke: none; }
+.cc-illus__mid { fill: var(--_cc-viz-mid); stroke: none; }
+.cc-illus__accent { fill: var(--_cc-viz-live); stroke: none; }
+.cc-illus__crit { fill: var(--_cc-negative); stroke: none; }
 .cc-panel-empty__title {
   margin: 0;
   font-size: 13px;
@@ -1420,6 +1490,41 @@ button.cc-tile:focus-visible,
   height: 64px;
   border-radius: var(--_cc-radius-md);
 }
+/* Shown after 150 ms, so a fast load never flashes (A3.7). */
+.cc-skeleton { animation: cc-skeleton-in 1ms linear 150ms both; }
+@keyframes cc-skeleton-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.cc-skeleton--tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 12px;
+}
+.cc-skeleton--tiles .cc-skeleton__row {
+  width: 100%;
+  height: 52px;
+  border-radius: var(--_cc-radius-md);
+}
+.cc-skeleton--graph,
+.cc-skeleton--timeline { padding: 24px var(--_cc-panel-pad-x); }
+.cc-skeleton__art {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 260px;
+  fill: none;
+  stroke: none;
+  animation: cc-breathe 1.4s ease-in-out infinite;
+}
+@keyframes cc-breathe {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 0.8; }
+}
+.cc-skeleton__grid { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-skeleton__edge { stroke: var(--_cc-viz-faint); stroke-width: 1.25; }
+.cc-skeleton__node { fill: var(--_cc-viz-faint); }
+.cc-skeleton__bar { fill: var(--_cc-viz-faint); }
 @keyframes cc-shimmer {
   0%   { background-position: 100% 0; }
   100% { background-position: -100% 0; }
@@ -2016,6 +2121,200 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 .cc-dots.is-selectable .cc-dots__svg { cursor: pointer; }
 .cc-dots__now { stroke: var(--_cc-viz-live); stroke-width: 1; }
 
+/* ── Detail drawer (spec A3.10) ────────────────────────────────────
+   Docked from 900 px (pushes the main view, a 6 px resize handle),
+   an overlay from 600 to 900 px (e3), the whole view under 600 px. */
+.cc-drawer-layout {
+  container-type: inline-size;
+  container-name: cc-drawer;
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.cc-drawer-layout__inner {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.cc-drawer-layout__main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.cc-drawer-layout__drawer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: var(--_cc-drawer-w, 340px);
+  min-height: 0;
+  border-left: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+  animation: cc-drawer-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-drawer-layout__handle {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  width: 6px;
+  margin-right: -6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.cc-drawer-layout__handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.cc-drawer-layout__handle:hover::before { background: var(--_cc-border-strong); }
+.cc-drawer-layout__handle:focus-visible { outline: none; }
+.cc-drawer-layout__handle:focus-visible::before { background: var(--_cc-focus-ring); }
+.cc-drawer-layout__back {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 100%;
+  padding: 8px var(--_cc-panel-pad-x);
+  border: 0;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-drawer-layout__back:hover { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-drawer-layout__back:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+@keyframes cc-drawer-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: none; }
+}
+@container cc-drawer (max-width: 899px) {
+  .cc-drawer-layout__handle { display: none; }
+  .cc-drawer-layout__drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    width: min(var(--_cc-drawer-w, 340px), 88%);
+    border-left-color: var(--_cc-border-strong);
+    box-shadow: var(--_cc-shadow-lg);
+  }
+}
+@container cc-drawer (max-width: 599px) {
+  .cc-drawer-layout__drawer {
+    left: 0;
+    width: auto;
+    border-left: 0;
+    box-shadow: none;
+    animation-name: cc-fade-in;
+  }
+  .cc-drawer-layout.has-drawer .cc-drawer-layout__main { visibility: hidden; }
+  .cc-drawer-layout__back { display: flex; }
+}
+
+.cc-drawer {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--_cc-surface-card);
+}
+.cc-drawer__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: none;
+  padding: 14px 10px 12px 16px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.cc-drawer__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 24px;
+}
+.cc-drawer__titles { flex: 1 1 auto; min-width: 0; }
+.cc-drawer__title {
+  margin: 0;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-entity);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-drawer__title:focus { outline: none; }
+.cc-drawer__title:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-drawer__sub {
+  margin-top: 2px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__status { flex: none; margin-top: 3px; }
+.cc-drawer__tools {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  margin-top: 1px;
+}
+.cc-drawer__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px 24px;
+}
+.cc-drawer__section { padding-top: 16px; }
+.cc-drawer__section + .cc-drawer__section { padding-top: 20px; }
+.cc-drawer__section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cc-drawer__section-label {
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__section-label .cc-count { margin-left: 2px; }
+.cc-drawer__section-action {
+  margin-left: auto;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 20px;
+}
+.cc-drawer__tech { margin-top: 16px; }
+
 /* ── Hover reveal (spec A4.1) ──────────────────────────────────────
    Secondary controls fade in when their container is hovered or holds
    focus, is selected, or the control is open; opacity only, so they stay
@@ -2111,6 +2410,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   .cc-popover,
   .cc-status-toast { animation: cc-fade-in 120ms linear; }
   .cc-panel-head__progress::before { animation: none; width: 50%; }
+  .cc-skeleton__art,
+  .cc-agent__avatar.is-live { animation: none; }
+  .cc-drawer-layout__drawer { animation-name: cc-fade-in; }
   .cc-mark[data-tone="live"]:not(.cc-chip__mark),
   .cc-dot.is-live {
     animation: none;
@@ -2122,6 +2424,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 .reduced-motion .cc-popover,
 .reduced-motion .cc-status-toast { animation: cc-fade-in 120ms linear; }
 .reduced-motion .cc-panel-head__progress::before { animation: none; width: 50%; }
+.reduced-motion .cc-skeleton__art,
+.reduced-motion .cc-agent__avatar.is-live { animation: none; }
+.reduced-motion .cc-drawer-layout__drawer { animation-name: cc-fade-in; }
 .reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
 .reduced-motion .cc-dot.is-live {
   animation: none;

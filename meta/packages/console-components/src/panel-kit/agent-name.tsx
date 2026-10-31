@@ -26,19 +26,24 @@ export function useAgentDirectory(): AgentDirectory {
   return useContext(AgentDirectoryContext);
 }
 
-export type AgentAvatarSize = 18 | 22 | 28;
+export type AgentAvatarSize = 18 | 22 | 28 | 36;
 
+/** An agent's initial on the accent soft fill (18, 22, 28 or 36 px).
+ * `live` (working now) adds the accent pulse ring; a static double ring
+ * under reduced motion. Decorative: the name beside it carries the words. */
 export function AgentAvatar({
   name,
   size = 18,
+  live,
   className,
 }: {
   name: string;
   size?: AgentAvatarSize;
+  live?: boolean;
   className?: string;
 }) {
   return (
-    <span className={cx("cc-agent__avatar", className)} data-size={size} aria-hidden="true">
+    <span className={cx("cc-agent__avatar", live && "is-live", className)} data-size={size} aria-hidden="true">
       {agentInitial(name)}
     </span>
   );

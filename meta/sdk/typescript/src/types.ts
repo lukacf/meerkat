@@ -4276,6 +4276,12 @@ export interface WorkGraphEvidenceRef {
   readonly summary: string | null;
   readonly confirmationKind: string | null;
   readonly confirmingOwnerKey: WorkGraphOwnerKey | null;
+  /**
+   * Ids of earlier evidence on the same item that this ref withdraws (empty
+   * when it withdraws nothing). A ref is withdrawn when a later ref on the
+   * item lists its id; nothing is removed.
+   */
+  readonly withdraws: readonly string[];
 }
 
 export function parseWorkGraphEvidenceRef(raw: unknown): WorkGraphEvidenceRef {
@@ -4291,6 +4297,7 @@ export function parseWorkGraphEvidenceRef(raw: unknown): WorkGraphEvidenceRef {
       d.confirming_owner_key != null
         ? parseWorkGraphOwnerKey(d.confirming_owner_key)
         : null,
+    withdraws: asStringArray(d.withdraws),
   };
 }
 
@@ -4300,6 +4307,11 @@ export interface WorkGraphEvidenceInput {
   readonly id: string;
   readonly label?: string;
   readonly summary?: string;
+  /**
+   * Ids of earlier evidence on the same item that this ref withdraws.
+   * `workgraphAddEvidence` only: goal confirmation refuses the field.
+   */
+  readonly withdraws?: readonly string[];
 }
 
 export function workGraphEvidenceInputToDict(
@@ -4311,6 +4323,7 @@ export function workGraphEvidenceInputToDict(
   };
   if (evidence.label !== undefined) result.label = evidence.label;
   if (evidence.summary !== undefined) result.summary = evidence.summary;
+  if (evidence.withdraws !== undefined) result.withdraws = [...evidence.withdraws];
   return result;
 }
 

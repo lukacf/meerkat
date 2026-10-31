@@ -3840,15 +3840,15 @@ async fn memory_panel_record_usage_withholds_denied_identities() {
     let _ = runtime.mob_handle().stop().await;
 }
 
-/// Seed one durable dream verdict sheet (`dream_runs`) for the steward dream
-/// [`seeded_memory_store`] committed (`run-dream-1`, which `dreams`
-/// reconstructs from the audit rows).
-async fn seed_dream_run_sheet(store: &meerkat_meta::SqliteAgentMemoryStore) {
+/// Seed one durable dream verdict sheet (`dream_runs`) for a steward dream
+/// the store committed (for [`seeded_memory_store`], `run-dream-1`, which
+/// `dreams` reconstructs from the audit rows).
+async fn seed_dream_run_sheet(store: &meerkat_meta::SqliteAgentMemoryStore, run_id: &str) {
     store
         .save_dream_run(
             "default",
             meerkat_meta::memory::PersistedDreamRun {
-                run_id: "run-dream-1".to_string(),
+                run_id: run_id.to_string(),
                 partition_label: "realm".to_string(),
                 started_at_ms: 1,
                 completed_at_ms: 2,
@@ -3883,7 +3883,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
     let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
     let memory_dir = tempfile::tempdir().expect("memory dir");
     let (store, ..) = seeded_memory_store(memory_dir.path()).await;
-    seed_dream_run_sheet(&store).await;
+    seed_dream_run_sheet(&store, "run-dream-1").await;
     runtime.set_memory_panel_store(Arc::new(store.clone()));
 
     let reads = |id: &str, actions: &[&str]| AccessRule {
@@ -3955,14 +3955,15 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
 }
 
 /// A caller who may read every memory scope of the realm (each identity, the
-/// mob, the operator and the realm scope) gets the realm's whole dream
+/// mob, the operator and the realm scope) and, since the realm holds a
+/// quarantined record, its quarantined content gets the realm's whole dream
 /// history, `dreams` and `dream_runs` alike, with `withheld_by_access: false`.
 #[tokio::test]
 async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
     let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
     let memory_dir = tempfile::tempdir().expect("memory dir");
     let (store, ..) = seeded_memory_store(memory_dir.path()).await;
-    seed_dream_run_sheet(&store).await;
+    seed_dream_run_sheet(&store, "run-dream-1").await;
     runtime.set_memory_panel_store(Arc::new(store.clone()));
     runtime.set_access_controller(
         AccessController::new(AccessControlConfig {
@@ -3975,6 +3976,7 @@ async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
                     "agent.memory.read".to_string(),
                     "mob.memory.read".to_string(),
                     "operator.memory.read".to_string(),
+                    "memory.quarantine.review".to_string(),
                 ],
                 ..AccessRule::default()
             }],
@@ -3997,6 +3999,232 @@ async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
             "{method}: {result:#?}"
         );
     }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A store whose realm holds a record in router's and in delivery's memory
+/// and one steward dream (`run-plain-1`, with its `dream_runs` sheet) that
+/// wrote into router's, and no quarantined content.
+async fn plain_dream_store(root: &std::path::Path) -> meerkat_meta::SqliteAgentMemoryStore {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::memory::staged::StagedBatchKind;
+    use meerkat_meta::{
+        AgentMemoryProvider, MemoryScope, NewMemoryRecord, SqliteAgentMemoryStore,
+        StagedMemoryStore, StagedMutationBatch, StagedOp, TrustTier,
+    };
+
+    let store = SqliteAgentMemoryStore::open(root).expect("open store");
+    let record = |title: &str| NewMemoryRecord {
+        kind: MemoryKind::Fact,
+        title: title.to_string(),
+        description: format!("{title} description"),
+        body: format!("{title} body"),
+        tags: Vec::new(),
+        evidence: Vec::new(),
+        verification: None,
+    };
+    let identity_scope = |identity: &str| MemoryScope::Identity {
+        realm: "default".to_string(),
+        identity: identity.to_string(),
+    };
+    for identity in ["router", "delivery"] {
+        store
+            .remember_authored(
+                &identity_scope(identity),
+                record(&format!("{identity} fact")),
+                MemoryAuthor::Operator,
+            )
+            .await
+            .expect("identity record");
+    }
+    let token = store
+        .stage(StagedMutationBatch {
+            kind: StagedBatchKind::FreshWrite,
+            realm: "default".to_string(),
+            author: MemoryAuthor::Steward {
+                run_id: "run-plain-1".to_string(),
+            },
+            ops: vec![StagedOp::Create {
+                id: None,
+                scope: identity_scope("router"),
+                record: record("Router consolidated"),
+                trust: TrustTier::AgentObserved,
+                derived_from: Vec::new(),
+                rationale: Some("consolidated router's notes".to_string()),
+                created_at_ms: None,
+                updated_at_ms: None,
+            }],
+        })
+        .await
+        .expect("stage dream batch");
+    store.commit(token).await.expect("commit dream batch");
+    seed_dream_run_sheet(&store, "run-plain-1").await;
+    store
+}
+
+/// A controller whose one rule grants `actions` with no resource selector.
+fn unscoped_reader(actions: &[&str]) -> AccessController {
+    AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![AccessRule {
+            id: "unscoped-reader".to_string(),
+            actions: actions.iter().copied().map(String::from).collect(),
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller")
+}
+
+/// Both dream reads either list `run_id` with `withheld_by_access: false`,
+/// or list no run with `withheld_by_access: true`.
+async fn assert_dream_history(app: &axum::Router, run_id: &str, withheld: bool, who: &str) {
+    for (method, result) in dream_history_reads(app).await {
+        let listed = result["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().any(|run| run["run_id"] == json!(run_id)));
+        assert_eq!(
+            listed, !withheld,
+            "{who}: {method} lists {run_id}: {result:#?}"
+        );
+        assert_eq!(
+            result["withheld_by_access"],
+            json!(withheld),
+            "{who}: {method}: {result:#?}"
+        );
+        if withheld {
+            assert_eq!(result["runs"], json!([]), "{who}: {method}: {result:#?}");
+        }
+    }
+}
+
+/// Quarantined content needs `memory.quarantine.review`, as an audit verdict
+/// on it does: while the realm holds a quarantined record, its dream history
+/// is withheld from a caller who may read every scope there but lacks the
+/// review grant, and listed once the caller holds it too.
+#[tokio::test]
+async fn memory_panel_dream_history_needs_the_review_grant_while_a_record_is_quarantined() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, ..) = seeded_memory_store(memory_dir.path()).await;
+    seed_dream_run_sheet(&store, "run-dream-1").await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let every_scope = [
+        "agent.view",
+        "agent.memory.read",
+        "mob.memory.read",
+        "operator.memory.read",
+    ];
+
+    runtime.set_access_controller(unscoped_reader(&every_scope));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_dream_history(&app, "run-dream-1", true, "every scope, no review grant").await;
+
+    let mut reviewer = every_scope.to_vec();
+    reviewer.push("memory.quarantine.review");
+    runtime.set_access_controller(unscoped_reader(&reviewer));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_dream_history(
+        &app,
+        "run-dream-1",
+        false,
+        "every scope and the review grant",
+    )
+    .await;
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// Quarantined content stays reviewer-only after it is tombstoned (here a
+/// quarantined write that was then forgotten), so the realm's dream history
+/// still needs the review grant although no record is quarantined any more.
+#[tokio::test]
+async fn memory_panel_dream_history_needs_the_review_grant_after_a_quarantined_tombstone() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind, RecordStatus};
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    struct AlwaysQuarantine;
+    impl meerkat_meta::memory::taint::LlmWriteGate for AlwaysQuarantine {
+        fn quarantine_reason(
+            &self,
+            author: &MemoryAuthor,
+            _kind: meerkat_meta::memory::staged::StagedBatchKind,
+            _evidence: &[meerkat_meta::memory::records::EvidenceRef],
+        ) -> Option<String> {
+            author.is_llm().then(|| "test taint".to_string())
+        }
+    }
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    let router = MemoryScope::Identity {
+        realm: "default".to_string(),
+        identity: "router".to_string(),
+    };
+    store.set_llm_write_gate(Arc::new(AlwaysQuarantine));
+    let quarantined = store
+        .remember_authored(
+            &router,
+            NewMemoryRecord {
+                kind: MemoryKind::Fact,
+                title: "Router tainted claim".to_string(),
+                description: "Router tainted claim description".to_string(),
+                body: "Router tainted claim body".to_string(),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Agent {
+                identity: "router".to_string(),
+            },
+        )
+        .await
+        .expect("quarantined write");
+    assert!(
+        matches!(quarantined.status, RecordStatus::Quarantined { .. }),
+        "the write must land quarantined: {quarantined:?}"
+    );
+    store
+        .forget_authored(&router, &quarantined.memory_id, MemoryAuthor::Operator)
+        .await
+        .expect("forget the quarantined write");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(unscoped_reader(&["agent.view", "agent.memory.read"]));
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    assert_dream_history(
+        &app,
+        "run-plain-1",
+        true,
+        "every scope, no review grant, a forgotten quarantined write",
+    )
+    .await;
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A realm that never held quarantined content needs no review grant: a
+/// caller who may read every scope there (its two identities) without
+/// `memory.quarantine.review` gets the realm's dream history.
+#[tokio::test]
+async fn memory_panel_dream_history_needs_no_review_grant_where_nothing_was_quarantined() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(unscoped_reader(&["agent.view", "agent.memory.read"]));
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    assert_dream_history(
+        &app,
+        "run-plain-1",
+        false,
+        "every scope, no review grant, nothing quarantined",
+    )
+    .await;
 
     let _ = runtime.mob_handle().stop().await;
 }

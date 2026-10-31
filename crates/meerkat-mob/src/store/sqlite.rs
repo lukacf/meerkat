@@ -4723,11 +4723,20 @@ fn query_member_binding_intent_rows(
     let mut intent_rows = BTreeMap::new();
     for (identity, storage_type, bytes) in identities {
         // A created entry's row is MobMachine's to drive; one this build
-        // cannot read is unreadable.
+        // cannot read, or one that seals another mob or identity than its
+        // physical key names, is unreadable, as the created scan reads it.
         if storage_type == "blob"
             && let Some(created) = crate::identity::classify_created_identity_row(&bytes)
         {
-            intent_rows.insert(identity, super::created_row_management(&created));
+            let management = match &created {
+                crate::identity::CreatedIdentityObservation::Created(record)
+                    if record.mob_id != *mob_id || record.agent_identity != identity =>
+                {
+                    crate::runtime::MemberIdentityManagement::IntentUnreadable
+                }
+                created => super::created_row_management(created),
+            };
+            intent_rows.insert(identity, management);
             continue;
         }
         let observation = query_identity_intent_observation(conn, mob_id, &identity)?;
@@ -5723,6 +5732,13 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                     storage_type,
                     bytes,
                 ) = row.map_err(se)?;
+                // A created entry's row (schema version 2 and later) is no
+                // identity intent: the created identity scan reads it.
+                if storage_type == "blob"
+                    && crate::identity::classify_created_identity_row(&bytes).is_some()
+                {
+                    continue;
+                }
                 let identity_key = decode_required_identity_text(
                     &identity_type,
                     identity_bytes.clone(),
@@ -6038,12 +6054,24 @@ impl MobIdentityStore for SqliteMobIdentityStore {
             };
             let mut observations = BTreeMap::new();
             for (identity_type, identity_bytes, storage_type, bytes) in selected {
-                if storage_type != "blob" {
-                    continue;
-                }
-                let Some(observation) = crate::identity::classify_created_identity_row(&bytes)
-                else {
-                    continue;
+                // A row of another storage class than this build writes is
+                // unreadable for the identity its key names: the intent
+                // readers report it malformed, and its name is reserved,
+                // never read as free.
+                let observation = if storage_type == "blob" {
+                    let Some(observation) = crate::identity::classify_created_identity_row(&bytes)
+                    else {
+                        continue;
+                    };
+                    observation
+                } else {
+                    crate::identity::CreatedIdentityObservation::Unreadable {
+                        evidence_digest: identity_raw_evidence_digest(&bytes),
+                        detail: format!(
+                            "identity row uses SQLite storage class '{storage_type}', expected \
+                             blob"
+                        ),
+                    }
                 };
                 // A row whose physical key cannot name its identity, or names
                 // another identity than the row, is unreadable for the

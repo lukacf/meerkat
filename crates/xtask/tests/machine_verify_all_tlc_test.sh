@@ -1148,7 +1148,8 @@ run_machine_verify() {
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
 # 4-worker local run (2026-10-31), and it has since grown to nineteen runs
 # (six witness runs and twelve mutant runs) over a space the session's
-# binding fact at most doubles, not yet re-measured; the MobMachine
+# binding fact and its takeover witness grow to up to about three times
+# those 9203 states, not yet re-measured; the MobMachine
 # operator-instruction delivery audit with --mutants joined it after these
 # measurements (not yet measured: two whole-space runs, eleven witness runs
 # and six mutant runs over the MobMachine model, whose JVM start and model

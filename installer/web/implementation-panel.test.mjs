@@ -35,13 +35,14 @@ const { RehearsalActivityBanner } = await loadModule("proposal-simulation.jsx", 
 const { trialActivityStatus } = await loadModule("simulation-state.mjs");
 const { setupProgress } = await loadModule("setup-progress.mjs");
 
-async function pendingBuilderFeedback(edited, verify, { readiness, blocked = false, savedDetails = {} } = {}) {
+async function pendingBuilderFeedback(edited, verify, { readiness, servicePreparation, existingBuild = false, blocked = false, savedDetails = {} } = {}) {
   const require = createRequire(import.meta.url);
   const { JSDOM } = createRequire(new URL("../../console/package.json", import.meta.url))("jsdom");
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/", pretendToBeVisual: true });
   const initial = "  Keep this comparison\n\u00e5\u{1f9ed}  ";
   const state = { id: "pending-builder-guide", version: 12, proposal: { target: "mac" } };
   if (readiness) state.readiness = readiness;
+  if (servicePreparation) state.service_preparation = servicePreparation;
   const url = `/api/guide/${state.id}/implementation`;
   const feedbackStorageKey = `mobkit-implementation-feedback-v1:${state.id}`;
   dom.window.localStorage.setItem(feedbackStorageKey, initial);
@@ -62,7 +63,7 @@ async function pendingBuilderFeedback(edited, verify, { readiness, blocked = fal
         posted = true;
         return post;
       }
-      if (target === url) return posted ? { ok: true, json: async () => ({ ...saved }) }
+      if (target === url) return posted || existingBuild ? { ok: true, json: async () => ({ ...saved }) }
         : { ok: false, status: 404, json: async () => ({ detail: "No saved build." }) };
       assert.ok(target.startsWith(`${url}/timeline?`), `Unexpected fixture read: ${target}`);
       return { ok: true, json: async () => ({ build_id: saved.build_id, frames: [], has_more: false }) };
@@ -82,7 +83,7 @@ async function pendingBuilderFeedback(edited, verify, { readiness, blocked = fal
       { state, plan: { project: { name: "Synthetic comparison" } }, Icon: () => null })));
     const textarea = dom.window.document.querySelector("textarea");
     assert.equal(textarea.value, initial);
-    const button = [...dom.window.document.querySelectorAll("button")].find((item) => item.textContent.includes("Build application"));
+    const button = [...dom.window.document.querySelectorAll("button")].find((item) => item.textContent.includes(existingBuild ? "Resume saved build" : "Build application"));
     assert.equal(button.disabled, blocked);
     await act(async () => button.click());
     if (blocked) {
@@ -192,6 +193,45 @@ test("a host-declared necessary setup decision blocks builder admission while pr
 test("proposed defaults and open implementation work remain explicitly buildable", async () => {
   await pendingBuilderFeedback(false, textarea => assert.equal(textarea.value, ""), {
     readiness: { ready: false, context_ready: true, decision_blockers: [], implementation_blockers: ["Build custom controls."] } });
+});
+
+for (const existingBuild of [false, true]) test(`required service checks block ${existingBuild ? "Resume" : "first Build"} and preserve the draft`, async () => {
+  await pendingBuilderFeedback(false, document => {
+    assert.match(document.body.textContent, /Service setup is unavailable on this host/);
+    assert.match(document.body.textContent, /Native service preparation is unavailable/);
+    assert.match(document.body.textContent, /Slack.*Receive and reply/);
+    assert.match(document.body.textContent, /Choose the resource this service should use/);
+  }, { existingBuild, blocked: true, servicePreparation: {
+    status: "unavailable", detail: "Native service preparation is unavailable.",
+    required_operations: [{id:"incoming",service:"Slack",operation:"Receive and reply",resource:""}],
+  } });
+});
+
+test("planned source operations stay distinct from verified access and do not enable Build", async () => {
+  await pendingBuilderFeedback(false, document => {
+    const warning = document.querySelector(".implementation-warning");
+    assert.match(warning.textContent, /2 planned operations; source setup still needs checking/);
+    assert.match(warning.textContent, /connection and access to each resource still need verification/);
+    assert.match(warning.textContent, /Repository A/);
+    assert.match(warning.textContent, /Repository B/);
+    assert.match(warning.textContent, /Slack questions.*required operations still need selection/);
+    assert.equal(warning.querySelector("details").open, false);
+    for (const resource of ["Two repositories", "Repository A", "Repository B", "My channel"]) {
+      const paragraph = [...warning.querySelectorAll("p")].find(item => item.textContent === resource);
+      assert.ok(paragraph?.closest("details"), `Exact resource remains inside its disclosure: ${resource}`);
+    }
+    assert.equal(warning.querySelectorAll("button").length, 0);
+  }, { blocked: true, servicePreparation: { status: "unavailable", detail: "Protected setup is unavailable.",
+    required_operations: [
+      { id: "incoming:repositories", service: "Repositories", operation: "Poll changes", resource: "Two repositories",
+        capability: "unresolved", reason_code: "source_binding_not_verified", planned_operations: [
+          { id: "read-a", service: "GHE", operation: "Read changes", resource: "Repository A" },
+          { id: "read-b", service: "GHE", operation: "Read changes", resource: "Repository B" },
+        ] },
+      { id: "incoming:slack", service: "Slack questions", operation: "Receive questions", resource: "My channel",
+        capability: "unresolved", reason_code: "source_operation_not_selected", planned_operations: [] },
+    ],
+  } });
 });
 
 test("retained builder activity shows the current checking and review phase, then removes it when the receipt ends", async () => {

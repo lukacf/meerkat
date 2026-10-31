@@ -55,6 +55,27 @@ def development(product, meta_version="0.9.0"):
     return target, descriptor, staging
 
 
+def test_distribution_admits_exact_asymmetric_guide_pair_and_refuses_equal_version_assumption(
+        product, bundle_source, tmp_path, monkeypatch):
+    from launchkit import distribution, product_distribution, guide_sdk
+    monkeypatch.setattr(guide_sdk, 'SELECTED_VERSION', '0.9.6')
+    monkeypatch.setattr(guide_sdk, 'CORE_REQUIREMENT', '=0.9.7')
+    monkeypatch.setattr(guide_sdk, 'WHEEL', 'vendor/guide/meerkat_meta-0.9.6-py3-none-any.whl')
+    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    target, _, _ = development(product, '0.9.4')
+    output = tmp_path / 'asymmetric-guide.zip'
+    product_distribution.package(root, target, guide, output)
+    extracted = tmp_path / 'asymmetric-guide'
+    with zipfile.ZipFile(output) as archive:
+        archive.extractall(extracted)
+    observed = product_distribution.verify(extracted)
+    assert (observed['guide']['version'], observed['guide']['core_version']) == ('0.9.6','0.9.7')
+    observed['guide']['core_version'] = '0.9.6'
+    (extracted / distribution.MANIFEST).write_bytes(json_bytes(observed))
+    with pytest.raises(distribution.DistributionError):
+        product_distribution.verify(extracted)
+
+
 @pytest.mark.parametrize("meta_version", ["0.9.0", "0.9.1", "0.9.4"])
 def test_development_keeps_actual_prefix_and_source_without_inventing_verifier(product, meta_version):
     target, descriptor, _ = development(product, meta_version)
@@ -188,7 +209,7 @@ def guide_product_inputs(product, bundle_source, monkeypatch):
     gateway = put(product.root / "guide/rpc_gateway", b"inert guide, never execute\n")
     gateway.path.chmod(0o700)
     selected = guide_sdk.SELECTED_VERSION
-    guide = SelectedGuideRuntime(ExactFile(gateway.path, gateway.sha256), selected, selected, "a" * 40, "b" * 40)
+    guide = SelectedGuideRuntime(ExactFile(gateway.path, gateway.sha256), selected, guide_sdk.declared_core_version(), "a" * 40, "b" * 40)
     return root, sdk, gateway, guide
 
 

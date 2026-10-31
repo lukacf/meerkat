@@ -1647,8 +1647,10 @@ async def run(spec, args, *, application_startup=None):
     state = ROOT / ".mobkit/state"
     state.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(state, 0o700)
-    restore_limit = "META_IDENTITY_RESTORE_CONCURRENCY" if meta else "MOBKIT_IDENTITY_RESTORE_CONCURRENCY"
-    os.environ[restore_limit] = "1"
+    # Meta owns its bounded restore default and explicit operator overrides.
+    # Retain the predecessor's separate behavior only for predecessor packages.
+    if not meta:
+        os.environ["MOBKIT_IDENTITY_RESTORE_CONCURRENCY"] = "1"
     async def build(*, preparing=False):
         await application.require_tool_policy_current()
         untrusted_tools = sorted({tool["name"] for item in spec["classes"] for tool in pool.for_class(item)}

@@ -1168,8 +1168,10 @@ class DeploymentService:
         if deployment_id is None:
             try:
                 deployment_id = json.loads((parent / "latest.json").read_text())["deployment_id"]
-            except (OSError, ValueError, KeyError):
+            except FileNotFoundError:
                 raise LookupError("No local deployment has been started for this setup.") from None
+            except (OSError, ValueError, KeyError, TypeError):
+                raise DraftConflict("The saved local deployment selection could not be read. Its installation state is unknown.") from None
             return self._directory(guide_id, deployment_id)
         return parent / deployment_id
 

@@ -25,6 +25,7 @@ from .projects import DraftConflict, fingerprint
 from .templates.storage_setup import write_private
 from .owned_worker import spawn_owned_worker, stop_owned_worker
 from .deployment_deadlines import WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT
+from .service_requirements import required_service_operations
 
 ACCEPTANCE_POLICY_VERSION = 1
 IMPLEMENTATION_SECONDS = 2400
@@ -1121,7 +1122,9 @@ def _package_archive(files):
 class ImplementationService:
     """Background build admission, snapshots, native timelines and checked packages."""
 
-    def __init__(self, root, guide, operations=None):
+    def __init__(self, root, guide, operations=None, *, require_service_checks=False):
+        if type(require_service_checks) is not bool:
+            raise TypeError("Select required service checks through the trusted host policy.")
         self.root = Path(root) / "implementations"
         self.guide = guide
         self.operations = operations
@@ -1129,6 +1132,31 @@ class ImplementationService:
         self.tasks = {}
         self.processes = {}
         self.checker_setup = None
+        # Trusted host policy only. The native preparation adapter is not yet
+        # available, so unresolved required service operations cannot be admitted.
+        # Never consume a model/browser "ready" assertion to clear this hold.
+        self._require_service_checks = require_service_checks
+
+    def service_preparation(self, state):
+        if not self._require_service_checks:
+            return None
+        required = required_service_operations(state)
+        if (state.get("brief") or {}).get("service_requirements") is None:
+            return {"status": "needs_inventory", "guide_id": state["id"], "guide_version": state["version"],
+                "reason_code": "service_inventory_missing",
+                "detail": "The saved plan does not have a recorded service inventory. Ask your guide to refresh the required service operations, including an explicit empty inventory if none are needed, before Build or Resume. Your saved source and results remain available.",
+                "required_operations": required}
+        if not required:
+            return None
+        return {"status": "unavailable", "guide_id": state["id"], "guide_version": state["version"],
+            "reason_code": "native_service_checks_unavailable",
+            "detail": "The required operations below have not been verified. Protected connection setup and operation checks are not available on this host yet. Build and Resume are blocked for this application; your saved source and results remain available.",
+            "required_operations": required}
+
+    def _require_prebuild_service_checks(self, state):
+        observation = self.service_preparation(state)
+        if observation is not None:
+            raise ImplementationPrerequisiteNotAdmitted(observation["detail"])
 
     async def _guide(self, identity):
         if self.operations is not None:
@@ -1510,15 +1538,19 @@ class ImplementationService:
             if not proposal:
                 raise ValueError("Describe a concrete job and get a proposed system before building.")
             proposal = Blueprint.model_validate(proposal).model_dump(mode="json")
+            runtime_artifacts = None
+            if runtime_target is not None:
+                from .runtime_selection import selected_runtime_artifacts
+                runtime_artifacts = await asyncio.to_thread(selected_runtime_artifacts, runtime_target)
             from .compiler import package_availability
             availability = await asyncio.to_thread(package_availability, proposal,
-                **({"runtime_target": runtime_target}
+                **({"runtime_target": runtime_target, "verified_artifacts": runtime_artifacts}
                    if initial_product or preserve_design and runtime_target is not None else {}))
             runtime_candidate = None
             if runtime_target is not None:
                 from .runtime_selection import implementation_candidate_selection
                 runtime_candidate = await asyncio.to_thread(implementation_candidate_selection, runtime_target,
-                    deployment_target=proposal["target"])
+                    deployment_target=proposal["target"], verified_artifacts=runtime_artifacts)
             request = request.strip()
             if receipt and (receipt.get("stop_requested") and receipt["status"] in {"queued", "running", "checking"}
                     or receipt.get("cleanup_in_progress")
@@ -1657,6 +1689,7 @@ class ImplementationService:
                     receipt["build_id"], prior_status["source_digest"], state, proposal)
             # Existing-build dedup above remains usable. Refuse a new package
             # before checker admission, history reservation or worker publication.
+            self._require_prebuild_service_checks(state)
             if not availability["available"] and not retained_candidate:
                 raise ValueError(availability["reason"])
             decisions = implementation_decision_blockers(state)
@@ -1881,10 +1914,13 @@ class ImplementationService:
 
                 def publish_admission():
                     # No awaits separate the final fences from worker publication.
+                    self._require_prebuild_service_checks(latest_state)
                     workspace.require_preparation_current()
                     if runtime_target is not None:
                         from .runtime_selection import implementation_candidate_selection
-                        if fingerprint(implementation_candidate_selection(runtime_target, deployment_target=proposal["target"])) != fingerprint(runtime_candidate):
+                        if fingerprint(implementation_candidate_selection(runtime_target,
+                                deployment_target=proposal["target"],
+                                verified_artifacts=runtime_artifacts)) != fingerprint(runtime_candidate):
                             raise DraftConflict("The selected candidate changed before builder admission.")
                     self._fence_selected(guide_id, expected_selected_build_id,
                         _preparing_build_id=identity if previous is None else None)

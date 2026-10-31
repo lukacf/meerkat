@@ -163,7 +163,7 @@ test('the narrow Menu retains existing controls and closes with Escape without c
   });
 });
 
-test('actual textarea focus compacts mobile chrome and preserves native mounts, accessible attachment control and growing draft', async () => {
+test('actual textarea focus preserves mobile navigation mounts, accessible attachment control and growing draft', async () => {
   await mount({ narrow: true, draft: '', selected: [] }, async ({ document, window, calls, input, local, setNarrow }) => {
     const shell = document.querySelector('.setup-shell'), textarea = document.querySelector('#setup-message');
     const native = document.querySelector('[data-native-console-chat]'), header = document.querySelector('.setup-header');
@@ -1036,5 +1036,98 @@ test('first turn transition restores the initial question after refusal or inter
     assert.ok(document.querySelector('.setup-native-chat').textContent.includes(sent));
     assert.equal(document.querySelector('#setup-message').value, next);
     assert.equal(calls.filter(call => call.method === 'POST').length, 0);
+  });
+});
+
+
+test('expired-session send refusal offers host sign-in and preserves draft without replay', async () => {
+  const draft = '  Check GHE and Slack before building. Keep this exact draft.  ';
+  await mount({draft, selected:[], onPost: () => ({httpError:401,detail:'Current sign-in required'}),
+    onRead: ({url}) => url === '/api/architect/status' ? {available:true,status:'ready'} : null,
+    setupDom: ({window: {document}}) => {
+      const meta=document.createElement('meta'); meta.name='forge-sign-in'; meta.content='/host/login';
+      document.head.append(meta);
+    }}, async ({document,calls,local,input}) => {
+      await act(async () => {document.querySelector('#setup-send').click(); await pause();});
+      const alert = document.querySelector('.setup-sign-in-anchor[role="alert"]');
+      assert.ok(alert); assert.match(alert.textContent,/Sign in to continue/);
+      assert.doesNotMatch(document.body.textContent,/Live updates interrupted|Let's pick up from here/);
+      assert.equal(alert.querySelector('a').getAttribute('href'),'/host/login');
+      assert.equal(alert.querySelector('a').target,'_blank');
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(document.querySelector('#setup-send').disabled,true);
+      assert.equal(JSON.parse(local.get(input.key)).draft,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1);
+      await act(async () => {[...alert.querySelectorAll('button')].find(b=>b.textContent==='Check sign-in').click(); await pause();});
+      assert.equal(document.querySelector('.setup-sign-in-anchor[role="alert"]'),null);
+      assert.equal(document.querySelector('#setup-send').disabled,false);
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1,'Authentication recovery never resends the correction.');
+    });
+});
+
+for (const mode of ['mobile Escape', 'mobile Close', 'resized desktop Escape']) test(`deployment dialog returns focus to visible navigation after ${mode}`, async () => {
+  await mount({ narrow: true, onRead: ({ url }) => url.startsWith('/api/guide/list') ? { setups: [] } : undefined,
+    setupDom: dom => {
+      dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+      dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+    } }, async ({ document, window, calls, input, local, setNarrow }) => {
+    const menu = document.querySelector('.setup-mobile-menu-toggle');
+    const trigger = [...document.querySelectorAll('button')].find(node => node.textContent === 'My deployments');
+    const textarea = document.querySelector('#setup-message'), before = local.get(input.key);
+    await act(async () => { menu.click(); });
+    await act(async () => { trigger.focus(); trigger.click(); await pause(); });
+    assert.equal(menu.getAttribute('aria-expanded'), 'false');
+    assert.equal(document.querySelector('#setup-header-menu').classList.contains('is-open'), false);
+    const dialog = document.querySelector('dialog');
+    assert.ok(dialog?.open);
+    if (mode.startsWith('resized')) await setNarrow(false);
+    await act(async () => {
+      if (mode.endsWith('Close')) [...dialog.querySelectorAll('button')].find(node => node.textContent === 'Close').click();
+      else dialog.dispatchEvent(new window.Event('cancel', { bubbles: true, cancelable: true }));
+      await pause();
+    });
+    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.activeElement === (mode.startsWith('resized') ? trigger : menu));
+    assert.ok(document.querySelector('#setup-message') === textarea);
+    assert.equal(textarea.value, input.draft);
+    assert.equal(local.get(input.key), before);
+    assert.deepEqual(calls.filter(call => call.method === 'POST'), []);
+  });
+});
+
+test('deployments modal presents authoritative sign-in recovery and only refreshes reads after renewal', async () => {
+  let signedOut = false;
+  await mount({ narrow: true, onRead: ({ url }) => {
+    if (url.startsWith('/api/guide/list?')) return signedOut
+      ? { httpError: 401, detail: 'Sign in required' } : { setups: [] };
+    if (url.includes('/timeline') && signedOut) return { httpError: 401, detail: 'Sign in required' };
+  }, setupDom: dom => {
+    const meta = dom.window.document.createElement('meta');
+    meta.name = 'forge-sign-in'; meta.content = '/sign-in'; dom.window.document.head.append(meta);
+    dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+    dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  } }, async ({ document, calls, input, local }) => {
+    const button = (label, scope = document) => [...scope.querySelectorAll('button')].find(node => node.textContent === label);
+    const before = local.get(input.key), textarea = document.querySelector('#setup-message');
+    await act(async () => { document.querySelector('.setup-mobile-menu-toggle').click(); });
+    await act(async () => { button('My deployments').click(); await pause(); });
+    const dialog = document.querySelector('dialog');
+    assert.match(dialog.textContent, /No saved deployments/);
+    signedOut = true;
+    await act(async () => { button('Refresh deployments', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /Sign in to continue/);
+    assert.doesNotMatch(dialog.textContent, /No saved deployments|could not be listed/);
+    assert.equal(dialog.querySelector('a').getAttribute('href'), '/sign-in');
+    assert.equal(document.querySelectorAll('.setup-error').length, 1, 'Only the modal owns visible auth recovery.');
+    await act(async () => { button('Check sign-in', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /Sign-in could not be confirmed/);
+    signedOut = false;
+    await act(async () => { button('Check sign-in', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /No saved deployments/);
+    assert.doesNotMatch(dialog.textContent, /Sign in to continue|could not be listed/);
+    assert.equal(local.get(input.key), before); assert.equal(textarea.value, input.draft);
+    assert.ok(calls.filter(call => call.url.includes('/timeline')).length >= 3);
+    assert.deepEqual(calls.filter(call => call.method === 'POST'), []);
   });
 });

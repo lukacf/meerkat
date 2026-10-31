@@ -28,6 +28,7 @@ from .architect import ArchitectService, ArchitectUnavailable
 from .projects import ProjectStore, DraftConflict, fingerprint
 from .guide import GuideService
 from .guide_store import GuideStore
+from .runtime_diagnostics import runtime_diagnostics
 from .organization import load_organization_plugin
 from .guide_attachments import AttachmentReference, MAX_FILES, MAX_FILE_BYTES, MAX_TURN_BYTES
 from .guide_operations import GuideOperations
@@ -43,6 +44,7 @@ from .owned_console import (browser_console_url, console_response, resolve_owner
 from .forge_application_host import ForgeApplicationHost, application_setup_binding
 from .local_application_registry import LocalApplicationRegistry
 from .deployment import DeploymentService
+from .deployment_records import original_deployment_record
 from .installed_feedback import InstalledFeedbackNotAdmitted, InstalledSuccessNotAdmitted
 from .remote_deployment import RemoteDeploymentService, RemoteProductActionNotSent
 from .gcp_preflight import GcpPreflightService
@@ -54,6 +56,55 @@ from .rehearsal import RehearsalService, StartNotAdmitted, start_request_fingerp
 from .provider_settings import ProviderSettings, ProviderSettingsUnavailable, canonical_setup_provider
 from .checker_setup import CheckerSetupService
 from .toolkit_saved_requests import ToolkitSavedRequests, ToolkitSavedRequestsError, MAX_MANIFEST_BYTES
+from .service_callback import MCP_CALLBACK_PATH, callback_landing, callback_unavailable
+from .service_login_host import ServiceLoginRoute, ServiceLoginUnavailable
+from .provider_setup_route import ProviderSetupRoute, unavailable as provider_setup_unavailable
+from .provider_setup_host import ProviderSetupUnavailable
+
+# Only the trusted workspace launcher can supply its actual authenticated
+# request/session join and same-native-host login owner. HTTP never selects it.
+service_login_route = None
+provider_setup_route = None
+
+
+def select_provider_setup_session(owner, authenticated_context):
+    """Trusted launcher only, after registering this owner's revoke/close.
+
+    Register a dormant native session for each original browser login on the
+    serving loop. Reuse the same resolver object across logins. This hook does
+    not launch Connect or activate a guide; browser input cannot call it.
+    """
+    global provider_setup_route
+    if provider_setup_route is None or provider_setup_route.retired:
+        provider_setup_route = ProviderSetupRoute(owner, authenticated_context)
+    else:
+        if provider_setup_route.authenticated_context is not authenticated_context:
+            raise ProviderSetupUnavailable()
+        provider_setup_route.add(owner)
+    return provider_setup_route
+
+
+def select_service_login_host(host, authenticated_context):
+    """Install on the serving loop after registering host.close with logout.
+
+    The installation owner supplies authentication and native startup. This
+    hook neither derives identity from headers nor starts a second gateway.
+    Reuse the same resolver for separate original browser sessions. Logout
+    fences and joins that session's host; shutdown joins all retained owners.
+    A resolver replacement is refused until the route's cleanup has joined.
+    """
+    global service_login_route
+    if service_login_route is None or service_login_route.retired:
+        selected = ServiceLoginRoute(host, authenticated_context)
+        service_login_route = selected
+    else:
+        selected = service_login_route
+        if authenticated_context is not selected.authenticated_context:
+            raise ServiceLoginUnavailable()
+        selected.add(host)
+    # The route retains this original host before native enrollment enters.
+    host.start()
+    return selected
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 checker_setup = CheckerSetupService(APP_ROOT)
@@ -104,7 +155,8 @@ visualization_reviews = VisualizationReviewService(runtime=visual_review_runtime
     expected_renderer_hash=REVIEW_RENDERER_HASH, runtime_owner_id=visual_review_runtime.runtime_owner_id,
     reference_context=bundled_review_reference_context())
 visual_review_runtime.reviews = visualization_reviews
-implementation = ImplementationService(STUDIO_ROOT, guide, guide_operations)
+implementation = ImplementationService(STUDIO_ROOT, guide, guide_operations, require_service_checks=True)
+guide.service_preparation_provider = implementation.service_preparation
 application_host = None
 
 
@@ -296,45 +348,75 @@ guide.trial_evidence_provider = lambda state: rehearsal.status(state["id"], stat
 
 @asynccontextmanager
 async def lifespan(app):
-    try:
-        provider_settings.restore()
-        # Reconcile only persisted positive native termination observations.
-        # An invalid critic proof disables that feature without blocking setup.
-        await visual_review_runtime.reconcile_terminated()
-        yield
-    finally:
-        # Each service retains ownership of different native work. A failed or
-        # hung cleanup must not prevent the remaining owners from stopping theirs.
-        # The deployment, implementation and rehearsal workers stop themselves
-        # on owner loss; stop_owners never signals them, and no owner names
-        # its groups.
-        def workers(service):
-            return lambda: list((getattr(service, "processes", None) or {}).values())
-        failures = await stop_owners((
-            Owner("guide operations", guide_operations),
-            Owner("visualization operations", visualization_operations),
-            Owner("visualization reviews", visualization_reviews),
-            Owner("visual critic runtime", visual_review_runtime),
-            Owner("remote deployment", remote_deployment),
-            Owner("GCP resource preparation", gcp_provisioning),
-            Owner("GCP access checks", gcp_preflight),
-            Owner("deployment", deployment, workers=workers(deployment)),
-            Owner("rehearsal", rehearsal, workers=workers(rehearsal)),
-            Owner("implementation", implementation, workers=workers(implementation)),
-            Owner("checker preparation", checker_setup),
-            Owner("saved Toolkit requests", toolkit_saved_requests),
-            Owner("architect", architect),
-        ))
-        if failures:
-            raise BaseExceptionGroup(
-                "Meta Forge cleanup failed for: " + ", ".join(name for name, _ in failures),
-                [error for _, error in failures],
-            )
+    with runtime_diagnostics():
+        try:
+            provider_settings.restore()
+            # Reconcile only persisted positive native termination observations.
+            # An invalid critic proof disables that feature without blocking setup.
+            await visual_review_runtime.reconcile_terminated()
+            yield
+        finally:
+            # Each service retains ownership of different native work. A failed or
+            # hung cleanup must not prevent the remaining owners from stopping theirs.
+            # The deployment, implementation and rehearsal workers stop themselves
+            # on owner loss; stop_owners never signals them, and no owner names
+            # its groups.
+            def workers(service):
+                return lambda: list((getattr(service, "processes", None) or {}).values())
+            failures = await stop_owners((
+                *((Owner("native provider setup", provider_setup_route),)
+                  if provider_setup_route is not None else ()),
+                *((Owner("protected service login", service_login_route),)
+                  if service_login_route is not None else ()),
+                Owner("guide operations", guide_operations),
+                Owner("visualization operations", visualization_operations),
+                Owner("visualization reviews", visualization_reviews),
+                Owner("visual critic runtime", visual_review_runtime),
+                Owner("remote deployment", remote_deployment),
+                Owner("GCP resource preparation", gcp_provisioning),
+                Owner("GCP access checks", gcp_preflight),
+                Owner("deployment", deployment, workers=workers(deployment)),
+                Owner("rehearsal", rehearsal, workers=workers(rehearsal)),
+                Owner("implementation", implementation, workers=workers(implementation)),
+                Owner("checker preparation", checker_setup),
+                Owner("saved Toolkit requests", toolkit_saved_requests),
+                Owner("architect", architect),
+            ))
+            if failures:
+                raise BaseExceptionGroup(
+                    "Meta Forge cleanup failed for: " + ", ".join(name for name, _ in failures),
+                    [error for _, error in failures],
+                )
 
 
 app = FastAPI(title="Meta Forge", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
 design_lock = asyncio.Lock()
+
+
+@app.get('/api/provider-setup')
+async def native_provider_setup_status(request: Request):
+    selected = provider_setup_route
+    return await selected.handle(request) if selected is not None else provider_setup_unavailable()
+
+
+@app.post('/api/provider-setup/{action}')
+async def native_provider_setup_action(action: str, request: Request):
+    if action not in ('begin', 'answer', 'cancel', 'restart'):
+        return provider_setup_unavailable(404)
+    selected = provider_setup_route
+    return await selected.handle(request, action) if selected is not None else provider_setup_unavailable()
+
+
+@app.get(MCP_CALLBACK_PATH)
+async def service_callback_landing():
+    return callback_landing()
+
+
+@app.post(MCP_CALLBACK_PATH)
+async def service_callback_return(request: Request):
+    selected = service_login_route
+    return await selected.post(request) if selected is not None else callback_unavailable()
 
 
 @app.exception_handler(RequestValidationError)
@@ -379,11 +461,18 @@ async def request_validation_error(request: Request, error: RequestValidationErr
 
 @app.middleware("http")
 async def local_requests(request: Request, call_next):
+    if request.url.path == '/api/provider-setup' or request.url.path.startswith('/api/provider-setup/'):
+        # This protected route authenticates the original host context and its
+        # exact origin before consuming a bounded private body. A public host
+        # origin need not equal the internal workspace socket's URL.
+        return await call_next(request)
     origin = request.headers.get("origin")
     allowed = {f"{request.url.scheme}://{request.url.netloc}", "http://127.0.0.1:5173", "http://localhost:5173"}
     if request.url.path.startswith("/api/") and origin and origin not in allowed:
         return JSONResponse({"detail": "Open Meta Forge from its local setup URL."}, status_code=403)
-    if request.method in ("POST", "PUT"):
+    if request.method in ("POST", "PUT") and request.url.path != MCP_CALLBACK_PATH:
+        # The protected callback owns its body handling. While no native owner
+        # is composed, it refuses the request without consuming private input.
         # The animation request includes the fully resolved graph, not just its
         # class definitions. Keep every identity and relationship for large mobs.
         if request.url.path.startswith("/api/owned-console/"):
@@ -414,7 +503,7 @@ async def local_requests(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") or request.url.path == MCP_CALLBACK_PATH else "no-cache"
     return response
 
 
@@ -785,8 +874,8 @@ async def new_guide():
 
 
 @app.get("/api/guide/list")
-async def list_guides():
-    return {"setups": await asyncio.to_thread(guide.store.list)}
+async def list_guides(include_all: bool = False):
+    return {"setups": await asyncio.to_thread(guide.store.list, include_all=include_all)}
 
 
 @app.post("/api/guide/start")
@@ -876,6 +965,29 @@ async def respond_guide(identity: str, value: GuideResponse):
     await guide_result(asyncio.to_thread(guide.attachments.resolve, identity, value.attachments))
     state, pending = await guide_result(guide_operations.submit(guide, identity, value))
     return JSONResponse({**state, "input_surface": guide.input_surface()}, status_code=202 if pending else 200)
+
+
+@app.get("/api/guide/{identity}/commands/{command_id}")
+async def read_guide_command(identity: str, command_id: str = ApiPath(pattern=r"^[0-9a-f]{64}$")):
+    from .guide_commands import command_response
+    return await guide_result(asyncio.to_thread(command_response, guide.store, command_id, identity))
+
+
+class GuideCommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=1, strict=True)
+    text: str = Field(min_length=1, max_length=6000, strict=True)
+
+
+@app.post("/api/guide/{identity}/commands/{command_id}")
+async def submit_guide_command(identity: str, value: GuideCommandRequest,
+                               command_id: str = ApiPath(pattern=r"^[0-9a-f]{64}$")):
+    # The existing authenticated workspace host owns access and channel binding.
+    # This route accepts no workspace, native principal or runtime override.
+    request = GuideResponse(version=value.version, action="chat", text=value.text)
+    state, pending = await guide_result(guide_operations.submit(guide, identity, request, command_id=command_id))
+    return JSONResponse(state, status_code=202 if pending else 200,
+                        headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/guide/{identity}/apply")
@@ -1324,6 +1436,8 @@ async def end_rehearsal(identity: str, value: RehearsalCancel):
 @app.get("/api/guide/{identity}/rehearsal")
 async def rehearsal_status(identity: str):
     receipt = await guide_result(rehearsal.status(identity))
+    if isinstance(receipt, Response):
+        return receipt
     return {**receipt, "browser_console_url": await browser_console_url(rehearsal, identity, receipt, "rehearsal")}
 
 
@@ -1389,6 +1503,12 @@ async def gcp_deployment_status(identity: str, operation_id: str | None = None):
     return await guide_result(gcp_provisioning.status(identity, operation_id))
 
 
+@app.get("/api/guide/{identity}/gcp-deployment/record")
+async def original_gcp_deployment_record(identity: str, operation_id: str):
+    return await guide_result(original_deployment_record("gcp-deployment", gcp_provisioning, identity, operation_id),
+        failure_detail="The original cloud receipt could not be read. Its state remains unknown.")
+
+
 @app.post("/api/guide/{identity}/gcp-deployment/create", status_code=202)
 async def create_gcp_deployment(identity: str, value: GcpCreateRequest):
     return await guide_result(gcp_provisioning.create(identity, value.version, value.build_id, value.account, value.project, value.request_id))
@@ -1419,6 +1539,12 @@ async def connect_gcp_deployment(identity: str, value: GcpConnectRequest):
 @app.get("/api/guide/{identity}/remote-deployment")
 async def remote_deployment_status(identity: str, force: bool = False):
     return await guide_result(remote_deployment.status(identity, force=force))
+
+
+@app.get("/api/guide/{identity}/remote-deployment/record")
+async def original_remote_deployment_record(identity: str, deployment_id: str):
+    return await guide_result(original_deployment_record("remote-deployment", remote_deployment, identity, deployment_id),
+        failure_detail="The original remote receipt could not be read. Its state remains unknown.")
 
 
 @app.post("/api/guide/{identity}/remote-deployment/connect", status_code=202)
@@ -1550,6 +1676,12 @@ async def deployment_status(identity: str):
     return await guide_result(deployment.status(identity))
 
 
+@app.get("/api/guide/{identity}/deployment/record")
+async def original_local_deployment_record(identity: str, deployment_id: str):
+    return await guide_result(original_deployment_record("deployment", deployment, identity, deployment_id),
+        failure_detail="The original deployment receipt could not be read. Its state remains unknown.")
+
+
 @app.get("/api/guide/{identity}/deployment/experiences")
 async def deployment_experiences(identity: str):
     return await guide_result(deployment.experiences(identity))
@@ -1666,12 +1798,16 @@ async def stop_implementation(identity: str, value: ImplementationStopRequest):
 @app.get("/api/guide/{identity}/implementation")
 async def implementation_status(identity: str):
     receipt = await guide_result(implementation.status(identity))
+    if isinstance(receipt, Response):
+        return receipt
     return {**receipt, "browser_console_url": await browser_console_url(implementation, identity, receipt, "implementation")}
 
 
 @app.api_route("/api/owned-console/guide/{generation}/{path:path}", methods=["GET", "HEAD", "POST"])
 async def owned_guide_console(generation: str, path: str, request: Request):
     owner = resolve_guide_owner(architect, generation)
+    if request.method == "POST" and pending_guide_command():
+        raise HTTPException(409, "Recover the original guide command before sending Console actions.")
     return await console_response(request, owner, path)
 
 
@@ -1850,9 +1986,14 @@ async def architect_status():
         return architect.status()
 
 
+def pending_guide_command():
+    from .guide_commands import pending_command
+    return pending_command(guide.store) is not None
+
+
 def provider_owned_work():
     """Keep credentials fixed for every currently owned native operation."""
-    if (architect.message_lock.locked() or architect.pending_interaction
+    if (architect.message_lock.locked() or architect.pending_interaction or pending_guide_command()
             or architect.visualizer.lock.locked() or architect.visualizer.pending
             or visual_review_runtime.runtime is not None or visual_review_runtime.lock.locked()):
         return True
@@ -1909,7 +2050,7 @@ class ProviderSettingsBody(BaseModel):
 
 @app.get('/api/provider-settings')
 async def read_provider_settings():
-    return provider_public_status()
+    return {**provider_public_status(), 'native_provider_setup': provider_setup_route is not None}
 
 
 @app.get('/api/checker-setup')
@@ -1928,6 +2069,8 @@ async def prepare_checker_setup(request: Request):
 
 @app.put('/api/provider-settings')
 async def save_provider_settings(value: ProviderSettingsBody):
+    if provider_setup_route is not None:
+        raise HTTPException(409, 'Use the native model and sign-in chooser for this host.')
     if architect.start_lock.locked():
         raise HTTPException(409, 'Wait for setup team startup before changing its credentials.')
     async with architect.start_lock:
@@ -1969,7 +2112,7 @@ async def stop_setup_team():
 
 @app.post("/api/architect/context")
 async def architect_context(value: BlueprintBody):
-    if architect.message_lock.locked() or architect.pending_interaction:
+    if architect.message_lock.locked() or architect.pending_interaction or pending_guide_command():
         raise HTTPException(409, "Wait for the current design request before changing its context.")
     blueprint = blueprint_or_error(value.blueprint).model_dump(mode="json")
     architect.set_context(blueprint)
@@ -1979,7 +2122,7 @@ async def architect_context(value: BlueprintBody):
 @app.post("/api/architect/start")
 async def architect_start(value: BlueprintBody | None = None):
     if value:
-        if architect.message_lock.locked() or architect.pending_interaction:
+        if architect.message_lock.locked() or architect.pending_interaction or pending_guide_command():
             raise HTTPException(409, "The current design request is still running.")
         blueprint = blueprint_or_error(value.blueprint)
         architect.set_context(blueprint.model_dump(mode="json"))

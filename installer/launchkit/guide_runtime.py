@@ -25,13 +25,13 @@ def selected_model_configuration():
 
 
 def model_profile_lines(provider, model, configuration=None):
-    """Author the selected model, preserving its explicit native auth binding."""
+    """Author supported model fields without implying native auth selection."""
     lines = [f'model = {json.dumps(model)}', f'provider = {json.dumps(provider)}']
     if configuration is not None:
+        if "auth_binding" in configuration:
+            raise RuntimeError("This guide runtime cannot apply an explicit auth binding.")
         if configuration["provider"] != provider or configuration["model"] != model:
             raise RuntimeError("The Forge agent model changed its selected host route.")
-        if configuration.get("auth_binding") is not None:
-            lines.append(f'auth_binding = {json.dumps(configuration["auth_binding"])}')
     return lines
 
 

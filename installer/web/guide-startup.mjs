@@ -35,6 +35,7 @@ export function guideStartupDetail(observation) {
 
 export function guideStartupPresentation(state, snapshot) {
   if (!state?.id || snapshot?.guideId !== state.id) return null;
+  if (snapshot.authenticationRequired) return 'sign_in_required';
   if (snapshot.retrying) return 'retrying';
   if (snapshot.startup?.retryRequired === true) return 'failed';
   if (snapshot.startup?.status === 'starting') return 'starting';

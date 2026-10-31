@@ -22,7 +22,7 @@ def provider_functions(tmp_path, locked=None):
     environment = {}
     settings = ProviderSettings(tmp_path / "private-profile", environ=environment)
     scope = {"__package__": "launchkit", "ProviderSettingsBody": object,
-        "provider_settings": settings, "STUDIO_ROOT": settings.root,
+        "provider_settings": settings, "provider_setup_route": None, "STUDIO_ROOT": settings.root,
         "canonical_setup_provider": lambda root: locked,
         "ProviderSettingsUnavailable": ProviderSettingsUnavailable, "HTTPException": HTTPException,
         "architect": SimpleNamespace(runtime=None, state="stopped", provider_stop_failed=False,

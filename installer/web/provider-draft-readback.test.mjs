@@ -191,8 +191,8 @@ for (const source of ["environment", "native_host_config"]) test(`same-provider 
 
     mode = "managed";
     await click("Check saved settings");
-    assert.equal(document.querySelector("select").value, "anthropic");
-    assert.equal(document.querySelector("select").disabled, true);
+    assert.equal(document.querySelector("select"), null, "host-managed settings show the current provider without an unusable selector");
+    assert.match(document.querySelector(".setup-provider-configured").textContent, /Anthropic/);
     assert.equal(document.querySelector('input[type="password"]') === null, true, "host-managed credentials have no key field");
     assert.ok(![...document.querySelectorAll("button")].some(item => item.textContent === "Save locally"));
     assert.match(document.body.textContent, source === "environment" ? /Configured by the server environment/ : /configured by this Forge host/);

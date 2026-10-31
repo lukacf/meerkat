@@ -27,6 +27,8 @@ export type ConversationTranscriptProps = ConversationApprovalProps & {
   Icon?: IconRenderer | null;
   markdownUrlPolicy?: MarkdownUrlPolicy;
   className?: string;
+  /** Preserve chronological labels when a surface renders a transcript in sections. */
+  turnIndexOffset?: number;
   onFlowRunMessageMember?: ((memberKey: string) => void) | null;
   onFlowRunRestore?: FlowRunRestoreHandler | null;
   workGraphActions?: WorkGraphCardActions | null;
@@ -53,6 +55,7 @@ export function ConversationTranscript({
   Icon,
   markdownUrlPolicy,
   className,
+  turnIndexOffset = 0,
   onFlowRunMessageMember = null,
   onFlowRunRestore = null,
   workGraphActions = null,
@@ -93,11 +96,11 @@ export function ConversationTranscript({
         const isLastTurn = turnIndex === turns.length - 1;
         return (
           <section
-            aria-label={`Turn ${turnIndex + 1}`}
+            aria-label={`Turn ${turnIndexOffset + turnIndex + 1}`}
             className="cc-conversation-turn"
-            data-cc-conversation-turn-index={turnIndex}
+            data-cc-conversation-turn-index={turnIndexOffset + turnIndex}
             data-conversation-turn-id={turn.id}
-            data-testid={`conversation-turn:${turnIndex}`}
+            data-testid={`conversation-turn:${turnIndexOffset + turnIndex}`}
             key={turn.id}
           >
             {turn.groups.map((group) => (
@@ -128,10 +131,10 @@ export function ConversationTranscript({
       <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} />
       {!turns.length && renderableTurnDiff && onToggleDiffFile ? (
         <section
-          aria-label="Turn 1"
+          aria-label={`Turn ${turnIndexOffset + 1}`}
           className="cc-conversation-turn"
-          data-cc-conversation-turn-index={0}
-          data-testid="conversation-turn:0"
+          data-cc-conversation-turn-index={turnIndexOffset}
+          data-testid={`conversation-turn:${turnIndexOffset}`}
         >
           <TurnDiffCard
             expandedFile={expandedDiffFile}

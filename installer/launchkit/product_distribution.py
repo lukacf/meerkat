@@ -415,7 +415,7 @@ def verify(root):
     guide = data["guide"]
     if (type(guide) is not dict or guide.keys() != {"version", "core_version", "meta_source", "core_source", "gateway", "sdk"}
             or guide["version"] != guide_sdk.SELECTED_VERSION
-            or guide["core_version"] != guide_sdk.SELECTED_VERSION
+            or guide["core_version"] != guide_sdk.declared_core_version()
             or guide["sdk"] != guide_sdk.selection()
             or guide_sdk.WHEEL not in data["files"]
             or guide["gateway"] != {"path": "vendor/guide/rpc_gateway",

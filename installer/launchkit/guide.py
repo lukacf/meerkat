@@ -342,12 +342,43 @@ always-on server or GCP. These are adaptive lenses, not a fixed questionnaire.
 Understand desired experience before translating it to host requirements. An
 admin console plus staff chat/custom UI is a combined requirement. A small native
 pilot is an explicit choice, not a silent replacement for the requested experience.
-Detailed API endpoints, device protocol fields, package names, authentication,
-server sizes and cloud project IDs belong to later implementation decisions.
+Detailed device protocol fields, package names, server sizes and cloud project IDs
+belong to later implementation decisions. Required service access and actual
+operations must be identified and checked before Build, not deferred to installation.
 Preserve user-named services. Once their role in the design is clear, research the
 appropriate MCP and exact capabilities yourself. Ask a technical field only when
 it is necessary for the next concrete configuration or the user explicitly asks.
 A request to discuss agents calls for agent design, not an integration questionnaire.
+
+Record required service uses in brief.service_requirements, each linked to a
+brief.requirements ID and actual user source_message_ids. Give each useful operation
+its own stable id, service name, capability (read, write or incoming_interaction),
+operation in the user's terms, and requested resource scope. Leave resource empty
+when unresolved; it never means all resources. Preserve user-required incoming
+Slack interaction separately from reading history or posting through outbound tools.
+These rows retain desired scope, not native tool names, executable probes, credentials,
+grants or check results. Changing their capability or linked feature needs later
+user evidence; keep native artifact and tool selection outside this intent.
+For each incoming_data source, record service_requirement_ids with the exact IDs
+of every required operation for that source, within its linked requested feature.
+Use the read operations for a polled repository source; do not invent an incoming
+conversation operation to associate it. Keep different sources distinct even when
+they support the same feature. These links only describe the plan: they do not
+verify the source binding, its resources, receipt freshness or initial history.
+An empty or omitted association means its required operations still need selection.
+Do not omit a required service to offer Build or relabel it optional without the
+user's decision in the linked feature. Existing briefs without these rows have
+not thereby established that no service is needed. Refresh the inventory for the
+current design on every publication. Use an explicit empty service_requirements
+list only when the design needs no service operations; null or omission means the
+inventory is still missing and Build or Resume needs a guide refresh. Resolve named services against
+the actual supported native route before Build. Request protected authentication
+through the host's connection controls only, never ask for secrets in conversation.
+Authentication, stored credentials and tool discovery do not prove a required
+operation on the selected resource. Only actual native operation results can do
+that, and outbound success cannot establish an incoming frontend. If this host
+lacks preparation or an operation is unsupported, state the concrete unmet
+requirement; do not promise that installation will supply it or invent a check.
 
 Keep brief.facts under outcome, audience, interfaces, ownership, inputs, workflow,
 knowledge, authority, destination, first_version. Each fact has summary, status
@@ -722,6 +753,8 @@ def compact_guidance_context(context):
         projected["implementation_actions"] = context["implementation_actions"]
     if context.get("package_availability") is not None:
         projected["package_availability"] = copy.deepcopy(context["package_availability"])
+    if context.get("service_preparation") is not None:
+        projected["service_preparation"] = copy.deepcopy(context["service_preparation"])
     projected["current_user_message"] = _compact_guide_message(context.get("current_user_message") or {})
     projected["evidence_messages"] = [_compact_guide_message(row) for row in context.get("evidence_messages", [])]
     projected["recent_guide_messages"] = [_compact_guide_message(row) for row in context.get("conversation", [])
@@ -767,8 +800,9 @@ def implementation_action_context(state, evidence, capability, checker_available
     saved_proposal = bool(state.get("proposal") or state.get("blueprint"))
     availability = availability if availability is not None else guide_package_availability(state)
     package_held = bool(availability and availability["available"] is False)
+    service_hold = state.get("service_preparation")
     gate_clear = lifecycle.get("build_gate_clear") is True
-    build_available = bool(host_capable and saved_proposal and gate_clear and not decisions and not package_held)
+    build_available = bool(host_capable and saved_proposal and gate_clear and not decisions and not package_held and not service_hold)
     content_current = lifecycle.get("content_current") is True
     acceptance_current = evidence.get("acceptance_current") is True
     action = "Build application"
@@ -788,6 +822,8 @@ def implementation_action_context(state, evidence, capability, checker_available
         reason = lifecycle.get("detail") or "Current build lifecycle evidence is unavailable. Refresh its status before choosing an action."
     elif decisions:
         reason = "Resolve the guide's remaining decisions before building: " + " ".join(decisions)
+    elif service_hold:
+        reason = service_hold["detail"]
     elif package_held:
         reason = availability["reason"]
     elif capability.get("available") is not True:
@@ -880,6 +916,7 @@ class GuideService:
         self.store = store
         self.attachments = GuideAttachments(store.root)
         self.architect = architect
+        self.architect.guide_command_store = store
         self.implementation_evidence_provider = implementation_evidence_provider
         self.trial_evidence_provider = trial_evidence_provider
         self.deployment_evidence_provider = deployment_evidence_provider
@@ -887,6 +924,7 @@ class GuideService:
         self.lock = asyncio.Lock()
         # A trusted host supplies its existing target, never browser/model input.
         self.package_runtime_provider = None
+        self.service_preparation_provider = None
         self._package_artifacts = {}
 
     async def package_availability(self, state):
@@ -969,6 +1007,12 @@ class GuideService:
         return project_implementation_evidence(detached, evidence, unavailable=evidence is None)
 
     async def _with_implementation_evidence(self, state):
+        # This is a current host projection, never a saved or model-owned pass.
+        state.pop("service_preparation", None)
+        if self.service_preparation_provider is not None:
+            observation = self.service_preparation_provider(copy.deepcopy(state))
+            if observation is not None:
+                state["service_preparation"] = observation
         state.pop("package_availability", None)
         availability = await self.package_availability(state)
         if availability is not None:
@@ -1037,7 +1081,7 @@ class GuideService:
             return project_remote_deployment_evidence(detached, unavailable=True)
         return project_remote_deployment_evidence(detached, receipt)
 
-    async def _save(self, state, version):
+    async def _save(self, state, version, *, command=None):
         # Read projections are recomputed after a revision change. Their presence
         # in an API response cannot turn them into durable guide truth.
         saved = copy.deepcopy(state)
@@ -1046,8 +1090,9 @@ class GuideService:
         saved.pop("deployment_evidence", None)
         saved.pop("remote_deployment_evidence", None)
         saved.pop("package_availability", None)
+        saved.pop("service_preparation", None)
         saved.pop("organization_update", None)
-        saved = await asyncio.to_thread(self.store.save, saved, version)
+        saved = await asyncio.to_thread(self.store.save, saved, version, **({"command": command} if command else {}))
         return await self._with_implementation_evidence(saved)
 
     async def get(self, identity):
@@ -1086,14 +1131,31 @@ class GuideService:
             })
         return await self._with_implementation_evidence(state)
 
-    async def respond(self, identity, value):
+    async def respond(self, identity, value, *, command_id=None):
         from .projects import DraftConflict
         if self.lock.locked():
             raise ArchitectUnavailable("Your setup agent is still considering the previous answer.")
         async with self.lock:
+            from .guide_commands import GuideCommand, pending_command
+            command = None
+            retained = None
+            if command_id is not None:
+                if value.action != "chat" or value.attachments or value.blueprint or value.manual_intent:
+                    raise ValueError("A stable guide command accepts a plain chat message only.")
+                command = GuideCommand(self.store, command_id, identity, value.model_dump(mode="json"))
+                retained = await asyncio.to_thread(command.load)
+                if retained and retained["applied"] is not None:
+                    return await self._with_implementation_evidence(copy.deepcopy(retained["applied"]))
+                if retained and retained["failure"] is not None:
+                    raise DraftConflict("This original command ended without a saved response. Submit a new command to try again.")
+            pending = await asyncio.to_thread(pending_command, self.store)
+            if pending is not None and pending != command_id:
+                raise DraftConflict("Recover the previous guide command before starting another.")
             state = await self.get(identity)
             if state["version"] != value.version:
                 raise DraftConflict("This setup changed in another tab. Reload before continuing.")
+            if retained is not None:
+                return await self._respond_prepared(retained["prepared"], value.version, command)
             action = value.action
             if action == "organization":
                 from .organization import organization_snapshot
@@ -1221,7 +1283,8 @@ class GuideService:
             context = {
                 "guide_id": identity, "guide_version": value.version, "action": action, "answers": state["answers"],
                 "input_surface": self.input_surface(),
-                "operation_request_id": fingerprint({"guide_id": identity, **value.model_dump(mode="json")}),
+                "operation_request_id": fingerprint({"guide_id": identity, **value.model_dump(mode="json"),
+                    **({"command_id": command_id} if command_id else {})}),
                 "current_stage": stage, "current_status": state["status"],
                 "current_question": question, "saved_plan_available": bool(previous_plan),
                 "manual_plan_submitted": value.blueprint is not None,
@@ -1243,6 +1306,8 @@ class GuideService:
             context["trial_evidence"] = await self.trial_evidence(state)
             context["deployment_evidence"] = await self.deployment_evidence(state, context["implementation_evidence"])
             context["remote_deployment_evidence"] = await self.remote_deployment_evidence(state, context["implementation_evidence"])
+            if state.get("service_preparation") is not None:
+                context["service_preparation"] = copy.deepcopy(state["service_preparation"])
             from .implementation_workspace import _sandbox_executable
             capability = planner_capability()
             context["implementation_actions"] = implementation_action_context(
@@ -1257,56 +1322,72 @@ class GuideService:
             if context.get("organization") is not None:
                 from .organization import ORGANIZATION_GUIDANCE
                 prompt += "\n" + ORGANIZATION_GUIDANCE
-            result = await self.architect.message(prompt, draft, guide_context=context)
-            if not result.get("guide"):
-                raise GuidePublicationMissing("The guide answered without publishing its response. Your saved setup remains unchanged.")
-            proposed = result.get("proposal")
-            if proposed is not None:
-                proposed = Blueprint.model_validate(proposed).model_dump(mode="json")
-            guided = validate_guide_publication(result["guide"], context, proposed, current_blueprint=draft)
-            if guided.get("visualization_feedback") is not None:
-                state["visualization_feedback"] = publication_visualization_feedback(guided, context)
-            if status_only_publication(guided, context, proposed):
-                # Operational prose is a conversation update, never application
-                # scope, a final review, or proof that a requested job succeeded.
-                state["messages"] += [current_message, conversation_message(
-                    "assistant", guided["message"], stage=stage, action=action,
-                    question=None, changes=[],
-                )]
-                # Operational guidance does not answer or replace a pending decision.
-                state.update(source="agent", summary=guided["summary"],
-                             warnings=guided["warnings"], changes=[],
-                             console_url=result.get("console_url") or state.get("console_url"))
-                return await self._save(state, value.version)
-            refining = guided["publication_mode"] == "refinement"
-            actual_stage = stage if refining else guided["question"]["stage"] if guided["question"] else "review"
-            brief = guided["brief"]
-            for topic, fact in state["brief"]["facts"].items():
-                if fact != brief["facts"].get(topic):
-                    state["fact_history"].append({"topic": topic, "fact": fact, "obsolete": True, "reason": "revised", "message_id": current_message["id"]})
-            reopened = [topic for topic in state["reopened_topics"]
-                        if brief["facts"].get(topic, {}).get("status") == "unresolved"]
-            changes = []
-            if proposed is not None:
-                changes = summarize_changes(previous_plan, proposed) if previous_plan else ["Initial agent team proposed"]
+            prepared = {"state": state, "draft": draft, "previous_plan": previous_plan,
+                        "current_message": current_message, "stage": stage, "action": action,
+                        "context": context, "prompt": prompt}
+            if command is not None:
+                prepared = await asyncio.to_thread(command.prepare, prepared)
+            return await self._respond_prepared(prepared, value.version, command)
+
+    async def _respond_prepared(self, prepared, version, command):
+        prepared = copy.deepcopy(prepared)
+        state, draft, previous_plan = (prepared[key] for key in ("state", "draft", "previous_plan"))
+        current_message, stage, action, context = (prepared[key] for key in
+            ("current_message", "stage", "action", "context"))
+        result = await self.architect.message(prepared["prompt"], draft, guide_context=context,
+            **({"command": command} if command else {}))
+        if not result.get("guide"):
+            raise GuidePublicationMissing("The guide answered without publishing its response. Your saved setup remains unchanged.")
+        proposed = result.get("proposal")
+        if proposed is not None:
+            proposed = Blueprint.model_validate(proposed).model_dump(mode="json")
+        guided = validate_guide_publication(result["guide"], context, proposed, current_blueprint=draft)
+        if guided.get("visualization_feedback") is not None:
+            state["visualization_feedback"] = publication_visualization_feedback(guided, context)
+        if status_only_publication(guided, context, proposed):
+            # Operational prose is a conversation update, never application
+            # scope, a final review, or proof that a requested job succeeded.
             state["messages"] += [current_message, conversation_message(
-                "assistant", guided["message"], stage=actual_stage, action=action,
-                question=guided["question"], changes=changes,
+                "assistant", guided["message"], stage=stage, action=action,
+                question=None, changes=[],
             )]
-            state.update(stage=actual_stage, question=guided["question"], source="agent", brief=brief,
-                         reopened_topics=reopened, readiness=review_readiness(brief),
-                         status=("refining" if refining else "review" if actual_stage == "review" else "handoff" if any(item["disposition"] == "handoff" for item in brief["requirements"]) else "question"),
-                         summary=guided["summary"], warnings=guided["warnings"],
-                         proposal=proposed if proposed is not None else state.get("proposal"),
-                         changes=changes, console_url=result.get("console_url") or state.get("console_url"),
-                         completed_stages=_completed_groups(brief, reopened))
-            return await self._save(state, value.version)
+            # Operational guidance does not answer or replace a pending decision.
+            state.update(source="agent", summary=guided["summary"],
+                         warnings=guided["warnings"], changes=[],
+                         console_url=result.get("console_url") or state.get("console_url"))
+            return await self._save(state, version, command=command)
+        refining = guided["publication_mode"] == "refinement"
+        actual_stage = stage if refining else guided["question"]["stage"] if guided["question"] else "review"
+        brief = guided["brief"]
+        for topic, fact in state["brief"]["facts"].items():
+            if fact != brief["facts"].get(topic):
+                state["fact_history"].append({"topic": topic, "fact": fact, "obsolete": True, "reason": "revised", "message_id": current_message["id"]})
+        reopened = [topic for topic in state["reopened_topics"]
+                    if brief["facts"].get(topic, {}).get("status") == "unresolved"]
+        changes = []
+        if proposed is not None:
+            changes = summarize_changes(previous_plan, proposed) if previous_plan else ["Initial agent team proposed"]
+        state["messages"] += [current_message, conversation_message(
+            "assistant", guided["message"], stage=actual_stage, action=action,
+            question=guided["question"], changes=changes,
+        )]
+        state.update(stage=actual_stage, question=guided["question"], source="agent", brief=brief,
+                     reopened_topics=reopened, readiness=review_readiness(brief),
+                     status=("refining" if refining else "review" if actual_stage == "review" else "handoff" if any(item["disposition"] == "handoff" for item in brief["requirements"]) else "question"),
+                     summary=guided["summary"], warnings=guided["warnings"],
+                     proposal=proposed if proposed is not None else state.get("proposal"),
+                     changes=changes, console_url=result.get("console_url") or state.get("console_url"),
+                     completed_stages=_completed_groups(brief, reopened))
+        return await self._save(state, version, command=command)
 
     async def apply(self, identity, version):
         from .projects import DraftConflict
         if self.lock.locked():
             raise ArchitectUnavailable("Wait for the setup agent to finish before applying the recommendation.")
         async with self.lock:
+            from .guide_commands import pending_command
+            if await asyncio.to_thread(pending_command, self.store):
+                raise DraftConflict("Recover the previous guide command before applying a recommendation.")
             state = await self.get(identity)
             if state["version"] != version:
                 raise DraftConflict("This setup changed. Reload before applying its recommendation.")

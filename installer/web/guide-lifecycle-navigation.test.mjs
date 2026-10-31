@@ -444,7 +444,7 @@ function savedBuildObservationFixture(options = {}) {
   return state;
 }
 function applicationStatus(document) {
-  const status = document.querySelector('.setup-progress-card');
+  const status = document.querySelector('.setup-current-status, .setup-progress-card');
   assert.ok(status, 'The real parent application status must be present independently of the builder');
   return status;
 }
@@ -2382,5 +2382,35 @@ test('pending initial Build presentation cannot follow navigation away and back 
       assert.equal(state.feedback(A), feedback);
       assert.equal(state.posts().length, 1);
     });
+  });
+});
+
+test('first cloud build keeps one current step while future destination reads fail', async t => {
+  const state = savedBuildObservationFixture();
+  state.guides.get(A).proposal.target = 'gcp';
+  state.guides.get(A).proposal.gcp = { project: 'fixture-project', zone: 'europe-west1-b' };
+  const read = state.read;
+  state.read = async (url, options) => {
+    const value = await read(url, options);
+    return url === '/api/workbench' ? { ...value, capabilities: { agent_team: { available: false } } } : value;
+  };
+  for (const kind of ['deployment', 'remote', 'cloud'])
+    state.receipts[kind].set(A, { httpError: 503, detail: 'Synthetic destination observation unavailable.' });
+  await mountedApp(t, state, async document => {
+    const phase = name => document.querySelector(`[data-setup-phase="${name}"]`);
+    assert.equal(phase('deployment').hidden, true);
+    assert.equal(phase('build').open, true);
+    assert.equal(phase('trial').open, false);
+    assert.equal(document.querySelectorAll('.setup-current-status, .setup-progress-card').length, 1);
+    assert.doesNotMatch(applicationStatus(document).textContent, /installation status|remote status|cloud status/i);
+    const admission = state.schedule(`${urlFor(A)}/implementation`, 'POST');
+    await click(implementation(document), 'Build application');
+    assertPendingAdmission(document);
+    assert.equal(phase('deployment').hidden, true);
+    assert.equal(phase('build').open, true);
+    await finish(admission, initialRunningBuild());
+    assert.equal(phase('deployment').hidden, true);
+    assert.equal(state.posts().length, 1);
+    assert.equal(state.composer(A), unsent);
   });
 });

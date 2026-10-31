@@ -17,7 +17,8 @@ const { createGuideFrameLog, ingestGuideTimeline, guideConversation, nextGuideTi
 const require = createRequire(import.meta.url);
 const { JSDOM } = createRequire(new URL("../../console/package.json", import.meta.url))("jsdom");
 const mountedBundle = await build({
-  entryPoints: [fileURLToPath(new URL("native-guide-chat.jsx", import.meta.url))],
+  stdin: { contents: 'export * from "./native-guide-chat.jsx"; export { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";',
+    resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "jsx" },
   bundle: true, write: false, format: "esm", platform: "node", jsx: "automatic", logLevel: "silent",
   loader: { ".css": "empty" }, nodePaths: [fileURLToPath(new URL("node_modules", import.meta.url))],
   alias: { "@console-core": fileURLToPath(new URL("../../packages/console-core/src", import.meta.url)) },
@@ -26,7 +27,7 @@ const mountedBundle = await build({
       path: pathToFileURL(require.resolve(args.path)).href, external: true }));
   } }],
 });
-const { NativeGuideChat, useGuideTimeline } =
+const { NativeGuideChat, useGuideTimeline, ConversationTranscript } =
   await import(`data:text/javascript;base64,${Buffer.from(mountedBundle.outputFiles[0].text).toString("base64")}`);
 
 const frame = (id, kind, payload, offset = 0) => ({
@@ -286,7 +287,7 @@ const clickHandler = node => node[Object.keys(node).find(key => key.startsWith("
 
 // Mount the shipping timeline owner and Console presentation. Only transport
 // replies are synthetic; a status action cannot send an answer or start a team.
-async function mountedStartup(verify, { initialStatus = unavailable, heldChecks = false, savedMessages = [] } = {}) {
+async function mountedStartup(verify, { initialStatus = unavailable, heldChecks = false, savedMessages = [], authenticationRequired = false } = {}) {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/", pretendToBeVisual: true });
   const calls = [], held = new Map(), timelineReads = new Map();
   const selected = structuredClone({ ...state, messages: savedMessages,
@@ -309,7 +310,10 @@ async function mountedStartup(verify, { initialStatus = unavailable, heldChecks 
       const match = /^\/api\/guide\/([^/]+)\/timeline\?/.exec(url);
       assert.ok(match, `Unexpected fixture read: ${url}`);
       const count = (timelineReads.get(match[1]) || 0) + 1; timelineReads.set(match[1], count);
-      if (match[1] === selected.id && count === 1) throw new Error("Synthetic timeline is unavailable.");
+      if (match[1] === selected.id && count === 1) {
+        if (authenticationRequired) return {ok:false,status:401,json:async()=>({detail:"Current sign-in required"})};
+        throw new Error("Synthetic timeline is unavailable.");
+      }
       return response(emptyTimeline);
     } };
   const previous = new Map(Object.keys(replacements).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -403,4 +407,108 @@ test("mounted typed failed startup keeps its existing retry control and an unmou
     await invoke(check);
     assert.deepEqual(calls, before);
   });
+});
+
+test('previous turns remain visible in chronological order through a terminal handoff', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const saved = { id: 'history-guide', operation: { status: 'completed' }, messages: [
+    { id: 'one', role: 'user', text: 'Original requirement', created_at: '2026-10-26T10:00:00Z' },
+    { id: 'two', role: 'assistant', text: 'Original saved answer', created_at: '2026-10-26T10:00:01Z' },
+    { id: 'three', role: 'user', text: 'Current question', created_at: '2026-10-26T10:01:00Z' },
+    { id: 'four', role: 'assistant', text: 'Current saved answer', created_at: '2026-10-26T10:01:01Z' },
+  ] };
+  const before = structuredClone(saved);
+  const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
+    { state: saved, snapshot: { frames: [], bindings: [], available: true }, collapseCompleted: true }));
+  const dom = new JSDOM(html), document = dom.window.document;
+  assert.equal(document.querySelector('details'), null, 'Historical prose is never hidden in a disclosure.');
+  const turns = [...document.querySelectorAll('[data-guide-turn]')];
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map(turn => turn.querySelector('.cc-conversation-turn').getAttribute('aria-label')), ['Turn 1', 'Turn 2']);
+  assert.match(turns[0].textContent, /Original requirement.*Original saved answer/s);
+  assert.match(turns[1].textContent, /Current question.*Current saved answer/s);
+  assert.equal(turns[1].dataset.repeatedDay, 'true', 'The same calendar day does not need another heading.');
+  const current = document.querySelector('[data-current-guide-transcript]');
+  assert.match(current.textContent, /Current question/);
+  assert.match(current.textContent, /Current saved answer/);
+  assert.doesNotMatch(current.textContent, /Original requirement/);
+  assert.deepEqual(saved, before);
+  dom.window.close();
+});
+
+test('shared transcript preserves default numbering and supports continued and empty-turn labels', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const viewState = guideConversation({ state: { id: 'numbered', messages: [{ role: 'user', text: 'Keep my request.' }] } }).viewState;
+  for (const [offset, expected] of [[undefined, 1], [4, 5]]) {
+    const render = view => new JSDOM(renderToStaticMarkup(React.createElement(ConversationTranscript,
+      { viewState: view, turnIndexOffset: offset, onToggleDiffFile() {} })));
+    const populated = render(viewState);
+    assert.equal(populated.window.document.querySelector('.cc-conversation-turn').getAttribute('aria-label'), `Turn ${expected}`);
+    assert.match(populated.window.document.body.textContent, /Keep my request/);
+    populated.window.close();
+    const empty = render({ ...viewState, groups: [], turnDiff: { fileCount: 0, plus: 0, minus: 0, files: [] } });
+    assert.equal(empty.window.document.querySelector('.cc-conversation-turn').getAttribute('aria-label'), `Turn ${expected}`);
+    empty.window.close();
+  }
+});
+
+test('technical work stays collapsed with its own turn while both saved answers stay readable', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const saved = { id: 'technical-history', operation: { status: 'completed' }, messages: [
+    { id: 'one', role: 'user', text: 'Original request', created_at: '1970-01-01T00:00:00Z' },
+    { id: 'two', role: 'assistant', text: 'First answer', created_at: '1970-01-01T00:00:02Z' },
+    { id: 'three', role: 'user', text: 'A new requirement', created_at: '1970-01-01T00:00:03Z' },
+    { id: 'four', role: 'assistant', text: 'Second answer', created_at: '1970-01-01T00:00:04Z' },
+  ] };
+  const frames = ingestGuideTimeline(createGuideFrameLog(), { frames: [
+    frame('first-tool', 'tool_call_requested', { id: 'first-call', name: 'inspect_blueprint', args: {} }, 1),
+  ] });
+  const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
+    { state: saved, snapshot: { frames, bindings: [], available: true } }));
+  const dom = new JSDOM(html), document = dom.window.document;
+  const turns = [...document.querySelectorAll('[data-guide-turn]')];
+  const activity = document.querySelector('[data-guide-technical-activity]');
+  assert.ok(activity);
+  assert.equal(activity.open, false);
+  assert.equal(activity.closest('[data-guide-turn]'), turns[0]);
+  assert.match(turns[0].textContent, /First answer/);
+  assert.match(turns[1].textContent, /Second answer/);
+  for (const transcript of document.querySelectorAll('[data-guide-turn] > .cc-conversation-transcript'))
+    assert.equal(transcript.closest('details'), null);
+  dom.window.close();
+});
+
+
+test("expired sign-in stops native recovery and checks only saved timeline without resending", async () => {
+  await mountedStartup(async ({ document, calls, button, assertPreserved }) => {
+    const meta = document.createElement("meta"); meta.name = "forge-sign-in";
+    meta.content = "/host/login"; document.head.append(meta);
+    assert.match(document.querySelector(".setup-error").textContent, /Sign in to continue/);
+    assert.doesNotMatch(document.body.textContent, /Reconnecting|Retry setup team/);
+    assert.equal(calls.length, 1, "401 does not probe or start the native setup team");
+    assertPreserved();
+    await act(async () => button("Check sign-in").click());
+    assert.equal(document.querySelector(".setup-error"), null);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.url.includes("/timeline?")));
+    assertPreserved();
+  }, { authenticationRequired: true });
+});
+
+test("returning to the original expired tab checks its timeline once and never replays input", async () => {
+  await mountedStartup(async ({ document, calls, assertPreserved, unmount }) => {
+    assert.match(document.body.textContent, /Sign in to continue/);
+    const view = document.defaultView;
+    await act(async () => {
+      view.dispatchEvent(new view.Event('focus'));
+      document.dispatchEvent(new view.Event('visibilitychange'));
+    });
+    assert.equal(document.querySelector('.setup-error'), null);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.method === 'GET' && call.url.includes('/timeline?')));
+    assertPreserved();
+    await unmount();
+    view.dispatchEvent(new view.Event('focus'));
+    assert.equal(calls.length, 2);
+  }, { authenticationRequired: true });
 });

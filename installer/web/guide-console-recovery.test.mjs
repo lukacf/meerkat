@@ -74,6 +74,38 @@ async function mount(onFetch, render, verify, { intervals } = {}) {
 }
 const response = value => ({ ok: true, status: 200, json: async () => value });
 
+test('current guide keeps the answer and failures visible while native technical activity is optional', async () => {
+  const state = { ...guide, messages: [
+    { id: 'question', role: 'user', text: 'Check my repository', created_at: new Date(100).toISOString() },
+    { id: 'answer', role: 'assistant', text: 'Your repository needs a protected connection.', created_at: new Date(2000).toISOString() },
+  ] };
+  const snapshot = { available: true, frames: [
+    { id: 'compact', event: 'compaction_started', timestampMs: 1000, interactionId: 'turn', data: {} },
+    { id: 'tool', event: 'tool_call_requested', timestampMs: 1100, interactionId: 'turn',
+      data: { id: 'inspect', name: 'inspect_repository', args: { repo: 'example' } } },
+    { id: 'failure', event: 'interaction_failed', timestampMs: 1200, interactionId: 'turn',
+      data: { error: 'The connection needs attention' } },
+  ], bindings: [{ interaction_id: 'turn', assistant_message_id: 'answer' }] };
+  let activity;
+  await mount(() => { throw new Error('Display must not perform a request'); },
+    () => React.createElement(NativeGuideChat, { state, snapshot, Icon: () => null,
+      onActivity: entries => { activity = entries; } }),
+    async ({ document, click }) => {
+      const current = document.querySelector('[data-current-guide-transcript]');
+      assert.match(current.textContent, /Your repository needs a protected connection/);
+      assert.match(current.textContent, /The connection needs attention/);
+      assert.doesNotMatch(current.textContent, /inspect_repository|Compaction started/);
+      const details = document.querySelector('[data-guide-technical-activity]');
+      assert.equal(details.open, false);
+      assert.match(details.textContent, /inspect_repository/);
+      assert.match(details.textContent, /Compaction started/);
+      await click(details.querySelector('summary'));
+      assert.equal(details.open, true);
+      assert.ok(activity.some(entry => entry.blocks?.some(block => block.name === 'inspect_repository')),
+        'The canonical activity callback retains the original native tool evidence');
+    });
+});
+
 test('held startup JSON can be checked independently without replaying Start or accepting its late old response', async () => {
   const body = deferred(); let bodyEntered = false, serverReady = false, checkReads = 0;
   function Conversation() {

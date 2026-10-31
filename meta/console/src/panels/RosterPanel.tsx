@@ -2,7 +2,7 @@ import React from "react";
 import type { ConsoleAgent } from "../types";
 import { agentDisplayTitle, responsePhaseWords } from "../lib/agents";
 import { restartOffered } from "../lib/side-chat";
-import { bucketOf } from "./Sidebar";
+import { AGENT_BUCKET_ORDER as BUCKET_ORDER, bucketOf } from "../lib/agent-buckets";
 import {
   AgentAvatar,
   AgentName,
@@ -54,7 +54,6 @@ interface RosterPanelProps {
 
 type Bucket = ReturnType<typeof bucketOf>;
 type Filter = "all" | Bucket;
-const BUCKET_ORDER: Bucket[] = ["Personal", "Coordinators", "Domains", "Internal", "Other"];
 
 const RETIRED_STATES = new Set(["retired", "retiring", "stopped", "completed"]);
 

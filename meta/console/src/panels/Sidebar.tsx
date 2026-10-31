@@ -44,9 +44,11 @@ import type {
 import { Icon } from "../icon";
 import { isAgentPinned, operatorPanelPath, sidebarAgentPinId } from "../lib/adapters";
 import { agentDisplayTitle, agentKindLabel } from "../lib/agents";
+import { AGENT_BUCKET_ORDER as SECTION_ORDER, bucketOf, type AgentBucket as Bucket } from "../lib/agent-buckets";
 import { countRender } from "../lib/render-counts";
 
 export { sidebarAgentPinId } from "../lib/adapters";
+export { bucketOf } from "../lib/agent-buckets";
 export {
   SECTION_COLLAPSE_STORAGE_PREFIX,
   SIDEBAR_PINS_STORAGE_PREFIX,
@@ -140,7 +142,6 @@ function visibleNavKinds(): NavKind[] {
   return ALL_NAV;
 }
 
-type Bucket = "Personal" | "Coordinators" | "Domains" | "Internal" | "Other";
 interface AgentRow {
   agent: ConsoleAgent;
   childOfHost: boolean;
@@ -455,24 +456,6 @@ export function sidebarPinnedFamilyPinIds(agent: ConsoleAgent, agents: ConsoleAg
   visit(agent);
   return ids;
 }
-
-/** An agent's section in the sidebar's Category view and the roster's group
- * filter. An explicit group label decides first; only an agent whose group
- * names no section is placed by its role (or kind). */
-export function bucketOf(a: ConsoleAgent): Bucket {
-  const g = (a.group || "").toLowerCase();
-  const p = (a.role || a.kind || "").toLowerCase();
-  if (g.includes("coordinator")) return "Coordinators";
-  if (g.includes("personal")) return "Personal";
-  if (g.includes("internal")) return "Internal";
-  if (g.includes("domain") || g.includes("responder") || g.includes("communication") || g.includes("specialist")) return "Domains";
-  if (p.includes("coord") || p.includes("triage") || p.includes("router") || p.includes("commander")) return "Coordinators";
-  if (p.includes("personal") || p.includes("identity") || p.includes("lead")) return "Personal";
-  if (p.includes("gate") || p.includes("monitor") || p.includes("scribe")) return "Internal";
-  return "Domains";
-}
-
-const SECTION_ORDER: Bucket[] = ["Personal", "Coordinators", "Domains", "Internal", "Other"];
 
 function configuredSelectors(config: ConsoleAgentListConfig | undefined, key: "group_by" | "subgroup_by"): string[] {
   return (config?.[key] || []).map((value) => value.trim()).filter(Boolean);

@@ -749,6 +749,7 @@ test_suite(
         "//crates/meerkat-machine-schema:live_context_readiness_guard_contract_test",
         "//crates/meerkat-machine-schema:meerkat_machine_schema_unit_test",
         "//crates/meerkat-machine-schema:member_residency_guard_phase_scan_test",
+        "//crates/meerkat-machine-schema:mob_machine_operator_instruction_region_test",
         "//crates/meerkat-machine-schema:model_routing_handoff_lifecycle_test",
         "//crates/meerkat-machine-schema:named_type_binding_covers_catalog_test",
         "//crates/meerkat-machine-schema:occurrence_completed_entry_lattice_test",

@@ -93,12 +93,20 @@ pub(super) async fn dispatch(
         "meta/memory/panel/dreams" => handle_memory_panel_dreams(store, &params, id).await,
         "meta/memory/panel/dream_runs" => handle_memory_panel_dream_runs(store, &params, id).await,
         "meta/memory/panel/audit_verdicts" => {
-            handle_memory_panel_audit_verdicts(store, &params, id).await
+            handle_memory_panel_audit_verdicts(store, access_view, &params, id).await
         }
-        "meta/memory/panel/overview" => handle_memory_panel_overview(store, &params, id).await,
-        "meta/memory/panel/proposals" => handle_memory_panel_proposals(store, &params, id).await,
-        "meta/memory/panel/injections" => handle_memory_panel_injections(store, &params, id).await,
-        "meta/memory/panel/harvests" => handle_memory_panel_harvests(store, &params, id).await,
+        "meta/memory/panel/overview" => {
+            handle_memory_panel_overview(store, access_view, &params, id).await
+        }
+        "meta/memory/panel/proposals" => {
+            handle_memory_panel_proposals(store, access_view, &params, id).await
+        }
+        "meta/memory/panel/injections" => {
+            handle_memory_panel_injections(store, access_view, &params, id).await
+        }
+        "meta/memory/panel/harvests" => {
+            handle_memory_panel_harvests(store, access_view, &params, id).await
+        }
         method => {
             let admission = selected.runtime.workgraph_admission();
             let service = selected.runtime.workgraph_service();

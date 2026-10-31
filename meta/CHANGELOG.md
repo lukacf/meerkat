@@ -596,6 +596,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   is tried again at the first health pass after the dispatcher's
   failed-round pause (30 seconds by default).
 
+- A candidate launch
+  (`runtime_options.mob_composition.authority = "candidate"`) refuses
+  `meta/bound_member_transcript` with `-32047` `candidate_launch`, as it
+  refuses `meta/compact_member`: the verb rewrites a member's session
+  transcript, which is the authoritative launch's to change. Before, a
+  candidate ran it.
+
 ### Known limitations
 
 - A Console side chat is in no declared roster: a host that reconciles the

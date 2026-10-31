@@ -2019,6 +2019,8 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/stop_member_run",
     "meta/force_cancel_member",
     "meta/compact_member",
+    // A rewrite of a member's session transcript.
+    "meta/bound_member_transcript",
     "meta/member_activate_instruction",
     "meta/live/open",
     "meta/console/send",

@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   required method with no default: forward it to the service or builder it
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
+- `ConsoleUiConfig` has a new public field, `attention`
+  (`console_config::ConsoleAttentionUiConfig`): the console's host attention
+  sources (see Added). Code that builds the struct with a literal adds
+  `attention: Default::default()` or ends the literal with
+  `..Default::default()`; both types implement `Default`.
 
 ### Added
 
@@ -143,6 +148,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its identity moved to the row's tooltip and a copy action, and an agent
   without a display name is named by its identity in words (`router:main`
   reads "Router main") or, for a generated id, by its kind and a short suffix.
+
+- The Console's **Needs you** also counts host-provided attention items.
+  `[[attention.sources]]` in the console configuration names same-origin JSON
+  endpoints (an `id`, a `label` and a `url` each) that list things waiting for
+  the operator which the host, not Meta gating, owns. The console reads them
+  with the operator's session when it loads, every 30 seconds while visible
+  and when the page becomes visible again, and lists their items in the
+  Approvals inbox after the approvals, as cards with one **Open** link to the
+  host's page, which decides. A source that cannot be read is named there and
+  hides nothing else; an aggregate console, which has no approvals, opens the
+  inbox for them too. See "Host-provided attention items" in the
+  configuration reference.
 
 - `/console/experience` sidebar, `identity_status` and `health_overview` rows
   carry `last_activity_ms`, the newest time the console's frame log recorded

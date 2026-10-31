@@ -29,10 +29,13 @@ export {
 export type { AgentDirectory, AgentDirectoryEntry } from "./agents";
 export { AgentAvatar, AgentDirectoryProvider, AgentName, useAgentDirectory } from "./agent-name";
 export type { AgentAvatarSize } from "./agent-name";
-export { Button } from "./button";
-export type { ButtonProps, ButtonSize, ButtonVariant } from "./button";
-export { Chip, Count, StatusDot } from "./chip";
-export { KitGlyph } from "./glyphs";
+export { Button, IconButton } from "./button";
+export type { ButtonProps, ButtonSize, ButtonVariant, IconButtonProps } from "./button";
+export { Chip, Count, StatusDot, StatusPill } from "./chip";
+export type { ChipVariant } from "./chip";
+export { StatusMark } from "./status-mark";
+export type { StatusMarkSize } from "./status-mark";
+export { KIT_GLYPH_NAMES, KitGlyph } from "./glyphs";
 export type { KitGlyphName } from "./glyphs";
 export { KeyValueList } from "./key-value";
 export type { KeyValueItem } from "./key-value";

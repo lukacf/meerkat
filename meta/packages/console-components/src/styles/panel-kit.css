@@ -475,6 +475,42 @@ textarea.cc-input {
   border-color: transparent;
   background: var(--_cc-surface-hover);
 }
+/* Pressed or expanded (a toggle, an open menu): the soft fill. */
+.cc-btn[aria-pressed="true"],
+.cc-btn[aria-expanded="true"] {
+  color: var(--_cc-foreground);
+  background: var(--_cc-surface-soft);
+}
+.cc-btn:active:not(:disabled) { transition-duration: var(--_cc-dur-press); }
+/* Icon buttons (spec A3.2): the glyph at 16 px (14 px small). */
+.cc-btn--icon .cc-btn__icon svg,
+.cc-btn--icon > svg {
+  width: 16px;
+  height: 16px;
+}
+.cc-btn--icon.cc-btn--sm .cc-btn__icon svg,
+.cc-btn--icon.cc-btn--sm > svg {
+  width: 14px;
+  height: 14px;
+}
+.cc-btn--icon { position: relative; }
+.cc-btn--icon .cc-glyph { stroke-width: 1.75; }
+/* Quiet: the meta ink until hovered or open (the overflow trigger). */
+.cc-btn--quiet { color: var(--_cc-foreground-meta); }
+.cc-btn--quiet:hover:not(:disabled),
+.cc-btn--quiet[aria-expanded="true"] { color: var(--_cc-foreground); }
+/* A non-default state behind the button: a 5 px accent dot. */
+.cc-btn__badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card);
+  pointer-events: none;
+}
 .cc-btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -520,6 +556,22 @@ textarea.cc-input {
   font-family: var(--_cc-font-mono);
   font-size: 10.5px;
 }
+/* A status pill: the tone's mark 5 px before the word (spec A3.3). */
+.cc-chip--mark { padding-left: 7px; }
+.cc-chip > .cc-mark {
+  margin-right: 5px;
+  vertical-align: -0.5px;
+}
+.cc-chip > .cc-mark[data-tone="crit"] { margin-right: 5.8px; }
+/* Quiet: no fill and no border, the mark and the word in muted ink (dense
+   rows where a pill per row is too loud). */
+.cc-chip--quiet,
+.cc-chip.cc-chip--quiet:not([data-tone="neutral"]):not([data-tone="locked"]) {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+}
 .cc-chip__dot {
   display: inline-block;
   width: 6px;
@@ -563,6 +615,68 @@ textarea.cc-input {
 @keyframes cc-live-pulse {
   0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklch, var(--_cc-member-accent) 45%, transparent); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--_cc-member-accent) 10%, transparent); }
+}
+/* Every dot speaks shape too (spec A3.3): warn a triangle, crit a diamond. */
+.cc-dot[data-tone="warn"] {
+  width: 8px;
+  height: 7px;
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-dot[data-tone="crit"] {
+  width: 5.5px;
+  height: 5.5px;
+  margin: 0.75px;
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-dot[data-tone="live"]:not(.is-live) {
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px color-mix(in oklch, var(--_cc-member-accent) 55%, transparent);
+}
+
+/* ── Status marks (spec A2.4) ──────────────────────────────────────
+   One shape per tone in an 8 px box (10 px for size md): ok and info a
+   filled circle, warn a triangle (9 x 8), crit a diamond, neutral a
+   hollow circle, locked a hollow square, live the accent circle with a
+   pulse ring. Where the variant squares round corners (terminal), the
+   circles render as squares; the triangle and diamond keep their
+   geometry. */
+.cc-mark {
+  --_cc-mark-size: 8px;
+  display: inline-block;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--_cc-mark-size);
+  height: var(--_cc-mark-size);
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-tone);
+  vertical-align: middle;
+}
+.cc-mark[data-size="md"] { --_cc-mark-size: 10px; }
+.cc-mark[data-tone="warn"] {
+  width: calc(var(--_cc-mark-size) + 1px);
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-mark[data-tone="crit"] {
+  width: calc(var(--_cc-mark-size) * 0.8);
+  height: calc(var(--_cc-mark-size) * 0.8);
+  margin: calc(var(--_cc-mark-size) * 0.1);
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-mark[data-tone="neutral"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-viz-mid);
+}
+.cc-mark[data-tone="locked"] {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-foreground-meta);
+}
+.cc-mark[data-tone="live"] { background: var(--_cc-viz-live); }
+.cc-mark[data-tone="live"]:not(.cc-chip__mark) {
+  animation: cc-live-pulse var(--_cc-dur-pulse) ease-in-out infinite;
 }
 
 .cc-count {
@@ -1236,6 +1350,27 @@ button.cc-tile:focus-visible,
   transform: rotate(45deg);
 }
 
+/* ── Hover reveal (spec A4.1) ──────────────────────────────────────
+   Secondary controls fade in when their container is hovered or holds
+   focus, is selected, or the control is open; opacity only, so they stay
+   in the accessibility tree and the tab order. Always shown without hover
+   and in panes under 480 px. */
+.cc-reveal {
+  opacity: 0;
+  transition: opacity var(--_cc-dur-fast) ease;
+}
+.cc-reveal-host:hover .cc-reveal,
+.cc-reveal-host:focus-within .cc-reveal,
+.cc-reveal-host.is-selected .cc-reveal,
+.cc-reveal:focus-visible,
+.cc-reveal:focus-within,
+.cc-reveal[aria-expanded="true"],
+.cc-reveal:has([aria-expanded="true"]),
+.cc-reveal.has-badge { opacity: 1; }
+@media (hover: none) {
+  .cc-reveal { opacity: 1; }
+}
+
 /* ── Narrow panes ──────────────────────────────────────────────── */
 
 @container cc-panel (max-width: 719px) {
@@ -1256,6 +1391,7 @@ button.cc-tile:focus-visible,
 }
 
 @container cc-panel (max-width: 479px) {
+  .cc-reveal { opacity: 1; }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
     --_cc-card-pad: 8px 10px;
@@ -1285,6 +1421,16 @@ button.cc-tile:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .cc-dot.is-live,
   .cc-skeleton__row { animation: none; }
+  .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+  .cc-dot.is-live {
+    animation: none;
+    box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+  }
 }
 .reduced-motion .cc-dot.is-live,
 .reduced-motion .cc-skeleton__row { animation: none; }
+.reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+.reduced-motion .cc-dot.is-live {
+  animation: none;
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+}

@@ -6458,12 +6458,22 @@ impl SessionRuntime {
     /// Refuse an input that would rebuild a help session from storage, before
     /// the input is admitted: a session that is neither live nor staged is
     /// rebuilt from its stored state.
+    ///
+    /// A session whose task ended with the host's runtime it ran on is not
+    /// live: an input admitted for it waits for the session's next
+    /// registration, which rebuilds it from storage. That is asked first,
+    /// without the actor: the live read asks the lost actor, and fails.
     async fn refuse_cold_help_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let live = self
+        let task_ended_with_its_runtime = self
             .service
-            .has_live_session(session_id)
-            .await
-            .map_err(session_error_to_rpc)?;
+            .session_task_ended_with_its_runtime(session_id)
+            .await;
+        let live = !task_ended_with_its_runtime
+            && self
+                .service
+                .has_live_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?;
         if live || self.staged_sessions.contains(session_id).await {
             return Ok(());
         }

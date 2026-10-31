@@ -3445,7 +3445,10 @@ reads does not answer within 30 seconds or meets one still running.
 `declarations/get` reads the applied `revision` (0 before any) and its
 `digest`, and `records`, one per declared source and subscription and one
 per child of a declared role template: `{kind, id, status, refusal?,
-collection?, delivery?}`. `kind` is `source`, `subscription` or
+collection?, delivery?}`. A record dropped from the declarations stays
+listed until its drop takes effect: a drop refused for now, or a dropped
+source until the schedule service has reconciled its runner after its end.
+`kind` is `source`, `subscription` or
 `role_child`; `status` is `applied`, `pending`, `suppressed`, or `left` for
 a role child whose member left the role; `refusal` is `{kind, message}`. An
 applied source carries `collection` (`baselining`, `backfilling`, `live`,

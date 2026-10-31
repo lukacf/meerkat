@@ -5949,7 +5949,10 @@ export function parseAnnouncementDeclarationRecord(raw: unknown): AnnouncementDe
 /**
  * `declarations/get` and `declarations/apply`: the applied `revision` (0
  * before any), its `digest`, and one record per declared source and
- * subscription and per child of a declared role template.
+ * subscription and per child of a declared role template. A record dropped
+ * from the declarations stays listed until its drop takes effect: a drop
+ * refused for now, or a dropped source until the schedule service has
+ * reconciled its runner after its end.
  */
 export interface AnnouncementDeclarationsView {
   readonly revision: number;

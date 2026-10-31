@@ -226,7 +226,10 @@ declaration made, so records made at runtime and an operator's pause, end
 or cancel stand. What the runtime refuses for now, such as a member that
 has not registered yet, waits as pending and is retried;
 `declarations/get` shows each declared record as applied, pending,
-suppressed or left.
+suppressed or left. A record dropped from the declarations stays listed
+until its drop takes effect: a drop the runtime refuses for now, or a
+dropped source until the schedule service has reconciled its runner after
+its end.
 
 A subscription can name every member of a mob with a role instead of one
 member: a role template. Each member with the role gets its own child

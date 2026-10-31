@@ -653,7 +653,10 @@ only marked records, through the owner's own put and verb paths, with
 operation ids derived from the step, the record, its digest and its
 revision, so a crash re-run replays what committed. A record the runtime
 refuses for now is pending with its typed refusal, and an operator's end or
-cancel is suppressed until the declaration of the record changes.
+cancel is suppressed until the declaration of the record changes. A dropped
+record keeps its mark, and so stays listed by `declarations/get`, until its
+end or cancel and, for a source, its runner's reconcile after the end have
+taken effect.
 
 A role template (`members: {mob_id, role}`) is kept in its own table,
 shares one id space with subscriptions and never delivers. At each capture

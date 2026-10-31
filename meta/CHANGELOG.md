@@ -614,8 +614,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   or subscription whose put committed before a stop at the step after it
   (its runner's reconcile, or the drop of its mobs that ended) is listed
   and managed at once, that step owed until it answers, so a later
-  revision changes or drops it as any other. The call itself still runs to
-  its end, and until it does, a holder that would call the same method,
+  revision changes or drops it as any other. A dropped source's runner
+  schedule follows its end once the schedule service answers, and until
+  then `declarations/get` lists the source from its mark, as it lists a
+  drop refused for now. The call itself still runs to its end, and until
+  it does, a holder that would call the same method,
   whatever its arguments, stops at once instead of waiting or calling
   again, so retries never pile up on it. The health pass finishes the
   declared records of a stopped reconcile (see above), and the step a put
@@ -625,6 +628,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   end of the failed one. A read's own wait for the gate is unchanged, and
   it never answers a partial view. A call whose task panics answers a
   fixed text that names the call, and the panic is logged.
+- A mob announcement store call whose own task panics answers the storage
+  failure "an announcement store call ended without an answer", and the
+  panic is logged. Before, the task's failure, the panic's message
+  included, became the error's text, which a caller answers as `-32000`.
 
 ### Known limitations
 

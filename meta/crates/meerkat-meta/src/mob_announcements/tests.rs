@@ -2404,6 +2404,14 @@ pub(super) struct ScriptedNative {
     pub(super) input_default: Mutex<Option<serde_json::Value>>,
     /// How many times the members of a role were read.
     role_reads: AtomicU64,
+    /// Members whose check answers nothing until the test clears them, as a
+    /// native read that never answers (a wedged child mob actor or identity
+    /// registry).
+    wedged: tokio::sync::watch::Sender<BTreeSet<String>>,
+    /// How many times each member's check was made.
+    checks: Mutex<BTreeMap<String, u64>>,
+    /// Members whose check panics, as a native read whose task fails.
+    panicking: Mutex<BTreeSet<String>>,
 }
 
 /// A member's role and labels, as a scripted roster records them.
@@ -2438,12 +2446,47 @@ impl ScriptedNative {
             inputs: Mutex::new(BTreeMap::new()),
             input_default: Mutex::new(None),
             role_reads: AtomicU64::new(0),
+            wedged: tokio::sync::watch::Sender::new(BTreeSet::new()),
+            checks: Mutex::new(BTreeMap::new()),
+            panicking: Mutex::new(BTreeSet::new()),
         }
     }
 
     /// How many times the members of a role were read.
     fn role_reads(&self) -> u64 {
         self.role_reads.load(Ordering::SeqCst)
+    }
+
+    /// Wedge the check of `identity`: it answers nothing until
+    /// [`Self::unwedge`].
+    fn wedge(&self, identity: &str) {
+        self.wedged.send_modify(|wedged| {
+            wedged.insert(identity.to_string());
+        });
+    }
+
+    /// Let the check of `identity` answer again, a check that waits
+    /// included.
+    fn unwedge(&self, identity: &str) {
+        self.wedged.send_modify(|wedged| {
+            wedged.remove(identity);
+        });
+    }
+
+    /// How many times the check of `identity` was made.
+    fn checks(&self, identity: &str) -> u64 {
+        self.checks
+            .lock()
+            .unwrap()
+            .get(identity)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Make the check of `identity` panic, as a native read whose task
+    /// fails.
+    fn panic_at_check(&self, identity: &str) {
+        self.panicking.lock().unwrap().insert(identity.to_string());
     }
 
     /// Record `identity`'s role and labels on this mob's roster.
@@ -2678,6 +2721,23 @@ impl NativeDelivery for ScriptedNative {
     ) -> std::result::Result<(), MemberProblem> {
         let identity = member.identity.as_str();
         let mob_id = member.mob_id.as_str();
+        *self
+            .checks
+            .lock()
+            .unwrap()
+            .entry(identity.to_string())
+            .or_default() += 1;
+        if self.panicking.lock().unwrap().contains(identity) {
+            panic!("the scripted check of {identity} panicked");
+        }
+        let wedged = self.wedged.borrow().contains(identity);
+        if wedged {
+            let _ = self
+                .wedged
+                .subscribe()
+                .wait_for(|identities| !identities.contains(identity))
+                .await;
+        }
         match route {
             MemberRoute::Local if self.unusable.contains(identity) => Err(MemberProblem::Unusable(
                 format!("{identity} is placed on a host"),
@@ -4084,8 +4144,9 @@ async fn a_round_full_of_held_members_does_not_starve_the_next_one() {
 /// member, as a storage fault would, and the first retention passes
 /// report more work, as a long backlog would. A put of one subscription can
 /// be held before it reaches the store, so a test acts while the owner is
-/// between two of its writes, or fail once, as a storage fault would. It
-/// counts what it is asked.
+/// between two of its writes, or fail once, as a storage fault would; the
+/// next read of the role template children can be held too. It counts what
+/// it is asked.
 struct FaultyStore {
     inner: SqliteAnnouncementStore,
     failing: Option<Member>,
@@ -4100,7 +4161,10 @@ struct FaultyStore {
     /// Panics the next backlog read, as a fault inside a round would.
     panic_next_round: std::sync::atomic::AtomicBool,
     /// The next put of this subscription waits until the test releases it.
-    held_put: Mutex<Option<HeldPut>>,
+    held_put: Mutex<Option<(SubscriptionId, HeldCall)>>,
+    /// The next read of the role template children waits until the test
+    /// releases it.
+    held_children: Mutex<Option<HeldCall>>,
     /// The next put of this subscription fails as a storage fault would,
     /// before anything of it reaches the store.
     failing_put: Mutex<Option<SubscriptionId>>,
@@ -4111,34 +4175,50 @@ struct FaultyStore {
     health_passes: std::sync::atomic::AtomicBool,
 }
 
-/// A put a [`FaultyStore`] holds before it reaches the store: the
-/// subscription it puts, and the signals the store and the test exchange.
+/// A call a [`FaultyStore`] holds before it reaches the store: the signals
+/// the store and the test exchange.
 #[derive(Clone)]
-struct HeldPut {
-    id: SubscriptionId,
-    /// Notified once the put arrived and waits.
+struct HeldCall {
+    /// Notified once the call arrived and waits.
     arrived: Arc<tokio::sync::Notify>,
-    /// Notified by the test to let the put go on.
+    /// Notified by the test to let the call go on.
     released: Arc<tokio::sync::Notify>,
 }
 
-impl HeldPut {
-    /// Whether the held put arrived within `bound`.
+impl HeldCall {
+    fn new() -> Self {
+        Self {
+            arrived: Arc::new(tokio::sync::Notify::new()),
+            released: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// Whether the held call arrived within `bound`.
     async fn reached(&self, bound: std::time::Duration) -> bool {
         tokio::time::timeout(bound, self.arrived.notified())
             .await
             .is_ok()
     }
 
-    /// Let the held put go on to the store.
+    /// Let the held call go on to the store.
     fn release(&self) {
         self.released.notify_one();
     }
+
+    /// Say the call arrived, and wait for its release, for at most
+    /// [`HELD_PUT_BOUND`].
+    async fn wait(self) {
+        self.arrived.notify_one();
+        let _ = tokio::time::timeout(HELD_PUT_BOUND, self.released.notified()).await;
+    }
 }
 
-/// How long a held put waits for its release before it goes on anyway: a
-/// test that fails before it releases never leaves the put waiting.
-const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a held call waits for its release before it goes on anyway: a
+/// test that fails before it releases never leaves the call waiting. Longer
+/// than the bound a row allows the gate holder it holds (the declarations
+/// rows' `STOPS_WITHIN`), so a call a row holds as a store call that never
+/// answers stays held for that row.
+const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl FaultyStore {
     fn new(inner: SqliteAnnouncementStore, failing: Option<&str>) -> Self {
@@ -4152,6 +4232,7 @@ impl FaultyStore {
             pass_times: Mutex::new(Vec::new()),
             panic_next_round: std::sync::atomic::AtomicBool::new(false),
             held_put: Mutex::new(None),
+            held_children: Mutex::new(None),
             failing_put: Mutex::new(None),
             health_passes: std::sync::atomic::AtomicBool::new(false),
         }
@@ -4171,23 +4252,31 @@ impl FaultyStore {
     /// Hold the next put of the subscription `id`: the owner has made every
     /// check and holds whatever it holds, and the store has written nothing
     /// of the put, until the test releases it.
-    fn hold_put(&self, id: &str) -> HeldPut {
-        let held = HeldPut {
-            id: sid(id),
-            arrived: Arc::new(tokio::sync::Notify::new()),
-            released: Arc::new(tokio::sync::Notify::new()),
-        };
-        *self.held_put.lock().unwrap() = Some(held.clone());
+    fn hold_put(&self, id: &str) -> HeldCall {
+        let held = HeldCall::new();
+        *self.held_put.lock().unwrap() = Some((sid(id), held.clone()));
+        held
+    }
+
+    /// Hold the next read of the role template children, a read only
+    /// `declarations/get` makes, until the test releases it.
+    fn hold_role_children(&self) -> HeldCall {
+        let held = HeldCall::new();
+        *self.held_children.lock().unwrap() = Some(held.clone());
         held
     }
 
     /// Wait here while the put of `id` is held, for at most
     /// [`HELD_PUT_BOUND`].
     async fn wait_if_held(&self, id: &SubscriptionId) {
-        let held = self.held_put.lock().unwrap().take_if(|held| held.id == *id);
+        let held = self
+            .held_put
+            .lock()
+            .unwrap()
+            .take_if(|(held, _)| *held == *id)
+            .map(|(_, held)| held);
         if let Some(held) = held {
-            held.arrived.notify_one();
-            let _ = tokio::time::timeout(HELD_PUT_BOUND, held.released.notified()).await;
+            held.wait().await;
         }
     }
 }
@@ -4304,6 +4393,15 @@ impl AnnouncementStore for FaultyStore {
         now_ms: u64,
     ) -> Result<()> {
         self.inner.remove_declaration_mark(kind, id, now_ms).await
+    }
+
+    /// Held here when the test holds it.
+    async fn role_children(&self) -> Result<Vec<super::store::RoleChild>> {
+        let held = self.held_children.lock().unwrap().take();
+        if let Some(held) = held {
+            held.wait().await;
+        }
+        self.inner.role_children().await
     }
 
     /// The SQLite store's cursor when the test runs health passes on this

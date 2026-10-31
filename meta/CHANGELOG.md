@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   A hook or `after_create` that legitimately takes longer hands its work off
   and answers.
 
+- `mob_announcements::store::DeclarationMark` has a new public field,
+  `step_owed`: whether the step after a declared record's put (the schedule
+  service's reconcile of a source's runner, or the drop of the mobs a
+  subscription names that ended) is still owed, which the health pass then
+  takes (see Fixed). Code that builds the struct with a literal adds
+  `step_owed: false`. A host's own `AnnouncementStore` keeps the field with
+  each mark it stores: it is serialized only when set, and a mark stored
+  without it owes nothing.
+
 ### Upgrade
 
 - The lifecycle side effects of identities (the customizer's `after_create`,
@@ -631,15 +640,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   applied, with every listed record applied, before the subscriptions that
   revision adds existed: the read listed only the records the reconcile had
   reached so far.
-- A declarations reconcile that a storage failure stopped is finished at
-  the next health pass. Before, the health pass reconciled again only while
-  a declared record was pending, so the records the stopped reconcile had
-  not reached stayed unmade, and missing from `declarations/get`, until the
-  next start, apply or change in the gateway's set of mobs. A dropped record
-  whose end or cancel was refused for now is retried there too. The health
-  pass never waits for a reconcile in progress, and after a retry fails, it
-  is tried again at the first health pass after the dispatcher's
-  failed-round pause (30 seconds by default).
+- The declared records of a declarations reconcile that a storage failure
+  stopped are finished at the next health pass, a record whose declaration
+  it changed but had not replaced yet included. Before, the health pass
+  reconciled again only while a declared record was pending, so the records
+  the stopped reconcile had not reached stayed unmade, and missing from
+  `declarations/get`, until the next start, apply or change in the
+  gateway's set of mobs, and a record whose declaration changed kept its
+  old content while `declarations/get` reported it applied at the new
+  revision. A dropped record whose end or cancel was refused for now is
+  retried there too. The health pass never waits for a reconcile in
+  progress, and after a retry fails, it is tried again at the first health
+  pass after the dispatcher's failed-round pause (30 seconds by default).
+- Whatever holds the declarations gate (a reconcile, an apply or a
+  `declarations/get`) waits on any one call for at most 30 seconds, the
+  time the dispatcher waits for the startup reconcile: a store call, a
+  read of this gateway's runtime (a member check, a mob's roster or event
+  log, the hosted mobs) or the schedule service's reconcile of a source's
+  runner. Before, one call that never answered, such as one to a wedged
+  child mob or a host store commit that never settled, held the gate as
+  long as it lasted, and with it `declarations/apply`, `declarations/get`
+  and, when the health pass retried the declarations (a pending record,
+  say), the dispatcher's round and every delivery after it. The holder now
+  stops at the first call past the bound, as a storage failure stops it,
+  and releases the gate: a warning names the call; an apply is refused
+  `native_unavailable` for a runtime read or the schedule service, and an
+  apply or a read fails with a storage failure for a store call; and a
+  reconcile leaves the records it had not reached as they were. A source
+  or subscription whose put committed before a stop at the step after it
+  (its runner's reconcile, or the drop of its mobs that ended) is listed
+  and managed at once, that step owed until it answers, so a later
+  revision changes or drops it as any other. A dropped source's runner
+  schedule follows its end once the schedule service answers, and until
+  then `declarations/get` lists the source from its mark, as it lists a
+  drop refused for now. The call itself still runs to its end, and until
+  it does, a holder that would call the same method,
+  whatever its arguments, stops at once instead of waiting or calling
+  again, so retries never pile up on it. The health pass finishes the
+  declared records of a stopped reconcile (see above), and the step a put
+  still owes, once the call answers; the children of a role template it
+  had not reached wait for the template's next capture or trigger. After
+  any failed retry the next one now waits the failed-round pause from the
+  end of the failed one. A read's own wait for the gate is unchanged, and
+  it never answers a partial view. A call whose task panics answers a
+  fixed text that names the call, and the panic is logged.
+- A mob announcement store call whose own task panics answers the storage
+  failure "an announcement store call ended without an answer", and the
+  panic is logged. Before, the task's failure, the panic's message
+  included, became the error's text, which a caller answers as `-32000`.
 - An approval card in a narrow Console chat pane no longer breaks its details
   one character per line. The card kept each label beside its value at any
   width, so a narrow pane left the values a column too narrow to read ("Not

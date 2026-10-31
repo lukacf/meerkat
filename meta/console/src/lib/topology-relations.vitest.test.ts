@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { describe, test } from "vitest";
 
+import type { ConsoleAgent } from "../types";
 import {
   normalizeTopologyLineage,
   normalizeTopologyMemoryScopes,
+  normalizeTopologyMemoryStore,
   normalizeTopologyRoutes,
+  readTopologyRelations,
+  topologyAgentStatus,
+  topologyGrouping,
   topologyRoutesAccessFromError,
 } from "./topology-relations";
 
@@ -125,4 +130,105 @@ test("a refused routes read means no routing access; anything else means unavail
   assert.equal(topologyRoutesAccessFromError(rpc(-32601)), "unavailable");
   assert.equal(topologyRoutesAccessFromError(new Error("network down")), "unavailable");
   assert.equal(topologyRoutesAccessFromError(null), "unavailable");
+});
+
+const agent = (extra: Partial<ConsoleAgent>): ConsoleAgent => ({
+  identity: "billing",
+  agent_id: "billing",
+  member_id: "billing",
+  label: "Billing",
+  kind: "mob_agent",
+  state: "active",
+  ...extra,
+});
+
+test("the team's store counts every scope's active records", () => {
+  assert.deepEqual(
+    normalizeTopologyMemoryStore({ scopes: [{ scope_kind: "identity", active: 12 }, { scope_kind: "realm", active: 40 }, { active: "x" }] }),
+    { id: "team", label: "Team memory", records: 52 },
+  );
+});
+
+test("lanes read the sidebar's words: its buckets, or the configured grouping", () => {
+  const buckets = topologyGrouping(null);
+  assert.equal(buckets.sectionOf(agent({ group: "Coordinators" })), "Coordinators");
+  assert.equal(buckets.sectionOf(agent({ group: "Specialists" })), "Domains");
+  assert.equal(buckets.sectionOf(agent({ role: "monitor" })), "Internal");
+  assert.deepEqual(buckets.order, ["Personal", "Coordinators", "Domains", "Internal", "Other"]);
+  const ordered = topologyGrouping({ section_order: ["Internal"] });
+  assert.deepEqual(ordered.order?.slice(0, 2), ["Internal", "Personal"]);
+  const configured = topologyGrouping({ group_by: ["labels.desk", "role"], fallback_group: "Unfiled", section_order: ["Front", "Back"] });
+  assert.equal(configured.sectionOf(agent({ labels: { desk: "Front" } })), "Front");
+  assert.equal(configured.sectionOf(agent({ role: "triage" })), "triage");
+  assert.equal(configured.sectionOf(agent({})), "Unfiled");
+  assert.deepEqual(configured.order, ["Front", "Back"]);
+});
+
+test("the map's status rule: working from the owner's facts, health as a badge, busy never unobserved", () => {
+  assert.deepEqual(topologyAgentStatus(agent({ response_phase: "generating" })), { working: true, health: null, healthWord: null, retired: false });
+  assert.equal(topologyAgentStatus(agent({}), true).working, true);
+  assert.equal(topologyAgentStatus(agent({ response_phase: null }), true).working, false);
+  const progress = (health: string) => ({ health, run_state: "idle", in_flight_work: 0, last_progress_at_ms: 0, last_progress_event: "unchanged" });
+  assert.deepEqual(topologyAgentStatus(agent({ progress: progress("degraded") })), { working: false, health: "warn", healthWord: "Degraded", retired: false });
+  assert.deepEqual(topologyAgentStatus(agent({ progress: progress("wedged") })), { working: false, health: "crit", healthWord: "Stalled", retired: false });
+  assert.equal(topologyAgentStatus(agent({ state: "retired" })).retired, true);
+});
+
+describe("the topology's relation reads", () => {
+  const methods = {
+    listRoutingRoutes: "meta/routing/routes/list",
+    listDeliveryHistory: "meta/delivery/history",
+    topologyMobEvents: "meta/mob_events/query",
+    getMemoryOverview: "meta/memory/panel/overview",
+  } as Record<string, string>;
+  const methodOf = (command: string) => methods[command] || `meta/${command}`;
+  const answers: Record<string, unknown> = {
+    listRoutingRoutes: { routes: [{ route_key: "mob.member.billing", channel: "notification", recipient: "billing", sink: "mob_member" }] },
+    listDeliveryHistory: { deliveries: [] },
+    topologyMobEvents: { events: [{ kind: "member_spawned", data: { type: "member_spawned", agent_identity: "helper", spawned_by: "billing" } }] },
+    getMemoryOverview: { scopes: [{ scope_kind: "identity", scope_key: "billing", active: 3 }] },
+  };
+
+  test("reads routes, lineage and memory with the targets and parameters they need", async () => {
+    const calls: Array<[string, string, unknown]> = [];
+    const result = await readTopologyRelations({
+      methods: Object.values(methods),
+      methodOf: methodOf as never,
+      execute: async (command, target, params) => {
+        calls.push([command, target, params]);
+        return answers[command];
+      },
+      memoryAvailable: true,
+    });
+    assert.deepEqual(calls.map(([command, target]) => `${command}@${target}`).sort(), [
+      "getMemoryOverview@memory",
+      "listDeliveryHistory@routing",
+      "listRoutingRoutes@routing",
+      "topologyMobEvents@topology",
+    ]);
+    assert.deepEqual(calls.find(([command]) => command === "topologyMobEvents")?.[2], { event_types: ["member_spawned"], limit: 2000 });
+    assert.equal(result.routesAccess, "loaded");
+    assert.equal(result.routes?.[0]?.managed, true);
+    assert.deepEqual(result.lineage, [{ parent: "billing", child: "helper", kind: "spawn", atMs: null }]);
+    assert.deepEqual(result.memoryScopes, [{ identity: "billing", records: 3, quarantined: 0 }]);
+    assert.deepEqual(result.stores, [{ id: "team", label: "Team memory", records: 3 }]);
+  });
+
+  test("a refused routes read says why, a failed one leaves only its relation out, and nothing unadvertised is read", async () => {
+    const calls: string[] = [];
+    const result = await readTopologyRelations({
+      methods: [methods.listRoutingRoutes, methods.topologyMobEvents],
+      methodOf: methodOf as never,
+      execute: async (command) => {
+        calls.push(command);
+        if (command === "listRoutingRoutes") throw Object.assign(new Error("denied"), { rpcError: { code: -32030, data: { kind: "access_denied" } } });
+        throw new Error("lineage read failed");
+      },
+      memoryAvailable: false,
+    });
+    assert.deepEqual(calls.sort(), ["listRoutingRoutes", "topologyMobEvents"]);
+    assert.deepEqual(result, { routes: null, routesAccess: "denied", lineage: null, memoryScopes: null, stores: null });
+    const none = await readTopologyRelations({ methods: [], methodOf: methodOf as never, execute: async () => ({}), memoryAvailable: true });
+    assert.deepEqual(none, { routes: null, routesAccess: "unavailable", lineage: null, memoryScopes: null, stores: null });
+  });
 });

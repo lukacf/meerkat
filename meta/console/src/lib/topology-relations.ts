@@ -6,12 +6,19 @@
 // in, the component package's relation inputs out.
 
 import type {
+  ConsoleTopologyAgentStatus,
+  ConsoleTopologyGrouping,
   ConsoleTopologyLineage,
   ConsoleTopologyLineageKind,
   ConsoleTopologyMemoryScope,
   ConsoleTopologyRoute,
   ConsoleTopologyRoutesAccess,
+  ConsoleTopologyStore,
 } from "../../../packages/console-components/src/topology/types";
+import type { ConsoleAgent, ConsoleAgentListConfig } from "../types";
+import { AGENT_BUCKET_ORDER, bucketOf } from "./agent-buckets";
+import { agentHealth, isAgentWorking } from "./agent-status";
+import { CONSOLE_COMMAND_NAMES, type ConsoleCommandName } from "./headless";
 
 /** The route keys the runtime keeps for every member on its own (roster routes). */
 const ROSTER_ROUTE_PREFIX = "mob.member.";
@@ -168,4 +175,168 @@ export function topologyRoutesAccessFromError(error: unknown): ConsoleTopologyRo
   const kind = rpcError && isRecord(rpcError.data) ? text(rpcError.data.kind) : "";
   if (kind === "access_denied" || code === -32030 || code === -32001) return "denied";
   return "unavailable";
+}
+
+/** The team's shared memory store (the SHARED lane), with the records every scope holds. */
+export function normalizeTopologyMemoryStore(overview: unknown): ConsoleTopologyStore {
+  let records = 0;
+  for (const raw of list(overview, "scopes")) {
+    if (isRecord(raw)) records += finite(raw.active) ?? 0;
+  }
+  return { id: "team", label: "Team memory", records };
+}
+
+function configuredValue(agent: ConsoleAgent, selector: string): string | null {
+  const name = selector.trim();
+  if (!name) return null;
+  if (name.startsWith("labels.")) return text(agent.labels?.[name.slice("labels.".length)]) || null;
+  if (name.startsWith("label:")) return text(agent.labels?.[name.slice("label:".length)]) || null;
+  switch (name) {
+    case "group": return text(agent.group) || null;
+    case "subgroup": return text(agent.subgroup) || null;
+    case "role": return text(agent.role) || null;
+    case "kind": return text(agent.kind) || null;
+    case "identity": return text(agent.identity) || null;
+    case "member_id": return text(agent.member_id) || null;
+    case "agent_id": return text(agent.agent_id) || null;
+    default: return text(agent.labels?.[name]) || null;
+  }
+}
+
+/**
+ * The map's lanes in the sidebar's words: the configured grouping
+ * (`agent_list.group_by`, then its fallback group) when the console names
+ * one, else the sidebar's buckets; the configured section order first.
+ */
+export function topologyGrouping(config: ConsoleAgentListConfig | null | undefined): ConsoleTopologyGrouping {
+  if (!config) return BUCKET_GROUPING;
+  const cached = groupingByConfig.get(config);
+  if (cached) return cached;
+  const grouping = buildTopologyGrouping(config);
+  groupingByConfig.set(config, grouping);
+  return grouping;
+}
+
+// One grouping per configuration object, so a render passes the same rule
+// and the map does not rebuild its lanes.
+const groupingByConfig = new WeakMap<ConsoleAgentListConfig, ConsoleTopologyGrouping>();
+
+function buildTopologyGrouping(config: ConsoleAgentListConfig | null | undefined): ConsoleTopologyGrouping {
+  const selectors = (config?.group_by || []).map((value) => value.trim()).filter(Boolean);
+  const configuredOrder = (config?.section_order || []).map((value) => value.trim()).filter(Boolean);
+  if (selectors.length > 0) {
+    const fallback = text(config?.fallback_group) || "Agents";
+    return {
+      sectionOf: (agent) => {
+        for (const selector of selectors) {
+          const value = configuredValue(agent, selector);
+          if (value) return value;
+        }
+        return fallback;
+      },
+      order: configuredOrder,
+    };
+  }
+  return {
+    sectionOf: (agent) => bucketOf(agent),
+    order: configuredOrder.length > 0 ? [...configuredOrder, ...AGENT_BUCKET_ORDER] : AGENT_BUCKET_ORDER,
+  };
+}
+
+/**
+ * The console's one status rule for an agent on the map: working now (the
+ * owner's phase, an open run, or a run the console saw start), and health
+ * that needs attention as the node's badge. A busy agent reads as working,
+ * never as unobserved.
+ */
+export function topologyAgentStatus(agent: ConsoleAgent, openRun = false): ConsoleTopologyAgentStatus {
+  const working = isAgentWorking(agent, { openRun });
+  const health = agentHealth(agent);
+  const retired = health.kind === "retired" || health.kind === "retiring";
+  return {
+    working,
+    health: health.problem ? (health.tone === "crit" ? "crit" : "warn") : null,
+    healthWord: health.problem ? health.word : null,
+    retired,
+  };
+}
+
+const BUCKET_GROUPING: ConsoleTopologyGrouping = buildTopologyGrouping(null);
+
+/** What the topology read beside the query, and when. */
+export interface ConsoleTopologyRelationsState {
+  routes: ConsoleTopologyRoute[] | null;
+  routesAccess: ConsoleTopologyRoutesAccess | null;
+  lineage: ConsoleTopologyLineage[] | null;
+  memoryScopes: ConsoleTopologyMemoryScope[] | null;
+  stores: ConsoleTopologyStore[] | null;
+  /** When the last refresh answered. */
+  updatedAtMs: number | null;
+  /** Why the last refresh failed; the map keeps the data it had. */
+  error: string | null;
+}
+
+export const EMPTY_TOPOLOGY_RELATIONS: ConsoleTopologyRelationsState = {
+  routes: null,
+  routesAccess: null,
+  lineage: null,
+  memoryScopes: null,
+  stores: null,
+  updatedAtMs: null,
+  error: null,
+};
+
+export type TopologyRelationTarget = "topology" | "routing" | "memory";
+
+export interface TopologyRelationReads {
+  /** The methods the runtime advertises. */
+  methods: readonly string[];
+  /** A command's RPC method. */
+  methodOf: (command: ConsoleCommandName) => string;
+  execute: (command: ConsoleCommandName, target: TopologyRelationTarget, params?: Record<string, unknown>) => Promise<unknown>;
+  /** Memory is set up and readable (the SHARED lane and the memory arcs). */
+  memoryAvailable: boolean;
+}
+
+/**
+ * The relations the map draws beyond the query: routes (when the caller may
+ * read routing), typed lineage (mob events) and the agents' memory scopes.
+ * Each read is optional and never fails the whole: one that is not
+ * advertised or fails leaves only its own relation out, and a refused routes
+ * read says why.
+ */
+export async function readTopologyRelations(
+  reads: TopologyRelationReads,
+): Promise<Omit<ConsoleTopologyRelationsState, "updatedAtMs" | "error">> {
+  const has = (command: ConsoleCommandName) => reads.methods.includes(reads.methodOf(command));
+  const routesRead: Promise<Pick<ConsoleTopologyRelationsState, "routes" | "routesAccess">> = has(CONSOLE_COMMAND_NAMES.listRoutingRoutes)
+    ? Promise.all([
+        reads.execute(CONSOLE_COMMAND_NAMES.listRoutingRoutes, "routing"),
+        has(CONSOLE_COMMAND_NAMES.listDeliveryHistory)
+          ? reads.execute(CONSOLE_COMMAND_NAMES.listDeliveryHistory, "routing").catch(() => null)
+          : Promise.resolve(null),
+      ]).then(
+        ([routes, history]) => ({ routes: normalizeTopologyRoutes(routes, history), routesAccess: "loaded" as const }),
+        (error: unknown) => ({ routes: null, routesAccess: topologyRoutesAccessFromError(error) }),
+      )
+    : Promise.resolve({ routes: null, routesAccess: "unavailable" as const });
+  const lineageRead = has(CONSOLE_COMMAND_NAMES.topologyMobEvents)
+    ? reads.execute(CONSOLE_COMMAND_NAMES.topologyMobEvents, "topology", {
+        event_types: [...TOPOLOGY_LINEAGE_EVENT_TYPES],
+        limit: TOPOLOGY_LINEAGE_EVENT_LIMIT,
+      }).then(normalizeTopologyLineage, () => null)
+    : Promise.resolve(null);
+  const memoryRead = reads.memoryAvailable && has(CONSOLE_COMMAND_NAMES.getMemoryOverview)
+    ? reads.execute(CONSOLE_COMMAND_NAMES.getMemoryOverview, "memory").then(
+        (overview) => ({ memoryScopes: normalizeTopologyMemoryScopes(overview), stores: [normalizeTopologyMemoryStore(overview)] }),
+        () => null,
+      )
+    : Promise.resolve(null);
+  const [routes, lineage, memory] = await Promise.all([routesRead, lineageRead, memoryRead]);
+  return {
+    ...routes,
+    lineage,
+    memoryScopes: memory?.memoryScopes ?? null,
+    stores: memory?.stores ?? null,
+  };
 }

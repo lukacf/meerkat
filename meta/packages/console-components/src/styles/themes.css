@@ -42,9 +42,11 @@
   --_cc-negative-default:            oklch(0.58 0.18 25);
   --_cc-warning-default:             oklch(0.68 0.15 75);
 
-  --_cc-member-accent-default:       oklch(0.55 0.14 30);
-  --_cc-member-accent-soft-default:  oklch(0.93 0.04 30);
-  --_cc-member-surface-default:      oklch(0.97 0.015 30);
+  /* The brand orange, hue 40 (spec A2.2): 5.0:1 as a mark on the card. */
+  --_cc-member-accent-default:       oklch(0.56 0.165 40);
+  --_cc-member-accent-soft-default:  oklch(0.93 0.045 40);
+  --_cc-member-surface-default:      oklch(0.97 0.018 40);
+  --_cc-surface-overlay-default:     var(--_cc-surface-raised);
 
   --_cc-sheen-soft-default:          rgba(255, 255, 255, 0.6);
   --_cc-sheen-strong-default:        rgba(255, 255, 255, 0.8);
@@ -82,9 +84,10 @@
   --_cc-negative-default:            oklch(0.70 0.18 25);
   --_cc-warning-default:             oklch(0.78 0.15 75);
 
-  --_cc-member-accent-default:       oklch(0.72 0.15 30);
-  --_cc-member-accent-soft-default:  oklch(0.32 0.08 30);
-  --_cc-member-surface-default:      oklch(0.24 0.06 30);
+  /* The brand orange, hue 40 (spec A2.2): 7.0:1 as a mark on the card. */
+  --_cc-member-accent-default:       oklch(0.72 0.16 40);
+  --_cc-member-accent-soft-default:  oklch(0.32 0.08 40);
+  --_cc-member-surface-default:      oklch(0.24 0.06 40);
 
   --_cc-sheen-soft-default:          rgba(255, 255, 255, 0.04);
   --_cc-sheen-strong-default:        rgba(255, 255, 255, 0.08);
@@ -171,6 +174,7 @@
   --_cc-member-accent-default:       oklch(0.52 0.16 145);
   --_cc-member-accent-soft-default:  oklch(0.92 0.06 145);
   --_cc-member-surface-default:      oklch(0.96 0.03 145);
+  --_cc-surface-overlay-default:     var(--_cc-surface-raised);
 
   --_cc-font-display-default:        "IBM Plex Mono", ui-monospace, monospace;
   --_cc-font-mono-default:           "IBM Plex Mono", ui-monospace, monospace;
@@ -246,4 +250,5 @@
   --_cc-member-accent-default:       oklch(0.55 0.16 250);
   --_cc-member-accent-soft-default:  oklch(0.92 0.04 250);
   --_cc-member-surface-default:      oklch(0.96 0.02 250);
+  --_cc-surface-overlay-default:     var(--_cc-surface-raised);
 }

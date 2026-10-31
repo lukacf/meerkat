@@ -120,9 +120,15 @@ describe("copy helpers", () => {
 
 describe("tone map", () => {
   it("maps status words to one tone each", () => {
-    expect(statusTone("in_progress")).toBe("info");
-    expect(statusTone("In progress")).toBe("info");
-    expect(statusTone("running")).toBe("info");
+    // In-progress words are live ("happening now", spec A2.4); info keeps
+    // the informative ones.
+    expect(statusTone("in_progress")).toBe("live");
+    expect(statusTone("In progress")).toBe("live");
+    expect(statusTone("running")).toBe("live");
+    expect(statusTone("claimed")).toBe("live");
+    expect(statusTone("retrying")).toBe("info");
+    expect(statusTone("queued")).toBe("info");
+    expect(statusTone("sent")).toBe("ok");
     expect(statusTone("completed")).toBe("ok");
     expect(statusTone("healthy")).toBe("ok");
     expect(statusTone("delivered")).toBe("ok");
@@ -261,7 +267,8 @@ describe("TechnicalDetails", () => {
     const details = view.getByTestId("details") as HTMLDetailsElement;
     expect(details.tagName).toBe("DETAILS");
     expect(details.open).toBe(false);
-    expect(details.querySelector("summary")?.textContent).toBe("Technical details");
+    // The summary counts the fields it holds (console v2 spec A3.6).
+    expect(details.querySelector("summary")?.textContent).toBe("Technical details · 2");
     const labels = Array.from(details.querySelectorAll("dt")).map((node) => node.textContent);
     expect(labels).toEqual(["Identity", "Generation"]);
     expect(details.querySelectorAll(".cc-tech-id").length).toBe(1);

@@ -22,6 +22,9 @@ import type {
 export type { ConsoleTopologyControlCapabilities } from "@console-core";
 
 import type { ConsoleAgent, ConsoleTopologyNode } from "../types";
+import type { ConsoleTopologyLink } from "../../../packages/console-components/src/topology/types";
+
+export type { ConsoleTopologyLink } from "../../../packages/console-components/src/topology/types";
 
 export interface RuntimeTopologyEndpoint {
   authority?: string | null;
@@ -70,6 +73,15 @@ interface RuntimeTopologyQuery {
 
 export interface NormalizedConsoleTopology {
   nodes: ConsoleTopologyNode[];
+  /**
+   * Every pair the query reports, with its flags: wired (`actual`), declared
+   * or desired but not wired, suppressed by an operator, and cross-authority.
+   * Endpoint ids are the nodes' stock endpoint keys. `wired_to` on the nodes
+   * keeps only the actual peers.
+   */
+  links: ConsoleTopologyLink[];
+  /** The authority (the team) the query describes. */
+  authority: string | null;
   management: TopologyManagementState;
 }
 
@@ -441,6 +453,7 @@ export function normalizeConsoleTopologyQuery(
   ]));
   const actualPeers = new Map<string, Set<string>>();
   const edgeByKey = new Map<string, RuntimeTopologyEdge>();
+  const pairByKey = new Map<string, TopologyEdgeRef>();
   for (const edge of query.edges) {
     const pair = canonicalEdge(
       consoleTopologyEndpointKey(edge.edge.a, query.authority),
@@ -448,6 +461,7 @@ export function normalizeConsoleTopologyQuery(
     );
     if (pair.from === pair.to) continue;
     edgeByKey.set(edgeKey(pair), edge);
+    pairByKey.set(edgeKey(pair), pair);
     if (!edge.actual) continue;
     const fromPeers = actualPeers.get(pair.from) || new Set<string>();
     fromPeers.add(pair.to);
@@ -463,9 +477,13 @@ export function normalizeConsoleTopologyQuery(
     const authority = endpointAuthority(node.endpoint, query.authority);
     const fallback = fallbackById.get(identity) || fallbackById.get(runtimeIdentity);
     const agent = agentById.get(runtimeIdentity);
+    // A node of another authority is another team's agent: the map draws it
+    // as one, and its id stays authority-qualified.
+    const crossScope = Boolean(authority && query.authority && authority !== query.authority);
     return {
       identity,
       ref: { id: identity, authority, identity: runtimeIdentity },
+      ...(crossScope ? { presentation: { crossScope: true, scopeId: authority, scopeLabel: authority } } : {}),
       label: agentDisplayTitle({
         label: fallback?.label || agent?.label || runtimeIdentity,
         identity: runtimeIdentity,
@@ -554,8 +572,28 @@ export function normalizeConsoleTopologyQuery(
     }];
   });
 
+  const links: ConsoleTopologyLink[] = [];
+  for (const [key, edge] of edgeByKey) {
+    const pair = pairByKey.get(key);
+    if (!pair) continue;
+    const link: ConsoleTopologyLink = {
+      from: pair.from,
+      to: pair.to,
+      actual: edge.actual === true,
+      declared: edge.declared === true,
+      desired: edge.desired === true,
+      suppressed: edge.suppressed === true,
+      operatorAdded: edge.operator_added === true,
+      cross: endpointAuthority(edge.edge.a, query.authority) !== endpointAuthority(edge.edge.b, query.authority),
+    };
+    // A pair with no flag says nothing about the pair.
+    if (link.actual || link.declared || link.desired || link.suppressed || link.operatorAdded) links.push(link);
+  }
+
   return {
     nodes,
+    links,
+    authority: query.authority || null,
     management: {
       revision: query.revision,
       policy: {

@@ -5116,7 +5116,7 @@ fn recompute_sqlite_present_incident_wiring(
 ) -> Result<(), MobStoreError> {
     let mut statement = tx
         .prepare(
-            "SELECT agent_identity, CAST(record_json AS BLOB)
+            "SELECT agent_identity, typeof(record_json), CAST(record_json AS BLOB)
              FROM mob_identity_intents
              WHERE mob_id = ?1
              ORDER BY agent_identity",
@@ -5124,12 +5124,25 @@ fn recompute_sqlite_present_incident_wiring(
         .map_err(se)?;
     let rows = statement
         .query_map(params![mob_id.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(se)?;
     let mut records = Vec::new();
     for row in rows {
-        let (physical_identity, bytes) = row.map_err(se)?;
+        let (physical_identity, storage_type, bytes) = row.map_err(se)?;
+        // A created entry's row (schema version 2 and later) carries no
+        // host-adopted wiring: the recompute leaves it out and never rewrites
+        // it, as the intent scan leaves it out, so it blocks no adoption of
+        // another identity.
+        if storage_type == "blob"
+            && crate::identity::classify_created_identity_row(&bytes).is_some()
+        {
+            continue;
+        }
         let record: IdentityIntentRecord = decode_json(&bytes)?;
         record.validate().map_err(|error| {
             identity_authority_blocked(

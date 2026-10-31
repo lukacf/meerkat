@@ -105,27 +105,26 @@ def selected_interpreter_refusal(target, interpreter=None):
 def selected_host_refusal(glibc_floor, interpreter=None):
     """Why this computer cannot run the selected product's native programs, or None.
 
-    A Linux product declares the oldest glibc they run on. Below it every
-    package still installs, and the application fails only when it starts.
+    The resource library declares an exact consuming host. Its glibc value
+    is separate from the minimum glibc supported by dependency wheels.
     """
     if glibc_floor is None:
         return None
     floor = tuple(glibc_floor)
     host = forge_interpreter() if interpreter is None else interpreter
     found = tuple(host["glibc_minimum"])
-    if host["system"] == "Linux" and found >= floor:
+    if host["system"] == "Linux" and found == floor:
         return None
     needed = f"glibc {floor[0]}.{floor[1]}"
     present = f"glibc {found[0]}.{found[1]}" if host["system"] == "Linux" and found != (0, 0) else "no glibc"
-    return (f"This product's native programs need {needed} or newer, but this computer has {present}, so the "
-        f"application would install and then fail when it starts. Install it on a Linux computer with {needed} "
-        "or newer, or upgrade this computer's operating system.")
+    return (f"This product's selected resource library requires exactly {needed}, but this computer has {present}. "
+        f"Use a Linux computer with {needed}, or obtain a product whose resource library supports this computer.")
 
 
 def selected_update_refusal(target, interpreter=None):
     """Why this computer cannot install an update to the selected product, or None.
 
-    Stage asks before it writes anything. The glibc floor comes from the
+    Stage asks before it writes anything. The exact glibc version comes from the
     pinned assembly and resource build record alone; the install worker
     refuses again on the fully read product.
     """

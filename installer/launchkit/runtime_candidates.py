@@ -118,7 +118,7 @@ class MetaToolkitRuntimeArtifacts:
     catalog: dict
     evidence: tuple[ArtifactFile, ...]
     origin: str = "installed-gateway-assembly"
-    # The oldest glibc the product's Linux programs run on, as declared.
+    # Legacy field name: exact supported_host glibc, not a wheel ABI minimum.
     glibc_floor: tuple[int, int] | None = None
     _verified_inputs: tuple = field(default=(), init=False, repr=False, compare=False)
     _verified_metadata: tuple = field(default=(), init=False, repr=False, compare=False)
@@ -303,10 +303,10 @@ def _product_prefix_stream(compressed, prefix):
 
 
 def _declared_glibc_floor(record, platform):
-    """The oldest glibc a Linux product runs on, as its resource build declares.
+    """The exact consuming-host glibc declared by the selected resource library.
 
     The Connect resource packager records the host the product supports. A
-    record without that declaration states no floor; a present one must be
+    record without that declaration states no version; a present one must be
     complete.
     """
     if "runtime_compatibility" not in record:
@@ -324,7 +324,7 @@ def _declared_glibc_floor(record, platform):
 
 
 def declared_glibc_floor(target):
-    """Read only a selected product's declared glibc floor.
+    """Read only a selected product's exact declared glibc version.
 
     It opens the pinned assembly and its resource build record, not the whole
     product, so a refusal can come before the full read. The full read still

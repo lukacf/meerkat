@@ -206,3 +206,31 @@ async def test_stage_a_default_public_product_guard_remains_with_no_transport_or
     with pytest.raises(DraftConflict, match="Remote installation is not supported"):
         await service.accepted(service.guide.identity, 4, service.implementation.identity)
     assert not service.root.exists() and not service.transport.calls and not service.tasks
+
+
+@pytest.mark.parametrize("host_glibc", ["2.35", "2.39", "2.41"])
+def test_guest_requires_product_exact_glibc_even_when_control_wheels_fit(monkeypatch, host_glibc):
+    tag = "cp" + str(sys.version_info.major) + str(sys.version_info.minor)
+    manifest = {"format": control.FORMAT, "interpreter": {
+        "implementation": "cpython", "machine": "x86_64", "python_tag": tag,
+        "abi_tag": tag, "glibc_minimum": [2, 31], "product_glibc": [2, 39]}}
+    monkeypatch.setattr(control.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(control.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(control.platform, "libc_ver", lambda: ("glibc", host_glibc))
+    if host_glibc == "2.39":
+        assert control.guest_interpreter(manifest)["glibc"] == [2, 39]
+    else:
+        with pytest.raises(ValueError, match="selected product requires exactly glibc 2.39"):
+            control.guest_interpreter(manifest)
+
+
+async def test_control_selection_binds_product_glibc_separately_from_wheel_minimum(inputs_destination, monkeypatch):
+    from types import SimpleNamespace
+    from launchkit import runtime_selection
+    f = inputs_destination
+    selection = selected_control(f)
+    monkeypatch.setattr(runtime_selection, "selected_runtime_artifacts",
+        lambda target: SimpleNamespace(glibc_floor=(2, 39)))
+    _, interpreter = selection.read_dependencies()
+    assert interpreter["glibc_minimum"] == [2, 31]
+    assert interpreter["product_glibc"] == [2, 39]

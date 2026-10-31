@@ -27,8 +27,8 @@ MAX_FILES = 8192
 
 
 def candidate_readme(guide, target, origin, *, ordinary=False, glibc_floor=None):
-    # A Linux product's glibc floor is the one its resource build declares.
-    linux = "Linux x86_64" + (f" with glibc {glibc_floor[0]}.{glibc_floor[1]} or newer" if glibc_floor else "")
+    # The legacy field name carries the resource library's exact host version.
+    linux = "Linux x86_64" + (f" with exactly glibc {glibc_floor[0]}.{glibc_floor[1]}" if glibc_floor else "")
     host = (linux if target.target == "linux-x86_64"
         else "Apple Silicon macOS 13.5 or newer")
     ordinary_note = (f"\nApplications without a connection setup helper use the included Meta "

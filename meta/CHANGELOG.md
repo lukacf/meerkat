@@ -161,6 +161,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   inbox for them too. See "Host-provided attention items" in the
   configuration reference.
 
+- A source may also name `decide_href`, a same-origin path where the host
+  decides an approval. On a read-only session each pending approval card, in
+  the inbox and in an agent's chat, shows one **Decide in** link per such
+  source instead of the disabled buttons. `{decision_id}` in it is replaced
+  by the URL-encoded request id; without the placeholder it is the host's
+  page in general. Without `decide_href` nothing changes. An invalid
+  `decide_href` is dropped and the source stays.
+
 - `/console/experience` sidebar, `identity_status` and `health_overview` rows
   carry `last_activity_ms`, the newest time the console's frame log recorded
   the agent acting (a live runtime event, a console send or a tool

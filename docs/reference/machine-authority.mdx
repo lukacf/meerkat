@@ -251,6 +251,30 @@ facts. The shell re-seats an entry owed its seat once the mob runs, as the
 handle's own command through that created custody, and MobMachine's guards
 decide each seat.
 
+The ci profile has no identities, so the hand-written audit
+`specs/machines/mob_machine/created_identity_audit.sh` drives the created
+entries' arms in four runs:
+
+- The scan run scans a row of every presence, with and without a revival
+  record, in Running and Stopped, until the boot plan's seal. The rows are
+  for a replayed seated member (with or without its `Declared` entry's row)
+  and for an identity without a member. The run reaches every outcome, the
+  contradicted rows included, and exactly one arm answers every row.
+- The reseat run opens, aborts and seats spawn ladders with every pair of
+  custodies over the scanned rows, alongside the worker reconcile and the
+  destroy. It checks that no ladder opens for a reserved name, that a
+  ladder's custody matches its name's origin, that a seat under created
+  custody binds the entry's revival record, and that a row of a name an
+  open ladder acts for reserves it.
+- The names run drives the declared apply, its seal, the legacy adoption,
+  the agent lane's admission and the admission probe over `Created`,
+  removed and unreadable names. Exactly one arm answers each, and the seal
+  never touches a `Created` entry.
+- The placed run scans the row of a member seated on a member host.
+
+The audit seeds defects, one per invariant above, per action property and
+per guard a reachable state needs, and refuses each.
+
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it
 seats (`member_rotation_peer_endpoints`) and its target

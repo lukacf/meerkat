@@ -98,7 +98,7 @@ ComputeRespawn* respawn generation probe over the spawn ladder; spawn ladder var
 ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
-ProbeMember* spawn admission probe in the Completed and Destroyed phases, and its other-origin and reserved-name refusals; identity_entry_audit drives its other Running and Stopped arms
+ProbeMember* spawn admission probe in the Completed and Destroyed phases; identity_entry_audit and created_identity_audit drive its Running and Stopped arms
 RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 Kickoff* member kickoff lifecycle; the seat owes no kickoff and no audit drives the kickoff arms
 RecoverMemberKickoff* member kickoff replay; no audit drives it
@@ -175,7 +175,7 @@ RecoverIdentityGeneration* generation high-water recovery; generation_highwater_
 SealIdentity* generation high-water seal; generation_highwater_audit drives it and checks its witnesses, without a coverage list
 AdvanceDefinition* definition epoch advance; no audit drives it
 Reconcile* desired-roster reconcile in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
-ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases, and its refusal of an unreadable name; identity_entry_audit drives its other Running and Stopped arms
+ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases; identity_entry_audit and created_identity_audit drive its Running and Stopped arms
 AdoptLegacyIdentityEntryMobNotRunning* the legacy adoption in the Completed and Destroyed phases; identity_entry_audit drives every other arm and the Stopped one
 RespawnIdentityEntryRefusedCompleted the legacy fresh-life respawn's refusal of an identity entry in the Completed phase; identity_entry_audit drives its Running and Stopped arms
 RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
@@ -200,8 +200,3 @@ BeginExplicitResumeCleanup* explicit resume rollback cleanup; the resume run doe
 SettleExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
 CancelExplicit* explicit resume cancellation; the resume run does not cancel
 FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume run does not cancel
-RecoverCreatedIdentityEntry* the boot scan of the identity store's created entry rows; no audit drives it yet
-DeclareIdentityEntryRefusedNameOwnedByCreated the declared apply's refusal of a created entry's name; no audit records a created entry yet
-DeclareIdentityEntryRefusedNameTombstoned the declared apply's refusal of a removed created entry's name; no audit records a tombstone yet
-DeclareIdentityEntryRefusedNameUnreadable the declared apply's refusal of an unreadable name; no audit reserves a name yet
-AdoptLegacyIdentityEntryOtherCustody the legacy adoption's refusal of a created or reserved name; no audit records either yet

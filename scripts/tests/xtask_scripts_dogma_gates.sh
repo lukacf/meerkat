@@ -390,6 +390,11 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # mutants' generated invariants, totality invariants and action properties
 # (one per declared apply invariant, property and guard), and its forced
 # destroy mutants' generated invariants violated.
+# created_identity_audit.sh (mob_machine) requires a final distinct-state
+# count at or above each of its four runs' floors, a coverage block in which
+# each covered action of every run generated a state, its seventeen step
+# witnesses violated, and with --mutants each seeded defect's generated
+# invariant, totality invariant or action property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -789,6 +794,36 @@ printf '%s\n' \
   'echo "Error: Invariant AuditApplyOpenExactlyOne is violated."' \
   'echo "Error: Invariant AuditPlacedDeclareExactlyOne is violated."' \
   'echo "Error: Action property AuditRemoteCommitSeatsEntry is violated."' \
+  'for action in RecoverCreatedIdentityEntrySeatedRunning RecoverCreatedIdentityEntrySeatedStopped RecoverCreatedIdentityEntryRetiredRunning RecoverCreatedIdentityEntryRetiredStopped RecoverCreatedIdentityEntryPendingRunning RecoverCreatedIdentityEntryPendingStopped RecoverCreatedIdentityEntryTombstoneRunning RecoverCreatedIdentityEntryTombstoneStopped RecoverCreatedIdentityEntryUnreadableRunning RecoverCreatedIdentityEntryUnreadableStopped DeclareIdentityEntryRefusedNameOwnedByCreated DeclareIdentityEntryRefusedNameTombstoned DeclareIdentityEntryRefusedNameUnreadable AdoptLegacyIdentityEntryOtherCustody ResolveAgentLaneMemberAdmissionUnreadableNameRunning ResolveAgentLaneMemberAdmissionUnreadableNameStopped ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped ProbeMemberAdmissionIdentityNameReservedRunning ProbeMemberAdmissionIdentityNameReservedStopped CommitSpawnActivationFinalRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessScanSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanRetired is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanTombstone is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanEntryTombstoned is violated."' \
+  'echo "Error: Action property NotAuditWitnessReseatOnRecord is violated."' \
+  'echo "Error: Action property NotAuditWitnessCreatedCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSparesReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyClearsReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealKeepsCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSkipsUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessProbeOtherOrigin is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedPlaced is violated."' \
+  'echo "Error: Invariant AuditRecoverExactlyOne is violated."' \
+  'echo "Error: Invariant unseated_created_entry_is_preparing_or_owed is violated."' \
+  'echo "Error: Invariant tombstone_is_never_an_entry is violated."' \
+  'echo "Error: Action property AuditNoLadderForReservedName is violated."' \
+  'echo "Error: Action property AuditLadderCustodyMatchesOrigin is violated."' \
+  'echo "Error: Invariant entry_custodies_are_disjoint is violated."' \
+  'echo "Error: Action property AuditCreatedSeatTakesRecord is violated."' \
+  'echo "Error: Invariant AuditReseatProbeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditNamesDeclareExactlyOne is violated."' \
+  'echo "Error: Action property AuditSealNeverTouchesCreated is violated."' \
+  'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
+  'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -855,7 +890,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i audits-k audits-l audits-m audits-n audits-o"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i audits-k audits-l audits-m audits-n audits-o audits-q"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

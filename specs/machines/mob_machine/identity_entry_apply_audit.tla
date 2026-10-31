@@ -157,9 +157,10 @@
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations. With --mutants the runner also seeds defects into a
 \* copy of the generated model and requires TLC to refuse each (see
-\* identity_entry_audit.sh). No origin other than Declared exists yet, so the
-\* declared apply's explicit origin check has no refusal to reach here; the
-\* release that adds an origin adds its row and mutant.
+\* identity_entry_audit.sh). These runs record no Created entry and reserve
+\* no name, so the declared apply's refusals of a Created entry's, a removed
+\* or an unreadable name are checked by created_identity_audit's names run,
+\* with a mutant of the origin check.
 \*
 \* The TLC configs are DERIVED from the generated ci.cfg on every run by
 \* identity_entry_audit.sh.

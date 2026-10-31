@@ -25,7 +25,7 @@ name: CI
 #                     document changed
 #   governance-docs-gate - the machine-authority docs gate, on the same
 #                     changes, in parallel with governance-gates
-#   tlc-audits      - (x13) the hand-written TLC audit shards on a
+#   tlc-audits      - (x14) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -937,7 +937,9 @@ jobs:
   # (audits-l) for the identity entry audit's entry part (281 s locally), and
   # four (audits-k, audits-m, audits-n, audits-o) for its declared apply's
   # apply, legacy, roles and hosted parts (180, 230, 196 and 212 s locally
-  # with 4 workers); none of these seven is measured on a hosted runner yet.
+  # with 4 workers), and a fourteenth (audits-q) for the created identity
+  # audit (217 s locally); none of these eight is measured on a hosted
+  # runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -952,7 +954,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-i, audits-k, audits-l, audits-m, audits-n, audits-o]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-i, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.

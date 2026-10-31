@@ -645,6 +645,9 @@ them.
   host-store realms keep their documents in the host's store and are not
   listed.
 
+- `meerkat-machine-schema`: `InputFieldDomainKind` gains the variant
+  `CiValues(BTreeSet<u64>)` (see Added), so exhaustive matches need an arm.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1295,6 +1298,13 @@ them.
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
   and the fold source.
+- `meerkat-machine-schema`, `meerkat-machine-codegen`: a machine schema can
+  narrow an unsigned input field's TLC samples in the CI profile alone
+  (`InputFieldDomainKind::CiValues`, declared with
+  `MachineSchemaMetadata::with_input_field_domain`). The generated model
+  ranges the field over a constant that `ci.cfg` assigns the declared values
+  and `deep.cfg` those together with the default `0..2`; a composition
+  explores the Deep set, and the generated machine is unchanged.
 
 ### Changed
 

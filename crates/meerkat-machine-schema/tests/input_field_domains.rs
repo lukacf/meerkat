@@ -45,6 +45,10 @@ fn values(values: &[u64]) -> InputFieldDomainKind {
     InputFieldDomainKind::AdditionalValues(values.iter().copied().collect::<BTreeSet<_>>())
 }
 
+fn ci_values(values: &[u64]) -> InputFieldDomainKind {
+    InputFieldDomainKind::CiValues(values.iter().copied().collect::<BTreeSet<_>>())
+}
+
 #[test]
 fn workgraph_declares_every_bound_expected_revision_as_the_current_revision() {
     let schema = dsl_workgraph_lifecycle_machine();
@@ -81,6 +85,30 @@ fn additional_values_extend_a_bound_unsigned_field() {
     schema
         .validate()
         .expect("a bound u64 field takes additional values");
+}
+
+#[test]
+fn ci_values_take_a_nonempty_in_range_set_for_a_bound_unsigned_field() {
+    with_declaration("CreateOpen", "unresolved_blocker_count", ci_values(&[0]))
+        .validate()
+        .expect("a bound u64 field takes CI values");
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[])
+        )),
+        InputFieldDomainError::EmptyValues
+    );
+    let too_big = TLC_MAX_UNSIGNED_INPUT_SAMPLE + 1;
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[0, too_big])
+        )),
+        InputFieldDomainError::ValueOutOfRange { value: too_big }
+    );
 }
 
 #[test]

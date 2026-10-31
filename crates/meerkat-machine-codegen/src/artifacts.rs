@@ -1425,9 +1425,10 @@ pub fn render_machine_ci_cfg(
         &named_samples,
         &named_bindings,
     );
+    let input_samples = machine_input_sample_constants(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
-    if !domains.is_empty() || uses_u64_max {
+    if !domains.is_empty() || uses_u64_max || !input_samples.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         if uses_u64_max {
             push_u64_max_cfg_assignment(&mut out);
@@ -1480,6 +1481,17 @@ pub fn render_machine_ci_cfg(
                 )
                 .expect("write to string");
             }
+        }
+        // A `CiValues` input field: the CI profile explores exactly its
+        // declared values, the Deep profile those and the default `0..2`.
+        for (constant, ci_values) in &input_samples {
+            let values: BTreeSet<u64> = if deep {
+                broad_input_samples(ci_values)
+            } else {
+                ci_values.iter().copied().collect()
+            };
+            writeln!(&mut out, "  {} = {}", constant, render_u64_set(&values))
+                .expect("write to string");
         }
     }
     if !schema.invariants.is_empty() {
@@ -5648,6 +5660,60 @@ mod tests {
         );
     }
 
+    /// A `CiValues` declaration ranges the field over a model constant: the
+    /// CI config assigns it exactly the declared values, the Deep config those
+    /// and the default unsigned domain.
+    #[test]
+    fn ci_values_narrow_the_ci_profile_alone() {
+        use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+        use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+        use meerkat_machine_schema::{InputFieldDomain, InputFieldDomainKind};
+
+        let mut sampled = dsl_workgraph_lifecycle_machine();
+        sampled.input_field_domains.push(InputFieldDomain {
+            input: InputVariantId::parse("CreateOpen").expect("input slug"),
+            field: FieldId::parse("unresolved_blocker_count").expect("field slug"),
+            domain: InputFieldDomainKind::CiValues([0, 5].into_iter().collect()),
+        });
+        let constant = "InputSamples_CreateOpen_unresolved_blocker_count";
+        let model = render_machine_semantic_model(&sampled).expect("render sampled model");
+        assert!(
+            next_disjunct_for(&model, "CreateOpen").contains(&format!(
+                "\\E arg_unresolved_blocker_count \\in {constant} : "
+            )),
+            "the field ranges over its samples constant"
+        );
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("model constants");
+        assert!(
+            constants_line.contains(constant),
+            "the model declares the samples constant: {constants_line}"
+        );
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen")
+                .contains("\\E expected_revision \\in {revision} : "),
+            "the machine's other declarations are unchanged"
+        );
+
+        let ci = render_machine_ci_cfg(&sampled, false).expect("valid CI CFG");
+        assert!(
+            ci.contains(&format!("\n  {constant} = {{0, 5}}\n")),
+            "the CI config assigns exactly the declared values:\n{ci}"
+        );
+        let deep = render_machine_ci_cfg(&sampled, true).expect("valid Deep CFG");
+        assert!(
+            deep.contains(&format!("\n  {constant} = {{0, 1, 2, 5}}\n")),
+            "the Deep config keeps the default domain beside the declared values:\n{deep}"
+        );
+        assert_eq!(
+            broad_input_samples(&[0, 5].into_iter().collect::<BTreeSet<u64>>()),
+            [0, 1, 2, 5].into_iter().collect::<BTreeSet<u64>>(),
+            "outside the CI profile the field keeps the default domain beside its values"
+        );
+    }
+
     #[test]
     fn substituted_compound_values_are_delimited_and_atoms_are_not() {
         for atom in [
@@ -8044,6 +8110,11 @@ impl<'a> CompositionTlaCompiler<'a> {
             Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
                 additional_values_domain(&self.binding_domain_for_type(ty), values)
             }
+            // A composition has no machine CI profile: it explores the
+            // field's Deep samples, the declared values and `0..2`.
+            Some(meerkat_machine_schema::InputFieldDomainKind::CiValues(values)) => {
+                render_u64_set(&broad_input_samples(values))
+            }
             None => self.binding_domain_for_type(ty),
         }
     }
@@ -10403,6 +10474,11 @@ impl<'a> MachineTlaCompiler<'a> {
             .map(|(name, _)| name)
             .cloned()
             .collect::<Vec<_>>();
+        model_constants.extend(
+            machine_input_sample_constants(self.schema)
+                .into_iter()
+                .map(|(constant, _)| constant),
+        );
         if machine_uses_u64_max(self.schema) {
             model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
         }
@@ -12422,12 +12498,22 @@ impl<'a> MachineTlaCompiler<'a> {
         binding: &str,
         ty: &TypeRef,
     ) -> String {
-        match input.and_then(|input| self.schema.input_field_domain(input, binding)) {
-            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+        let declared = input.and_then(|input| {
+            self.schema
+                .input_field_domain(input, binding)
+                .map(|domain| (input, domain))
+        });
+        match declared {
+            Some((_, meerkat_machine_schema::InputFieldDomainKind::StateField(state_field))) => {
                 format!("{{{}}}", state_field.as_str())
             }
-            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+            Some((_, meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values))) => {
                 additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            // A model constant that each profile's config assigns: the CI
+            // profile the declared values, the Deep profile those and `0..2`.
+            Some((input, meerkat_machine_schema::InputFieldDomainKind::CiValues(_))) => {
+                input_samples_constant_name(input, binding)
             }
             None => self.binding_domain_for_type(ty),
         }
@@ -14437,4 +14523,43 @@ fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("({default} \\cup {{{values}}})")
+}
+
+/// The model constant that a `CiValues` input field ranges over in the
+/// generated model; each profile's config assigns it.
+fn input_samples_constant_name(input: &str, field: &str) -> String {
+    format!("InputSamples_{}_{}", tla_ident(input), tla_ident(field))
+}
+
+/// The samples a `CiValues` input field keeps outside the CI profile (the
+/// Deep profile and every composition): the declared values together with the
+/// default unsigned domain (`0..2`).
+fn broad_input_samples(ci_values: &BTreeSet<u64>) -> BTreeSet<u64> {
+    (0..=2).chain(ci_values.iter().copied()).collect()
+}
+
+fn render_u64_set(values: &BTreeSet<u64>) -> String {
+    let values = values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{values}}}")
+}
+
+/// Every `CiValues` input field of a machine, in declaration order: the model
+/// constant the field ranges over and the values the CI profile assigns it.
+fn machine_input_sample_constants(schema: &MachineSchema) -> Vec<(String, &BTreeSet<u64>)> {
+    schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiValues(values) => Some((
+                input_samples_constant_name(declaration.input.as_str(), declaration.field.as_str()),
+                values,
+            )),
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_) => None,
+        })
+        .collect()
 }

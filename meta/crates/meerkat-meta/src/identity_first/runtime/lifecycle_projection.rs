@@ -2099,17 +2099,16 @@ impl IdentityRuntime {
         let _ = self
             .lifecycle_projection
             .take_retiring(&prepared.identity, prepared.generation);
+        // The key reads the whole step, so it is taken before `recorded`
+        // moves out of it.
+        let key = prepared.key();
         let Some(earlier) = prepared.recorded else {
             return;
         };
         let (store, mob_id) = self.identity_record_store();
         let restored = match earlier {
             Some(earlier) => store.set_lifecycle_effect_intent(&earlier).await,
-            None => {
-                store
-                    .clear_lifecycle_effect_intent(&mob_id, &prepared.key())
-                    .await
-            }
+            None => store.clear_lifecycle_effect_intent(&mob_id, &key).await,
         };
         if let Err(error) = restored {
             tracing::warn!(

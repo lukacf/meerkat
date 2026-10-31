@@ -164,6 +164,9 @@ pub use instruction_activation::{
     MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
     materialize_instruction_activation_messages, validate_instruction_activation_messages,
 };
+pub(crate) use instruction_activation::{
+    instruction_activation_offsets, instruction_activation_places,
+};
 pub(crate) use instruction_target::InstructionFold;
 pub use instruction_target::{
     InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
@@ -5400,11 +5403,13 @@ impl Session {
     /// recorded operator-instruction state. Every path that puts an
     /// operator-instruction entry row in a session records it (a run start's
     /// application, a compaction fold, any entry append, a fork that copies
-    /// entry rows), and decode carries it with the rows, so the key alone
-    /// answers, in O(1) and without reading the transcript. Entry rows leave
-    /// the live transcript only through a compaction fold, which records the
-    /// state in the same rewrite, so a document whose rewrite graph retains
-    /// an entry row always carries it too: once 5, always 5.
+    /// entry rows), and so does a rewrite that moves an instruction
+    /// activation row to another offset, whose record releases before
+    /// activation places refuse. Decode carries it with the rows, so the key
+    /// alone answers, in O(1) and without reading the transcript. Entry rows
+    /// leave the live transcript only through a compaction fold, which
+    /// records the state in the same rewrite, so a document whose rewrite
+    /// graph retains an entry row always carries it too: once 5, always 5.
     pub fn carries_operator_instruction_facts(&self) -> bool {
         self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
     }
@@ -9146,28 +9151,29 @@ impl Session {
             .map_err(TranscriptEditError::InvalidTranscriptShape)?;
         validate_instruction_activation_messages(&rewritten)
             .map_err(TranscriptEditError::InvalidTranscriptShape)?;
+        // Whether this rewrite moves an instruction activation row to
+        // another offset. Releases before activation places compare
+        // activation rows at their offsets, so they refuse the record of such
+        // a rewrite: its document is written at envelope 5 (below).
+        let mut shifts_activation_offsets = false;
         if expected_revision.is_none() {
-            let activation_rows = |messages: &[Message]| {
-                messages
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, message)| {
-                        let Message::System(system) = message else {
-                            return None;
-                        };
-                        system
-                            .instruction_activation
-                            .as_ref()
-                            .map(|_| (index, system.clone()))
-                    })
-                    .collect::<Vec<_>>()
-            };
-            if activation_rows(self.messages()) != activation_rows(&rewritten) {
+            // Instruction activation rows are compared by place: the same
+            // rows, byte for byte, in the same order, each with the same
+            // conversation rows before it, whatever their offsets. A rewrite
+            // may add, remove or reorder ordinary System rows around one (a
+            // keyed prompt update inserts a later version before it), but
+            // cannot mint, alter, move, erase or restore one across
+            // conversational content.
+            if instruction_activation_places(self.messages())
+                != instruction_activation_places(&rewritten)
+            {
                 return Err(TranscriptEditError::InvalidTranscriptShape(
                     "same-session transcript rewrite cannot mint, alter, move, erase, or restore instruction activation boundaries"
                         .to_string(),
                 ));
             }
+            shifts_activation_offsets = instruction_activation_offsets(self.messages())
+                != instruction_activation_offsets(&rewritten);
             // Only a run start appends an operator-instruction entry row, and
             // only the validated compaction fold takes entry rows out and
             // inserts a snapshot. Entry rows are compared by identity and by
@@ -9244,13 +9250,21 @@ impl Session {
             actor,
             committed_at,
         };
-        self.finish_compact_transcript_rewrite(
+        let commit = self.finish_compact_transcript_rewrite(
             prior_history,
             commit,
             replacement,
             rewritten,
             realtime_rebase,
-        )
+        )?;
+        if shifts_activation_offsets {
+            // The graph now retains a record that moved an activation row
+            // to another offset: the document carries a fact only envelope 5
+            // reads ([`Self::carries_operator_instruction_facts`]).
+            self.record_unowned_instruction_state()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        }
+        Ok(commit)
     }
 
     fn finish_compact_transcript_rewrite(

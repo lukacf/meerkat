@@ -1697,14 +1697,15 @@ impl Session {
     }
 
     /// Record an unowned operator-instruction state (no owner, generation 0,
-    /// entry sequence 0, no slot) unless the session already records one. A
-    /// session that receives entry rows by copy (a fork child) records it, so
-    /// the state key alone answers whether a session carries
-    /// operator-instruction facts: the copied rows name another origin, and
-    /// this session's own entry sequence starts at zero.
-    pub(crate) fn record_inherited_instruction_state(
-        &mut self,
-    ) -> Result<(), InstructionStateError> {
+    /// entry sequence 0, no slot) unless the session already records one.
+    /// The state key alone answers whether a session's document carries a
+    /// fact only envelope 5 reads ([`Session::carries_operator_instruction_facts`]),
+    /// so every such fact records it: a session that receives entry rows by
+    /// copy (a fork child: the copied rows name another origin, and this
+    /// session's own entry sequence starts at zero), and a session whose
+    /// rewrite graph retains a record that moved an instruction activation
+    /// row to another offset.
+    pub(crate) fn record_unowned_instruction_state(&mut self) -> Result<(), InstructionStateError> {
         if self.instruction_target_state()?.is_some() {
             return Ok(());
         }

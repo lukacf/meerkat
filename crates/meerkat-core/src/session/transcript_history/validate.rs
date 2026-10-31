@@ -14,7 +14,7 @@ use crate::session::operator_instructions::{
 };
 use crate::session::{
     InstructionEntryKind, TranscriptEditError, TranscriptRewriteSemantic,
-    transcript_messages_digest,
+    instruction_activation_offsets, instruction_activation_places, transcript_messages_digest,
 };
 use crate::types::{AssistantBlock, Message};
 use std::collections::BTreeSet;
@@ -140,27 +140,26 @@ fn validate_instruction_activation_revision_transition(
             },
         )?;
     }
-    let activation_rows = |messages: &[Message], preserve_offsets: bool| {
-        messages
+    // Activation rows pair in order, each the same row. A compaction may
+    // summarize the conversation around them. Any other rewrite keeps each
+    // at its place among the conversation rows (`instruction_activation_places`),
+    // or, as releases before activation places required, at its offset: the
+    // records those releases wrote keep validating.
+    let parent = instruction_activation_places(&parent_body.messages);
+    let revision = instruction_activation_places(&revision_body.messages);
+    let same_rows = parent.len() == revision.len()
+        && parent
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                let Message::System(system) = message else {
-                    return None;
-                };
-                system.instruction_activation.as_ref().map(|_| {
-                    (
-                        preserve_offsets.then_some(index),
-                        Message::System(system.clone()),
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    let preserve_offsets = commit.selection.semantic() != TranscriptRewriteSemantic::Compaction;
-    if activation_rows(&parent_body.messages, preserve_offsets)
-        != activation_rows(&revision_body.messages, preserve_offsets)
-    {
+            .zip(&revision)
+            .all(|((_, parent_row), (_, revision_row))| parent_row == revision_row);
+    let kept_in_place = commit.selection.semantic() == TranscriptRewriteSemantic::Compaction
+        || parent
+            .iter()
+            .zip(&revision)
+            .all(|((parent_place, _), (revision_place, _))| parent_place == revision_place)
+        || instruction_activation_offsets(&parent_body.messages)
+            == instruction_activation_offsets(&revision_body.messages);
+    if !same_rows || !kept_in_place {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "transcript rewrite changed an instruction activation boundary".to_string(),
         ));

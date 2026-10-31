@@ -714,6 +714,44 @@ pub fn inherited_instruction_keys_requiring_activation(
     inherited
 }
 
+/// Every instruction activation row with its place: the number of rows
+/// before it that are not System rows (its place among the conversation
+/// rows), in transcript order, so a row's position in the list is its order
+/// among the activation rows. Two of these lists are equal when the same
+/// activation rows, byte for byte, stand in the same order with the same
+/// conversation rows before each, whatever their offsets: a rewrite that
+/// adds, removes or reorders ordinary System rows around an activation row
+/// (a keyed prompt update inserts a later version before one) keeps it, and
+/// minting, altering, erasing or reordering an activation row, or moving one
+/// across a conversation row, changes the list.
+pub(crate) fn instruction_activation_places(messages: &[Message]) -> Vec<(usize, &Message)> {
+    let mut conversation_rows = 0;
+    let mut places = Vec::new();
+    for message in messages {
+        let Message::System(system) = message else {
+            conversation_rows += 1;
+            continue;
+        };
+        if system.instruction_activation.is_some() {
+            places.push((conversation_rows, message));
+        }
+    }
+    places
+}
+
+/// The transcript offset of every instruction activation row, in order:
+/// what releases before activation places compare across a rewrite.
+pub(crate) fn instruction_activation_offsets(messages: &[Message]) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            matches!(message, Message::System(system) if system.instruction_activation.is_some())
+        })
+        .map(|(offset, _)| offset)
+        .collect()
+}
+
 impl Session {
     /// Apply the host's fork instruction policy to this fork child, before its
     /// single save, and return how many re-activation rows it appended.

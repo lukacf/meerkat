@@ -1460,7 +1460,7 @@ impl Session {
             .or_default()
             .apply(identity)?;
         if !self.carries_operator_instruction_facts() {
-            self.record_inherited_instruction_state()
+            self.record_unowned_instruction_state()
                 .map_err(|error| error.to_string())?;
         }
         self.messages.push(Message::System(entry));
@@ -1557,7 +1557,7 @@ impl Session {
         // A fork child records no state before this (the source's is
         // session authority, which a fork does not copy), so recording the
         // unowned state has nothing to refuse.
-        if let Err(error) = self.record_inherited_instruction_state() {
+        if let Err(error) = self.record_unowned_instruction_state() {
             tracing::error!(
                 session_id = %self.id(),
                 %error,

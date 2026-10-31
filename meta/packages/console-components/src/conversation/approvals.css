@@ -94,6 +94,19 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* A host link (Open, or Decide in a source's label) is a kit button whose
+   label can be long: it wraps inside the card instead of overflowing it, and
+   keeps the button's height on one line. */
+.cc-approval__actions .cc-host-attention__open {
+  flex: 0 1 auto;
+  max-width: 100%;
+  height: auto;
+  min-height: var(--_cc-panel-control-h);
+  padding-block: 5px;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .cc-approval-attention { padding: 7px 8px; border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555)); }
 .cc-approval-attention__open { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-muted, var(--_cc-foreground-muted)); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
 .cc-approval-attention__open:hover { background: var(--bg-hover, var(--_cc-surface-hover)); color: var(--ink, var(--_cc-foreground)); }

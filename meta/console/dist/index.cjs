@@ -25827,6 +25827,25 @@ function text3(value) {
   if (!trimmed) return null;
   return trimmed.length > HOST_ATTENTION_LIMITS.textLength ? "".concat(trimmed.slice(0, HOST_ATTENTION_LIMITS.textLength - 1), "\u2026") : trimmed;
 }
+var DECISION_ID = "{decision_id}";
+function hostDecideLinks(sources, decisionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(decisionId);
+  } catch {
+    encoded = null;
+  }
+  const links = [];
+  for (const source of sources || []) {
+    const template = source.decide_href;
+    if (!isSameOriginPath(template)) continue;
+    const parts = template.split(DECISION_ID);
+    if (parts.length > 1 && encoded === null) continue;
+    const href = parts.join(encoded ?? "");
+    if (isSameOriginPath(href)) links.push({ sourceId: source.id, label: source.label, href });
+  }
+  return links;
+}
 function normalizeHostAttention(source, body) {
   if (!body || typeof body !== "object" || !Array.isArray(body.items)) return null;
   const items = [];
@@ -26623,6 +26642,9 @@ function JumpToLatest({ onClick, working = false }) {
     }
   ) });
 }
+
+// ../packages/console-components/src/conversation/approval-card.tsx
+var React3 = __toESM(require("react"));
 
 // ../packages/console-components/src/panel-kit/cx.ts
 function cx(...parts) {
@@ -27936,6 +27958,11 @@ function CompletedToolDisclosure({ blocks, children }) {
 var import_jsx_runtime26 = require("react/jsx-runtime");
 var labels = { approve: "Approve", reject: "Reject", escalate: "Escalate" };
 var variants = { approve: "positive", reject: "danger", escalate: "default" };
+var HostDecideSourcesContext = React3.createContext(void 0);
+var HostDecideSourcesProvider = HostDecideSourcesContext.Provider;
+function useHostDecideSources() {
+  return React3.useContext(HostDecideSourcesContext);
+}
 var STATE_WORDS = {
   pending: { text: "Approval needed", tone: "warn" },
   submitting: { text: "Submitting decision", tone: "info" },
@@ -27950,19 +27977,21 @@ function riskChip(tier) {
   const code4 = /^r\d$/i.test(tier) ? tier.toUpperCase() : tier;
   return { text: word ? "".concat(word, " risk") : code4, title: "Risk tier ".concat(code4) };
 }
-function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onDecide }) {
+function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }) {
   const now = useNow();
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
   const stale = resourceStatus !== "ready";
+  const hostDecide = readOnly && pending && decideLinks?.length ? decideLinks : null;
   const state = submitting ? "submitting" : decision?.phase === "failed" ? "failed" : request.status === "expired" ? "expired" : !pending ? "settled" : stale ? "stale" : decision?.phase === "unavailable" ? "unavailable" : "pending";
   const words2 = STATE_WORDS[state];
   const waiting = pending && request.createdAtMs !== void 0 ? formatDuration(Math.max(0, now - request.createdAtMs)) : "";
   const titleIsId = request.action === request.actionId;
+  const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
   return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("article", { className: "cc-approval", "data-state": state, "data-testid": "gating-pending:".concat(request.pendingId), children: [
     /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("header", { className: "cc-approval__header", children: [
       /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cc-approval__heading", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: titleIsId ? humanizeEnum(request.actionId) || request.action : request.action }),
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }),
         waiting ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cc-approval__waiting", children: "Waiting ".concat(waiting) }) : null
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { tone: words2.tone, children: words2.text }) })
@@ -28014,9 +28043,23 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onD
       "Escalated to a new request ",
       /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(TechnicalId, { value: decision.result.next_pending_id, label: "Request ID" })
     ] }) : null,
-    readOnly ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Notice, { tone: "locked", children: "Read-only access" }) : null,
+    readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Notice, { tone: "locked", children: "Read-only access" }) : null,
     resourceStatus === "forbidden" ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Notice, { tone: "locked", children: "Approval access denied" }) : null,
-    pending ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__actions", children: request.actions.map((action) => /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
+    hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__actions", children: hostDecide.map((link3) => /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)(
+      "a",
+      {
+        className: "cc-btn cc-host-attention__open",
+        href: link3.href,
+        target: "_top",
+        "aria-label": "Decide in ".concat(link3.label, ": ").concat(title),
+        "data-testid": "gating-decide-link:".concat(request.pendingId, ":").concat(link3.sourceId),
+        children: [
+          "Decide in ",
+          link3.label
+        ]
+      },
+      link3.sourceId
+    )) }) : pending ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__actions", children: request.actions.map((action) => /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
       Button,
       {
         variant: variants[action],
@@ -28033,6 +28076,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onD
   ] });
 }
 function HostAttentionCard({ item }) {
+  const source = item.sourceLabel ? "From ".concat(item.sourceLabel) : "";
   return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)(
     "article",
     {
@@ -28043,7 +28087,7 @@ function HostAttentionCard({ item }) {
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("header", { className: "cc-approval__header", children: [
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("strong", { className: "cc-approval__title", children: item.title }) }),
-          item.sourceLabel ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { className: "cc-host-attention__source", children: "From ".concat(item.sourceLabel) }) : null
+          source ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { className: "cc-host-attention__source", title: source, children: source }) : null
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
           KeyValueList,
@@ -28112,10 +28156,23 @@ function pendingApprovalTurns(turns, { approvalSnapshot, approvalIdentity, conve
   return approvalInteractionIdsByTurn(turns).flatMap((interactionIds, index2) => interactionIds.length > 0 && approvalSnapshot.requests.some((request) => Boolean(request.origin?.interactionId) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds })) ? [index2] : []);
 }
 function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds }) {
+  const decideSources = useHostDecideSources();
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
-  return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(import_jsx_runtime27.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ApprovalCard, { request, resourceStatus: approvalSnapshot.status, decision: approvalSnapshot.decisions[request.pendingId], readOnly: approvalSnapshot.readOnly || !onApprovalDecision, onDecide: onApprovalDecision ?? (() => {
-  }) }, request.pendingId)) });
+  const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(import_jsx_runtime27.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+    ApprovalCard,
+    {
+      request,
+      resourceStatus: approvalSnapshot.status,
+      decision: approvalSnapshot.decisions[request.pendingId],
+      readOnly,
+      decideLinks: readOnly ? hostDecideLinks(decideSources, request.pendingId) : void 0,
+      onDecide: onApprovalDecision ?? (() => {
+      })
+    },
+    request.pendingId
+  )) });
 }
 
 // ../packages/console-components/src/conversation/conversation-pane.tsx
@@ -53583,7 +53640,9 @@ function GatingInboxPanel({
   auditUpdatedAtMs,
   auditError,
   selectedPendingId,
-  hostAttention
+  hostAttention,
+  hostDecideSources,
+  showPending
 }) {
   const [tab2, setTab] = import_react38.default.useState("pending");
   const tabIds = import_react38.default.useId();
@@ -53601,6 +53660,9 @@ function GatingInboxPanel({
       setTab("pending");
     }
   }, [selectedPendingId]);
+  import_react38.default.useEffect(() => {
+    if (showPending) setTab("pending");
+  }, [showPending]);
   import_react38.default.useEffect(() => {
     if (tab2 !== "pending" || !selectedPendingId || !selectedRequestAvailable) return;
     const selected = Array.from(listRef.current?.querySelectorAll("[data-approval-id]") || []).find((element3) => element3.dataset.approvalId === selectedPendingId);
@@ -53638,6 +53700,7 @@ function GatingInboxPanel({
               resourceStatus: resource.status,
               decision: resource.decisions[request.pendingId],
               readOnly: readOnly || resource.readOnly,
+              decideLinks: readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : void 0,
               onDecide
             }
           )
@@ -63608,7 +63671,7 @@ function stripConsoleBlobReferencesFromText(value, references = consoleBlobRefer
 }
 
 // src/panels/transcript-window.ts
-var React28 = __toESM(require("react"));
+var React29 = __toESM(require("react"));
 var TURN_WINDOW_OVERSCAN = 1.5;
 var TURN_WINDOW_MARGIN = 0.5;
 var TURN_FIND_BAND = 20;
@@ -63685,20 +63748,20 @@ function turnSlots(turns, mounted, measurements, gap, parked = []) {
 }
 var NO_ACTIONABLE_TURNS = /* @__PURE__ */ new Set();
 function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIONABLE_TURNS) {
-  const measurements = React28.useRef(/* @__PURE__ */ new Map());
-  const geometry = React28.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
-  const turnsRef = React28.useRef(turns);
+  const measurements = React29.useRef(/* @__PURE__ */ new Map());
+  const geometry = React29.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
+  const turnsRef = React29.useRef(turns);
   turnsRef.current = turns;
-  const keys2 = React28.useMemo(() => turns.map(renderKey), [turns, renderKey]);
-  const keysRef = React28.useRef(keys2);
+  const keys2 = React29.useMemo(() => turns.map(renderKey), [turns, renderKey]);
+  const keysRef = React29.useRef(keys2);
   keysRef.current = keys2;
-  const pins = React28.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
-  const actionableRef = React28.useRef(actionable);
+  const pins = React29.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
+  const actionableRef = React29.useRef(actionable);
   actionableRef.current = actionable;
-  const [plan, setPlan] = React28.useState(null);
-  const planRef = React28.useRef(plan);
+  const [plan, setPlan] = React29.useState(null);
+  const planRef = React29.useRef(plan);
   planRef.current = plan;
-  const replan = React28.useCallback(() => {
+  const replan = React29.useCallback(() => {
     const body = bodyRef.current;
     if (!enabled || !body) return;
     const current = turnsRef.current;
@@ -63724,7 +63787,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     if (sink) sink.TurnWindowPlans = (sink.TurnWindowPlans ?? 0) + 1;
     setPlan(next);
   }, [bodyRef, enabled]);
-  React28.useLayoutEffect(() => {
+  React29.useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!enabled || !body || typeof ResizeObserver === "undefined") return;
     const indexOf = /* @__PURE__ */ new Map();
@@ -63820,7 +63883,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       body.removeEventListener("focusout", onFocus);
     };
   }, [bodyRef, enabled, replan]);
-  React28.useLayoutEffect(() => {
+  React29.useLayoutEffect(() => {
     if (!enabled) return;
     const body = bodyRef.current;
     if (body) {
@@ -63833,13 +63896,13 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     }
   }, [turns, keys2, enabled, bodyRef]);
   const actionableKey = [...actionable].sort().join("\n");
-  const actionableKeyRef = React28.useRef(actionableKey);
-  React28.useEffect(() => {
+  const actionableKeyRef = React29.useRef(actionableKey);
+  React29.useEffect(() => {
     if (actionableKeyRef.current === actionableKey) return;
     actionableKeyRef.current = actionableKey;
     replan();
   }, [actionableKey, replan]);
-  const mount = React28.useCallback((index2) => {
+  const mount = React29.useCallback((index2) => {
     if (index2 < 0 || index2 >= turnsRef.current.length) return false;
     pins.current.jump = /* @__PURE__ */ new Set([index2]);
     replan();
@@ -63855,8 +63918,8 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     body?.addEventListener("keydown", release);
     return true;
   }, [bodyRef, replan]);
-  const pendingFocus = React28.useRef(null);
-  const focusTurn = React28.useCallback((id) => {
+  const pendingFocus = React29.useRef(null);
+  const focusTurn = React29.useCallback((id) => {
     pendingFocus.current = id;
     const index2 = turnsRef.current.findIndex((turn) => turn.id === id);
     if (index2 >= 0) {
@@ -63869,7 +63932,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       element3.focus();
     }
   }, [bodyRef, mount]);
-  const slots = React28.useMemo(() => {
+  const slots = React29.useMemo(() => {
     if (!enabled || !plan) return turns.map((_2, index2) => ({ kind: "turn", index: index2 }));
     const mounted = new Set(plan.mounted.filter((index2) => index2 < turns.length));
     for (let i2 = 0; i2 < turns.length; i2 += 1) {
@@ -63879,7 +63942,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     const parked = plan.parked.filter((index2) => index2 < turns.length && !mounted.has(index2));
     return turnSlots(turns, [...mounted].sort((a, b2) => a - b2), measurements.current, geometry.current.gap, parked);
   }, [enabled, plan, turns, keys2]);
-  React28.useLayoutEffect(() => {
+  React29.useLayoutEffect(() => {
     const id = pendingFocus.current;
     if (!id) return;
     const element3 = bodyRef.current?.querySelector(':scope > [data-conversation-turn-id="'.concat(CSS.escape(id), '"]:not([hidden])'));
@@ -63887,7 +63950,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     pendingFocus.current = null;
     element3.focus();
   });
-  return React28.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
+  return React29.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
 }
 
 // src/panels/ChatPane.tsx
@@ -70253,6 +70316,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   resendUncertainRef.current = resendUncertain;
   const [approvalSnapshot, setApprovalSnapshot] = import_react57.default.useState();
   const [selectedApprovalId, setSelectedApprovalId] = import_react57.default.useState();
+  const [approvalOpens, setApprovalOpens] = import_react57.default.useState(0);
   const approvalResourceRef = import_react57.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
   import_react57.default.useEffect(() => {
@@ -70309,6 +70373,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }, [hostAttentionKey]);
   function openApproval(pendingId) {
     setSelectedApprovalId(pendingId);
+    setApprovalOpens((count2) => count2 + 1);
     dock.openTarget(buildControlTarget2("gating"), "replace_focused");
   }
   const hasVoiceHost = experience?.voice?.readiness_method === "meta/console/voice/readiness";
@@ -72487,7 +72552,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide: () => {
           },
           readOnly: true,
-          hostAttention: hostAttention || { status: "loading", items: [], failedSources: [] }
+          hostAttention: hostAttention || { status: "loading", items: [], failedSources: [] },
+          showPending: approvalOpens
         }
       );
     }
@@ -72517,7 +72583,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly,
-          hostAttention
+          hostAttention,
+          hostDecideSources: hostAttentionSources,
+          showPending: approvalOpens
         }
       );
     if (target.kind === "topology") {
@@ -72583,7 +72651,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly,
-          hostAttention
+          hostAttention,
+          hostDecideSources: hostAttentionSources,
+          showPending: approvalOpens
         }
       );
     if (target.kind === "logs")
@@ -72700,7 +72770,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(PanelShell, { children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(EmptyState, { kind: "unavailable", title: "This panel isn't available in this console" }) });
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime78.jsxs)(
     "div",
     {
       className: "cc-theme-scope meta-shell",
@@ -72843,7 +72913,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         )
       ]
     }
-  ) }) }) });
+  ) }) }) }) });
 }
 
 // src/index.tsx

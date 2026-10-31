@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HOST_ATTENTION_LIMITS, isSameOriginPath, loadHostAttention, normalizeHostAttention, startHostAttentionPolling, type HostAttentionSnapshot } from "./host-attention";
+import { HOST_ATTENTION_LIMITS, hostDecideLinks, isSameOriginPath, loadHostAttention, normalizeHostAttention, startHostAttentionPolling, type HostAttentionSnapshot } from "./host-attention";
 
 const source = { id: "host", label: "Host", url: "/host/attention" };
 const item = (id: string, extra: Record<string, unknown> = {}) => ({
@@ -25,6 +25,38 @@ test("same-origin paths follow the operator panel path rules", () => {
   for (const bad of ["https://evil.example/x", "//evil.example/x", "x/y", "/a b", "/a\\b", "/a/../b", "/%2e%2E/x", "/\uFEFFx", "/a\u0085b", 7, null]) {
     assert.equal(isSameOriginPath(bad), false, String(bad));
   }
+});
+
+test("a decide link fills the decision id URL-encoded and stays a same-origin path", () => {
+  const sources = [
+    { ...source, id: "query", label: "Query", decide_href: "/host/decide?decision={decision_id}" },
+    { ...source, id: "path", label: "Path", decide_href: "/host/decide/{decision_id}/{decision_id}" },
+    { ...source, id: "page", label: "Page", decide_href: "/host/approvals" },
+    { ...source, id: "none", label: "None" },
+    { ...source, id: "remote", label: "Remote", decide_href: "https://evil.example/decide/{decision_id}" },
+    { ...source, id: "authority", label: "Authority", decide_href: "//evil.example/{decision_id}" },
+  ];
+  assert.deepEqual(hostDecideLinks(sources, "g 1/2?x#y&å"), [
+    { sourceId: "query", label: "Query", href: "/host/decide?decision=g%201%2F2%3Fx%23y%26%C3%A5" },
+    { sourceId: "path", label: "Path", href: "/host/decide/g%201%2F2%3Fx%23y%26%C3%A5/g%201%2F2%3Fx%23y%26%C3%A5" },
+    { sourceId: "page", label: "Page", href: "/host/approvals" },
+  ]);
+  // An id that would make a dot segment drops that link only.
+  assert.deepEqual(hostDecideLinks(sources, "..").map((link) => link.href), [
+    "/host/decide?decision=..", "/host/approvals",
+  ]);
+  // An id cannot turn the path into another origin: "/" is encoded.
+  assert.deepEqual(hostDecideLinks([{ ...source, decide_href: "/{decision_id}" }], "/evil.example").map((link) => link.href), ["/%2Fevil.example"]);
+  assert.deepEqual(hostDecideLinks(undefined, "g1"), []);
+});
+
+test("a decision id is encoded exactly once, and one that cannot be encoded drops only the links that need it", () => {
+  const sources = [
+    { ...source, id: "filled", label: "Filled", decide_href: "/host/decide?decision={decision_id}" },
+    { ...source, id: "page", label: "Page", decide_href: "/host/approvals" },
+  ];
+  assert.deepEqual(hostDecideLinks(sources, "a%2Fb%").map((link) => link.href), ["/host/decide?decision=a%252Fb%25", "/host/approvals"]);
+  assert.deepEqual(hostDecideLinks(sources, "lone\uD800").map((link) => link.href), ["/host/approvals"]);
 });
 
 test("items are validated, bounded and keep their source", () => {

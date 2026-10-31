@@ -14,26 +14,26 @@ import { SHARED_CONSOLE_RUNTIME_ID } from "./panel-runtime";
 
 const SOURCE = "/host/attention";
 
-function experience(runtimeId: string) {
+function experience(runtimeId: string, options: { readOnly?: boolean; decideHref?: string } = {}) {
   return {
     contract_version: "test",
     runtime_id: runtimeId,
-    console_config: { attention: { sources: [{ id: "host", label: "Host", url: SOURCE }] } },
-    console_policy: {},
+    console_config: { attention: { sources: [{ id: "host", label: "Host", url: SOURCE, ...(options.decideHref ? { decide_href: options.decideHref } : {}) }] } },
+    console_policy: options.readOnly ? { read_only: true } : {},
     agent_sidebar: { live_snapshot: { agents: [] } },
     activity_feed: { filter_presets: [], active_preset_id: "all" },
   };
 }
 
-function transport(runtimeId: string): MetaConsoleTransport {
+function transport(runtimeId: string, options: { readOnly?: boolean; decideHref?: string; pending?: unknown[] } = {}): MetaConsoleTransport {
   return {
-    loadExperience: async () => experience(runtimeId) as never,
+    loadExperience: async () => experience(runtimeId, options) as never,
     loadModules: async () => ({ modules: [] }) as never,
     capabilities: async () => ({ version: "test", methods: Object.values(CONSOLE_RPC_METHODS) }) as never,
     queryTimeline: async () => ({ frames: [], available: true }) as never,
     subscribeTimeline: () => () => {},
     send: async (input) => ({ interaction_id: "sent", identity: input.identity, cursor: "console:x" }) as never,
-    executeCommand: async (input) => ({ command: input.command, accepted: true, result: { pending: [] } }) as never,
+    executeCommand: async (input) => ({ command: input.command, accepted: true, result: { pending: options.pending || [] } }) as never,
   } as MetaConsoleTransport;
 }
 
@@ -87,6 +87,24 @@ describe("host-provided attention in the console", () => {
     view.unmount();
   }, 30_000);
 
+  it.each([
+    ["a runtime", "host-attention-runtime"],
+    ["an aggregate", SHARED_CONSOLE_RUNTIME_ID],
+  ])("Needs you brings %s console's inbox open on another tab back to Pending", async (_kind, runtimeId) => {
+    const view = render(<ConsoleApp baseUrl="" transport={transport(runtimeId)} />);
+    await settle();
+    const needsYou = () => within(view.getByTestId("approval-attention")).getByRole("button");
+    await act(async () => { fireEvent.click(needsYou()); });
+    await settle();
+    await act(async () => { fireEvent.click(view.getByTestId("gating-tab:audit")); });
+    expect(view.queryByTestId("host-attention-list") === null).toBe(true);
+    await act(async () => { fireEvent.click(needsYou()); });
+    await settle();
+    expect(view.getByTestId("gating-tab:pending").getAttribute("aria-selected")).toBe("true");
+    expect(within(view.getByTestId("host-attention-list")).getByRole("link", { name: "Open: Confirm a setting" })).toBeTruthy();
+    view.unmount();
+  }, 30_000);
+
   it("an open aggregate inbox stays when the host items drop to zero", async () => {
     let answered = 0;
     window.fetch = vi.fn(async (url: RequestInfo | URL) => {
@@ -107,6 +125,20 @@ describe("host-provided attention in the console", () => {
     expect(view.getByText("Approvals are not available for this connection")).toBeTruthy();
     expect(view.getByText("Not available on this connection")).toBeTruthy();
     expect(view.queryByText("Not available on this runtime") === null).toBe(true);
+    view.unmount();
+  }, 30_000);
+
+  it("a read-only runtime console links its pending approval to the source's decide page", async () => {
+    const view = render(<ConsoleApp baseUrl="" transport={transport("host-attention-runtime", {
+      readOnly: true,
+      decideHref: "/host/decide?decision={decision_id}",
+      pending: [{ pending_id: "p 1", action_id: "a1", action: "Deploy release" }],
+    })} />);
+    await settle();
+    await act(async () => { fireEvent.click(within(view.getByTestId("approval-attention")).getByRole("button")); });
+    await settle();
+    const link = view.getByRole("link", { name: "Decide in Host: Deploy release" });
+    expect(link.getAttribute("href")).toBe("/host/decide?decision=p%201");
     view.unmount();
   }, 30_000);
 });

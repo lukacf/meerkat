@@ -1,5 +1,6 @@
 import { approvalMatchesConversation, type ApprovalAction, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
-import { ApprovalCard } from "./approval-card";
+import { hostDecideLinks } from "../../../console-core/src/host-attention";
+import { ApprovalCard, useHostDecideSources } from "./approval-card";
 
 export type ConversationApprovalProps = {
   approvalSnapshot?: PendingApprovalSnapshot;
@@ -33,9 +34,12 @@ export function ConversationApprovals({ approvalSnapshot, approvalIdentity, onAp
   /** Omit for conversation-only provenance, supply exact IDs for turn placement. */
   interactionIds?: readonly string[];
 }) {
+  const decideSources = useHostDecideSources();
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) =>
     Boolean(request.origin?.interactionId) === Boolean(interactionIds)
     && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
-  return <>{requests.map((request) => <ApprovalCard key={request.pendingId} request={request} resourceStatus={approvalSnapshot.status} decision={approvalSnapshot.decisions[request.pendingId]} readOnly={approvalSnapshot.readOnly || !onApprovalDecision} onDecide={onApprovalDecision ?? (() => {})} />)}</>;
+  const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  return <>{requests.map((request) => <ApprovalCard key={request.pendingId} request={request} resourceStatus={approvalSnapshot.status} decision={approvalSnapshot.decisions[request.pendingId]} readOnly={readOnly}
+    decideLinks={readOnly ? hostDecideLinks(decideSources, request.pendingId) : undefined} onDecide={onApprovalDecision ?? (() => {})} />)}</>;
 }

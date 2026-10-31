@@ -244,6 +244,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   inbox for them too. See "Host-provided attention items" in the
   configuration reference.
 
+- A source may also name `decide_href`, a same-origin path where the host
+  decides an approval. On a read-only session each pending approval card, in
+  the inbox and in an agent's chat, shows one **Decide in** link per such
+  source instead of the disabled buttons. `{decision_id}` in it is replaced
+  by the URL-encoded request id; without the placeholder it is the host's
+  page in general. Without `decide_href` nothing changes. An invalid
+  `decide_href` is dropped and the source stays.
+
 - `/console/experience` sidebar, `identity_status` and `health_overview` rows
   carry `last_activity_ms`, the newest time the console's frame log recorded
   the agent acting (a live runtime event, a console send or a tool
@@ -379,6 +387,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   between its nodes, panel tabs are tied to the panels they show, an opened
   detail takes the focus and Back returns it, and headings no longer skip
   levels. The roster's manual order, Group and Sort are described under Added.
+- The Console's Approvals header reads "Not available on this connection"
+  where the connection offers no approvals (a gateway without
+  `meta/gating/pending`, or an aggregate console, whose inbox lists host
+  attention items only) instead of pending and automatic counts that cannot
+  apply there.
 
 - The side effects of an identity's lifecycle steps run from Core's member
   lifecycle journal, attempted at least once, through a cursor the identity

@@ -212,6 +212,8 @@ export interface ConsoleAttentionSourceConfig {
   label: string;
   /** Same-origin path answering {"items": [...]} (host-provided attention items). */
   url: string;
+  /** Same-origin path where the host decides an approval; `{decision_id}` is filled in. */
+  decide_href?: string;
 }
 
 export interface ConsoleAttentionUiConfig {

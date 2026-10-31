@@ -6723,7 +6723,7 @@ impl MobBootstrapSpec {
     /// A spec over a session service composed outside Meta's stock
     /// constructors. No Meta pre-build hook runs inside it, so the base layer
     /// refuses a marked document MCP descriptor in a member's build
-    /// ([`crate::document_mcp_marker`]): no document binding resolved it.
+    /// (`crate::document_mcp_marker`): no document binding resolved it.
     ///
     /// The refusal sits in the spec's outermost layer, which runs before any
     /// pre-build hook inside the supplied service. A supplied service whose
@@ -10126,7 +10126,7 @@ impl MobRuntime {
     /// Bootstrap a mob that is `Running` on return.
     ///
     /// The honest wrapper: any caller that gets a `MobRuntime` from here can
-    /// spawn into it. Identity-first composition uses [`Self::prepare`] instead,
+    /// spawn into it. Identity-first composition uses `Self::prepare` instead,
     /// because it must interpose registration before the lift.
     pub async fn bootstrap(spec: MobBootstrapSpec) -> Result<Self, MobRuntimeError> {
         let (runtime, pending) = Self::prepare(spec).await?;

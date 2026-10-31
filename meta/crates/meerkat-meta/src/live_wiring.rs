@@ -12,9 +12,9 @@
 //! Feature gating: the strict GPT Live machinery here (WebRTC answer, strict
 //! pending/active custody, capability projection, public observation) is
 //! compiled under `openai-live`, which serves the released public
-//! `gpt-live-1` path via [`LiveCapabilityProvider::public`]. The deprecated
+//! `gpt-live-1` path via `LiveCapabilityProvider::public`. The deprecated
 //! private ChatGPT-brokered path adds only its factory identity under
-//! `experimental-gpt-live` via [`LiveCapabilityProvider::experimental`].
+//! `experimental-gpt-live` via `LiveCapabilityProvider::experimental`.
 
 use std::sync::Arc;
 #[cfg(feature = "openai-live")]
@@ -1072,9 +1072,9 @@ async fn retain_live_rpc_response_delivery(
 /// Meerkat factory that will admit strict GPT Live opens.
 ///
 /// Stock Meta composition uses [`Self::disabled`]. An embedding host may
-/// opt in through [`Self::public`] (released `gpt-live-1`, `openai-live`) by
+/// opt in through `Self::public` (released `gpt-live-1`, `openai-live`) by
 /// supplying its already-configured factory, exact realm, and the composed
-/// open authority, or through the deprecated [`Self::experimental`] path,
+/// open authority, or through the deprecated `Self::experimental` path,
 /// which additionally pins the exact experimental factory identity. Every
 /// capabilities request revalidates those predicates upstream, so stale
 /// realm, binding, Gate0, operator, or factory state fails closed to an

@@ -170,7 +170,7 @@ impl UnifiedRuntime {
             .restore_gating_state(snapshot)
     }
 
-    /// See [`MetaRuntimeHandle::set_gating_escalation_routes`].
+    /// See [`crate::runtime::MetaRuntimeHandle::set_gating_escalation_routes`].
     pub async fn set_gating_escalation_routes(
         &self,
         routes: crate::runtime::GatingEscalationRoutes,
@@ -191,7 +191,7 @@ impl UnifiedRuntime {
             .decide_gating_action(request)
     }
 
-    /// See [`MetaRuntimeHandle::gating_audit_after`].
+    /// See [`crate::runtime::MetaRuntimeHandle::gating_audit_after`].
     pub async fn gating_audit_after(
         &self,
         after_audit_id: Option<&str>,

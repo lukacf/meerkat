@@ -26,7 +26,7 @@
 //! The directory is Meerkat's own (`<state>/mobs`). Meta derives it from
 //! Meerkat's public custody path instead of spelling it again, and the storage
 //! maintenance verbs enumerate its databases through
-//! [`child_mob_databases`].
+//! `child_mob_databases`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -80,7 +80,7 @@ pub enum ChildMobStorageError {
     /// The canonical council store exists and could not be read.
     CouncilStore(crate::council_wiring::CouncilStoreError),
     /// The legacy empty realm profile store in the child root (see
-    /// [`recognize_legacy_empty_realm_profiles`]) could not be inspected or
+    /// `recognize_legacy_empty_realm_profiles`) could not be inspected or
     /// converted.
     LegacyRealmProfiles { path: PathBuf, detail: String },
     /// Meerkat refused the persistent root (for example a custody database

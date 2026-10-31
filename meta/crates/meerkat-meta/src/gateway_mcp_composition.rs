@@ -15,7 +15,7 @@
 //!
 //! Every member factory's builder also gets the meerkat facade's canonical
 //! MCP credential source for the installation's meerkat-level realm
-//! ([`gateway_member_builder`]): a member launch of a stdio server that
+//! (`gateway_member_builder`): a member launch of a stdio server that
 //! realm's own config document defines reads the server's service secrets
 //! from the factory's own credential store. The host administers those
 //! definitions and values through
@@ -97,7 +97,7 @@ impl<'a> GatewayFactoryConstruction<'a> {
     /// The MCP server definitions of the factory's realm's own config
     /// document and the service secrets of their stdio servers, held in
     /// this factory's own provider-auth persistence: the credential store
-    /// its members' launches read ([`gateway_member_builder`]). Like
+    /// its members' launches read (`gateway_member_builder`). Like
     /// [`Self::host_auth_service`] it is never built from a copied
     /// configuration or a new store, and a factory without provider-auth
     /// persistence answers `HostAuthError::PersistenceUnavailable`.
@@ -144,7 +144,7 @@ impl<'a> GatewayFactoryConstruction<'a> {
 /// The value is stored in the factory's own credential store, bound to that
 /// definition, and only while the realm's own document lists exactly that
 /// definition; a member launch of the definition then reads it through
-/// [`gateway_member_builder`]'s credential source. No value is returned,
+/// `gateway_member_builder`'s credential source. No value is returned,
 /// written to configuration or shown by `Debug`.
 ///
 /// Each mutation runs the host's [`AdministrationEntry`] at its entry, after

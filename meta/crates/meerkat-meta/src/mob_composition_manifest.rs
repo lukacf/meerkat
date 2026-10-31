@@ -841,7 +841,7 @@ fn collect_diverged_paths(
 /// whose composition nobody has spoken for, and the next authoritative resume
 /// would then adopt ITS OWN definition as the record while
 /// `MobBuilder::for_resume` boots the definition the event log actually holds.
-/// That is the certified lie [`record_on_create`] warns about, reached by
+/// That is the certified lie `record_on_create` warns about, reached by
 /// omission rather than by a bad write.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -886,7 +886,7 @@ pub enum CandidateDefinition {
     Stored,
 }
 
-/// Judge a candidate resume from `fields`, the [`diverged_definition_fields`]
+/// Judge a candidate resume from `fields`, the `diverged_definition_fields`
 /// of the stored definition the resume will boot against the supplied one
 /// (empty when they match, after the released-representation allowance). A
 /// difference refuses under [`CandidateDefinition::RequireMatch`] and is

@@ -186,7 +186,7 @@ impl CompiledPolicyProvider {
     /// Validates the artifact, including its digest and required default-deny
     /// setting, before taking the accepted-state write lock. Also rejects a
     /// policy belonging to another provider, a `member_identity` that names no
-    /// roster row (see [`Self::validate_member_identity`]), a revision below
+    /// roster row (see `Self::validate_member_identity`), a revision below
     /// one already accepted, and a repeat of an accepted revision whose bytes
     /// differ. Validation happens at installation so evaluation can use the
     /// accepted immutable snapshot without rechecking the artifact.

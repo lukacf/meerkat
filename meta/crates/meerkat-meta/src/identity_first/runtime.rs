@@ -254,7 +254,7 @@ fn untracked_delivery() -> TurnTracking {
     TurnTracking::Unavailable(TurnUntrackable::NotDelivered)
 }
 
-/// What [`IdentityRuntime::send_core`] settled on.
+/// What `IdentityRuntime::send_core` settled on.
 /// A governed send the member's native admission accepted or deduplicated.
 #[derive(Debug)]
 pub struct GovernedSendOutcome {
@@ -836,6 +836,8 @@ pub enum IdentityRuntimeError {
     /// A governed delivery failed. A definite pre-admission refusal means
     /// the input was not admitted; [`GovernedInputError::AdmissionUnresolved`]
     /// means admission may have happened and the custody is with the host.
+    ///
+    /// [`GovernedInputError::AdmissionUnresolved`]: super::bridge::GovernedInputError::AdmissionUnresolved
     GovernedInput(super::bridge::GovernedInputError),
     /// The customizer's callback tools were refused for their
     /// installed-artifact references; the build published nothing.
@@ -2352,7 +2354,7 @@ impl IdentityFirstRuntimeContext {
     }
 
     /// [`Self::bootstrap_roster`] with every freshly created roster member
-    /// held before its publication (see [`super::held_bootstrap`]). Once each
+    /// held before its publication (see `super::held_bootstrap`). Once each
     /// roster identity is held, `complete` receives the held members and the
     /// pass's [`super::held_bootstrap::HeldCompletion`]. The pass's one
     /// terminal decision comes deadline first, then from the caller's loss,
@@ -9634,7 +9636,7 @@ impl IdentityRuntime {
     /// reach. Nothing is materialized here: each step's delivery reaches a
     /// Dormant member through Core's own wake. An identity Core holds needs
     /// no Core step; the others are seated in one step
-    /// ([`Self::seat_identities`]). Returns Core's delivery scope of each
+    /// (`Self::seat_identities`). Returns Core's delivery scope of each
     /// session-backed member, read from Core without waking it.
     pub async fn materialize_all_required(
         &self,
@@ -10830,6 +10832,8 @@ impl IdentityRuntime {
     /// as a refusal. Only a local session-backed member takes governed input,
     /// with no repair, retry or ungoverned fallback. Replay is the native
     /// replay of the bound input's event key.
+    ///
+    /// [`GovernedSettlement::accepted`]: super::bridge::GovernedSettlement::accepted
     pub async fn send_governed_with_turn_ticket(
         self: &Arc<Self>,
         identity: &AgentIdentity,
@@ -14263,7 +14267,7 @@ impl IdentityRuntime {
     // -----------------------------------------------------------------------
 
     /// Respawn: non-destructive recovery onto the same session at a new Core
-    /// generation (see [`Self::respawn_locked`]).
+    /// generation (see `Self::respawn_locked`).
     pub async fn respawn(
         &self,
         identity: &AgentIdentity,
@@ -15855,7 +15859,7 @@ impl IdentityRuntime {
     /// when you need to wait for a specific turn. Retained for callers that
     /// only need "has this identity ever spoken".
     ///
-    /// Event-driven, as [`Self::wait_for_output_where`].
+    /// Event-driven, as `Self::wait_for_output_where`.
     pub async fn wait_for_output(
         &self,
         identity: &AgentIdentity,
@@ -15867,7 +15871,7 @@ impl IdentityRuntime {
     }
 
     /// Wait until the identity's output_preview contains `needle`, or
-    /// timeout. Event-driven, as [`Self::wait_for_output_where`].
+    /// timeout. Event-driven, as `Self::wait_for_output_where`.
     pub async fn wait_for_output_containing(
         &self,
         identity: &AgentIdentity,

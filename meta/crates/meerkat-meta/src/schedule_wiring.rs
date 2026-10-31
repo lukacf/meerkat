@@ -401,7 +401,7 @@ async fn apply_source_runner(
 }
 
 /// Bring the durable schedule of `source`'s runner in line with its record
-/// (see [`apply_source_runner`] for the rules). Only schedules carrying
+/// (see `apply_source_runner` for the rules). Only schedules carrying
 /// [`SOURCE_RUNNER_LABEL`] are read, changed or ended.
 pub async fn reconcile_source_runner(
     service: &ScheduleService,

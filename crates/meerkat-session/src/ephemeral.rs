@@ -8957,31 +8957,45 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         let actor_runtime = SessionTaskRuntime::current();
         #[cfg(not(target_arch = "wasm32"))]
-        let task_handle = tokio::spawn(session_task(
-            agent,
-            session_id.clone(),
-            agent_event_tx,
-            agent_event_rx,
-            command_rx,
-            Arc::clone(&deferred_turn_state),
-            SessionTaskControl {
-                actor_witness: actor_witness.clone(),
-                _hosting_claim: hosting_claim,
-                state_tx,
-                summary_tx,
-                transcript_authority_tx,
-                visible_tool_defs_tx,
-                llm_identity_tx,
-                turn_admission: Arc::clone(&turn_admission),
-                interrupt_notify: interrupt_notify.clone(),
-                shutdown_notify: Arc::clone(&shutdown_notify),
-                event_journal: Arc::clone(&event_journal),
-                #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-                lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
-                session_context: session_context.clone(),
-                archive_snapshot_gate: Arc::clone(&archive_snapshot_gate),
-            },
+        let make_session_task = || {
+            session_task(
+                agent,
+                session_id.clone(),
+                agent_event_tx,
+                agent_event_rx,
+                command_rx,
+                Arc::clone(&deferred_turn_state),
+                SessionTaskControl {
+                    actor_witness: actor_witness.clone(),
+                    _hosting_claim: hosting_claim,
+                    state_tx,
+                    summary_tx,
+                    transcript_authority_tx,
+                    visible_tool_defs_tx,
+                    llm_identity_tx,
+                    turn_admission: Arc::clone(&turn_admission),
+                    interrupt_notify: interrupt_notify.clone(),
+                    shutdown_notify: Arc::clone(&shutdown_notify),
+                    event_journal: Arc::clone(&event_journal),
+                    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+                    lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
+                    session_context: session_context.clone(),
+                    archive_snapshot_gate: Arc::clone(&archive_snapshot_gate),
+                },
+            )
+        };
+        // The task that runs every turn of the session is built in its own
+        // frame and boxed: `tokio::spawn` takes its future by value, and at
+        // opt-level 0 this one, with the agent in it, was copied through each
+        // of spawn's frames on top of the materialization that spawns it. A
+        // member's materialization runs on the host's runtime, whose workers
+        // also run the session's turns.
+        #[cfg(all(feature = "runtime-machine", not(target_arch = "wasm32")))]
+        let task_handle = tokio::spawn(meerkat_runtime::stack_relief::box_in_own_frame(
+            make_session_task,
         ));
+        #[cfg(all(not(feature = "runtime-machine"), not(target_arch = "wasm32")))]
+        let task_handle = tokio::spawn(make_session_task());
         #[cfg(target_arch = "wasm32")]
         crate::tokio::task::spawn(session_task(
             agent,

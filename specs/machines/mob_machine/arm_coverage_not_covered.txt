@@ -97,7 +97,6 @@ CompleteSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 1
 CancelPending* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 StageSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ComputeRespawn* respawn generation probe over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-RespawnRunning respawn over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
@@ -131,7 +130,7 @@ RollbackExternal* external route install; trust wiring and peer overlay obligati
 RollbackRoute* route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 WireExternal* external peer wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 UnwireExternal* external peer wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
-RecoverExternal* external peer wiring replay; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecoverExternal* external peer unwiring replay; trust wiring and peer overlay obligations (member, supervisor and external peers); member_residency_audit's replay-same run drives the wiring replay
 SetExternal* external member rebind capability; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 WireMembersWithTrust* trust-carrying member wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 WireMembersPlacedPeerWake* a wiring edge that wakes a Dormant member it joins to a placed member; placed members (member hosts) are outside the audits: no audit binds a host or places a member
@@ -139,7 +138,6 @@ ResolveWiringEdgeRealization* edge trust realization outcomes in the Stopped, Co
 ResolveExternalEdgeRealization* external edge trust realization outcomes; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 WireMembersAlreadyWired idempotent re-wire of an edge member_residency_audit's edge run already wired
 UnwireMembers* member unwiring; member_residency_audit's edge run keeps its one edge
-RecoverRosterWiringAlreadyRecovered idempotent wiring replay; member_residency_audit's edge run drives the fresh replay
 RecoverRosterUnwire* member unwiring replay; member_residency_audit's edge run keeps its one edge
 OperationPeer* operation peer trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
 PeerInput* peer input admission bookkeeping; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
@@ -172,7 +170,7 @@ ForceCancel* forced cancellation; no audit drives it
 ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine; member_residency_audit drives the binding refusal and its stale twins
 ClassifyMemberWait* member wait classification over runtime material; no audit drives it
 ClassifyIdentity* identity reconciliation decisions; no audit drives them
-ConvergeRecovered* recovered roster and respawn topology convergence; no audit drives it
+ConvergeRecovered* recovered roster topology convergence in a destroyed mob and the respawn topology convergence; member_residency_audit's replay-same run drives the roster convergence in Running
 ObserveRespawn* respawn topology preservation records; no audit drives them
 ResolveRespawn* respawn topology restore; no audit drives it
 RecoverIdentityGeneration* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
@@ -181,6 +179,7 @@ AdvanceDefinition* definition epoch advance; no audit drives it
 Reconcile* desired-roster reconcile in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 AdoptLegacyIdentityEntryMobNotRunning* the legacy adoption in the Completed and Destroyed phases; identity_entry_audit drives every other arm and the Stopped one
+RespawnIdentityEntryRefusedCompleted the legacy fresh-life respawn's refusal of an identity entry in the Completed phase; identity_entry_audit drives its Running and Stopped arms
 ResetToRunning mob reset; no audit drives it
 RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
 ShutdownStopped Shutdown outside Running; member_residency_audit drives ShutdownRunning
@@ -204,5 +203,3 @@ BeginExplicitResumeCleanup* explicit resume rollback cleanup; the resume run doe
 SettleExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
 CancelExplicit* explicit resume cancellation; the resume run does not cancel
 FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume run does not cancel
-CommitMemberRotationLiveKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update
-CommitMemberRotationRetiredKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update

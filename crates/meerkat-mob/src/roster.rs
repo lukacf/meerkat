@@ -205,6 +205,20 @@ pub struct Roster {
     /// kickoff is still owed; this is only its content.
     #[serde(skip)]
     owed_kickoff_prompts: BTreeMap<AgentIdentity, (Generation, meerkat_core::types::ContentInput)>,
+    /// The continuity intent each member's incarnation was spawned with, with
+    /// that incarnation's generation, from its `MemberSpawned` row
+    /// (`MemberSpawnedEvent::continuity_intent`): a same-session successor
+    /// keeps the intent of the incarnation it replaces.
+    #[serde(skip)]
+    spawn_continuity: BTreeMap<AgentIdentity, (Generation, crate::runtime::SpawnContinuityIntent)>,
+    /// The role each member's current incarnation declares to its session's
+    /// next build, with that incarnation's generation, from its
+    /// `MemberSpawned` row (`MemberSpawnedEvent::resume_from_role`): the
+    /// role the session was last built under, when a same-session successor
+    /// took another one. A session already built under the member's role
+    /// reads the declaration as nothing to migrate.
+    #[serde(skip)]
+    resume_from_roles: BTreeMap<AgentIdentity, (Generation, ProfileName)>,
     /// What each unborn seat session carries to its first build, keyed by
     /// the session: the build inputs its seat rows journaled
     /// (`MemberSpawnedEvent::seat_build_inputs`, a later seat of the same
@@ -305,6 +319,25 @@ impl Roster {
                             .remove(&member_spawned.agent_identity);
                     }
                 }
+                self.spawn_continuity.insert(
+                    member_spawned.agent_identity.clone(),
+                    (
+                        member_spawned.generation,
+                        member_spawned.continuity_intent.clone(),
+                    ),
+                );
+                match member_spawned.resume_from_role() {
+                    Some(role) => {
+                        self.resume_from_roles.insert(
+                            member_spawned.agent_identity.clone(),
+                            (member_spawned.generation, role.clone()),
+                        );
+                    }
+                    None => {
+                        self.resume_from_roles
+                            .remove(&member_spawned.agent_identity);
+                    }
+                }
             }
             // Retirement admission is not roster terminality. Keep the spawn
             // projection intact so a restart retains the cleanup anchor.
@@ -362,6 +395,20 @@ impl Roster {
                     .is_some_and(|(owed, _)| owed == generation)
                 {
                     self.owed_kickoff_prompts.remove(agent_identity);
+                }
+                if self
+                    .spawn_continuity
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.spawn_continuity.remove(agent_identity);
+                }
+                if self
+                    .resume_from_roles
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.resume_from_roles.remove(agent_identity);
                 }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
@@ -483,6 +530,8 @@ impl Roster {
             MobEventKind::MobReset => {
                 self.entries.clear();
                 self.owed_kickoff_prompts.clear();
+                self.spawn_continuity.clear();
+                self.resume_from_roles.clear();
                 self.seat_builds.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
@@ -528,6 +577,8 @@ impl Roster {
         let mut projected = Self {
             creation_history: Default::default(),
             owed_kickoff_prompts: BTreeMap::new(),
+            spawn_continuity: BTreeMap::new(),
+            resume_from_roles: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
@@ -634,6 +685,28 @@ impl Roster {
     ) -> Option<&meerkat_core::types::ContentInput> {
         let (generation, prompt) = self.owed_kickoff_prompts.get(agent_identity)?;
         (self.entries.get(agent_identity)?.generation == *generation).then_some(prompt)
+    }
+
+    /// The continuity intent the current incarnation of `agent_identity` was
+    /// spawned with, from its `MemberSpawned` row. `None` when the roster
+    /// holds no incarnation of the identity, or the row is not the current
+    /// incarnation's.
+    pub(crate) fn spawn_continuity_intent(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<&crate::runtime::SpawnContinuityIntent> {
+        let (generation, intent) = self.spawn_continuity.get(agent_identity)?;
+        (self.entries.get(agent_identity)?.generation == *generation).then_some(intent)
+    }
+
+    /// The role the current incarnation of `agent_identity` declares to its
+    /// session's next build (`MemberLaunchMode::Resume::resume_from_role`),
+    /// from its `MemberSpawned` row: the role its session was last built
+    /// under, when a same-session successor took another one. `None` when
+    /// the incarnation declares none.
+    pub(crate) fn resume_from_role(&self, agent_identity: &AgentIdentity) -> Option<&ProfileName> {
+        let (generation, role) = self.resume_from_roles.get(agent_identity)?;
+        (self.entries.get(agent_identity)?.generation == *generation).then_some(role)
     }
 
     /// What the session `agent_identity` is bound to carries to its first
@@ -1699,6 +1772,7 @@ mod tests {
                 session_id: Some(bound.clone()),
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
+                rotation: None,
             },
         );
         let roster = Roster::project(&[spawned.clone(), recovered.clone()]);
@@ -2196,6 +2270,7 @@ mod tests {
             session_id: Some(retired.clone()),
             retiring_peer_endpoint: None,
             preserve_machine_topology: false,
+            rotation: None,
         };
         retirement
             .set_retiring_peer_endpoint(endpoint)

@@ -1047,6 +1047,7 @@ mod tests {
                 agent_identity: crate::ids::AgentIdentity::from("m"),
                 initial_message: None,
                 successor_spec: None,
+                same_session: None,
                 reply_tx: tx,
             }
             .required_control_scope(),
@@ -1334,7 +1335,7 @@ mod tests {
         let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
         let cmd = MobCommand::Retire {
             agent_identity: identity.clone(),
-            redrive: false,
+            redrive: super::super::state::RetirementRedrive::Plain,
             target: super::super::state::RetireTarget::Exact(
                 super::super::state::RetireMemberIncarnation {
                     agent_identity: identity.clone(),

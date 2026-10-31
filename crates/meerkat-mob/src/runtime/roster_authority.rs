@@ -147,6 +147,21 @@ impl RosterAuthority {
         self.roster.seat_build(identity)
     }
 
+    /// The continuity intent the current incarnation of `identity` was
+    /// spawned with ([`Roster::spawn_continuity_intent`]).
+    pub(crate) fn spawn_continuity_intent(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<&crate::runtime::SpawnContinuityIntent> {
+        self.roster.spawn_continuity_intent(identity)
+    }
+
+    /// The role the current incarnation of `identity` declares to its
+    /// session's next build ([`Roster::resume_from_role`]).
+    pub(crate) fn resume_from_role(&self, identity: &AgentIdentity) -> Option<&ProfileName> {
+        self.roster.resume_from_role(identity)
+    }
+
     /// Whether a journal row of this mob recorded `session_id`'s member comms
     /// endpoint ([`Roster::session_endpoint_recorded`]).
     pub(crate) fn session_endpoint_recorded(

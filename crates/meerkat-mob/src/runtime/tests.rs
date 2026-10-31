@@ -29,6 +29,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod rotation_intent_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_build_inputs;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_comms_key;
@@ -20992,6 +20994,7 @@ impl RetirementStartedAnchorCrash {
                     session_id: Some(bridge_session_id.clone()),
                     retiring_peer_endpoint: Some(retiring_peer_endpoint),
                     preserve_machine_topology: true,
+                    rotation: None,
                 },
             })
             .await
@@ -21260,6 +21263,7 @@ async fn test_shutdown_joins_recovered_retirement_worker_before_reply() {
                 session_id: Some(bridge_session_id.clone()),
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
+                rotation: None,
             },
         })
         .await
@@ -41857,6 +41861,7 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
                 session_id: Some(replacement.session_id.clone()),
                 retiring_peer_endpoint: Some(replacement_peer_endpoint),
                 preserve_machine_topology: false,
+                rotation: None,
             },
         })
         .await
@@ -75039,7 +75044,7 @@ async fn test_member_reads_bypass_saturated_actor_command_queue() {
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -75159,7 +75164,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -90404,6 +90409,7 @@ fn mob_runtime_parity_field_value(
         | "member_boot_obligation_owed"
         | "member_rotation_session_ids"
         | "member_rotation_peer_endpoints"
+        | "member_rotation_targets"
         | "identity_entry_origins" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))

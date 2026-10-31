@@ -7854,10 +7854,6 @@ struct RespawnSnapshot {
     /// Whether the definition's wiring rules apply to the member, carried to
     /// the replacement incarnation.
     definition_wiring: crate::DefinitionWiring,
-    /// Whether the member is an identity entry (MobMachine's
-    /// `identity_entry_origins`): its replacement is spawned with entry
-    /// custody, so the successor is the entry's member.
-    entry_custody: bool,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -9327,6 +9323,12 @@ pub(super) struct MobActor {
     /// stays owned here until a typed re-drive (explicit or on resume) or a
     /// Shutdown report accounts for it; it is never dropped.
     pub(super) stuck_retirements: BTreeMap<AgentIdentity, retirement_io::StuckRetirement>,
+    /// The rotation each pending rotation intent of MobMachine stands for, by
+    /// identity: the one its retirement's start row records (recovered at a
+    /// start), or the one a durably started rotation left when it settled
+    /// stuck. A re-drive of the identity's retirement plans the rotation's
+    /// next incarnation again from it; the rotation's terminal spends it.
+    pub(super) rotation_records: BTreeMap<AgentIdentity, super::MemberRotationRecord>,
     /// Per-member outcomes of the Shutdown in progress.
     pub(super) shutdown_report: super::MobShutdownReport,
     /// Caller-owned bound of the Shutdown in progress (`ShutdownOptions`).
@@ -29441,10 +29443,11 @@ impl MobActor {
                 }
                 MobCommand::ReleaseMember {
                     agent_identity,
+                    scope,
                     reply_tx,
                 } => {
                     self.inline_step_watchdog.set_step("release_member");
-                    Box::pin(self.handle_release_member(agent_identity, reply_tx)).await;
+                    Box::pin(self.handle_release_member(agent_identity, scope, reply_tx)).await;
                 }
                 MobCommand::StartupMemberRecovered { cause, outcome } => {
                     self.inline_step_watchdog
@@ -29827,6 +29830,17 @@ impl MobActor {
                     match target {
                         super::state::RetireTarget::Exact(expected_incarnation) => {
                             let result = self.validate_retire_member_incarnation(&expected_incarnation).await;
+                            // A caller other than the host leaves a rotation
+                            // held for its host held: decided here, in this
+                            // command's own step, by the actor's one hold
+                            // predicate.
+                            let redrive = match redrive {
+                                super::state::RetirementRedrive::Plain => false,
+                                super::state::RetirementRedrive::Redrive => true,
+                                super::state::RetirementRedrive::RedriveUnlessHeldForHost => {
+                                    !self.rotation_held_for_host(&agent_identity)
+                                }
+                            };
                             if !self.respawn_topology_reply_withheld {
                                 match result {
                                     Ok(()) => self.start_retirement(
@@ -29851,11 +29865,17 @@ impl MobActor {
                     agent_identity,
                     initial_message,
                     successor_spec,
+                    same_session,
                     reply_tx,
                 } => {
                     let respawn_identity = agent_identity.clone();
                     match boxed_arm_future(|| {
-                        self.handle_respawn(agent_identity, initial_message, successor_spec)
+                        self.handle_respawn(
+                            agent_identity,
+                            initial_message,
+                            successor_spec,
+                            same_session,
+                        )
                     })
                     .await
                     {
@@ -50164,6 +50184,7 @@ impl MobActor {
                 journal_kind,
                 session_id_for_route.clone(),
                 false,
+                None,
             )
             .await?;
         }
@@ -50380,15 +50401,7 @@ impl MobActor {
             .await
             .map_err(MobRespawnError::from)?;
         if !snapshot.cleanup_retry {
-            self.preview_dsl_input(
-                mob_dsl::MobMachineInput::Respawn {
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                        &snapshot.old_runtime_id,
-                    ),
-                },
-                "handle_respawn_admission",
-            )
-            .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+            self.admit_fresh_life_respawn(&agent_identity, &snapshot)?;
         }
 
         Ok(self
@@ -50594,11 +50607,96 @@ impl MobActor {
             }))
     }
 
+    /// MobMachine's verdict on a fresh-life respawn (`Respawn`) of
+    /// `agent_identity`'s current incarnation, probed on a copy of the
+    /// authority that is never committed: the reason it refuses one
+    /// (`RespawnRefused`, for an identity entry in any phase an entry lives
+    /// in), or `None` when it admits it or when no arm answers (the identity
+    /// holds no incarnation, or a worker's mob is not running), which the
+    /// respawn's own steps then answer.
+    fn fresh_life_respawn_refusal(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<mob_dsl::RespawnRefusalReason> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let agent_runtime_id = self
+            .dsl_authority
+            .state()
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .cloned()?;
+        let prepared = self
+            .prepare_dsl_input(
+                mob_dsl::MobMachineInput::Respawn {
+                    agent_identity: dsl_identity,
+                    agent_runtime_id,
+                },
+                "respawn_routing",
+            )
+            .ok()?;
+        Self::respawn_refusal_from_effects(&prepared.effects)
+    }
+
+    /// The refusal a `Respawn` step's effects carry, if any.
+    fn respawn_refusal_from_effects(
+        effects: &[mob_dsl::MobMachineEffect],
+    ) -> Option<mob_dsl::RespawnRefusalReason> {
+        effects.iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::RespawnRefused { reason, .. } => Some(*reason),
+            _ => None,
+        })
+    }
+
+    /// The typed answer to a fresh-life respawn MobMachine refused.
+    fn respawn_refusal(
+        mode: crate::MobRuntimeMode,
+        reason: mob_dsl::RespawnRefusalReason,
+    ) -> MobError {
+        match reason {
+            mob_dsl::RespawnRefusalReason::IdentityEntryKeepsSession => MobError::UnsupportedForMode {
+                mode,
+                reason: "an identity entry's successor keeps its session: it is not respawned with a fresh life".to_string(),
+            },
+        }
+    }
+
+    /// MobMachine's admission of a fresh-life respawn of `agent_identity`'s
+    /// incarnation `snapshot` names, previewed before anything is retired:
+    /// a refused one (an identity entry's member) is answered typed, and a
+    /// respawn no arm admits is an invalid transition.
+    fn admit_fresh_life_respawn(
+        &self,
+        agent_identity: &AgentIdentity,
+        snapshot: &RespawnSnapshot,
+    ) -> Result<(), super::handle::MobRespawnError> {
+        let prepared = self
+            .prepare_dsl_input(
+                mob_dsl::MobMachineInput::Respawn {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                        &snapshot.old_runtime_id,
+                    ),
+                },
+                "handle_respawn_admission",
+            )
+            .map_err(|_| {
+                super::handle::MobRespawnError::from(self.invalid_transition_to(MobState::Running))
+            })?;
+        match Self::respawn_refusal_from_effects(&prepared.effects) {
+            Some(reason) => Err(super::handle::MobRespawnError::from(Self::respawn_refusal(
+                snapshot.runtime_mode,
+                reason,
+            ))),
+            None => Ok(()),
+        }
+    }
+
     async fn handle_respawn(
         &mut self,
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
+        same_session: Option<Box<super::MemberRespawn>>,
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
@@ -50608,6 +50706,52 @@ impl MobActor {
         self.reattempt_deferred_member_custody(&agent_identity)
             .await
             .map_err(MobRespawnError::from)?;
+        // A same-session successor (`respawn_member`, and the respawn of an
+        // identity entry's member, whose successor keeps its session): one
+        // machine step that never leaves the identity unseated, finished by
+        // the restarted mob itself after a crash. A worker's respawn keeps
+        // its fresh session below. MobMachine decides which: it refuses a
+        // fresh-life respawn of an entry's member (`RespawnRefused`, reason
+        // `IdentityEntryKeepsSession`), in every phase an entry lives in.
+        // Only that reason routes to the same-session rotation; any other
+        // refusal is answered typed below.
+        let refusal = if same_session.is_none() {
+            self.fresh_life_respawn_refusal(&agent_identity)
+        } else {
+            None
+        };
+        let entry_keeps_session = matches!(
+            refusal,
+            Some(mob_dsl::RespawnRefusalReason::IdentityEntryKeepsSession)
+        );
+        if same_session.is_some() || (entry_keeps_session && successor_spec.is_none()) {
+            let request = match same_session {
+                Some(request) => *request,
+                None => super::MemberRespawn {
+                    initial_message,
+                    ..super::MemberRespawn::default()
+                },
+            };
+            let rotation = Box::pin(self.plan_member_respawn(&agent_identity, &request))
+                .await
+                .map_err(MobRespawnError::from)?;
+            let (reply, result) = oneshot::channel();
+            Box::pin(self.start_member_respawn(rotation, reply)).await;
+            return Ok(RespawnProgress::DeferredRetirement { result });
+        }
+        if let Some(reason) = refusal {
+            // An entry's successor keeps its session, which a successor spec
+            // (a fresh life) cannot: MobMachine refused it, and nothing is
+            // retired.
+            let mode = self
+                .roster
+                .read()
+                .await
+                .get(&agent_identity)
+                .map(|entry| entry.runtime_mode)
+                .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+            return Err(MobRespawnError::from(Self::respawn_refusal(mode, reason)));
+        }
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
             boxed_arm_future(|| async {
@@ -50692,14 +50836,6 @@ impl MobActor {
                 ),
                 fork_job: entry.fork_job,
                 definition_wiring: entry.definition_wiring,
-                // MobMachine's fact, read in the snapshot's own actor step:
-                // the successor of an identity entry's member is the
-                // entry's member.
-                entry_custody: self
-                    .dsl_authority
-                    .state()
-                    .identity_entry_origins
-                    .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity)),
                 cleanup_retry,
             }
         };
@@ -50778,11 +50914,11 @@ impl MobActor {
             &mut replacement_spec,
         )
         .map_err(MobRespawnError::from)?;
-        // The member's standing belongs to the identity, read from MobMachine
-        // with the snapshot: the successor of an identity entry's member is
-        // the entry's member again, and a worker's successor is a worker,
-        // whatever the successor spec or a customizer says.
-        replacement_spec.entry_custody = snapshot.entry_custody;
+        // The member's standing belongs to the identity: this path respawns
+        // only a worker (MobMachine's admission below refuses an identity
+        // entry's member), and a worker's successor is a worker, whatever
+        // the successor spec or a customizer says.
+        replacement_spec.entry_custody = false;
         if replacement_spec.identity != original_identity {
             return Err(MobRespawnError::from(MobError::Internal(format!(
                 "spawn customizer cannot change respawn identity from '{original_identity}' to '{}'",
@@ -50905,15 +51041,7 @@ impl MobActor {
         }
 
         if !snapshot.cleanup_retry {
-            self.preview_dsl_input(
-                mob_dsl::MobMachineInput::Respawn {
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                        &snapshot.old_runtime_id,
-                    ),
-                },
-                "handle_respawn_admission",
-            )
-            .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+            self.admit_fresh_life_respawn(&original_identity, &snapshot)?;
         }
         Ok(self
             .start_respawn_retirement(original_identity, replacement_spec, snapshot)
@@ -63626,6 +63754,7 @@ impl MobActor {
         journal_kind: mob_dsl::MobLifecycleJournalKind,
         session_id: Option<mob_dsl::SessionId>,
         preserve_machine_topology: bool,
+        rotation: Option<super::MemberRotationRecord>,
     ) -> Result<(), MobError> {
         let parse_session = |session_id: mob_dsl::SessionId| {
             SessionId::parse(&session_id.0).map_err(|error| {
@@ -63709,6 +63838,7 @@ impl MobActor {
             session_id,
             retiring_peer_endpoint,
             preserve_machine_topology,
+            rotation: rotation.map(Box::new),
         };
         let append = self
             .events

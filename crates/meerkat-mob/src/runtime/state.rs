@@ -838,9 +838,10 @@ pub(super) enum MobCommand {
         /// What this command may retire: the exact roster incarnation the
         /// handle observed, or one step of a scoped retire.
         target: RetireTarget,
-        /// Re-drive a stuck retirement instead of answering
-        /// `MemberRetirementStuck` (typed re-drive transition).
-        redrive: bool,
+        /// What the retire does with a stuck retirement: answer it
+        /// `MemberRetirementStuck`, or re-drive it (typed re-drive
+        /// transition), or re-drive it unless it is held for its host.
+        redrive: RetirementRedrive,
         deadline: meerkat_core::time_compat::Instant,
         admission_tx: tokio::sync::watch::Sender<bool>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -849,6 +850,11 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
+        /// A same-session successor's request
+        /// ([`super::handle::MobHandle::respawn_member`]): the member's next
+        /// incarnation keeps its session. `None` is `respawn`, which an
+        /// identity entry's member takes on its own session too.
+        same_session: Option<Box<super::MemberRespawn>>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
         >,
@@ -985,10 +991,14 @@ pub(super) enum MobCommand {
         edge: super::actor::member_wake::MemberWiringEdge,
     },
     /// Release a live member's materialization, keeping it seated
-    /// ([`super::handle::MobHandle::release_member`]).
+    /// ([`super::handle::MobHandle::release_member`]). With a scope
+    /// ([`super::handle::MobHandle::release_member_at_scope`]) only the
+    /// scope's incarnation is released: MobMachine answers any other one
+    /// Stale, and nothing is released.
     ReleaseMember {
         agent_identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        scope: Option<Box<super::MemberDeliveryScope>>,
+        reply_tx: oneshot::Sender<Result<super::ReleaseOutcome, MobError>>,
     },
     /// Internal re-entry carrying the settled recovery, and the readiness
     /// step, of one member a Running start left out (a stopped registration
@@ -1979,6 +1989,20 @@ pub(super) struct RetireMemberIncarnation {
     pub generation: Generation,
     pub fence_token: FenceToken,
     pub member_ref: MemberRef,
+}
+
+/// What a [`MobCommand::Retire`] does with a retirement that is stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetirementRedrive {
+    /// Answer it `MemberRetirementStuck` (a plain retire).
+    Plain,
+    /// Re-drive it (the typed re-drive transition).
+    Redrive,
+    /// Re-drive it unless it is a rotation held for its host
+    /// (`rotation_held_for_host`, decided in the command's own actor step):
+    /// a caller other than the host leaves that one held and is answered as
+    /// a plain retire is.
+    RedriveUnlessHeldForHost,
 }
 
 /// What one [`MobCommand::Retire`] may retire.

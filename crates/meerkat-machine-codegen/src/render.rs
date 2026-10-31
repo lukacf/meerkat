@@ -609,6 +609,26 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ResolveAgentLaneMemberAdmissionIdentityMemberStopped",
             "ResolveAgentLaneMemberAdmissionIdentityMemberCompleted",
             "ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed",
+            // Rotation targets (0.9.8): the same-session rotation's start and
+            // terminal, the replay of a rotation's intent, and the scoped
+            // release's stale verdict.
+            "BeginMemberRotationSameSessionRunning",
+            "CommitMemberRotationSameSessionRunning",
+            "CommitMemberRotationSameSessionStopped",
+            "CommitMemberRotationSameSessionKickoffRunning",
+            "CommitMemberRotationSameSessionKickoffStopped",
+            "RecoverMemberRotationIntentFreshSessionRunning",
+            "RecoverMemberRotationIntentSameSessionRunning",
+            "RecoverMemberRotationIntentDestroyingRunning",
+            "ClassifyMemberReleaseStaleRunning",
+            "ClassifyMemberReleaseStaleStopped",
+            "ClassifyMemberReleaseStaleCompleted",
+            "ClassifyMemberReleaseStaleDestroyed",
+            // The legacy respawn's refusal of an identity entry (0.9.8), in
+            // every phase an entry lives in.
+            "RespawnIdentityEntryRefusedRunning",
+            "RespawnIdentityEntryRefusedStopped",
+            "RespawnIdentityEntryRefusedCompleted",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

@@ -11239,6 +11239,20 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    [key \\in {{ key \\in DOMAIN arg_external_peer_edges_by_key : key.local # arg_agent_identity }} |-> arg_external_peer_edges_by_key[key]]"
         );
+        // The next sessions of the pending FreshSession rotations, which a
+        // destroy's admission abandons. A SameSession rotation names its
+        // member's own session, which the destroy's retirement of that member
+        // disposes of. Mirror of the catalog-native Rust helper.
+        writeln!(
+            out,
+            "{}(arg_member_rotation_session_ids, arg_member_rotation_targets) ==",
+            prefix("mob_machine_fresh_rotation_sessions")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [id \\in {{ id \\in DOMAIN arg_member_rotation_session_ids : ~(id \\in DOMAIN arg_member_rotation_targets /\\ arg_member_rotation_targets[id] = \"SameSession\") }} |-> arg_member_rotation_session_ids[id]]"
+        );
         // Row #351: reconcile-membership spawn/retire set helpers. The DSL
         // ReconcileMembership effect emits calls to these, but they had no TLA+
         // operator definitions, so TLC reported "Unknown operator" for

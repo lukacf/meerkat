@@ -5229,6 +5229,24 @@ fn recover_pending_member_retirements(
                     },
                     "recover_pending_member_retirement_started",
                 )?;
+                // The rotation the start row records, recorded again on the
+                // Retiring incarnation the row restored: the restarted mob's
+                // re-drive finishes it with no host record.
+                if let Some(rotation) = event.kind.retirement_rotation() {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverMemberRotationIntent {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                agent_runtime_id,
+                            ),
+                            target: rotation.target().to_machine(),
+                            session_id: mob_dsl::SessionId::from_domain(rotation.session_id()),
+                            peer_endpoint: rotation.machine_peer_endpoint(),
+                        },
+                        "recover_member_rotation_intent",
+                    )?;
+                }
             }
             MobEventKind::RespawnTopologyAbandoned {
                 agent_identity,
@@ -8030,11 +8048,32 @@ impl MobBuilder {
     /// ([`MobHandle::seat_dormant_members`], [`MobHandle::rotate_member`])
     /// clears the mark, durably, in the same step.
     ///
-    /// A host whose rotation a crash interrupted passes the identity here:
-    /// the start then holds the interrupted retirement open (it does not end
-    /// it as a plain retirement) until the host calls
-    /// [`MobHandle::rotate_member`] again, which finishes the rotation on the
-    /// same session.
+    /// A rotation's start row records it, so the start finishes a rotation a
+    /// crash interrupted itself, with no host record. A member passed here
+    /// whose interrupted rotation is a FreshSession one (a
+    /// [`MobHandle::rotate_member`]) is the host's to finish, since the host
+    /// keeps its own record of it: the start does not re-drive it. It holds
+    /// the interrupted retirement open (it neither finishes the rotation
+    /// itself nor ends it as a plain retirement), logs that it did, and
+    /// records the retirement stuck at admission with a cause that names the
+    /// wait ([`MobHandle::retirement_settlement`]). The host's next
+    /// [`MobHandle::rotate_member`] call with the same spec finishes it on the
+    /// same session, once ([`MobHandle::redrive_retirement`] re-drives it
+    /// too). A rotation whose start row predates the record is re-driven as
+    /// a plain retirement, whose terminal waits for the host's call. Until
+    /// the host acts, the member stays Retiring: its wakes are refused, any
+    /// other rotation of it is refused retryable, and a plain retire by any
+    /// caller answers [`MobError::MemberRetirementStuck`] with that cause.
+    /// Only [`MobHandle::rotate_member`] or [`MobHandle::redrive_retirement`]
+    /// finishes it; [`MobHandle::redrive_retirement_unless_held_for_host`],
+    /// the re-drive of a caller other than the host, leaves it held
+    /// ([`MobHandle::rotation_held_for_host`] reads whether it is). A
+    /// same-session rotation (a respawn) is the mob's own: the start finishes
+    /// it whatever this set says, and the member keeps its mark. Its
+    /// successor is seated Dormant, and its wakes are refused until the
+    /// host's seat step for it (a [`MobHandle::seat_dormant_members`] of the
+    /// identity on its kept session answers `AlreadySeated` and ends the
+    /// mark): the host wakes first.
     pub fn with_host_pending_members(
         mut self,
         members: impl IntoIterator<Item = AgentIdentity>,
@@ -9508,6 +9547,10 @@ impl MobBuilder {
             // Started carrier even though replay already restored Retiring.
             let mut retired_event_index = HashSet::new();
             let mut retirement_started_event_index = HashSet::new();
+            // The rotation each started retirement records, by identity, with
+            // the retiring generation: a re-drive of a rotation the replay
+            // recorded again plans its next incarnation from it.
+            let mut rotation_records = BTreeMap::new();
             for event in repaired_epoch_events {
                 match &event.kind {
                     MobEventKind::MemberRetirementStarted {
@@ -9517,6 +9560,10 @@ impl MobBuilder {
                     } => {
                         let key = format!("{}:{}", agent_identity, generation.get());
                         retirement_started_event_index.insert(key);
+                        if let Some(rotation) = event.kind.retirement_rotation() {
+                            rotation_records
+                                .insert(agent_identity.clone(), (*generation, rotation.clone()));
+                        }
                     }
                     MobEventKind::MemberRetired {
                         agent_identity,
@@ -9528,10 +9575,20 @@ impl MobBuilder {
                             agent_identity,
                             generation.get()
                         ));
+                        if rotation_records
+                            .get(agent_identity)
+                            .is_some_and(|(started, _)| started == generation)
+                        {
+                            rotation_records.remove(agent_identity);
+                        }
                     }
                     _ => {}
                 }
             }
+            let rotation_records = rotation_records
+                .into_iter()
+                .map(|(identity, (_, record))| (identity, record))
+                .collect::<BTreeMap<_, _>>();
 
             // The overlays restored members were rebuilt with, retained in the
             // map the preview handle (and so their tools) already share.
@@ -9565,6 +9622,7 @@ impl MobBuilder {
                 // completes ordinary retirement; only a successor already present
                 // in the replay stream consumes a temporary topology hold.
                 HashSet::new(),
+                rotation_records,
                 deferred_remote_intent_runs,
                 recovered_private_remote_turns,
                 recovered_host_revocations,
@@ -10766,6 +10824,7 @@ impl MobBuilder {
                 HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
+                BTreeMap::new(),
                 BTreeSet::new(),
                 Vec::new(),
                 Vec::new(),
@@ -10816,6 +10875,7 @@ impl MobBuilder {
         retired_event_index: HashSet<String>,
         retirement_started_event_index: HashSet<String>,
         preserved_respawn_topology_event_index: HashSet<String>,
+        rotation_records: BTreeMap<crate::ids::AgentIdentity, super::MemberRotationRecord>,
         recovered_remote_intent_runs: BTreeSet<RunId>,
         recovered_private_remote_turns: Vec<crate::event::RemoteTurnObligationEvent>,
         recovered_host_revocations: Vec<String>,
@@ -11162,6 +11222,7 @@ impl MobBuilder {
                 next_member_effect_ticket: 0,
                 retirements: BTreeMap::new(),
                 stuck_retirements: BTreeMap::new(),
+                rotation_records,
                 shutdown_report: super::MobShutdownReport::default(),
                 shutdown_deadline: None,
                 #[cfg(feature = "runtime-adapter")]
@@ -11380,27 +11441,40 @@ impl MobBuilder {
             // Complete: the start waits for it before it hands the mob back
             // (see its end).
             let mut recovered_phase_intent_first_attempt = None;
-            let recovered_retirements = if resume_destroy_cleanup {
+            let mut recovered_retirements = if resume_destroy_cleanup {
                 Vec::new()
             } else {
-                actor
-                    .dsl_authority
-                    .state()
+                let state = actor.dsl_authority.state();
+                state
                     .identity_to_runtime
                     .iter()
                     .filter(|(_, runtime_id)| {
                         matches!(
-                            actor
-                                .dsl_authority
-                                .state()
-                                .member_state_markers
-                                .get(*runtime_id),
+                            state.member_state_markers.get(*runtime_id),
                             Some(crate::machines::mob_machine::MobMemberState::Retiring)
                         )
                     })
                     .map(|(identity, _)| crate::ids::AgentIdentity::from(identity.0.as_str()))
                     .collect::<Vec<_>>()
             };
+            // The interrupted FreshSession rotation of a host-pending member
+            // is the host's to finish: the host keeps its own record of it
+            // and calls `rotate_member` again, which re-drives it once. The
+            // start holds it for the host (recorded stuck with a typed cause)
+            // instead of re-driving it; `redrive_retirement` re-drives it
+            // too. A same-session rotation is the mob's own and is always
+            // re-driven here. The hold is the actor's one predicate
+            // (`rotation_held_for_host`).
+            let held_for_host = recovered_retirements
+                .iter()
+                .filter(|identity| actor.rotation_held_for_host(identity))
+                .cloned()
+                .collect::<Vec<_>>();
+            for identity in held_for_host {
+                if actor.hold_rotation_for_host(&identity).await {
+                    recovered_retirements.retain(|recovered| recovered != &identity);
+                }
+            }
             // Cold-recovery convergence workers are owned by this actor instance.
             // Register them before moving the actor into its run loop so every
             // terminal path can abort and join them before command-channel closure.
@@ -11638,6 +11712,11 @@ pub(super) struct ResumeRestoreCandidate {
     /// customizer is asked. `None` for a member whose session a build
     /// created.
     pub(super) seat_build: Option<Arc<super::SeatBuild>>,
+    /// The role the member's session was last built under, when the
+    /// member's incarnation took another one on it (a same-session
+    /// successor's declared role migration): its build declares it, unless
+    /// the host's customizer declared one itself.
+    pub(super) resume_from_role: Option<ProfileName>,
 }
 
 /// The members a cold resume restores, in `entries`' order (every in-mob
@@ -11684,6 +11763,7 @@ fn resume_restore_set(
                 machine_session_id: machine_session_id.clone(),
                 in_turn: shares_session || member_restore_follows_in_mob_source(entry, mob_id),
                 seat_build: roster.seat_build(&entry.agent_identity),
+                resume_from_role: roster.resume_from_role(&entry.agent_identity).cloned(),
             })
         })
         .collect()
@@ -12784,7 +12864,12 @@ pub(super) async fn restore_resumed_member(
         }
         return Ok(MemberRestorePlan::Kept);
     }
-    let restore_resume_from_role = restore_resume_from_role.clone();
+    // A same-session successor under another role declares the role its
+    // session was last built under (its seat row records it), unless the
+    // host's customizer declared one itself.
+    let restore_resume_from_role = restore_resume_from_role
+        .clone()
+        .or_else(|| candidate.resume_from_role.clone());
     // The overlay this member is restored with: the customizer's overlay for
     // its own identity, except for a fork-derived member seated with its
     // source's overlay whose source (and every in-mob ancestor that overlay
@@ -17287,6 +17372,7 @@ mod tests {
                     session_id: Some(member_session_id),
                     retiring_peer_endpoint: None,
                     preserve_machine_topology: false,
+                    rotation: None,
                 },
             },
         ];
@@ -18225,6 +18311,7 @@ mod tests {
                     session_id: None,
                     retiring_peer_endpoint: None,
                     preserve_machine_topology: true,
+                    rotation: None,
                 },
             ),
             event(
@@ -18543,6 +18630,7 @@ mod tests {
                 session_id: None,
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
+                rotation: None,
             },
         });
         let start_error = respawn_topology_ledger(&conflicting_starts)
@@ -18838,6 +18926,7 @@ mod tests {
                         session_id: None,
                         retiring_peer_endpoint: None,
                         preserve_machine_topology,
+                        rotation: None,
                     },
                 ),
                 event(
@@ -19013,6 +19102,7 @@ mod tests {
                     session_id: None,
                     retiring_peer_endpoint: Some(retiring_endpoint.clone()),
                     preserve_machine_topology: false,
+                    rotation: None,
                 },
             ),
             event(
@@ -19346,13 +19436,18 @@ mod member_endpoint_defect_tests {
 /// settlement, through the typed re-drive transition. The retirement is owned
 /// by the actor once re-driven; this task only reports how it settles. A
 /// re-drive still running when its caller budget elapses is awaited on its
-/// settlement watch, never re-issued on a timer.
+/// settlement watch, never re-issued on a timer. The start is not the host:
+/// it re-drives as any caller other than the host does, so a rotation held
+/// for its host stays held (the start holds those before it re-drives).
 async fn recover_durable_member_retirement(
     handle: &MobHandle,
     identity: crate::ids::AgentIdentity,
 ) {
     let result = loop {
-        match handle.redrive_retirement(identity.clone()).await {
+        match handle
+            .redrive_retirement_unless_held_for_host(identity.clone())
+            .await
+        {
             // Not yet admitted by the starting actor: the retry joins the same
             // single-flight retirement slot and waits on it.
             Err(MobError::MemberRetirementAdmissionPending { .. }) => {}

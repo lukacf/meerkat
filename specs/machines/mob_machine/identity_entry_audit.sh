@@ -34,31 +34,39 @@
 #   one wake attempt): the retire run's member made an entry by the replay
 #   of its row or by its reseat's ladder opened with entry custody, through
 #   the dormant seat, the live and the archive-only retirement to its
-#   archive terminal, the rotation and the mob's destroy (its member
-#   retirement and archive, DestroyMob and DestroyFromAny). It checks every
-#   generated invariant (every unseat ends an entry; a destroyed mob holds no
-#   entry and no entry custody), the retire run's own properties, that a
-#   dormant seat records an entry exactly when its ladder holds entry custody
+#   archive terminal, the rotation, the legacy fresh-life respawn and its
+#   refusal of an entry (in Running and Stopped), the legacy respawn's
+#   topology-preserving archive terminals, and the mob's destroy (its
+#   member retirement and archive, DestroyMob and DestroyFromAny). It
+#   checks every generated
+#   invariant (every unseat ends an entry; a destroyed mob holds no entry and
+#   no entry custody), the retire run's own properties, that a dormant seat
+#   records an entry exactly when its ladder holds entry custody
 #   (AuditSeatRecordsEntryFromCustody), that a rotation's terminal keeps the
-#   entries (AuditRotationKeepsEntry), and that an identity becomes an entry
-#   only by a seat that consumes its custody or the replay of its row
-#   (AuditLifecycleEntryOnlyWithCause).
+#   entries (AuditRotationKeepsEntry), that an identity becomes an entry only
+#   by a seat that consumes its custody or the replay of its row
+#   (AuditLifecycleEntryOnlyWithCause), that the fresh-life respawn is
+#   admitted only for a member that is no entry
+#   (AuditFreshLifeRespawnNeverAnEntry), and that its topology-preserving
+#   archive never takes an entry (AuditPreservingArchiveNeverAnEntry).
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage). The runner
 # then reruns a run's space once per reachability witness, with that
 # witness's negation as an extra invariant (a state goal) or action property
 # (a step goal), and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds ten defects into a
-# copy of the generated model and requires TLC to refuse each with the
+# properties are not vacuous. With --mutants it then seeds twelve defects
+# into a copy of the generated model and requires TLC to refuse each with the
 # invariant or property it breaks: in the entry run, a reconcile that retires
 # an entry, an admission probe that answers an entry's name without custody
 # as a plain duplicate, an adoption without the observation and the replay of
 # an entry row on an unseated identity; in the lifecycle run, an archive
 # terminal and the destroy's member archive that keep the entry, a DestroyMob
 # that keeps the entries, a DestroyFromAny that keeps an open ladder's entry
-# custody, a rotation's terminal that drops the entry and a dormant seat that
-# ignores its ladder's entry custody. An anchor this script expects but
+# custody, a rotation's terminal that drops the entry, a dormant seat that
+# ignores its ladder's entry custody, a fresh-life respawn admitted for an
+# entry and a topology-preserving archive that takes an entry. An anchor
+# this script expects but
 # cannot find fails the run. Each TLC run is held to the canonical lane's
 # per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
 set -euo pipefail
@@ -71,7 +79,7 @@ fi
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 entry_states=8736
-lifecycle_states=11473
+lifecycle_states=11921
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator, since every audit wrapper here is a plain application.
@@ -148,6 +156,8 @@ lifecycle_covered_actions=(
   ObserveMemberRetirementArchivedRetired
   ObserveMemberRetirementArchivedLiveStopped
   ObserveMemberRetirementArchivedRetiredStopped
+  ObserveMemberRetirementArchivedLivePreservingTopology
+  ObserveMemberRetirementArchivedRetiredPreservingTopology
   RecoverRosterMemberRetirementStartedReleasing
   RecoverRosterMemberRetirementStartedPreservingBinding
   AuthorizeSpawnProfileRunning
@@ -167,6 +177,9 @@ lifecycle_covered_actions=(
   ObserveDestroyMemberRetirementArchivedRetiredRunning
   DestroyMob
   DestroyFromAny
+  RespawnRunning
+  RespawnIdentityEntryRefusedRunning
+  RespawnIdentityEntryRefusedStopped
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -269,7 +282,9 @@ write_cfg() {
   AuditRotationDecidesExemptionAnew
   AuditSeatRecordsEntryFromCustody
   AuditRotationKeepsEntry
-  AuditLifecycleEntryOnlyWithCause"
+  AuditLifecycleEntryOnlyWithCause
+  AuditFreshLifeRespawnNeverAnEntry
+  AuditPreservingArchiveNeverAnEntry"
       run_invariants="
   AuditWakingClosable
   AuditRetirementArchivable"
@@ -420,7 +435,10 @@ for witness in \
   "lifecycle:Action property:EntryRetiredLive" "lifecycle:Action property:EntryArchived" \
   "lifecycle:Action property:EntryRotated" "lifecycle:Action property:EntryDestroyArchived" \
   "lifecycle:Action property:EntryDestroyedMob" "lifecycle:Action property:EntryDestroyedForced" \
-  "lifecycle:Action property:CustodyDestroyed"; do
+  "lifecycle:Action property:CustodyDestroyed" \
+  "lifecycle:Action property:EntryRespawnRefused" "lifecycle:Action property:WorkerRespawnAdmitted" \
+  "lifecycle:Action property:EntryRespawnRefusedStopped" \
+  "lifecycle:Action property:WorkerPreservingArchive"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -602,6 +620,30 @@ PY
   # A dormant seat that ignores its ladder's entry custody.
   mutate lifecycle seat_ignores_custody "Action property AuditSeatRecordsEntryFromCustody" <<'PY'
 keep_var("CommitDormantSeatRunning", "identity_entry_origins")
+PY
+
+  # A fresh-life respawn admitted for an identity entry's member: the legacy
+  # respawn's entry guard dropped.
+  mutate lifecycle respawn_admits_entry "Action property AuditFreshLifeRespawnNeverAnEntry" <<'PY'
+text = open(path).read()
+found = _arm(text, "RespawnRunning")
+lines = found.group(0).split("\n")
+hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ ") and "identity_entry_origins" in line]
+assert len(hits) == 1, f"expected one entry guard in RespawnRunning, found {len(hits)}"
+del lines[hits[0]]
+open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+PY
+
+  # A topology-preserving archive that takes an identity entry: the live
+  # preserving archive's entry guard dropped.
+  mutate lifecycle preserving_archive_takes_entry "Action property AuditPreservingArchiveNeverAnEntry" <<'PY'
+text = open(path).read()
+found = _arm(text, "ObserveMemberRetirementArchivedLivePreservingTopology")
+lines = found.group(0).split("\n")
+hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ ") and "DOMAIN identity_entry_origins) = FALSE" in line]
+assert len(hits) == 1, f"expected one entry guard in the live preserving archive, found {len(hits)}"
+del lines[hits[0]]
+open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
 PY
 fi
 echo "identity entry audit passed"

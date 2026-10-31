@@ -8,11 +8,11 @@
 //! stronger or weaker than production, and TLC checks the wrong arm.
 //!
 //! The member-residency arms (Dormant, Waking and Live, the wake, release,
-//! seat, seat session replay, rotation, boot-plan and wiring-wake arms, and
-//! the existing arms they rewrote) are written one arm per lifecycle phase
-//! instead. This scan reads the `MobMachine` DSL source and fails when any of
-//! those arms has a guard, or a call inside one, that mentions
-//! `lifecycle_phase` beyond the plain source predicate
+//! seat, seat session replay, rotation and its replayed intent, boot-plan
+//! and wiring-wake arms, and the existing arms they rewrote) are written one
+//! arm per lifecycle phase instead. This scan reads the `MobMachine` DSL
+//! source and fails when any of those arms has a guard, or a call inside
+//! one, that mentions `lifecycle_phase` beyond the plain source predicate
 //! `guard { self.lifecycle_phase == Phase::X }` (or a disjunction of such
 //! comparisons only), and when a residency helper takes or reads the
 //! lifecycle phase. It also fails when an expected arm family is missing, so
@@ -49,6 +49,7 @@ const RESIDENCY_ARM_PREFIXES: &[&str] = &[
     "UnwireExternalPeerDormant",
     "WireMembers",
     "RecoverMemberSeatSession",
+    "RecoverMemberRotationIntent",
 ];
 
 /// Families that must each name at least one arm, so the scan is not vacuous.
@@ -74,6 +75,15 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
     "WireMembersWithTrustPlacedPeerWake",
     "ResolveMemberRevivalSessionCreated",
     "RecoverMemberSeatSession",
+    // The same-session rotation (0.9.8), the replay of a rotation's intent
+    // and the scoped release's stale verdict.
+    "BeginMemberRotationSameSession",
+    "CommitMemberRotationSameSession",
+    "CommitMemberRotationSameSessionKickoff",
+    "RecoverMemberRotationIntentFreshSession",
+    "RecoverMemberRotationIntentSameSession",
+    "RecoverMemberRotationIntentDestroying",
+    "ClassifyMemberReleaseStale",
 ];
 
 /// Transition-name prefixes of the identity-entry arms: the admission probe,

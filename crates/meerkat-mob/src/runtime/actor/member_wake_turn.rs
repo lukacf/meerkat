@@ -511,9 +511,13 @@ impl MobActor {
 
         // The seat's build inputs ride the member's first build, as a
         // spawn's do; a member whose session a build created has none.
-        let (entry, seat_build) = {
+        let (entry, seat_build, resume_from_role) = {
             let roster = self.roster.read().await;
-            (roster.get(&identity).cloned(), roster.seat_build(&identity))
+            (
+                roster.get(&identity).cloned(),
+                roster.seat_build(&identity),
+                roster.resume_from_role(&identity).cloned(),
+            )
         };
         let Some(entry) = entry else {
             self.abandon_member_wake(&run, mob_dsl::MemberWakeAbandonKind::NotCurrent, None)
@@ -597,6 +601,7 @@ impl MobActor {
                 machine_session_id,
                 in_turn: false,
                 seat_build,
+                resume_from_role,
             },
             base: self.dsl_authority.fork(),
             fork_rule,

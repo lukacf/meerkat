@@ -19,8 +19,8 @@
 //! legacy member ([`super::MobHandle::adopt_legacy_identity_entry`]). Its
 //! journal row records it ([`crate::event::MemberSpawnedEvent`]'s stored
 //! `identity_entry`, or the adoption's binding row), so a restart restores it
-//! without reading anything else. A rotation keeps it; every retirement
-//! removes it.
+//! without reading anything else. A rotation (a reset, a deletion, a
+//! same-session successor) keeps it; every retirement removes it.
 //!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
@@ -172,8 +172,10 @@ pub struct IdentityEntryView {
     /// The host named the identity's preparation pending when it built the
     /// mob, and has not carried it out: its wakes are refused, retryable.
     pub host_preparation_pending: bool,
-    /// A rotation (a reset or a deletion) of the identity is in flight.
-    pub rotation_in_flight: bool,
+    /// The target of the identity's rotation in flight, if one is: a new
+    /// session (a reset, a deletion), or the member's own session (a
+    /// same-session successor).
+    pub rotation_in_flight: Option<super::RotationTarget>,
 }
 
 /// A worker member: a member whose identity is not an entry.
@@ -268,10 +270,14 @@ pub enum MemberLifecycleEvent {
         generation: Generation,
         origin: IdentityEntryOrigin,
     },
-    /// A member's retirement started.
+    /// A member's retirement started. `rotation` is set when the retirement
+    /// carries out a rotation, with its target: its terminal seats the
+    /// identity's next incarnation in the same step (a `Retired` and a
+    /// `Spawned` fact).
     RetirementStarted {
         agent_identity: AgentIdentity,
         generation: Generation,
+        rotation: Option<super::RotationTarget>,
     },
     /// A member incarnation was retired.
     Retired {
@@ -407,7 +413,11 @@ fn entry_view(
         standing,
         broken: broken_fact(state, identity),
         host_preparation_pending: state.member_host_preparation_pending.contains(identity),
-        rotation_in_flight: state.member_rotation_session_ids.contains_key(identity),
+        rotation_in_flight: state
+            .member_rotation_targets
+            .get(identity)
+            .copied()
+            .map(super::RotationTarget::from_machine),
     })
 }
 
@@ -487,7 +497,7 @@ pub(crate) fn identity_census(
         if view.host_preparation_pending {
             census.host_preparation_pending += 1;
         }
-        if view.rotation_in_flight {
+        if view.rotation_in_flight.is_some() {
             census.rotation_in_flight += 1;
         }
     }
@@ -523,6 +533,9 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
         } => Some(MemberLifecycleEvent::RetirementStarted {
             agent_identity: agent_identity.clone(),
             generation: *generation,
+            rotation: kind
+                .retirement_rotation()
+                .map(super::MemberRotationRecord::target),
         }),
         MobEventKind::MemberRetired {
             agent_identity,

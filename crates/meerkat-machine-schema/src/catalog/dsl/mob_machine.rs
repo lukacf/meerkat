@@ -636,6 +636,16 @@ macro_rules! mob_catalog_machine_dsl {
             // and the destroy drop it. Only an Opened local ladder holds it
             // (entry_custody_ladder_is_open).
             spawn_exec_entry_custody: Set<AgentIdentity>,
+            // The target of each pending rotation, beside its session in
+            // member_rotation_session_ids (the same keys): FreshSession
+            // seats the next incarnation on a new session, SameSession on
+            // the member's own session, which the rotation keeps (a
+            // respawn, a declared role migration, a runtime-mode restamp).
+            // The rotation's start records it and the shell journals it on
+            // the retirement's start row; the replay of that row records it
+            // again (RecoverMemberRotationIntent); every step that drops the
+            // intent drops it.
+            member_rotation_targets: Map<AgentIdentity, Enum<RotationTarget>>,
         }
 
         init(Running) {
@@ -942,6 +952,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_definition_wiring_exempt = EmptySet,
             identity_entry_origins = EmptyMap,
             spawn_exec_entry_custody = EmptySet,
+            member_rotation_targets = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -1310,7 +1321,7 @@ macro_rules! mob_catalog_machine_dsl {
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
             RetireAbsent { agent_identity: AgentIdentity },
             RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
-            Respawn { agent_runtime_id: AgentRuntimeId },
+            Respawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             RetireAll,
             BindOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             // Track-B (R5): explicit identity-level wiring and session-binding
@@ -1879,11 +1890,16 @@ macro_rules! mob_catalog_machine_dsl {
             // The host carried out an identity's pending preparation on an
             // identity already seated on that session.
             ResolveMemberHostPreparation { agent_identity: AgentIdentity },
-            // A rotation (reset, delete): the exact Retiring incarnation will
-            // be re-seated Dormant on a NEW session in its terminal step. A
-            // network-comms member has no endpoint before its first wake
-            // (None): it is re-seated owed EndpointPending.
-            BeginMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool },
+            // A rotation. FreshSession (reset, delete): the exact Retiring
+            // incarnation will be re-seated Dormant on a NEW session in its
+            // terminal step. A network-comms member has no endpoint before
+            // its first wake (None): it is re-seated owed EndpointPending.
+            // SameSession (respawn, declared role migration, runtime-mode
+            // restamp): the current incarnation's retirement starts here and
+            // the next incarnation is seated Dormant on the member's own
+            // session, which the retirement keeps; it names that session and
+            // no endpoint (the member keeps its own).
+            BeginMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, target: Enum<RotationTarget> },
             // The rotation's archive terminal: retires the old incarnation and
             // seats the next one Dormant in one transition (no non-member
             // window). Its two journal rows are appended in one batch before
@@ -1892,8 +1908,11 @@ macro_rules! mob_catalog_machine_dsl {
             CommitMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: Enum<MemberSessionDisposal>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, kickoff_owed: bool, kickoff_objective_id: String, definition_wiring_exempt: bool },
             // The release verdict for one member: the shell's release_member
             // answers through it, never from a shell phase read. A pure
-            // verdict in every lifecycle phase.
-            ClassifyMemberRelease { agent_identity: AgentIdentity },
+            // verdict in every lifecycle phase. A scoped release names the
+            // incarnation it means (runtime id, fence and session, all three
+            // or none): a scope that is not the current incarnation on its
+            // current session answers Stale.
+            ClassifyMemberRelease { agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId> },
             // The adoption of one legacy member as an identity entry, once,
             // in the first declaration after an upgrade. legacy_roster_member
             // is the shell's raw observation that the spawn row of the
@@ -2049,6 +2068,10 @@ macro_rules! mob_catalog_machine_dsl {
             // adoption, records the entry's origin; the live steps record
             // the entry in their own transition.
             RecoverIdentityEntry { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: Enum<IdentityEntryOrigin> },
+            // Replay: the rotation a retirement's start row records (its
+            // stored rotation: target, next session, endpoint), on the
+            // Retiring incarnation the replay of that row restored.
+            RecoverMemberRotationIntent { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: Enum<RotationTarget>, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint> },
         }
 
         effect MobMachineEffect {
@@ -2449,6 +2472,9 @@ macro_rules! mob_catalog_machine_dsl {
             LegacyIdentityEntryAdoptionResolved { agent_identity: AgentIdentity, verdict: Enum<LegacyIdentityEntryAdoptionKind> },
             // The agent lane's admission of a member command.
             AgentLaneMemberAdmissionResolved { agent_identity: AgentIdentity, admission: Enum<AgentLaneMemberAdmissionKind> },
+            // A fresh-life respawn the machine refuses (`Respawn`): the shell
+            // answers it typed, and nothing changed.
+            RespawnRefused { agent_identity: AgentIdentity, reason: Enum<RespawnRefusalReason> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3390,6 +3416,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
         disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
         disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition RespawnRefused => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -4308,6 +4335,26 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.contains_key(id))
         }
 
+        // Every rotation intent has its target, and only a rotation intent
+        // has one.
+        invariant rotation_target_recorded_with_its_intent {
+            for_all(id in self.member_rotation_targets.keys(),
+                self.member_rotation_session_ids.contains_key(id))
+            && for_all(id in self.member_rotation_session_ids.keys(),
+                self.member_rotation_targets.contains_key(id))
+        }
+
+        // A same-session rotation keeps its member's session: while it is
+        // pending the member stays bound to the session the rotation names,
+        // and the rotation records no endpoint of its own (the member keeps
+        // its own).
+        invariant same_session_rotation_keeps_its_binding {
+            for_all(id in self.member_rotation_targets.keys(),
+                self.member_rotation_targets.get_cloned(id) != Some(RotationTarget::SameSession)
+                || (self.member_session_bindings.get_cloned(id) == self.member_rotation_session_ids.get_cloned(id)
+                    && self.member_rotation_peer_endpoints.contains_key(id) == false))
+        }
+
         // An archive-only retirement is a Retiring runtime; its
         // retirement routes no runtime retire.
         invariant archive_only_retirement_is_retiring {
@@ -4411,7 +4458,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // The destroy beats every member lifecycle. A destroyed mob holds
-        // no residency, rotation intent, pending host preparation or
+        // no residency, rotation intent or target, pending host preparation or
         // archive-only retirement, so nothing waits on a rotation or a host
         // carry-out after it, and no identity entry or entry custody.
         invariant destroyed_mob_holds_no_member_lifecycle {
@@ -4420,6 +4467,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_wake_attempts == EmptyMap
                 && self.member_rotation_session_ids == EmptyMap
                 && self.member_rotation_peer_endpoints == EmptyMap
+                && self.member_rotation_targets == EmptyMap
                 && self.member_host_preparation_pending == EmptySet
                 && self.runtime_retire_archive_only == EmptySet
                 && self.identity_entry_origins == EmptyMap
@@ -9049,6 +9097,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_present" { releasing != None }
             guard "session_matches_releasing" { session_id == releasing }
             guard "binding_matches_releasing" { self.member_session_bindings.get_cloned(agent_identity) == releasing }
+            // A same-session rotation keeps its member's session: its
+            // retirement is re-driven preserving the binding, never
+            // released.
+            guard "same_session_rotation_absent" { self.member_rotation_targets.get_cloned(agent_identity) != Some(RotationTarget::SameSession) }
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
@@ -9509,6 +9561,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -9619,6 +9672,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -12631,6 +12685,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
@@ -12665,11 +12720,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedLive {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -12742,6 +12802,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -12761,11 +12822,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedLivePreservingTopology {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -12780,6 +12846,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
+            // Only the legacy fresh-life respawn preserves topology, and it
+            // never respawns an identity entry (RespawnRunning admits none):
+            // its archive refuses an entry too, whatever the shell previewed.
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
@@ -12838,6 +12908,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -12853,11 +12924,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedLiveStopped {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Stopped }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -12926,6 +13002,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -12945,11 +13022,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedRetired {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -13012,6 +13094,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13030,11 +13113,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedRetiredPreservingTopology {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -13049,6 +13137,9 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
+            // As in the live arm: a legacy fresh-life respawn's archive
+            // refuses an identity entry.
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
@@ -13101,6 +13192,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -13115,11 +13207,16 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveMemberRetirementArchivedRetiredStopped {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Stopped }
             // A rotating identity's terminal is CommitMemberRotation. A
-            // rotation lost in a crash is re-driven by the host, which marks
-            // the identity host-pending at build: its plain terminal waits for
-            // the host's carry-out (BeginMemberRotation or
+            // rotation a crash interrupted is recorded again from its start
+            // row (RecoverMemberRotationIntent) and finished by that terminal.
+            // One whose row predates the record is re-driven by the host,
+            // which marks the identity host-pending at build: its plain
+            // terminal waits for the host's carry-out (BeginMemberRotation or
             // ResolveMemberHostPreparation), so a re-driven rotation never
             // leaves a non-member window.
             // Once the mob's destroy is admitted the destroy beats both: this
@@ -13182,6 +13279,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13201,6 +13299,9 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveMemberRetirementArchivedPlacedLive {
             per_phase [Running, Stopped]
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_present" { self.current_placed_spawn_ids.contains_key(agent_identity) == true }
@@ -13264,6 +13365,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -13309,6 +13411,9 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveMemberRetirementArchivedPlacedRetired {
             per_phase [Running, Stopped]
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
+            // A plain archive ends the session's member: it never takes a
+            // session the retirement kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "placed_carrier_present" { self.current_placed_spawn_ids.contains_key(agent_identity) == true }
@@ -13366,6 +13471,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -13515,6 +13621,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveDestroyMemberRetirementArchivedLiveRunning {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
@@ -13572,6 +13681,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -13594,6 +13704,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveDestroyMemberRetirementArchivedLiveStopped {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
@@ -13651,6 +13764,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -13673,6 +13787,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveDestroyMemberRetirementArchivedRetiredRunning {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
@@ -13724,6 +13841,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -13745,6 +13863,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ObserveDestroyMemberRetirementArchivedRetiredStopped {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
@@ -13796,6 +13917,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -13818,6 +13940,9 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveDestroyMemberRetirementArchivedPlacedLive {
             per_phase [Running, Stopped]
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -13884,6 +14009,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -13916,6 +14042,9 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveDestroyMemberRetirementArchivedPlacedRetired {
             per_phase [Running, Stopped]
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal }
+            // The destroy's archive never takes a session a retirement
+            // kept for a successor.
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -13976,6 +14105,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -14355,7 +14485,7 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
-            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
+            emit RotationSessionsAbandoned { rotations: mob_machine_fresh_rotation_sessions(self.member_rotation_session_ids, self.member_rotation_targets) }
             emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobDestroying }
         }
 
@@ -14493,6 +14623,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed = EmptyMap;
                 self.member_rotation_session_ids = EmptyMap;
                 self.member_rotation_peer_endpoints = EmptyMap;
+                self.member_rotation_targets = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
                 self.member_host_preparation_pending = EmptySet;
                 // Spawn-exec phase ladder: total teardown — clear the whole phase
@@ -20974,6 +21105,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_present" { releasing != None }
             guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
             guard "session_matches_releasing" { session_id == releasing }
+            // A same-session rotation keeps its member's session: its
+            // retirement is re-driven preserving the binding, never
+            // released.
+            guard "same_session_rotation_absent" { self.member_rotation_targets.get_cloned(agent_identity) != Some(RotationTarget::SameSession) }
             guard "retire_archive_only" {
                 self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
                 || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
@@ -21295,6 +21430,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_present" { releasing != None }
             guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
             guard "session_matches_releasing" { session_id == releasing }
+            // A same-session rotation keeps its member's session: its
+            // retirement is re-driven preserving the binding, never
+            // released.
+            guard "same_session_rotation_absent" { self.member_rotation_targets.get_cloned(agent_identity) != Some(RotationTarget::SameSession) }
             guard "retire_archive_only" {
                 self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
                 || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
@@ -21867,6 +22006,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed = EmptyMap;
                 self.member_rotation_session_ids = EmptyMap;
                 self.member_rotation_peer_endpoints = EmptyMap;
+                self.member_rotation_targets = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
                 self.member_host_preparation_pending = EmptySet;
                 self.runtime_retire_archive_only = EmptySet;
@@ -21885,15 +22025,37 @@ macro_rules! mob_catalog_machine_dsl {
         // Respawn (input, Running self-loop)
         // =====================================================================
 
+        // A fresh-life respawn (retire, then spawn a successor on a new
+        // session) of the identity's current incarnation. An identity entry's
+        // successor keeps its session and its entry (a same-session rotation),
+        // so an entry is never respawned as a fresh life: the twin below
+        // refuses it, typed.
         transition RespawnRunning {
-            on input Respawn { agent_runtime_id }
+            on input Respawn { agent_identity, agent_runtime_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {}
             to Running
             emit ExposePendingSpawn
+        }
+
+        // The fresh-life respawn of an identity entry's member, refused in
+        // every phase an entry lives in: nothing changes, and the shell
+        // answers the refusal typed (the entry's member is respawned on its
+        // own session instead, which a mob that is not Running refuses), so
+        // no fresh-life step runs for an entry in any phase.
+        transition RespawnIdentityEntryRefused {
+            per_phase [Running, Stopped, Completed]
+            on input Respawn { agent_identity, agent_runtime_id }
+            guard "identity_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit RespawnRefused { agent_identity: agent_identity, reason: RespawnRefusalReason::IdentityEntryKeepsSession }
         }
 
         // =====================================================================
@@ -22805,7 +22967,7 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
-            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
+            emit RotationSessionsAbandoned { rotations: mob_machine_fresh_rotation_sessions(self.member_rotation_session_ids, self.member_rotation_targets) }
         }
 
         transition AdmitDestroyCleanupCompleted {
@@ -22840,7 +23002,7 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
-            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
+            emit RotationSessionsAbandoned { rotations: mob_machine_fresh_rotation_sessions(self.member_rotation_session_ids, self.member_rotation_targets) }
         }
 
         transition AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped {
@@ -25633,7 +25795,8 @@ macro_rules! mob_catalog_machine_dsl {
         // terminal's Stopped twins finish it.
         transition BeginMemberRotation {
             per_phase [Running]
-            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived }
+            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target }
+            guard "fresh_session_target" { target == RotationTarget::FreshSession }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The destroy beats the rotation. Once it is admitted the
             // identity's retirement ends through the destroy, which drops the
@@ -25670,8 +25833,73 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.member_rotation_peer_endpoints.remove(agent_identity);
                 }
+                self.member_rotation_targets.insert(agent_identity, RotationTarget::FreshSession);
             }
             to Running
+        }
+
+        // A same-session rotation (a respawn, a declared role migration, a
+        // runtime-mode restamp) of the current incarnation. Unlike a
+        // FreshSession rotation it starts the incarnation's retirement
+        // itself, in this step, and records the rotation in the same step:
+        // the binding stays, and its terminal (the SameSession arms of
+        // CommitMemberRotation) seats the next incarnation Dormant on the
+        // member's OWN session, which the retirement keeps. The retirement
+        // routes no runtime retire (the runtime is recorded archive-only): a
+        // routed runtime Retire would leave the kept session's runtime
+        // retired for good, so the shell's disposal releases the
+        // registration and keeps the session (KeptForSuccessor). The member
+        // keeps its own endpoint: the rotation records none. Running only,
+        // as BeginMemberRotation; a Stop that lands mid-rotation keeps the
+        // intent, and the terminal's Stopped twin finishes it.
+        transition BeginMemberRotationSameSession {
+            per_phase [Running]
+            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target }
+            guard "same_session_target" { target == RotationTarget::SameSession }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The destroy beats the rotation, as for BeginMemberRotation.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "fence_token_matches_history" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "rotation_not_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
+            guard "same_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "session_not_archived" { session_archived == false }
+            guard "member_keeps_its_endpoint" { peer_endpoint == None }
+            update {
+                // The retirement's start, as RetireRunningPreservingBinding's
+                // archive-only twin: the binding stays.
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                // The rotation, on the member's own session.
+                self.member_rotation_session_ids.insert(agent_identity, session_id);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
+            // A member retire opens the kickoff-waiter drain obligation; the
+            // terminal is guarded on its closure.
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         // The rotation's archive terminal: the exact Retiring incarnation
@@ -25685,6 +25913,11 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            // A FreshSession rotation's terminal: its retirement disposed of
+            // the retiring incarnation's session (a kept session is a
+            // SameSession rotation's, whose own arms seat on it).
+            guard "fresh_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::FreshSession) }
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The re-seat owes no kickoff here; a rotation whose spec owes
             // one takes the Kickoff twin below. The caller states which.
@@ -25844,6 +26077,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_health_class.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -25867,6 +26101,11 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            // A FreshSession rotation's terminal: its retirement disposed of
+            // the retiring incarnation's session (a kept session is a
+            // SameSession rotation's, whose own arms seat on it).
+            guard "fresh_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::FreshSession) }
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The re-seat owes no kickoff here; a rotation whose spec owes
             // one takes the Kickoff twin below. The caller states which.
@@ -26026,6 +26265,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_health_class.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -26413,7 +26653,15 @@ macro_rules! mob_catalog_machine_dsl {
         // the registration release route, fenced by the epoch.
         transition ClassifyMemberRelease {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ClassifyMemberRelease { agent_identity }
+            on input ClassifyMemberRelease { agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id }
+            // An unscoped release, or one whose scope is the current
+            // incarnation (runtime id and fence) on its current session.
+            guard "scope_current" {
+                scope_agent_runtime_id == None
+                || (self.identity_to_runtime.get_cloned(agent_identity) == scope_agent_runtime_id
+                    && self.identity_runtime_fence_tokens.get_copied(agent_identity) == scope_fence_token
+                    && self.member_session_bindings.get_cloned(agent_identity) == scope_session_id)
+            }
             update {}
             to Running
             emit MemberReleaseClassified {
@@ -26435,6 +26683,24 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
+        // A scoped release whose scope is not the current incarnation on its
+        // current session (another runtime id or fence, another session, or
+        // no member at all): Stale, and nothing is released. A pure verdict
+        // in every lifecycle phase.
+        transition ClassifyMemberReleaseStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyMemberRelease { agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id }
+            guard "scope_stale" {
+                scope_agent_runtime_id != None
+                && (self.identity_to_runtime.get_cloned(agent_identity) != scope_agent_runtime_id
+                    || self.identity_runtime_fence_tokens.get_copied(agent_identity) != scope_fence_token
+                    || self.member_session_bindings.get_cloned(agent_identity) != scope_session_id)
+            }
+            update {}
+            to Running
+            emit MemberReleaseClassified { agent_identity: agent_identity, verdict: MemberReleaseVerdict::Stale }
+        }
+
         // The rotation terminal of a spec that owes a kickoff: as
         // its kickoff-free twin, and the next incarnation is seated with the
         // kickoff recorded pending.
@@ -26442,6 +26708,11 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            // A FreshSession rotation's terminal: its retirement disposed of
+            // the retiring incarnation's session (a kept session is a
+            // SameSession rotation's, whose own arms seat on it).
+            guard "fresh_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::FreshSession) }
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // A rotation whose spec owes a kickoff re-seats the
             // next incarnation with the kickoff recorded pending, so it is
@@ -26610,6 +26881,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_health_class.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -26635,6 +26907,11 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            // A FreshSession rotation's terminal: its retirement disposed of
+            // the retiring incarnation's session (a kept session is a
+            // SameSession rotation's, whose own arms seat on it).
+            guard "fresh_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::FreshSession) }
+            guard "session_disposed" { disposal != MemberSessionDisposal::KeptForSuccessor }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // A rotation whose spec owes a kickoff re-seats the
             // next incarnation with the kickoff recorded pending, so it is
@@ -26803,6 +27080,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_health_class.remove(agent_identity);
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -26822,6 +27100,414 @@ macro_rules! mob_catalog_machine_dsl {
             emit PublishWakeRoute { agent_identity: agent_identity }
             emit PersistKickoffUpdate { member_id: agent_identity, phase: KickoffPhase::Pending }
             emit EmitKickoffLifecycleNotice { member_id: agent_identity, intent: KickoffIntent::Pending }
+        }
+
+        // The same-session rotation's terminal: the exact Retiring
+        // incarnation, whose runtime registration the shell released while
+        // it kept the session (disposal KeptForSuccessor), is retired and the
+        // next one is seated Dormant at the next generation on the SAME
+        // session in ONE transition, so the identity is never a non-member
+        // and the session is never without its member. The binding, the
+        // member's endpoint and its wiring edges stay: the session, and with
+        // it the member's comms identity, is the same. Its MemberRetired and
+        // MemberSpawned rows (both naming the session) are appended in one
+        // batch before the commit. The next incarnation's profile (its
+        // grant) and runtime mode may differ from the retiring one's. A
+        // host-pending member keeps its mark: only the host's seat step ends
+        // it, so the next incarnation never wakes before the host's step.
+        transition CommitMemberRotationSameSession {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "same_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::SameSession) }
+            // The retirement kept the session for the next incarnation.
+            guard "session_kept" { disposal == MemberSessionDisposal::KeptForSuccessor }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The re-seat owes no kickoff here; a rotation whose spec owes one
+            // takes the Kickoff twin below. The caller states which.
+            guard "rotation_owes_no_kickoff" { kickoff_owed == false }
+            // The destroy beats the rotation, as for the FreshSession terminal.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            // The start routed no runtime retire: the retiring runtime is
+            // still current here.
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_kept" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "rotation_session_is_the_binding" { self.member_rotation_session_ids.get_cloned(agent_identity) == session_id }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guard (the spawn mint); its peer
+            // id is the member's own.
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            update {
+                // The retiring incarnation's runtime facts end. Its member's
+                // session, endpoint and wiring edges stay: they are the
+                // next incarnation's.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                // The next incarnation, seated Dormant on the SAME session in
+                // the same step: no non-member window, and the session is
+                // never without its member. A seat session no build created
+                // yet stays unborn: the next incarnation's first wake creates
+                // it.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A changed profile (a declared role migration) or runtime
+                // mode (a restamp) is the next incarnation's own.
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                // The member keeps its endpoint; one with none (network
+                // comms) owes it until its next wake registers one.
+                if self.member_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                // A host's preparation mark stays: the mob's own terminal is
+                // not the host's seat step, so a host-pending successor is
+                // seated Dormant and waits for that step (the host wakes
+                // first).
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+        }
+
+        // The same-session rotation's terminal of a spec that owes a kickoff
+        // (a respawn with an initial message): as its kickoff-free twin, and
+        // the next incarnation is seated with the kickoff recorded pending.
+        transition CommitMemberRotationSameSessionKickoff {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "same_session_target" { self.member_rotation_targets.get_cloned(agent_identity) == Some(RotationTarget::SameSession) }
+            // The retirement kept the session for the next incarnation.
+            guard "session_kept" { disposal == MemberSessionDisposal::KeptForSuccessor }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "rotation_owes_kickoff" { kickoff_owed == true }
+            // The destroy beats the rotation, as for the FreshSession terminal.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            // The start routed no runtime retire: the retiring runtime is
+            // still current here.
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_kept" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "rotation_session_is_the_binding" { self.member_rotation_session_ids.get_cloned(agent_identity) == session_id }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guard (the spawn mint); its peer
+            // id is the member's own.
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            update {
+                // The retiring incarnation's runtime facts end. Its member's
+                // session, endpoint and wiring edges stay: they are the
+                // next incarnation's.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                // The next incarnation, seated Dormant on the SAME session in
+                // the same step: no non-member window, and the session is
+                // never without its member. A seat session no build created
+                // yet stays unborn: the next incarnation's first wake creates
+                // it.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A changed profile (a declared role migration) or runtime
+                // mode (a restamp) is the next incarnation's own.
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                // The member keeps its endpoint; one with none (network
+                // comms) owes it until its next wake registers one.
+                if self.member_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                // A host's preparation mark stays: the mob's own terminal is
+                // not the host's seat step, so a host-pending successor is
+                // seated Dormant and waits for that step (the host wakes
+                // first).
+                // The owed kickoff (the respawn's initial message), recorded
+                // pending on the next incarnation in the same step: its boot
+                // verdict wakes it, and the kickoff runs once on the kept
+                // session.
+                self.member_kickoff_pending.insert(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.member_kickoff_objective_ids.insert(agent_identity, kickoff_objective_id);
+                if !self.objective_owner_ids.contains_key(kickoff_objective_id) {
+                    self.objective_owner_ids.insert(kickoff_objective_id, agent_identity);
+                }
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+            emit PersistKickoffUpdate { member_id: agent_identity, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: agent_identity, intent: KickoffIntent::Pending }
+        }
+
+        // The replay of a rotation's intent from its retirement's start row
+        // (the row's stored rotation), right after the replay of that row
+        // restored the Retiring incarnation, in the same pass: a Running
+        // mob, as that replay. The intent is recorded again with its target,
+        // next session and endpoint, so after a restart the rotation's own
+        // terminal finishes it with no host record: the plain archive
+        // terminal waits while the intent stands. The terminal's profile
+        // grant is the re-drive's own (AuthorizeSpawnProfile under the
+        // recovered intent). One arm per target, and one for an admitted
+        // destroy, which beats the rotation: the intent is not recorded and
+        // the destroy's retirement ends the identity.
+        transition RecoverMemberRotationIntentFreshSession {
+            per_phase [Running]
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            guard "fresh_session_target" { target == RotationTarget::FreshSession }
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "rotation_not_recorded" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
+            guard "new_session" { self.member_session_bindings.get_cloned(agent_identity) != Some(session_id) }
+            update {
+                self.member_rotation_session_ids.insert(agent_identity, session_id);
+                if peer_endpoint != None {
+                    self.member_rotation_peer_endpoints.insert(agent_identity, peer_endpoint.get("value"));
+                } else {
+                    self.member_rotation_peer_endpoints.remove(agent_identity);
+                }
+                self.member_rotation_targets.insert(agent_identity, RotationTarget::FreshSession);
+            }
+            to Running
+        }
+
+        transition RecoverMemberRotationIntentSameSession {
+            per_phase [Running]
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            guard "same_session_target" { target == RotationTarget::SameSession }
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "rotation_not_recorded" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
+            guard "same_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "member_keeps_its_endpoint" { peer_endpoint == None }
+            update {
+                self.member_rotation_session_ids.insert(agent_identity, session_id);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
+            }
+            to Running
+        }
+
+        transition RecoverMemberRotationIntentDestroying {
+            per_phase [Running]
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            update {}
+            to Running
         }
 
         // A refused binding request that belongs to no open wake of the
@@ -28651,6 +29337,23 @@ macro_rules! mob_catalog_machine_dsl {
                 .collect()
         }
 
+        // The next sessions of the pending FreshSession rotations, which a
+        // destroy's admission abandons: no member will own them. A
+        // SameSession rotation names its member's own session, which the
+        // destroy's retirement of that member disposes of.
+        fn mob_machine_fresh_rotation_sessions(
+            member_rotation_session_ids: &std::collections::BTreeMap<AgentIdentity, SessionId>,
+            member_rotation_targets: &std::collections::BTreeMap<AgentIdentity, RotationTarget>,
+        ) -> std::collections::BTreeMap<AgentIdentity, SessionId> {
+            member_rotation_session_ids
+                .iter()
+                .filter(|(identity, _)| {
+                    member_rotation_targets.get(*identity) != Some(&RotationTarget::SameSession)
+                })
+                .map(|(identity, session)| (identity.clone(), session.clone()))
+                .collect()
+        }
+
         fn mob_machine_placed_cleanup_absent_for_identity(
             obligations: &std::collections::BTreeSet<PlacedCarrierCleanupObligation>,
             agent_identity: &AgentIdentity,
@@ -30019,6 +30722,9 @@ pub enum MemberReleaseVerdict {
     /// peer, in another process, cannot wake it through an inproc route, so
     /// it stays Live and nothing is released until that edge is unwired.
     PinnedByPlacedPeer,
+    /// A scoped release whose scope is not the current incarnation on its
+    /// current session: nothing is released.
+    Stale,
 }
 
 /// A runtime registration epoch, as the composition route carries it.
@@ -30616,6 +31322,27 @@ pub enum IdentityEntryOrigin {
     Declared,
 }
 
+/// Why the machine refuses a fresh-life respawn (`RespawnRefused`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RespawnRefusalReason {
+    /// The identity is an identity entry: its successor keeps its session
+    /// and its entry (a same-session rotation), never a fresh life.
+    #[default]
+    IdentityEntryKeepsSession,
+}
+
+/// Where a rotation seats its next incarnation (`member_rotation_targets`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RotationTarget {
+    /// A new session (a reset, a deletion): the retiring incarnation's
+    /// session is disposed of.
+    #[default]
+    FreshSession,
+    /// The member's own session, which the retirement keeps (a respawn, a
+    /// declared role migration, a runtime-mode restamp).
+    SameSession,
+}
+
 /// The verdict of [`MobMachineInput::AdoptLegacyIdentityEntry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LegacyIdentityEntryAdoptionKind {
@@ -31133,6 +31860,9 @@ pub enum MemberSessionDisposal {
     Archived,
     RuntimeReleasedOnlyHostOwned,
     RuntimeReleasedOnlyNoDurableSessions,
+    /// A same-session rotation's retirement released the runtime and kept
+    /// the session: its next incarnation is seated on it.
+    KeptForSuccessor,
 }
 
 /// Machine-owned flow-step dispatch verdict (§18.9).

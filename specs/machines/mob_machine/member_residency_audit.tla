@@ -3,7 +3,7 @@
 \*
 \* The generated ci profile has no identities, so the residency arms and the
 \* residency invariants hold there only vacuously. This audit keeps the
-\* generated model unchanged and drives the residency arms in eight runs,
+\* generated model unchanged and drives the residency arms in eleven runs,
 \* each over a small, fixed domain, so every run fits the canonical lane's
 \* per-run cap:
 \*
@@ -28,18 +28,19 @@
 \*     routed and the archive-only retirement starts, the routed retire
 \*     retry, the runtime retire observation, the session ingress detach, the
 \*     plain archives, the replayed retirement starts, a rotation with its
-\*     terminal in Running and Stopped, a host-pending seed and its
-\*     carry-out, the identity seated again on the session its first seat
-\*     named, its exemption from the definition's wiring rules recorded by
-\*     its reseat's or its rotation's own input or by the replay of its row
-\*     for any of its incarnations in Running and Stopped (the run never
-\*     seals, so the replay applies throughout), and the mob's destroy: its
-\*     admission, its member retirement and archive arms and DestroyMob.
+\*     terminal in Running and Stopped, owing a kickoff or not, a
+\*     host-pending seed and its carry-out, the identity seated again on the
+\*     session its first seat named, its exemption from the definition's
+\*     wiring rules recorded by its reseat's or its rotation's own input or
+\*     by the replay of its row for any of its incarnations in Running and
+\*     Stopped (the run never seals, so the replay applies throughout), and
+\*     the mob's destroy: its admission, its member retirement and archive
+\*     arms and DestroyMob.
 \*   terminal (AuditTerminalSpec): one identity in the Completed and
 \*     Destroyed phases: Complete, MarkCompleted, the destroy, Shutdown, the
 \*     late feedback, the release, the wake refusal, the notice
-\*     classification and the release verdict there, and the replayed Retired
-\*     record.
+\*     classification and the release verdict (unscoped and scoped) there,
+\*     and the replayed Retired record.
 \*   resume (AuditResumeSpec): one identity through an explicit resume: Stop,
 \*     the resume's preparation, its readiness before Resume (while Stopped)
 \*     and Resume, the three member reservation arms (Dormant, Live, Join),
@@ -64,6 +65,38 @@
 \*     notified by the other: a peer notice between members, a wake while
 \*     the sender is Waking, and a retirement of one member while the other is
 \*     Waking.
+\*   rotate-same (AuditRotateSameSpec): one identity, made an identity entry
+\*     by the replay of its row or not, with or without an endpoint, marked
+\*     host-pending at build or not, rotated onto its own session (a
+\*     respawn) from any residency: the rotation's start, its profile grant,
+\*     its terminal owing a kickoff or not in Running and Stopped, the host's
+\*     seat step that ends the mark, the archive-only retirement starts and
+\*     re-drives
+\*     beside it (releasing and preserving the binding), the plain archives
+\*     with the session archived or kept, either incarnation's wake, ready
+\*     observation and release, the release verdict for every scope (none,
+\*     either incarnation's runtime id and fence, the member's session or
+\*     another), and the mob's destroy.
+\*   recover-rotation (AuditRecoverRotationSpec): one identity whose
+\*     retirement start (releasing or preserving the binding) and rotation
+\*     (FreshSession onto session 3, with or without an endpoint, or
+\*     SameSession on session 1) are replayed by every arm of the replay
+\*     signal, re-driven after the restart, and finished by the rotation's own
+\*     terminal (owing a kickoff or not, in Running and Stopped), its profile
+\*     grant, the session ingress detach, the plain archives, the next
+\*     incarnation's wake and the mob's destroy.
+\*   replay-same (AuditReplaySameSpec): two identities, member 1 wired to
+\*     member 2 and to an external peer, whose committed same-session
+\*     rotation's rows are replayed: each member's spawn row (the member,
+\*     its endpoint, its binding), the edge's and the external edge's rows,
+\*     member 1's MemberRetired row (its start preserved the binding, not
+\*     the topology, so the replay ends the incarnation's edges), its
+\*     successor's spawn row (generation 1 on the same session with the same
+\*     endpoint, only after that MemberRetired row) and the rows the
+\*     terminal batch records again (the edge and the external edge), every
+\*     row but the successor's in any order, then the end-of-replay roster
+\*     topology convergence, the boot plan and seal, and the successor's
+\*     wake.
 \*
 \* Domains are fixed per run (see the runner). Each run explores its whole
 \* reachable space under a state constraint that caps the machine's wake
@@ -116,7 +149,33 @@
 \*     Dormant, with its endpoint or owed EndpointPending, and requests no
 \*     runtime binding) and AuditSeatDecidesExemptionFromInput (a dormant
 \*     seat or a spawn commit records its member exempt from the
-\*     definition's wiring rules exactly when its own input says so).
+\*     definition's wiring rules exactly when its own input says so);
+\*   rotate-same: AuditSameSessionTerminalKeepsSession (the same-session
+\*     terminal seats the next incarnation Dormant on the member's own
+\*     session, keeping its binding and its endpoint),
+\*     AuditSameSessionNeverUnseats (while a same-session rotation is
+\*     pending, no step but the destroy's leaves the member unseated or
+\*     unbound), AuditDestroyFencesSameSessionRotation (no same-session
+\*     rotation begins or commits under an admitted destroy),
+\*     AuditSameSessionKeepsEntry (neither its start nor its terminal
+\*     records or ends an identity entry), AuditSameSessionTerminalKeepsHostMark
+\*     (its terminal neither ends nor records a host's preparation mark: only
+\*     the host's seat step ends it, so the successor never wakes first) and
+\*     AuditScopedReleaseFenced
+\*     (invariant, ENABLED form: in Running and Stopped the release verdict
+\*     answers every scope by exactly one arm, Stale exactly when the scope
+\*     is not the current incarnation on its current session);
+\*   recover-rotation: AuditRecoveredRotationFinishable (invariant, ENABLED
+\*     form: a replayed rotation whose grant is recorded and whose ingress
+\*     detach closed has an enabled terminal of its own target, and its
+\*     plain archive is not enabled, outside the destroy);
+\*   replay-same: AuditReplayKeepsKeptTopology (a step that keeps member 1's
+\*     incarnation and member 2 seated keeps their edge and member 1's
+\*     external edge: only an incarnation's end or an unseat ends them) and
+\*     AuditKeptRowsReplayable (invariant, ENABLED form: before the seal,
+\*     the replay of the edge's and the external edge's rows is accepted by
+\*     exactly one arm each, recorded already or not, so a replay never
+\*     fails on the rows a same-session terminal records again).
 \* An ASSUME over the generated wake refusal helper's whole input domain:
 \* a present, session-bound member with a phase is never refused as not a
 \* member. A second ASSUME pins the release verdict helper: Release,
@@ -322,10 +381,11 @@ AuditNotice(id) ==
         \/ ClassifyPeerNoticeRunning(id, id, ic)
         \/ ClassifyPeerNoticeStopped(id, id, ic)
 
-\* The release verdict for one member in the Running and Stopped phases.
+\* The unscoped release verdict for one member in the Running and Stopped
+\* phases.
 AuditReleaseVerdict(id) ==
-    \/ ClassifyMemberReleaseRunning(id)
-    \/ ClassifyMemberReleaseStopped(id)
+    \/ ClassifyMemberReleaseRunning(id, None, None, None)
+    \/ ClassifyMemberReleaseStopped(id, None, None, None)
 
 AuditClassify(id) ==
     \E obs \in {"DurableSnapshotPresent", "DurableSnapshotMissing"} :
@@ -496,16 +556,22 @@ RRecoverStarted ==
     \/ RecoverRosterMemberRetirementStartedPreservingBinding(Id1, Rid1, 0, None, Some(Sess1), None, FALSE)
 
 \* The rotation onto session 3 (no endpoint), its next incarnation Rid3,
-\* fence 3, generation 1, exempt from the definition's wiring rules exactly
+\* fence 3, generation 1, owing a kickoff (the Kickoff twins, which record
+\* it pending) or not, exempt from the definition's wiring rules exactly
 \* when its terminal's input says so (ex).
 RAuthorize ==
     AuthorizeSpawnProfileRunning(Id1, AuditProfile, AuditModel, AuditDigest, AuditDigest, AuditDigest, None, None, FALSE, None)
-RBeginRotation == BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, None, FALSE)
-RCommitRotationAs(ex) ==
-    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
-    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
-    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
-    \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+RBeginRotation == BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, None, FALSE, "FreshSession")
+RCommitRotationOwing(ko, ex) ==
+    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationLiveKickoffRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredKickoffRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationLiveKickoffStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredKickoffStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+RCommitRotationAs(ex) == \E ko \in BOOLEAN : RCommitRotationOwing(ko, ex)
 RCommitRotation == \E ex \in BOOLEAN : RCommitRotationAs(ex)
 RotationArms == RBeginRotation \/ RCommitRotation
 
@@ -590,6 +656,18 @@ TNotice ==
         \/ ClassifyPeerNoticeCompleted(Id1, Id1, ic)
         \/ ClassifyPeerNoticeDestroyed(Id1, Id1, ic)
 
+\* The release verdict in Completed and Destroyed: unscoped, scoped to
+\* member 1's own incarnation, and scoped to an incarnation it never had
+\* (Stale).
+TReleaseScopes ==
+    {<<None, None, None>>, <<Some(Rid1), Some(1), Some(Sess1)>>, <<Some(Rid2), Some(2), Some(Sess1)>>}
+TReleaseVerdict ==
+    \E s \in TReleaseScopes :
+        \/ ClassifyMemberReleaseCompleted(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseDestroyed(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseStaleCompleted(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseStaleDestroyed(Id1, s[1], s[2], s[3])
+
 TRecoverArms == WRecover \/ WBind \/ WEndpoint \/ WRecoverRetired
 
 AuditTerminalNext ==
@@ -602,8 +680,7 @@ AuditTerminalNext ==
     \/ WReadyEpoch1
     \/ TRelease
     \/ TNotice
-    \/ ClassifyMemberReleaseCompleted(Id1)
-    \/ ClassifyMemberReleaseDestroyed(Id1)
+    \/ TReleaseVerdict
     \/ \E a \in AuditAttempts :
            \/ ResolveRuntimeBindingRefusalStaleCompleted(Id1, Rid1, Sess1, AuditCode, AuditReason, Some(a))
            \/ ResolveRuntimeBindingRefusalStaleDestroyed(Id1, Rid1, Sess1, AuditCode, AuditReason, Some(a))
@@ -783,7 +860,7 @@ SRetire ==
     \/ RetireRunningReleasing(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
     \/ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
 SBeginRotation ==
-    \E ep \in {Some(E3Inproc), None} : BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, ep, FALSE)
+    \E ep \in {Some(E3Inproc), None} : BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, ep, FALSE, "FreshSession")
 SRuntimeRetired == ObserveRuntimeRetired(Rid1, 1)
 SDetach == SessionIngressDetachedForMobDestroyRunning(AuditMob, Rid1)
 SCommitRotation ==
@@ -875,6 +952,231 @@ AuditWake2Next ==
 AuditWake2Spec == Init /\ [][AuditWake2Next]_vars
 
 (***************************************************************************)
+(* The rotate-same run: one identity rotated onto its own session.         *)
+(***************************************************************************)
+
+\* Member 1's same-session rotation (a respawn): its retirement starts in the
+\* rotation's own step, on the member's kept binding, with no endpoint of the
+\* rotation's own.
+QBegin == BeginMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Sess1, None, FALSE, "SameSession")
+
+\* The same-session terminals: the next incarnation Rid3, fence 3,
+\* generation 1, seated Dormant on session 1, which the retirement kept,
+\* owing a kickoff (ko) or not, exempt from the definition's wiring rules
+\* exactly when its input says so (ex).
+QCommitAs(ko, ex) ==
+    \/ CommitMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Some(Sess1), "KeptForSuccessor", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationSameSessionStopped(Id1, Rid1, 1, 0, Some(Sess1), "KeptForSuccessor", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationSameSessionKickoffRunning(Id1, Rid1, 1, 0, Some(Sess1), "KeptForSuccessor", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+    \/ CommitMemberRotationSameSessionKickoffStopped(Id1, Rid1, 1, 0, Some(Sess1), "KeptForSuccessor", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
+QCommit == \E ko \in BOOLEAN, ex \in BOOLEAN : QCommitAs(ko, ex)
+
+\* Member 1's archive-only retirement starts (a Dormant or Waking member) and
+\* their re-drives: releasing the binding (which a same-session rotation
+\* refuses) or preserving it (the same-session rotation's own re-drive).
+QRetire ==
+    \/ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
+    \/ RetireStoppedReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
+    \/ RetireRunningPreservingBindingArchiveOnly(AuditMob, Rid1, Id1, 0, None, Some(Sess1))
+    \/ RetireStoppedPreservingBindingArchiveOnly(AuditMob, Rid1, Id1, 0, None, Some(Sess1))
+
+\* Member 1's plain archive terminals, with its session archived or kept (a
+\* plain archive never takes a kept session).
+QArchive ==
+    \E d \in {"Archived", "KeptForSuccessor"} :
+        \/ ObserveMemberRetirementArchivedLive(Id1, Rid1, 1, 0, Some(Sess1), d, FALSE)
+        \/ ObserveMemberRetirementArchivedLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), d, FALSE)
+
+\* Either incarnation's runtime-ready observation and registration release.
+QReady == ObserveRuntimeReady(Rid1, 1, Epoch1) \/ ObserveRuntimeReady(Rid3, 3, Epoch1)
+QRelease == ReleaseArm(Some(Rid1), Some(1), Epoch1) \/ ReleaseArm(Some(Rid3), Some(3), Epoch1)
+
+\* The release scopes: none, and every combination of either incarnation's
+\* runtime id, either fence and two sessions (the member's own and another):
+\* the retiring incarnation's own scope, stale once the rotation committed,
+\* a scope whose fence is not its runtime's, and one on another session.
+AuditReleaseScopes ==
+    {<<None, None, None>>}
+        \cup ({Some(Rid1), Some(Rid3)} \X {Some(1), Some(3)} \X {Some(Sess1), Some(Sess3)})
+
+\* The release verdict for every scope, in Running and Stopped.
+QReleaseVerdict ==
+    \E s \in AuditReleaseScopes :
+        \/ ClassifyMemberReleaseRunning(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseStopped(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseStaleRunning(Id1, s[1], s[2], s[3])
+        \/ ClassifyMemberReleaseStaleStopped(Id1, s[1], s[2], s[3])
+
+\* Member 1 made an identity entry by the replay of its row (the run never
+\* seals, so the replay applies throughout): a respawn of an entry's member
+\* is a same-session rotation.
+QEntry == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
+
+\* The host marks member 1's preparation pending at build, and its seat
+\* step for the member ends the mark.
+QHostPending == SeedMemberResidencyRunning("OnDemand", "Authoritative", {Id1})
+QHostPrepared == ResolveMemberHostPreparationRunning(Id1)
+
+AuditRotateSameNext ==
+    \/ WRecover
+    \/ WBind
+    \/ WEndpoint
+    \/ QEntry
+    \/ QHostPending
+    \/ QHostPrepared
+    \/ AuditOperatorWake(Id1)
+    \/ AuditWakePath(Id1)
+    \/ QReady
+    \/ QRelease
+    \/ QRetire
+    \/ WDetach
+    \/ QArchive
+    \/ RAuthorize
+    \/ QBegin
+    \/ QCommit
+    \/ QReleaseVerdict
+    \/ AuditQuiesceStop
+    \/ StopRunning
+    \/ ResumeStopped
+    \/ AuditQuiesceDestroy
+    \/ AdmitDestroyCleanup
+    \/ RDestroyMember
+    \/ RRuntimeRetired
+    \/ DestroyMob(Sess1)
+
+AuditRotateSameSpec == Init /\ [][AuditRotateSameNext]_vars
+
+(***************************************************************************)
+(* The recover-rotation run: a rotation's intent replayed from its         *)
+(* retirement's start row and finished by its own terminal.                *)
+(***************************************************************************)
+
+\* The rotations a start row records: a FreshSession rotation onto session 3
+\* (endpoint 3 or none) and a same-session rotation on session 1.
+VIntents ==
+    { <<"FreshSession", Sess3, Some(E3Inproc)>>,
+      <<"FreshSession", Sess3, None>>,
+      <<"SameSession", Sess1, None>> }
+
+\* The replay of a recorded rotation on member 1's Retiring incarnation, for
+\* every arm of the signal.
+VRecoverIntent ==
+    \E v \in VIntents :
+        \/ RecoverMemberRotationIntentFreshSessionRunning(Id1, Rid1, v[1], v[2], v[3])
+        \/ RecoverMemberRotationIntentSameSessionRunning(Id1, Rid1, v[1], v[2], v[3])
+        \/ RecoverMemberRotationIntentDestroyingRunning(Id1, Rid1, v[1], v[2], v[3])
+
+\* The re-drive of the replayed retirement (archive-only: nothing is
+\* registered after a restart), preserving the binding (a same-session
+\* rotation's own) or releasing it.
+VRedrive ==
+    \/ RetireRunningPreservingBindingArchiveOnly(AuditMob, Rid1, Id1, 0, None, Some(Sess1))
+    \/ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
+
+\* The FreshSession terminals over the runtime the restart left in place
+\* (the session archived), owing a kickoff (ko) or not, in Running and
+\* Stopped; the same-session ones are the rotate-same run's.
+VCommitFresh(ko) ==
+    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), "Archived", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, FALSE)
+    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), "Archived", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, FALSE)
+    \/ CommitMemberRotationLiveKickoffRunning(Id1, Rid1, 1, 0, Some(Sess1), "Archived", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, FALSE)
+    \/ CommitMemberRotationLiveKickoffStopped(Id1, Rid1, 1, 0, Some(Sess1), "Archived", Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, FALSE)
+VCommitSame(ko) == QCommitAs(ko, FALSE)
+VCommit == \E ko \in BOOLEAN : VCommitFresh(ko) \/ VCommitSame(ko)
+
+AuditRecoverRotationNext ==
+    \/ WRecover
+    \/ WBind
+    \/ WEndpoint
+    \/ RRecoverStarted
+    \/ VRecoverIntent
+    \/ RAuthorize
+    \/ WDetach
+    \/ VRedrive
+    \/ VCommit
+    \/ PlainArchives
+    \/ AuditOperatorWake(Id1)
+    \/ AuditWakePath(Id1)
+    \/ AuditQuiesceStop
+    \/ StopRunning
+    \/ ResumeStopped
+    \/ AuditQuiesceDestroy
+    \/ AdmitDestroyCleanup
+    \/ RDestroyMember
+    \/ DestroyMob(Sess1)
+
+AuditRecoverRotationSpec == Init /\ [][AuditRecoverRotationNext]_vars
+
+(***************************************************************************)
+(* The replay-same run: the rows of a committed same-session rotation      *)
+(* replayed, the edges its terminal kept among them.                       *)
+(***************************************************************************)
+
+\* Member 1's external peer (its own name and peer id) and its key.
+YExternal ==
+    [local |-> Id1,
+     endpoint |-> [name |-> "peername_4", peer_id |-> "peerid_4", address |-> "inproc://peername_4",
+                   signing_key |-> "peersigningkey_4"]]
+YExternalKey == [local |-> Id1, name |-> "peername_4"]
+
+\* The spawn rows, each replayed as the builder replays one: the member, its
+\* endpoint and its binding. Member 1's first incarnation (Rid1, fence 1,
+\* generation 0) and its same-session successor (Rid3, fence 3,
+\* generation 1) share session 1 and endpoint 1; member 2 is Rid2, fence 2,
+\* session 2, endpoint 2. The successor's spawn row follows the first
+\* incarnation's rows and its MemberRetired row in the journal: the replay
+\* meets it only once generation 0 is retained and member 1 is unseated.
+YRecoverSuccessor ==
+    /\ Id1 \in DOMAIN identity_runtime_generations
+    /\ identity_runtime_generations[Id1] = 0
+    /\ RecoverRosterMemberRunning(Id1, Rid3, 3, 1, AuditProfile, AuditMode, FALSE)
+YRecover ==
+    \/ RecoverRosterMemberRunning(Id1, Rid1, 1, 0, AuditProfile, AuditMode, FALSE)
+    \/ RecoverRosterMemberRunning(Id2, Rid2, 2, 0, AuditProfile, AuditMode, FALSE)
+    \/ YRecoverSuccessor
+YEndpoint ==
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id1, Rid1, 1, 0, E1Inproc)
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id2, Rid2, 2, 0, E2Inproc)
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id1, Rid3, 3, 1, E1Inproc)
+YBind ==
+    \/ RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
+    \/ RecoverMemberSessionBindingFreshRunning(Id2, Rid2, Sess2, None)
+    \/ RecoverMemberSessionBindingFreshRunning(Id1, Rid3, Sess1, None)
+
+\* The edge's and the external edge's rows: their own, and the ones the
+\* same-session terminal's batch records again after its successor's spawn
+\* row (recorded already or not).
+YWire ==
+    \/ RecoverRosterWiringRunning(AuditEdge)
+    \/ RecoverRosterWiringAlreadyRecovered(AuditEdge)
+    \/ RecoverExternalPeerWiringRunning(YExternalKey, YExternal)
+    \/ RecoverExternalPeerWiringAlreadyRecovered(YExternalKey, YExternal)
+
+\* Member 1's MemberRetired row: its same-session start preserved the
+\* binding, not the topology, so the replay ends the incarnation's edges.
+YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE)
+
+\* The end-of-replay roster topology convergence of the edge.
+YConverge ==
+    \/ ConvergeRecoveredRosterTopologyPrune(AuditEdge, Id1, Id2)
+    \/ ConvergeRecoveredRosterTopologyRetain(AuditEdge, Id1, Id2)
+
+AuditReplaySameNext ==
+    \/ YRecover
+    \/ YEndpoint
+    \/ YBind
+    \/ YWire
+    \/ YRetired
+    \/ YConverge
+    \/ AuditPlanDefault(Id1)
+    \/ AuditPlanDefault(Id2)
+    \/ SealBootMaterializationPlan
+    \/ AuditOperatorWake(Id1)
+    \/ AuditWakePath(Id1)
+
+AuditReplaySameSpec == Init /\ [][AuditReplaySameNext]_vars
+
+(***************************************************************************)
 (* Constraint and view.                                                    *)
 (***************************************************************************)
 
@@ -886,6 +1188,12 @@ AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
 (***************************************************************************)
 (* Properties.                                                             *)
 (***************************************************************************)
+
+\* The same-session terminal neither ends nor records a host's preparation
+\* mark: only the host's seat step ends it, so a host-pending member's
+\* successor never wakes before that step.
+AuditSameSessionTerminalKeepsHostMark ==
+    [][QCommit => (Id1 \in member_host_preparation_pending' <=> Id1 \in member_host_preparation_pending)]_vars
 
 \* A recovery or seat step leaves every existing phase as it was (a
 \* phase may only be added, by the one seating arm, or removed, by an unseat).
@@ -1176,6 +1484,83 @@ AuditSealedExemptsOnlyASeat ==
                \/ identity_to_runtime'[Id1] # identity_to_runtime[Id1]
       ]_vars
 
+\* Member 1 has a pending same-session rotation (before a step).
+SameSessionPending1 ==
+    /\ Id1 \in DOMAIN member_rotation_targets
+    /\ member_rotation_targets[Id1] = "SameSession"
+
+\* The same-session terminal seats member 1's next incarnation Dormant on the
+\* member's own session in the step that ends the retiring one: its binding
+\* and its endpoint stay.
+AuditSameSessionTerminalKeepsSession ==
+    [][QCommit =>
+         /\ Id1 \in DOMAIN identity_to_runtime'
+         /\ identity_to_runtime'[Id1] = Rid3
+         /\ Id1 \in DOMAIN member_session_bindings'
+         /\ member_session_bindings'[Id1] = Sess1
+         /\ member_peer_endpoints' = member_peer_endpoints
+         /\ Phase1Next = Some("Dormant")
+      ]_vars
+
+\* A same-session rotation never leaves member 1 unseated or unbound: while
+\* it is pending, every step but the destroy's keeps the member seated on
+\* its session (its terminal seats the next incarnation in the step that ends
+\* the retiring one).
+AuditSameSessionNeverUnseats ==
+    [][(SameSessionPending1 /\ ~destroy_admitted')
+         => /\ Id1 \in DOMAIN identity_to_runtime'
+            /\ Id1 \in DOMAIN member_session_bindings'
+            /\ member_session_bindings'[Id1] = Sess1
+      ]_vars
+
+\* No same-session rotation begins or commits under an admitted destroy.
+AuditDestroyFencesSameSessionRotation == [][destroy_admitted => ~(QBegin \/ QCommit)]_vars
+
+\* A same-session rotation keeps member 1's identity entry: neither its start
+\* nor its terminal records or ends an entry, so a respawned entry stays an
+\* entry throughout.
+AuditSameSessionKeepsEntry ==
+    [][(QBegin \/ QCommit) => identity_entry_origins' = identity_entry_origins]_vars
+
+\* Scope s names member 1's current incarnation (its runtime id and fence)
+\* on its current session, or nothing.
+ScopeCurrent(s) ==
+    \/ s[1] = None
+    \/ /\ Id1 \in DOMAIN identity_to_runtime
+       /\ s[1] = Some(identity_to_runtime[Id1])
+       /\ Id1 \in DOMAIN identity_runtime_fence_tokens
+       /\ s[2] = Some(identity_runtime_fence_tokens[Id1])
+       /\ Id1 \in DOMAIN member_session_bindings
+       /\ s[3] = Some(member_session_bindings[Id1])
+
+\* ENABLED form: in Running and Stopped, the release verdict answers every
+\* scope by exactly one arm, Stale exactly when the scope is not member 1's
+\* current incarnation on its current session (a stale runtime, fence or
+\* session), so a release scoped to a retired incarnation releases nothing.
+AuditScopedReleaseFenced ==
+    phase \in {"Running", "Stopped"} =>
+        \A s \in AuditReleaseScopes :
+            /\ (ENABLED ClassifyMemberReleaseRunning(Id1, s[1], s[2], s[3])
+                \/ ENABLED ClassifyMemberReleaseStopped(Id1, s[1], s[2], s[3])) = ScopeCurrent(s)
+            /\ (ENABLED ClassifyMemberReleaseStaleRunning(Id1, s[1], s[2], s[3])
+                \/ ENABLED ClassifyMemberReleaseStaleStopped(Id1, s[1], s[2], s[3])) = ~ScopeCurrent(s)
+
+\* ENABLED form: a rotation whose intent the replay recorded is finished by
+\* its own terminal with no host record. Once its grant is recorded and its
+\* session ingress detach closed, a terminal of its target is enabled and
+\* the plain archive is not (outside the destroy, which beats both).
+AuditRecoveredRotationFinishable ==
+    (/\ phase \in {"Running", "Stopped"}
+     /\ ~destroy_admitted
+     /\ Id1 \in DOMAIN member_rotation_targets
+     /\ Id1 \in DOMAIN spawn_profile_authority_profile_names
+     /\ Rid1 \notin pending_session_ingress_detach_runtime_ids)
+        => /\ \E ko \in BOOLEAN :
+                  IF member_rotation_targets[Id1] = "SameSession"
+                  THEN ENABLED VCommitSame(ko)
+                  ELSE ENABLED VCommitFresh(ko)
+           /\ ~ArchiveEnabled
+
 \* Over the wake refusal helper's whole input domain, a present,
 \* session-bound member with a phase is never refused as not a member.
 ASSUME \A present, bound, placed, broken, retiring, admitting, authoritative, origin_open,
@@ -1206,6 +1591,29 @@ ASSUME \A seated, placed, releasable, pinned \in BOOLEAN,
 ASSUME \A placed, sealed, has_endpoint, epoch_recorded \in BOOLEAN,
           residency \in {None, Some("Dormant"), Some("Waking"), Some("Live")} :
     ~member_registration_releasable(residency, placed, sealed, has_endpoint, epoch_recorded, TRUE)
+
+\* A step that keeps member 1's incarnation and member 2 seated keeps their
+\* edge and member 1's external edge: only an incarnation's end (its
+\* MemberRetired row) or an unseat ends them.
+AuditReplayKeepsKeptTopology ==
+    [][/\ Id1 \in DOMAIN identity_to_runtime
+       /\ Id1 \in DOMAIN identity_to_runtime'
+       /\ identity_to_runtime'[Id1] = identity_to_runtime[Id1]
+       /\ Id2 \in DOMAIN identity_to_runtime'
+       => /\ (AuditEdge \in wiring_edges => AuditEdge \in wiring_edges')
+          /\ (YExternal \in external_peer_edges => YExternal \in external_peer_edges')
+      ]_vars
+
+\* ENABLED form: in Running, before the seal, the replay of the edge's and
+\* the external edge's rows is accepted by exactly one arm each, recorded
+\* already or not: a replay never fails on the rows a same-session
+\* terminal records again.
+AuditKeptRowsReplayable ==
+    (phase = "Running" /\ boot_plan_sealed = FALSE)
+        => /\ (ENABLED RecoverRosterWiringRunning(AuditEdge))
+                # (ENABLED RecoverRosterWiringAlreadyRecovered(AuditEdge))
+           /\ (ENABLED RecoverExternalPeerWiringRunning(YExternalKey, YExternal))
+                # (ENABLED RecoverExternalPeerWiringAlreadyRecovered(YExternalKey, YExternal))
 
 (***************************************************************************)
 (* Reachability goals, each checked as an expected violation of its       *)
@@ -1364,6 +1772,74 @@ AuditWitnessRetireBesideWakingStep ==
     /\ Phase2 = Some("Waking")
     /\ W2Retire
 
+\* Rotate-same run: the next incarnation, on the session the rotation kept,
+\* wakes Live.
+AuditWitnessSameSessionWokeLiveStep ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Phase1 = Some("Waking")
+    /\ Phase1Next = Some("Live")
+\* Rotate-same run: under an admitted destroy, the destroy's archive ends a
+\* pending same-session rotation and its member.
+AuditWitnessDestroyEndsSameSessionStep ==
+    /\ SameSessionPending1
+    /\ destroy_admitted
+    /\ Id1 \notin DOMAIN member_rotation_targets'
+    /\ Id1 \notin DOMAIN identity_to_runtime'
+\* Rotate-same run: after the rotation, a release scoped to the retired
+\* incarnation on the same session answers Stale.
+AuditWitnessStaleScopeAfterRotation ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ ENABLED ClassifyMemberReleaseStaleRunning(Id1, Some(Rid1), Some(1), Some(Sess1))
+\* Rotate-same run: an identity entry's member is rotated onto its own
+\* session, and the identity stays an entry.
+AuditWitnessEntryRotatedSameSessionStep ==
+    /\ Id1 \in DOMAIN identity_entry_origins
+    /\ QCommit
+    /\ Id1 \in DOMAIN identity_entry_origins'
+\* Rotate-same run: a host-pending member's same-session terminal keeps the
+\* mark.
+AuditWitnessHostMarkKeptStep ==
+    /\ Id1 \in member_host_preparation_pending
+    /\ QCommit
+\* Rotate-same run: the successor's wake is refused while the host's mark
+\* stands.
+AuditWitnessHeldSuccessorRefusedStep ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Id1 \in member_host_preparation_pending
+    /\ WakeMemberRefusedRunning(Id1, "Operator", FALSE, "Content", FALSE)
+\* Recover-rotation run: a FreshSession rotation whose intent the replay
+\* recorded is finished by its own terminal (the run begins no rotation).
+AuditWitnessRecoveredFreshRotatedStep ==
+    /\ Id1 \in DOMAIN member_rotation_targets
+    /\ \E ko \in BOOLEAN : VCommitFresh(ko)
+\* Recover-rotation run: likewise a same-session rotation.
+AuditWitnessRecoveredSameRotatedStep ==
+    /\ Id1 \in DOMAIN member_rotation_targets
+    /\ \E ko \in BOOLEAN : VCommitSame(ko)
+\* Replay-same run: after the seal, member 1's successor is seated on its
+\* own session with its endpoint, its edge to member 2 and its external
+\* edge.
+AuditWitnessReplayedKeptTopology ==
+    /\ boot_plan_sealed
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Id1 \in DOMAIN member_session_bindings
+    /\ member_session_bindings[Id1] = Sess1
+    /\ Id1 \in DOMAIN member_peer_endpoints
+    /\ AuditEdge \in wiring_edges
+    /\ YExternal \in external_peer_edges
+\* Replay-same run: the replayed successor wakes Live with its kept edges.
+AuditWitnessReplayedSuccessorWokeLiveStep ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Phase1 = Some("Waking")
+    /\ Phase1Next = Some("Live")
+    /\ AuditEdge \in wiring_edges'
+    /\ YExternal \in external_peer_edges'
+
 NotAuditWitnessSealedDormant == ~AuditWitnessSealedDormant
 NotAuditWitnessSealedEndpointPending == ~AuditWitnessSealedEndpointPending
 NotAuditWitnessWokeLive == [][~AuditWitnessWokeLiveStep]_vars
@@ -1398,4 +1874,14 @@ NotAuditWitnessCrossNotice == [][~AuditWitnessCrossNoticeStep]_vars
 NotAuditWitnessRetireBesideWaking == [][~AuditWitnessRetireBesideWakingStep]_vars
 NotAuditWitnessExemptArchived == [][~AuditWitnessExemptArchivedStep]_vars
 NotAuditWitnessExemptRotated == [][~AuditWitnessExemptRotatedStep]_vars
+NotAuditWitnessSameSessionWokeLive == [][~AuditWitnessSameSessionWokeLiveStep]_vars
+NotAuditWitnessDestroyEndsSameSession == [][~AuditWitnessDestroyEndsSameSessionStep]_vars
+NotAuditWitnessStaleScopeAfterRotation == ~AuditWitnessStaleScopeAfterRotation
+NotAuditWitnessEntryRotatedSameSession == [][~AuditWitnessEntryRotatedSameSessionStep]_vars
+NotAuditWitnessRecoveredFreshRotated == [][~AuditWitnessRecoveredFreshRotatedStep]_vars
+NotAuditWitnessRecoveredSameRotated == [][~AuditWitnessRecoveredSameRotatedStep]_vars
+NotAuditWitnessReplayedKeptTopology == ~AuditWitnessReplayedKeptTopology
+NotAuditWitnessHostMarkKept == [][~AuditWitnessHostMarkKeptStep]_vars
+NotAuditWitnessHeldSuccessorRefused == [][~AuditWitnessHeldSuccessorRefusedStep]_vars
+NotAuditWitnessReplayedSuccessorWokeLive == [][~AuditWitnessReplayedSuccessorWokeLiveStep]_vars
 ====

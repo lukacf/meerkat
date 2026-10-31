@@ -73,20 +73,23 @@ fn disposal_fold_is_total_and_folds_already_archived() {
 
 #[test]
 fn machine_vocabulary_has_no_already_archived_seat() {
-    // The machine enum is the three-variant flat form (mob_machine.rs) — a
+    // The machine enum is the four-variant flat form (mob_machine.rs): a
     // compile-time pin that the AlreadyArchived distinction lives ONLY on
     // the wire. Matching all machine variants with no AlreadyArchived arm IS
-    // the assertion; a vocabulary change breaks this match.
+    // the assertion; a vocabulary change breaks this match. KeptForSuccessor
+    // is a local same-session rotation's disposal: no wire value folds to it.
     let all = [
         MachineDisposal::Archived,
         MachineDisposal::RuntimeReleasedOnlyHostOwned,
         MachineDisposal::RuntimeReleasedOnlyNoDurableSessions,
+        MachineDisposal::KeptForSuccessor,
     ];
     for disposal in all {
         match disposal {
             MachineDisposal::Archived
             | MachineDisposal::RuntimeReleasedOnlyHostOwned
-            | MachineDisposal::RuntimeReleasedOnlyNoDurableSessions => {}
+            | MachineDisposal::RuntimeReleasedOnlyNoDurableSessions
+            | MachineDisposal::KeptForSuccessor => {}
         }
     }
 }

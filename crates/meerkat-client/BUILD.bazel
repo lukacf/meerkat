@@ -78,7 +78,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
     proc_macro_deps = all_crate_deps(
@@ -133,7 +133,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
     proc_macro_deps = all_crate_deps(
@@ -181,7 +181,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
     tags = [
@@ -247,7 +247,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_BIN_NAME": "live_client_provider_matrix",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
@@ -313,7 +313,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_BIN_NAME": "provider_matrix_catalog",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
@@ -378,7 +378,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_BIN_NAME": "rct_contracts",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
@@ -445,7 +445,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION": "0.9.8",
         "CARGO_BIN_NAME": "system_client_proxy",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },

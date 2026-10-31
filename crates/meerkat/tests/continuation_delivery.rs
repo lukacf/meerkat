@@ -1192,11 +1192,13 @@ async fn a_consent_notice_keeps_its_queue_handling_and_job_notices_steer() {
 }
 
 /// A consent notice an earlier version admitted before it kept its declared
-/// queue handling, as a detached job's steering completion record (its
-/// admission index entry still reserved at the upgrade), is this delivery's
-/// admission: the owner applies it and admits nothing over it, where it
-/// would otherwise fail as a conflict and be retried forever. The same
-/// steering form of another consent result under the key stays a conflict.
+/// queue handling, as a detached job's steering completion record under its
+/// admission key (a host producer's delivery id, never its continuation
+/// key), with its admission index entry still reserved at the upgrade, is
+/// this delivery's admission: the owner applies it and admits nothing over
+/// it, where it would otherwise fail as a conflict and be retried forever.
+/// The same steering form of another consent result under that admission
+/// key stays a conflict.
 #[tokio::test]
 async fn a_consent_notice_admitted_in_its_steering_form_is_this_delivery() {
     let key = "consent:approval-1/approved";
@@ -1210,60 +1212,82 @@ async fn a_consent_notice_admitted_in_its_steering_form_is_this_delivery() {
     let owner = ContinuationOwner::Session {
         session_id: session.clone(),
     };
-    let earlier = meerkat_runtime::Input::Prompt(
-        meerkat_runtime::PromptInput::detached_job_completed(key, notice.clone()),
-    );
-    sink.already_holds(&session, &earlier);
     let mut continuation = delivery(key, meerkat::consent_notice_producer());
     continuation.body = meerkat::ContinuationBody::notice(notice.clone());
-    fixture
+    let receipt = fixture
         .continuations
         .submit(&owner, continuation, 1)
         .await
         .expect("consent notice continuation");
+    let earlier =
+        meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::detached_job_completed(
+            receipt.delivery_id.as_str(),
+            notice.clone(),
+        ));
+    fixture
+        .admission(
+            &LogicalRuntimeId::new(receipt.address.clone()),
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: earlier.id().clone(),
+            },
+        )
+        .await;
+    sink.already_holds(&session, &earlier);
     let handle = fixture
         .owner()
         .arm(Host::new(Some(sink.clone())))
         .expect("arm");
     let mut passes = handle.subscribe_passes();
-    wait_for_status(&fixture, &owner, key, &mut passes, |status| {
+    let status = wait_for_status(&fixture, &owner, key, &mut passes, |status| {
         matches!(status, ContinuationStatus::Applied { .. })
     })
     .await;
     assert!(sink.admissions().is_empty(), "nothing is admitted over it");
-    assert!(matches!(
-        fixture
-            .continuations
-            .continuation_status(&owner, &ContinuationKey::new(key).expect("key"))
-            .await
-            .expect("status"),
-        ContinuationStatus::Applied { input, .. } if &input == earlier.id()
-    ));
+    assert_eq!(
+        status,
+        ContinuationStatus::Applied {
+            receipt,
+            session,
+            input: earlier.id().clone()
+        }
+    );
 
-    // Another result's steering form under the same key is not this one.
+    // Another result's steering form under the same admission key is not
+    // this one.
     let fixture = Fixture::new();
     let sink = Arc::new(RecordingSink::default());
     let session = SessionId::new();
     let owner = ContinuationOwner::Session {
         session_id: session.clone(),
     };
-    sink.already_holds(
-        &session,
-        &meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::detached_job_completed(
-            key,
-            meerkat_core::types::SystemNoticeMessage::new(
-                meerkat_core::types::SystemNoticeKind::Generic,
-                "Consent for approval approval-1 was denied.".to_string(),
-            ),
-        )),
-    );
     let mut continuation = delivery(key, meerkat::consent_notice_producer());
     continuation.body = meerkat::ContinuationBody::notice(notice);
-    fixture
+    let receipt = fixture
         .continuations
         .submit(&owner, continuation, 1)
         .await
         .expect("consent notice continuation");
+    let other =
+        meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::detached_job_completed(
+            receipt.delivery_id.as_str(),
+            meerkat_core::types::SystemNoticeMessage::new(
+                meerkat_core::types::SystemNoticeKind::Generic,
+                "Consent for approval approval-1 was denied.".to_string(),
+            ),
+        ));
+    fixture
+        .admission(
+            &LogicalRuntimeId::new(receipt.address.clone()),
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: other.id().clone(),
+            },
+        )
+        .await;
+    sink.already_holds(&session, &other);
     let handle = fixture
         .owner()
         .arm(Host::new(Some(sink.clone())))

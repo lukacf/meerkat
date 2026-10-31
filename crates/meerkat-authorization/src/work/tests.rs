@@ -761,6 +761,8 @@ fn historical_source_reference_does_not_authorize_another_actual_resource() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+mod stale_read_wait;
+#[cfg(not(target_arch = "wasm32"))]
 mod tool_dispatch;
 
 struct BatchFixturePolicy {

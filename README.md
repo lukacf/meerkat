@@ -443,7 +443,7 @@ Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:
 
 ```toml
-meerkat = { version = "=0.9.7", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.8", features = ["sqlite-store", "session-store"] }
 ```
 
 ## License

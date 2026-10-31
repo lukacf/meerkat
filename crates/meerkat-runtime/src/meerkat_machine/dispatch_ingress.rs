@@ -155,6 +155,11 @@ impl MeerkatMachine {
     /// commit on a blocking worker that dropping an await cannot stop, and
     /// the reload reads the durable truth once it has. Other drivers write
     /// inline, as before.
+    ///
+    /// A write that answers with an error and leaves the session needing a
+    /// reload (a commit whose acknowledgement was lost, for example) hands
+    /// off the same degraded gate settlement before it hands M back (see
+    /// [`Self::hand_off_degraded_gate_settlement_after_failed_write`]).
     #[allow(clippy::too_many_arguments)]
     async fn write_admission_within_commit_deadline(
         &self,
@@ -166,6 +171,7 @@ impl MeerkatMachine {
         resolved: crate::accept::ResolvedAdmission,
         credential_custody: &Arc<super::credential_custody::NativeCredentialCustody>,
     ) -> Result<AnsweredAdmissionWrite, RuntimeDriverError> {
+        let durability_health = driver.durability_health_handle();
         let commit_deadline = driver.runtime_loop_commit_deadline();
         #[cfg(any(test, feature = "test-support"))]
         let commit_deadline = commit_deadline
@@ -174,6 +180,13 @@ impl MeerkatMachine {
             let result = driver
                 .accept_resolved_input_with_credential(input, resolved, credential_custody)
                 .await;
+            if result.is_err() {
+                self.hand_off_degraded_gate_settlement_after_failed_write(
+                    session_id,
+                    gate,
+                    durability_health.as_ref(),
+                );
+            }
             return Ok(AnsweredAdmissionWrite {
                 driver,
                 held_mutation_gate,
@@ -238,11 +251,40 @@ impl MeerkatMachine {
                 task.as_mut().await
             }
         };
-        joined.map_err(|error| {
+        let answered = joined.map_err(|error| {
             RuntimeDriverError::Internal(format!(
                 "owned runtime input admission write ended without a result: {error}"
             ))
-        })
+        });
+        if !matches!(&answered, Ok(answer) if answer.result.is_ok()) {
+            self.hand_off_degraded_gate_settlement_after_failed_write(
+                session_id,
+                gate,
+                durability_health.as_ref(),
+            );
+        }
+        answered
+    }
+
+    /// Hand off the session's degraded gate settlement after an admission
+    /// write that failed and left the session needing a durability reload:
+    /// one whose store committed and then lost the acknowledgement, for
+    /// example. As for a write past its deadline, nothing else may come to
+    /// settle the session: a retry can be refused before it reaches the
+    /// runtime, and an unregister refuses at its first durable write, before
+    /// it detaches anything. Once the caller releases M, the settlement
+    /// detaches the runtime loop, so the loop exits and publishes the
+    /// teardown handoff the reload's discard waits for. A failure that left
+    /// the session durability-ready hands nothing off.
+    fn hand_off_degraded_gate_settlement_after_failed_write(
+        &self,
+        session_id: &SessionId,
+        gate: &SessionMutationGate,
+        durability_health: Option<&DurabilityHealthHandle>,
+    ) {
+        if durability_health.is_some_and(|health| health.require_ready().is_err()) {
+            self.hand_off_degraded_gate_settlement(session_id, gate.clone());
+        }
     }
 
     /// Select whether generated admission should attempt exact live-boundary

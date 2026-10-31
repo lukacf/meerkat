@@ -283,16 +283,14 @@ them.
   `issue_child_if_current_within`) then answer `AuthorizationRefused`
   (`ReprepareRequired`) where they answered
   `OperationAuthorizationUnavailable`. The native work owner's
-  `owner_change_in_progress` also names such a hold until it ends, published
-  or not (`LocalAuthorizationPublication::change_in_progress` is
-  unchanged), so every owner-change wait now lasts until the holder releases
-  the writer, and a consent re-adjudication refused to rebuild while one is
-  held decides nothing now, as during a published change: a read keeps the
-  consent unchanged, a decision answers the retryable `StoreUnavailable`,
-  and a fresh attempt of a consented candidate is refused at once as
-  `ReviewUnavailable` (`OwnerUnavailable`), with the consent kept and a
-  run's own attempt counted as not made, where it re-adjudicated again
-  within its bound. The spend at entry is unchanged.
+  `owner_change_in_progress` names such a hold until it ends, published or
+  not, as in 0.9.8, so a consent re-adjudication refused to rebuild while
+  one is held decides nothing now, as during a published change: a read
+  keeps the consent unchanged, a decision answers the retryable
+  `StoreUnavailable`, and a fresh attempt of a consented candidate is
+  refused at once as `ReviewUnavailable` (`OwnerUnavailable`), with the
+  consent kept and a run's own attempt counted as not made, where it
+  re-adjudicated again within its bound. The spend at entry is unchanged.
   The governed helper fence and child issuance still answer `Unavailable`
   for the hold, and the host-facing entries that never wait
   (`LocalGrantAuthority::try_with_owner_changes_excluded`,
@@ -369,6 +367,30 @@ them.
   `PersistentSessionService`, the mob session wrappers of `rkat` and
   `meerkat-rpc`, and the session service of `MobMcpState::new_in_memory`
   answer it.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: the
+  reload-required discard of a durability-degraded registration whose
+  runtime loop is still attached
+  (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`) now detaches
+  that loop itself, and so does an input admission whose failed store
+  write degraded the session. Both hand off the session's degraded gate
+  settlement: once the session's mutation gate is free, it detaches the
+  runtime loop and hard-cancels the loop's exact current run through the
+  executor's interrupt handle, as a ready-gated caller on a degraded
+  session already did. Through 0.9.7 the discard waited for the loop to
+  hand its executor back on its own (a run in flight first reached its
+  refused commit, and an idle loop never did), and a failed admission left
+  the loop attached until such a caller came. After the detach,
+  `current_executor_attachment_witness` answers `None` and
+  `session_attachment_state` reports `ReloadRequired` without an
+  attachment, so the attachment witness of an executor that is not
+  machine-managed no longer names the registration
+  (`reload_required_registration_until_settled_if_current` answers
+  `NotCurrent` for it). This supersedes the 0.9.4 note that the discard
+  waits for an attached loop's handoff.
 
 ### Added
 
@@ -869,9 +891,8 @@ them.
   exclusion or an owner change), another actor's step (a child issuance, a
   further step of an entered operation) failed at once: as temporarily
   unavailable while the hold had not published (the step's reservation
-  never waits, and Core's bounded owner-change wait did not count such a
-  hold as a change in progress), and as a refusal to rebuild that nothing
-  waited out once it had published. The step now refuses to rebuild for
+  never waits), and as a refusal to rebuild that nothing waited out once
+  it had published. The step now refuses to rebuild for
   both, the native work owner names the hold as a change in progress until
   it ends, and the waiting forms wait for it within the existing
   owner-change bound and the call's remaining tool time, outside every
@@ -923,6 +944,46 @@ them.
   the client was built with. The strip now applies to every model attempt and
   to the summary request.
 
+- `meerkat-runtime`, `meerkat-mob`: the reload of a session whose input
+  admission lost its commit acknowledgement no longer waits forever. An
+  admission whose store committed the admission and then answered an error
+  (a lost acknowledgement, for example) degrades the session to need a
+  reload (`admission_commit`) and refuses typed, as before, but its error
+  path did not run the session's degraded gate settlement, and nothing else
+  did: a retry can be refused before it reaches the runtime, and an
+  unregister refuses at its first durable write. The idle runtime loop then
+  stayed attached and never handed its executor off, so the reload-required
+  discard (`recover_or_discard_reload_required_registration_if_current`,
+  `recover_or_discard_reload_required_registration_with_operation_if_current`,
+  `reload_required_registration_settlement_if_current`,
+  `reload_required_registration_until_settled_if_current`, and the mob
+  member reload that awaits it) waited for that handoff without bound: a mob
+  member's reload answered `MemberReloadTimedOut` at its deadline and kept
+  the member's admission lane. An admission whose failed store write
+  degraded the session now hands the degraded settlement off as it leaves,
+  as an admission past its commit deadline already does, and a reload hands
+  it off itself for a registration whose runtime loop is still attached,
+  whatever degraded it: once the session's mutation gate is free, the
+  settlement detaches the loop and hard-cancels the exact current run, and
+  the reload proceeds (see Breaking). The committed input stays durably
+  admitted and pending in the cold successor, and a resubmission with the
+  same idempotency key is deduplicated against it.
+
+- `meerkat-runtime`: the threads of the crate's two process-wide Tokio
+  runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
+  16 MiB again when `RKAT_WORKER_STACK_BYTES` is unset, or `RUST_MIN_STACK`
+  when that asks for more. Since 0.8.39 they took the 8 MiB host worker
+  budget. The cleanup runtime polls the turns of runtime-backed mob members,
+  with the tools an embedding host gives them and whatever those spawn, so a
+  host whose own workers run 16 MiB ran that work on half that stack, and
+  the process aborted with a stack overflow on a `meerkat-machine-cleanup`
+  thread once the work needed more than 8 MiB. `RKAT_WORKER_STACK_BYTES`
+  still sets their stack exactly, below 16 MiB included, and an invalid value
+  is refused as before, its message now naming the default these threads
+  take once it is unset. The host binaries' own workers and main future keep
+  the 8 MiB budget. The added size is virtual address space; pages are
+  committed only when touched.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
@@ -971,6 +1032,81 @@ them.
   its first turn builds the session, so it does not report a scoped tool
   grant gate no grant could honour: the create succeeds, and the refused
   build is only logged.
+
+## [0.9.8] - 2026-10-30
+
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`: the
+  native work owner's `WorkAuthorization::owner_change_in_progress`
+  (`LocalWorkAuthorization`) also names a reservation of its publication's
+  writer held now that has not published: an owner change still being
+  prepared (a grant issuance before its acknowledged append publishes), a
+  held exclusion (`LocalGrantAuthority::try_with_owner_changes_excluded`) or
+  another operation's final entry, named by the odd sequence it would
+  publish at. `LocalAuthorizationPublication::change_in_progress` is
+  unchanged and still names published changes only. Every owner-change wait
+  (`OwnerChangeChurn`, Core's own and a host's) now lasts until such a
+  holder releases the writer, within the same bounds, where it answered
+  `None` or settled while the holder still held. The operation-time steps
+  and the host-facing entries that never wait answer as before.
+
+### Added
+
+- `meerkat-core`: `OwnerChangeChurn::wait_after_stale_read`, the bounded
+  wait for a host's pure observation of a work's own authorization
+  publication (one that reads owners and runs no effect) that is still
+  stale after its one rebuild (`PublicationError::Changed`,
+  `LineageResolutionRefusal::Changed`). Such a read can end stale after a
+  change it never saw in progress: one that waited for an owner's own lock
+  while another actor's change held it (a grant issuance holds the grant
+  owner's mutex across its acknowledged append) ends stale only once that
+  change published, often after it completed, and
+  `wait_for_settled_change` then answers `None`. The new wait waits for any
+  change in progress, an unpublished reservation of the writer included,
+  and with none in progress as it starts it pauses 1 ms first. `Settled`
+  means make the same observation once more, afresh; `NotSettled` means
+  stop and answer the read as stale, never as unavailable. Every settled
+  wait is one of the churn's three free rebuilds, within its one deadline
+  (2 s, clamped to the budget passed, such as
+  `ToolDispatchContext::remaining_tool_time`), armed at its first wait. Take
+  a fresh churn for each decision point, hold nothing across the wait, and
+  never wait around an effect. Dropping the wait cancels it with nothing to
+  release. Shell synchronization only: no machine input, owner fact, wire
+  type or error variant changes.
+
+### Fixed
+
+- `meerkat-core`: an owner-change wait (`OwnerChangeChurn`) no longer
+  settles at or past its deadline. Its loop read the change in progress
+  before it checked the deadline, so a change that completed during the
+  last sleep before the deadline settled the wait at the deadline, and a
+  later wait of a churn whose deadline had passed settled at once when the
+  change cleared between its first read and the next: each granted a free
+  rebuild past `OWNER_CHANGE_WAIT_BOUND` or the caller's budget. The loop
+  now checks the deadline before every read, so a read at or after it
+  answers `NotSettled`. Every Core wait that rebuilds after
+  `ReprepareRequired` (`wait_for_settled_change`) and the new
+  `wait_after_stale_read` share the loop.
+
+### Upgrade notes
+
+- No storage migration: this release changes no stored format. It opens
+  every 0.9.7 store as it is, and 0.9.7 reads everything it writes.
+
+- Pin the Core crates exactly at `=0.9.8`, as for every release. Meta 0.9.7
+  pins Core `=0.9.8`.
+
+- A host whose own pure observation of a work's publication answered a
+  stale read as unavailable, or stopped when `wait_for_settled_change`
+  answered `None`, can wait with `OwnerChangeChurn::wait_after_stale_read`
+  between attempts of that observation and keep the answer typed as stale
+  once the wait answers `NotSettled` (see Added). Nothing changes for a host
+  that does not.
+
+### Known limitations
+
+- None new.
 
 ## [0.9.7] - 2026-10-28
 
@@ -38337,7 +38473,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/lukacf/meerkat/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/lukacf/meerkat/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/lukacf/meerkat/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/lukacf/meerkat/compare/v0.9.4...v0.9.5

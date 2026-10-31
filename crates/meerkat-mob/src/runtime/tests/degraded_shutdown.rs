@@ -569,14 +569,15 @@ async fn a_degraded_registration_without_a_teardown_handoff_settles_through_the_
     );
 }
 
-/// The refusal stays for a runtime loop that may still hold the session's
-/// mutation fence: a durability-degraded registration whose runtime loop is
-/// live and has not handed its executor back is not taken over by a later
-/// owner's executor registration (refused until a repair), and its discard
-/// waits for that loop's teardown handoff instead of taking the fence (the
-/// step times out and nothing is replaced).
+/// A durability-degraded registration whose runtime loop is live and has not
+/// handed its executor back is not taken over by a later owner's executor
+/// registration (refused until a repair), and its discard settles it. The
+/// discard never takes the session's mutation fence from under the loop: it
+/// hands off the session's degraded settlement, which detaches the loop once
+/// the fence is free, then claims the loop's teardown handoff and replaces
+/// the registration with a ready cold successor that has no executor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_degraded_registration_whose_live_loop_holds_the_fence_is_not_taken_over() {
+async fn a_degraded_registration_whose_live_loop_holds_the_fence_is_settled_by_its_discard() {
     use crate::runtime::provisioner::{DegradedUnregisterStep, MemberSessionDisposalArc};
 
     let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -598,10 +599,13 @@ async fn a_degraded_registration_whose_live_loop_holds_the_fence_is_not_taken_ov
         .current_session_registration_witness(&session)
         .await
         .expect("current registration");
-    let attachment = adapter
-        .current_executor_attachment_witness(&session)
-        .await
-        .expect("the runtime loop is attached");
+    assert!(
+        adapter
+            .current_executor_attachment_witness(&session)
+            .await
+            .is_some(),
+        "the runtime loop is attached"
+    );
     assert!(
         adapter
             .force_session_durability_reload_required_for_test(&session)
@@ -618,35 +622,49 @@ async fn a_degraded_registration_whose_live_loop_holds_the_fence_is_not_taken_ov
             "a later owner's executor registration must be refused while the loop holds the fence, got {other:?}"
         ),
     }
-    assert!(
-        matches!(
-            MemberSessionDisposalArc::discard_degraded_registration_first(
-                &adapter,
-                None,
-                &registration,
-                None,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .await,
-            DegradedUnregisterStep::TimedOut
-        ),
-        "the discard waits for the live loop's teardown handoff"
+    let successor = match MemberSessionDisposalArc::discard_degraded_registration_first(
+        &adapter,
+        None,
+        &registration,
+        None,
+        Instant::now() + STEP,
+    )
+    .await
+    {
+        DegradedUnregisterStep::Replaced { successor, .. } => successor,
+        DegradedUnregisterStep::Unchanged => {
+            panic!("the discard left the degraded registration unchanged")
+        }
+        DegradedUnregisterStep::HandedOver => {
+            panic!("the discard reported a takeover nobody made")
+        }
+        DegradedUnregisterStep::TimedOut => {
+            panic!("the discard waited for a live loop instead of settling it")
+        }
+        DegradedUnregisterStep::Failed(failure) => panic!("the discard failed: {failure}"),
+    };
+    assert_ne!(
+        successor, registration,
+        "the discard publishes a distinct cold successor"
     );
     assert_eq!(
         adapter
             .current_session_registration_witness(&session)
             .await
             .as_ref(),
-        Some(&registration),
-        "the degraded registration is not replaced"
+        Some(&successor),
+        "the cold successor is the current registration"
     );
-    assert_eq!(
+    assert!(
+        adapter.durability_reload_required(&session).await.is_none(),
+        "the cold successor is durability-ready"
+    );
+    assert!(
         adapter
             .current_executor_attachment_witness(&session)
             .await
-            .as_ref(),
-        Some(&attachment),
-        "the live loop stays attached"
+            .is_none(),
+        "the live loop was detached, and the cold successor has no executor"
     );
 }
 

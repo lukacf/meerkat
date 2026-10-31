@@ -385,6 +385,43 @@ elif name == "tag-validation-reflowed":
         "vars.MEERKAT_GCP_BUILDBUDDY_ENABLED != 'true' && "
         "github.event_name != 'workflow_dispatch') ||\n",
     )
+elif name in ("attestation-main-only", "attestation-any-release-branch", "attestation-ref-reordered"):
+    # The CI attestation's ref rule: the pre-maintenance-release rule (main
+    # only), any release branch instead of the tag's version's, and an
+    # equivalent spelling with the operands reordered.
+    rules = {
+        "attestation-main-only": '.ref == "refs/heads/main"',
+        "attestation-any-release-branch": '(.ref == "refs/heads/main" or (.ref | startswith("refs/heads/release/")))',
+        "attestation-ref-reordered": '(.ref == $release_branch_ref or .ref == "refs/heads/main")',
+    }
+    replace_once(
+        '             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and\n'
+        "             ((.schema_version == 1",
+        f"             {rules[name]} and\n"
+        "             ((.schema_version == 1",
+    )
+elif name in ("evidence-main-only", "evidence-any-release-branch", "evidence-run-any-branch", "evidence-branch-reordered"):
+    # The readiness evidence's ref and run-branch rules: the
+    # pre-maintenance-release rule (main only), any release branch, a run
+    # branch left unchecked, and an equivalent spelling.
+    attested = (
+        '             (.ref == "refs/heads/main" or .ref == $release_branch_ref) and\n'
+        "             .result == \"success\"'"
+    )
+    run_branch = '             (.head_branch == "main" or .head_branch == $release_branch) and\n'
+    if name == "evidence-main-only":
+        replace_once(attested, '             .ref == "refs/heads/main" and\n             .result == "success"\'')
+        replace_once(run_branch, '             .head_branch == "main" and\n')
+    elif name == "evidence-any-release-branch":
+        replace_once(
+            attested,
+            '             (.ref == "refs/heads/main" or (.ref | startswith("refs/heads/release/"))) and\n'
+            "             .result == \"success\"'",
+        )
+    elif name == "evidence-run-any-branch":
+        replace_once(run_branch, "")
+    else:
+        replace_once(run_branch, '             (.head_branch == $release_branch or .head_branch == "main") and\n')
 elif name == "prebuild-publishes":
     # A prebuild dispatch reaches the GitHub release publisher.
     replace_once(
@@ -998,6 +1035,10 @@ mutate dispatch-ref-name-expression "${TEST_ROOT}/dispatch-ref-name-expression.y
 expect_pass dispatch-ref-name-expression "${TEST_ROOT}/dispatch-ref-name-expression.yml" dispatch-binding
 mutate tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml"
 expect_pass tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml" tag-validation
+mutate attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml"
+expect_pass attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml" tag-validation
+mutate evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml"
+expect_pass evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml" semver-evidence
 mutate prebuild-lookup-if-reflowed "${TEST_ROOT}/prebuild-lookup-if-reflowed.yml"
 expect_pass prebuild-lookup-if-reflowed "${TEST_ROOT}/prebuild-lookup-if-reflowed.yml" prebuild
 mutate semver-baseline-needs-block-list "${TEST_ROOT}/semver-baseline-needs-block-list.yml"
@@ -1077,6 +1118,24 @@ expect_fail_named tag-validation-schema-unwritten "${TEST_ROOT}/tag-validation-s
 mutate tag-validation-ignores-sdk-host "${TEST_ROOT}/tag-validation-ignores-sdk-host.yml"
 expect_fail_named tag-validation-ignores-sdk-host "${TEST_ROOT}/tag-validation-ignores-sdk-host.yml" \
   "writes covers_release_validation=true where the SDK suites were skipped" tag-validation
+
+# A maintenance release is tagged on release/<version>: CI and semver
+# evidence from that branch qualifies next to main's, and from no other.
+mutate attestation-main-only "${TEST_ROOT}/attestation-main-only.yml"
+expect_fail_named attestation-main-only "${TEST_ROOT}/attestation-main-only.yml" \
+  "refuses the CI attestation of a push to release/0.0.0 (a maintenance release of the tag's version)" tag-validation
+mutate attestation-any-release-branch "${TEST_ROOT}/attestation-any-release-branch.yml"
+expect_fail_named attestation-any-release-branch "${TEST_ROOT}/attestation-any-release-branch.yml" \
+  "accepts the CI attestation of a push to release/9.9.9 (another version's release branch)" tag-validation
+mutate evidence-main-only "${TEST_ROOT}/evidence-main-only.yml"
+expect_fail_named evidence-main-only "${TEST_ROOT}/evidence-main-only.yml" \
+  "refuses the readiness evidence of a push to release/0.0.0 (a maintenance release of the tag's version)" semver-evidence
+mutate evidence-any-release-branch "${TEST_ROOT}/evidence-any-release-branch.yml"
+expect_fail_named evidence-any-release-branch "${TEST_ROOT}/evidence-any-release-branch.yml" \
+  "accepts the readiness evidence of a release/9.9.9 attestation whose run ran on main" semver-evidence
+mutate evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml"
+expect_fail_named evidence-run-any-branch "${TEST_ROOT}/evidence-run-any-branch.yml" \
+  "accepts the readiness evidence of a main-push attestation whose run ran on release/9.9.9" semver-evidence
 
 mutate prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml"
 expect_fail_named prebuild-publishes "${TEST_ROOT}/prebuild-publishes.yml" \

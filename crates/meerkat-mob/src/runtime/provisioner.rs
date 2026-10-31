@@ -3129,10 +3129,12 @@ pub(super) enum DegradedUnregisterStep {
     /// deadline, its wait for the session's mutation gate ends typed), and a
     /// settlement retries the discard on its next call. A registration whose
     /// runtime loop is still attached keeps its fence until that loop hands
-    /// it back, and the discard waits for that handoff. A registration that
-    /// no runtime loop holds (none was ever attached, or its teardown
-    /// completed) is not refused for a missing handoff: nothing retains its
-    /// mutation fence, and the discard takes it.
+    /// it back: the discard hands off the session's degraded settlement,
+    /// which detaches the loop once the fence is free (hard-cancelling the
+    /// loop's exact current run), and then claims that handoff. A
+    /// registration that no runtime loop holds (none was ever attached, or
+    /// its teardown completed) is not refused for a missing handoff: nothing
+    /// retains its mutation fence, and the discard takes it.
     Unchanged,
     /// The discard replaced the degraded process shell with `successor`, the
     /// exact cold registration it published, whose use starts at

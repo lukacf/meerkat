@@ -1,9 +1,14 @@
 name: Release semver readiness
 
 on:
+  # A push to main or to a release/** branch uploads the push evidence a tag
+  # run trusts: a maintenance release is tagged on release/<version> without
+  # reaching main. release.yml accepts the evidence of main or of the release
+  # branch of the tag's own version only.
   push:
     branches:
       - main
+      - 'release/**'
     paths:
       - Cargo.toml
       - CHANGELOG.md
@@ -156,6 +161,10 @@ jobs:
               report_sha256: $report_sha256
             }' > "${evidence}/attestation.json"
 
+      # Push evidence is named `main-` on a release/** push too: the tag run
+      # looks it up by that name and the tree, then binds the recorded ref and
+      # the run's branch to main or to the release branch of its version.
+      # Pull-request and dispatch evidence is a preview and never qualifies.
       - name: Upload exact-tree semver evidence
         if: ${{ steps.unpublished.outputs.needed == 'true' && steps.notes.outputs.baseline == 'published' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -6,6 +6,7 @@
 import React from "react";
 
 import { isCardKind } from "../layout/geometry";
+import { compareLabels } from "../layout/types";
 import { MarkShape, StatusSquareShape, itemStatusOf } from "./marks";
 import type { VizEdge, VizLane, VizNode, VizRelation } from "./types";
 import { nodeStatusWord, vizRelationWord } from "./words";
@@ -96,7 +97,7 @@ export function graphListRows(
     selected: selected.has(node.id),
     connections: connections.get(node.id)!,
   }));
-  const byName = (a: GraphListRow, b: GraphListRow) => a.node.label.localeCompare(b.node.label, undefined, { sensitivity: "base", numeric: true }) || (a.node.id < b.node.id ? -1 : 1);
+  const byName = (a: GraphListRow, b: GraphListRow) => compareLabels(a.node.label, b.node.label) || (a.node.id < b.node.id ? -1 : 1);
   const sort = options.sortBy ?? "group";
   rows.sort((a, b) => {
     if (sort === "degree") return b.degree - a.degree || byName(a, b);

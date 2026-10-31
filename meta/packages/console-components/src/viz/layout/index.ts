@@ -22,7 +22,7 @@ export type { Density, MarkGeometry, TextMeasure } from "./geometry";
 export { LANES, OTHER_LANE, layoutLanes } from "./lanes";
 export { LAYERED, layoutLayered, orderRanks, rankItems, routeBetween } from "./layered";
 export { RADIAL, RELATION_ORDER, layoutRadial, radialGroupOf } from "./radial";
-export { boundsOf, compareNodes, emptyLayout, unionBounds } from "./types";
+export { boundsOf, compareLabels, compareNodes, emptyLayout, unionBounds } from "./types";
 export type {
   ClusterBundle,
   EdgeRoute,

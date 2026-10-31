@@ -759,25 +759,27 @@ fi
 # name. The reseat run scans the rows of two identities without a member and
 # opens, aborts and seats their spawn ladders with every pair of custodies:
 # created custody seats a Created entry owed its seat again, on its revival
-# record; then the worker reconcile and the forced destroy. The names run
-# scans the rows and then drives the declarations, the seal over every
+# record, and a ladder opened before its name was reserved seats no member
+# and is aborted; then the worker reconcile and the forced destroy. The names
+# run scans the rows and then drives the declarations, the seal over every
 # desired set, the legacy adoption, the agent lane and the admission probe in
 # a running and a stopped mob; the placed run scans the row of a member
-# seated on a member host. They check every generated invariant (the created
-# entries' among them: an unseated Created entry awaits its template's
-# preparation or is owed its seat, a removed entry's name is never an entry
-# or a member again, created custody belongs to an open ladder of a Created
-# entry and never beside entry custody, no worker reconcile spawns a reserved
-# name or retires an unreadable one, a destroyed mob holds no entry, custody
-# or reserved name), exactly one arm answering every row, declaration, seal,
-# adoption, agent-lane admission and admission probe, and three action
-# properties (no spawn ladder opens for a reserved name; a ladder's custody
-# matches its name's origin, and a seat under created custody binds the
-# entry's revival record; the seal never touches a Created entry or an
-# unreadable name's). They require every listed arm to fire, a floor of
-# distinct states and their seventeen witnesses reached, and --mutants
-# refuses twenty-seven seeded defects: one per created entries' invariant and
-# property and one per new guard a reachable state needs.
+# seated on a member host, before or after its remote commit. They check
+# every generated invariant (the created entries' among them: an unseated
+# Created entry awaits its template's preparation or is owed its seat, a
+# removed entry's name is never an entry or a member again, created custody
+# belongs to an open ladder of a Created entry and never beside entry
+# custody, no worker reconcile spawns a reserved name or retires an
+# unreadable one, a destroyed mob holds no entry, custody or reserved name),
+# exactly one arm answering every row, declaration, seal, adoption,
+# agent-lane admission and admission probe, and four action properties (no
+# spawn ladder opens for a reserved name, and no ladder close seats a member
+# under one; a ladder's custody matches its name's origin, and a seat under
+# created custody binds the entry's revival record; the seal never touches a
+# Created entry or an unreadable name's). They require every listed arm to
+# fire, a floor of distinct states and their eighteen witnesses reached, and
+# --mutants refuses twenty-nine seeded defects: one per created entries'
+# invariant and property and one per new guard a reachable state needs.
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -986,8 +988,8 @@ run_machine_verify() {
 # runs recording a created entry or a reserved name (created_identity_audit
 # counts every arm).
 # audits-q = the created identity audit's recovery part with --mutants
-# (--part recovery), alone: its four whole-space runs, 17 witnesses and 27
-# mutants took 217 s locally with 4 TLC workers (2026-10-31), 48 TLC runs
+# (--part recovery), alone: its four whole-space runs, 18 witnesses and 29
+# mutants took 225 s locally with 4 TLC workers (2026-10-31), 51 TLC runs
 # whose JVM start and model parse are most of it. To keep it there its
 # reseat run spawns member 1 without custody only, gives a revival record
 # only to member 2's Present row and reconciles both members or none, its

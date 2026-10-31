@@ -1,7 +1,8 @@
 // The radial layout (the agent ego graph, design spec B9): the agent at the
-// centre, its peers on a ring, grouped by relation in sectors with a gap
-// between groups, starting at the top and running clockwise. Labels sit
-// outward along each peer's angle (the renderer reads `angles`).
+// centre, its peers on a ring (an ellipse in a wide, short frame), grouped
+// by relation in sectors with a gap between groups, starting at the top and
+// running clockwise. Labels sit outward along each peer's angle (the
+// renderer reads `angles`).
 
 import type { GraphLayout, LayoutEdge, LayoutNode, LayoutOptions } from "./types";
 import { compareNodes, emptyLayout } from "./types";
@@ -18,6 +19,8 @@ export const RADIAL = {
   slot: 22,
   /** A second, inner ring for crowded egos: this much further in. */
   innerStep: 26,
+  /** The ring may stretch to an ellipse this much wider than tall. */
+  maxAspect: 2,
 } as const;
 
 export const RELATION_ORDER: readonly VizRelation[] = ["wired", "traffic", "route", "lineage", "cross", "blocks", "parent", "related"];
@@ -64,17 +67,18 @@ export function layoutRadial(
   const ordered = [...groups.entries()]
     .sort(([a], [b]) => groupRank(a) - groupRank(b) || (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, list]) => [key, list.sort(compareNodes)] as const);
-  const gaps = ordered.length > 1 ? ordered.length : 0;
-  const slots = Math.max(1, peers.length + gaps);
-  const room = Math.min(
-    (options.width > 0 ? options.width : 480) / 2 - RADIAL.labelRoom,
-    (options.height > 0 ? options.height : 360) / 2 - RADIAL.vRoom,
-  );
+  // Half a slot between relation groups keeps the sectors apart without leaving holes.
+  const gap = ordered.length > 1 ? 0.5 : 0;
+  const slots = Math.max(1, peers.length + gap * ordered.length);
+  const roomY = (options.height > 0 ? options.height : 360) / 2 - RADIAL.vRoom;
+  const roomX = (options.width > 0 ? options.width : 480) / 2 - RADIAL.labelRoom;
   const needed = (slots * RADIAL.slot) / (2 * Math.PI);
-  const radius = Math.max(RADIAL.minRadius, Math.min(RADIAL.maxRadius, Math.max(room, Math.min(needed, RADIAL.maxRadius))));
+  const radius = Math.max(RADIAL.minRadius, Math.min(RADIAL.maxRadius, Math.max(roomY, Math.min(needed, RADIAL.maxRadius))));
+  // A wide, short frame (Agent details: 240 px tall) gets an ellipse up to twice as wide.
+  const radiusX = Math.max(radius, Math.min(roomX, radius * RADIAL.maxAspect));
   // Crowded: alternate peers between the ring and a ring further in.
-  const twoRings = needed > radius * 1.05;
-  const cx = radius + RADIAL.labelRoom;
+  const twoRings = needed > ((radius + radiusX) / 2) * 1.05;
+  const cx = radiusX + RADIAL.labelRoom;
   const cy = radius + RADIAL.vRoom;
   const boxes = new Map<string, VizNodeBox>();
   const angles = new Map<string, number>();
@@ -85,13 +89,19 @@ export function layoutRadial(
   for (const [, list] of ordered) {
     for (const peer of list) {
       const angle = -Math.PI / 2 + (slot + 0.5) * step;
-      const r = twoRings && count % 2 === 1 ? radius - RADIAL.innerStep : radius;
-      boxes.set(peer.id, { id: peer.id, x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, w: peer.w, h: peer.h });
+      const inner = twoRings && count % 2 === 1 ? RADIAL.innerStep : 0;
+      boxes.set(peer.id, {
+        id: peer.id,
+        x: cx + Math.cos(angle) * (radiusX - inner),
+        y: cy + Math.sin(angle) * (radius - inner),
+        w: peer.w,
+        h: peer.h,
+      });
       angles.set(peer.id, angle);
       slot += 1;
       count += 1;
     }
-    if (gaps > 0) slot += 1;
+    slot += gap;
   }
   layout.nodes = boxes;
   layout.angles = angles;

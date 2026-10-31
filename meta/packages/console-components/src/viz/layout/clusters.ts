@@ -10,12 +10,12 @@ import type { VizNodeBox, VizRelation } from "../graph/types";
 
 export const CLUSTERS = {
   /** Arc length between neighbouring dots on a ring. */
-  spacing: 9,
-  ringGap: 8.5,
+  spacing: 11,
+  ringGap: 10.5,
   /** First ring radius around a lead at the centre, and without one. */
-  aroundLead: 17,
-  aroundNothing: 9,
-  groupGap: 64,
+  aroundLead: 19,
+  aroundNothing: 10,
+  groupGap: 72,
   /** Room under each cluster for its label and count. */
   labelRoom: 30,
   pad: 40,

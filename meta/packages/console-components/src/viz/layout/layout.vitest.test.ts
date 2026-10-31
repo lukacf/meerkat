@@ -89,7 +89,7 @@ describe("lanes layout", () => {
     }
   });
 
-  it("hangs helpers off their host, right of it and 36 px down", () => {
+  it("hangs helpers off their host, right of its label and 36 px down", () => {
     const layout = layoutLanes(
       [mark("host", { lane: "l" }), mark("h1", { lane: "l", kind: "helper", anchor: "host" }), mark("h2", { lane: "l", kind: "helper", anchor: "host" })],
       [],
@@ -99,7 +99,8 @@ describe("lanes layout", () => {
     const host = layout.nodes.get("host")!;
     const h1 = layout.nodes.get("h1")!;
     const h2 = layout.nodes.get("h2")!;
-    expect(h1.x - host.x).toBe(LANES.helperDx);
+    // Right of the host's label (40 px wide here), never closer than 28 px.
+    expect(h1.x - host.x).toBe(Math.max(LANES.helperDx, 40 / 2 + 14));
     expect(h1.y - host.y).toBe(LANES.helperDy);
     expect(h2.x - h1.x).toBe(LANES.helperStep);
     // The helpers fit inside their band.
@@ -228,9 +229,16 @@ describe("radial layout", () => {
     ];
     const layout = layoutRadial(nodes, edges, "me", { width: 480, height: 240, density: "comfortable" });
     const centre = layout.nodes.get("me")!;
-    const distances = ["w1", "w2", "t1", "r1"].map((id) => Math.hypot(layout.nodes.get(id)!.x - centre.x, layout.nodes.get(id)!.y - centre.y));
-    for (const distance of distances) expect(distance).toBeCloseTo(distances[0], 6);
-    expect(distances[0]).toBeGreaterThanOrEqual(RADIAL.minRadius);
+    expect(centre.x).toBeCloseTo(layout.bounds.w / 2, 6);
+    expect(centre.y).toBeCloseTo(layout.bounds.h / 2, 6);
+    // One ellipse (wider than tall in a wide, short frame), never inside the minimum radius.
+    const ry = Math.max(...["w1", "w2", "t1", "r1"].map((id) => Math.abs(layout.nodes.get(id)!.y - centre.y)));
+    const rx = Math.max(...["w1", "w2", "t1", "r1"].map((id) => Math.abs(layout.nodes.get(id)!.x - centre.x)));
+    expect(rx).toBeGreaterThanOrEqual(ry);
+    for (const id of ["w1", "w2", "t1", "r1"]) {
+      const box = layout.nodes.get(id)!;
+      expect(Math.hypot(box.x - centre.x, box.y - centre.y)).toBeGreaterThanOrEqual(RADIAL.minRadius - 0.001);
+    }
     // Wired first (from the top, clockwise), then traffic, then route.
     const angle = (id: string) => layout.angles.get(id)!;
     expect(angle("w1")).toBeLessThan(angle("w2"));

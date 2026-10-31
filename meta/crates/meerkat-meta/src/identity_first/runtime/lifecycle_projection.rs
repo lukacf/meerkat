@@ -3525,6 +3525,14 @@ mod tests {
                 None,
                 RetirementOwes::IdentitysMember(Cause::Rotated),
             ),
+            // A rotation's retirement owes what its rotation owes, whatever
+            // cause it names.
+            (
+                Some(&fresh),
+                unlisted,
+                None,
+                RetirementOwes::IdentitysMember(Cause::Rotated),
+            ),
             (
                 Some(&moved),
                 None,

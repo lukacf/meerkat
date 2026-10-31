@@ -595,11 +595,20 @@ fn member_id(identity: &AgentIdentity) -> meerkat_mob::AgentIdentity {
 /// The facts Core's member lifecycle journal holds of `identity`'s member,
 /// each at its cursor, as `boot`'s session bridge reads them.
 async fn member_records(boot: &Boot, identity: &AgentIdentity) -> Vec<MemberLifecycleFactRecord> {
+    records_of_member(boot, &member_id(identity)).await
+}
+
+/// The facts Core's member lifecycle journal holds of `member`, each at its
+/// cursor, as `boot`'s session bridge reads them.
+async fn records_of_member(
+    boot: &Boot,
+    member: &meerkat_mob::AgentIdentity,
+) -> Vec<MemberLifecycleFactRecord> {
     let bridge = boot
         .identities
         .bridge()
         .expect("the runtime has a session bridge");
-    let member = member_id(identity);
+    let member = member.clone();
     let mut records = Vec::new();
     let mut after = 0;
     loop {
@@ -1963,6 +1972,183 @@ async fn a_retirement_core_s_seal_unlisted_owes_the_unlisting_from_its_own_fact(
         hook_calls_of(&seen, &alpha.identity),
         vec!["unlisted".to_string()],
         "the seal's retirement owes the unlisting's side effects, once"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// Meta's session bridge forwards the facts Core's journal records of an
+/// identity entry: a host's adoption of alpha's member as an identity entry
+/// (`EntryAdopted`, with its origin), and the end of that entry's member,
+/// whose `Retired` names the entry and no cause. Neither owes a side effect:
+/// the hook hears nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bridge_forwards_an_adoption_and_the_entry_its_member_ends_with() {
+    const MOB: &str = "lifecycle-fact-adoption";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let first = boot.session_of(&alpha.identity).await;
+    let adoption = boot
+        .runtime
+        .mob_handle()
+        .adopt_legacy_identity_entry(&member_id(&alpha.identity))
+        .await
+        .expect("the host adopts alpha's member");
+    assert_eq!(adoption, meerkat_mob::LegacyIdentityEntryAdoption::Adopted);
+    boot.runtime
+        .mob_handle()
+        .retire(member_id(&alpha.identity))
+        .await
+        .expect("a host retires the entry's member");
+
+    let facts = member_records(&boot, &alpha.identity)
+        .await
+        .into_iter()
+        .map(|record| record.fact)
+        .collect::<Vec<_>>();
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::EntryAdopted {
+                generation: 0,
+                origin: meerkat_mob::IdentityEntryOrigin::Declared,
+                ..
+            }
+        )),
+        "the adoption names its incarnation and its origin: {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Retired {
+                generation: 0,
+                session: Some(session),
+                identity_entry: Some(meerkat_mob::IdentityEntryOrigin::Declared),
+                cause: None,
+                rotation: None,
+                ..
+            } if *session == first
+        )),
+        "the entry's member's retirement names its session and the entry: {facts:#?}"
+    );
+    boot.identities.settle_lifecycle_projection().await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        hook_calls_of(&seen, &alpha.identity),
+        Vec::<String>::new(),
+        "a host's retire of an entry's member owes nothing"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// Meta's session bridge forwards the rows Core's journal holds of members
+/// no identity holds: a legacy member reset, a row no current Core writes,
+/// read as `LegacyReset` with both generations, and a retirement start that
+/// names the seal's cause. Neither owes a side effect: the hook hears
+/// nothing. The row writes both into the running mob's journal.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bridge_forwards_a_legacy_reset_and_a_retirement_start_s_cause() {
+    const MOB: &str = "lifecycle-fact-legacy-reset";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let legacy = meerkat_mob::AgentIdentity::from("legacy-worker");
+    let sealed = meerkat_mob::AgentIdentity::from("sealed-worker");
+    {
+        use meerkat_mob::MobEventStore as _;
+        let events = meerkat_mob::SqliteMobStores::open(temp.path().join("mob.sqlite3"))
+            .expect("open the mob's store")
+            .event_store();
+        events
+            .append(meerkat_mob::NewMobEvent::for_test(
+                meerkat_mob::MobId::from(MOB),
+                meerkat_mob::MobEventKind::MemberReset {
+                    agent_identity: legacy.clone(),
+                    previous_generation: meerkat_mob::Generation::new(0),
+                    new_generation: meerkat_mob::Generation::new(1),
+                    fence_token: meerkat_mob::FenceToken::new(2),
+                    agent_runtime_id: meerkat_mob::AgentRuntimeId::new(
+                        legacy.clone(),
+                        meerkat_mob::Generation::new(1),
+                    ),
+                },
+            ))
+            .await
+            .expect("append a legacy member reset");
+        events
+            .append(meerkat_mob::NewMobEvent::for_test(
+                meerkat_mob::MobId::from(MOB),
+                meerkat_mob::MobEventKind::MemberRetirementStarted {
+                    agent_identity: sealed.clone(),
+                    agent_runtime_id: meerkat_mob::AgentRuntimeId::new(
+                        sealed.clone(),
+                        meerkat_mob::Generation::new(0),
+                    ),
+                    generation: meerkat_mob::Generation::new(0),
+                    role: meerkat_mob::ProfileName::from("lead"),
+                    releasing: None,
+                    session_id: None,
+                    retiring_peer_endpoint: None,
+                    preserve_machine_topology: false,
+                    rotation: None,
+                    cause: Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                },
+            ))
+            .await
+            .expect("append a sealed retirement's start");
+    }
+
+    let reset = records_of_member(&boot, &legacy).await;
+    assert!(
+        reset.iter().any(|record| matches!(
+            record.fact,
+            MemberLifecycleFact::LegacyReset {
+                previous_generation: 0,
+                new_generation: 1,
+                ..
+            }
+        )),
+        "the legacy member reset reads with both generations: {reset:#?}"
+    );
+    let started = records_of_member(&boot, &sealed).await;
+    assert!(
+        started.iter().any(|record| matches!(
+            record.fact,
+            MemberLifecycleFact::RetirementStarted {
+                generation: 0,
+                rotation: None,
+                cause: Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                ..
+            }
+        )),
+        "the retirement start names the seal's cause: {started:#?}"
+    );
+    boot.identities.settle_lifecycle_projection().await;
+    tokio::time::sleep(SETTLE).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "neither row owes a side effect: {:?}",
+        seen.lock().unwrap()
     );
     let _ = boot.runtime.shutdown().await;
 }

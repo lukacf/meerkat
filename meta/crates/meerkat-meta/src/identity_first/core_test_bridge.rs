@@ -116,6 +116,29 @@ pub(crate) fn respawn_live(
     Ok(agent_runtime_id)
 }
 
+/// [`respawn_live`] with no retirement of the live incarnation journaled
+/// before the seat ([`CoreTestMembers::respawn_unretired`]): a journal that
+/// breaks Core's rule.
+pub(crate) fn respawn_live_unretired(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+    profile: &meerkat_mob::ProfileName,
+    generation: u64,
+    session: Option<SessionId>,
+) -> Result<AgentRuntimeId, BridgeError> {
+    let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
+        .map_err(|error| BridgeError::Mob(error.to_string()))?;
+    core.respawn_unretired(
+        identity,
+        &MemberRuntimeBinding {
+            agent_runtime_id: agent_runtime_id.clone(),
+            session_id: session,
+        },
+        profile,
+    );
+    Ok(agent_runtime_id)
+}
+
 /// Register `spec` with Core holding its member live at `generation` on
 /// `session`: the shape a materialized identity has at rest.
 pub(crate) async fn register_live(

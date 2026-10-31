@@ -63,6 +63,9 @@ pub(crate) struct CoreTestMembers {
     /// The incarnations Core's member history keeps no binding of
     /// ([`Self::forget_in_history`]), by identity and generation.
     forgotten_in_history: Mutex<BTreeSet<(AgentIdentity, u64)>>,
+    /// Core's standing of these identities' members as it answers it,
+    /// whatever Core holds ([`Self::pin_standing`]).
+    pinned_standing: Mutex<BTreeMap<AgentIdentity, MemberStanding>>,
 }
 
 impl CoreTestMembers {
@@ -270,6 +273,53 @@ impl CoreTestMembers {
         );
     }
 
+    /// The seat of a respawn of `identity`'s live member onto `binding`
+    /// under `profile`, naming the incarnation it follows, with no
+    /// retirement of that incarnation journaled before it: a journal that
+    /// breaks Core's rule that a respawn's retirement precedes its seat.
+    pub(crate) fn respawn_unretired(
+        &self,
+        identity: &AgentIdentity,
+        binding: &MemberRuntimeBinding,
+        profile: &meerkat_mob::ProfileName,
+    ) {
+        let generation = generation_of(&binding.agent_runtime_id);
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(live) = members.get(identity).filter(|member| member.live).cloned() else {
+            return;
+        };
+        self.ended
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((
+                identity.clone(),
+                TestMember {
+                    live: false,
+                    retiring: false,
+                    ..live.clone()
+                },
+            ));
+        self.journal_fact(
+            MemberLifecycleFact::seated(member_id(identity), generation, profile.clone())
+                .with_session(binding.session_id.clone())
+                .with_seat_rotation(Some(meerkat_mob::SeatRotation::respawn_after(
+                    meerkat_mob::Generation::new(live.generation),
+                ))),
+        );
+        members.insert(
+            identity.clone(),
+            TestMember {
+                runtime_id: binding.agent_runtime_id.clone(),
+                session_id: binding.session_id.clone(),
+                generation,
+                fence: live.fence + 1,
+                profile: profile.clone(),
+                live: true,
+                retiring: false,
+            },
+        );
+    }
+
     /// Core started the retirement of the live incarnation `runtime_id`,
     /// and has not ended it: its start is journaled, carrying out a rotation
     /// to `rotation` when it names one, and the member reads retiring.
@@ -327,11 +377,60 @@ impl CoreTestMembers {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberStanding, BridgeError> {
+        if let Some(pinned) = self
+            .pinned_standing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+        {
+            return Ok(pinned.clone());
+        }
         Ok(match self.live(identity) {
             Some(member) if member.retiring => MemberStanding::retiring(member.generation),
             Some(member) => MemberStanding::seated(member.generation),
             None => MemberStanding::unseated(),
         })
+    }
+
+    /// From now on Core's standing of `identity`'s member reads `standing`,
+    /// whatever Core holds: the state Core's actor last published, which
+    /// trails the journal by the steps it is still committing.
+    pub(crate) fn pin_standing(&self, identity: &AgentIdentity, standing: MemberStanding) {
+        self.pinned_standing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone(), standing);
+    }
+
+    /// Core journals `count` facts of a member no identity spawned (the
+    /// starts of its retirements), which owe the identities nothing: a busy
+    /// journal between two facts of an identity.
+    pub(crate) fn journal_others(&self, count: usize) {
+        let other = meerkat_mob::AgentIdentity::from("another-member");
+        for _ in 0..count {
+            self.journal_fact(MemberLifecycleFact::retirement_started(
+                other.clone(),
+                0,
+                None,
+                None,
+            ));
+        }
+    }
+
+    /// Core compensates the spawn of `identity`'s live member: the spawn's
+    /// membership step failed after its seat was journaled, and Core closes
+    /// the incarnation with a retirement that records no facts (no session,
+    /// no cause, no rotation).
+    pub(crate) fn compensate(&self, identity: &AgentIdentity) {
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(member) = members.get_mut(identity).filter(|member| member.live) {
+            member.live = false;
+            self.journal_fact(MemberLifecycleFact::retired(
+                member_id(identity),
+                member.generation,
+                member.profile.clone(),
+            ));
+        }
     }
 
     /// From now on Core's member history reads `identity`'s member as

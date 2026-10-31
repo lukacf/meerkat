@@ -194,6 +194,7 @@ impl InstructionMob {
             members,
             concurrency,
             storage,
+            None,
         )
         .await
     }
@@ -205,6 +206,20 @@ impl InstructionMob {
             &[],
             None,
             MobStorage::in_memory(),
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::new`] with no member yet, whose dormant seats key their
+    /// members' comms identities under `root`.
+    async fn with_member_comms_root(label: &str, root: &std::path::Path) -> Self {
+        Self::build(
+            with_unique_mob_id(sample_definition(), label),
+            &[],
+            None,
+            MobStorage::in_memory(),
+            Some(root),
         )
         .await
     }
@@ -214,6 +229,7 @@ impl InstructionMob {
         members: &[(&str, &str)],
         concurrency: Option<usize>,
         storage: MobStorage,
+        member_comms_root: Option<&std::path::Path>,
     ) -> Self {
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
@@ -223,6 +239,9 @@ impl InstructionMob {
             MobBuilder::new(definition, storage).with_session_service(service.clone());
         if let Some(concurrency) = concurrency {
             builder = builder.with_member_instruction_delivery_concurrency(concurrency);
+        }
+        if let Some(root) = member_comms_root {
+            builder = builder.with_member_comms_identity_root(root);
         }
         let handle = builder.create().await.expect("create the mob");
         let mut mob = Self {
@@ -1572,5 +1591,88 @@ async fn a_status_page_reads_its_member_sessions_in_one_call() {
         mob.service.member_instruction_reads()[before..],
         [3],
         "one read call carries the whole page"
+    );
+}
+
+/// A dormant resume seat over a session whose own host wrote its target (an
+/// attach) makes the session a member's at the seat, without a wake: the
+/// host's next session-level write is refused `owned_by_mob`, and the mob's
+/// first store-only delivery takes the host's target over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dormant_resume_seat_binds_the_hosts_session_at_the_seat() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let mob = InstructionMob::with_member_comms_root("oi-seat-attach", keys.path()).await;
+    mob.handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    let identity = AgentIdentity::from("oi-seat-attach-w1");
+    let session = mob.host_instructed_session(&identity).await;
+    let builds = mob.service.recorded_create_requests().await.len();
+    // Deliveries wait here, so the host's write below meets the target its
+    // host wrote, not one the mob already recorded.
+    let gate = mob.service.hold_instruction_records();
+    let spec = turn_driven("worker", &identity).with_launch_mode(
+        crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: session.clone(),
+            resume_from_role: None,
+        },
+    );
+    let outcomes = mob
+        .handle
+        .seat_dormant_members(vec![spec])
+        .await
+        .expect("the seat batch answers");
+    match &outcomes[0] {
+        DormantSeatOutcome::Seated { session_id, .. } => assert_eq!(session_id, &session),
+        other => panic!("the resume spec is seated on the host's session: {other:?}"),
+    }
+
+    let refused = mob
+        .service
+        .persisted_sessions
+        .write()
+        .await
+        .get_mut(&session)
+        .expect("the host's session")
+        .set_session_instruction(SessionInstructionWrite {
+            slot: slot("host"),
+            revision: revision(2),
+            change: SessionInstructionChange::Activate {
+                body: FORMAL.to_string(),
+                content_sha256: None,
+            },
+        })
+        .expect_err("a seated member's session takes no write of its host");
+    assert_eq!(refused.code(), InstructionSetErrorCode::OwnedByMob);
+
+    gate.add_permits(1);
+    current(&mob.handle, &identity).await;
+    let target = mob
+        .service
+        .committed_instruction_target(&session)
+        .await
+        .expect("the member session's target");
+    assert_eq!(
+        target.owner(),
+        &InstructionTargetOwner::Mob {
+            mob_id: mob.handle.mob_id().as_str().to_string(),
+            agent_identity: identity.as_str().to_string(),
+        }
+    );
+    assert_eq!(
+        active_slots(&mob.service, &session).await,
+        vec![("tone".to_string(), 1)],
+        "the mob's snapshot replaced the host's target"
+    );
+    assert_eq!(
+        mob.handle.member_materialization_for_test(&identity),
+        Some(crate::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the member stays dormant"
+    );
+    assert_eq!(
+        mob.service.recorded_create_requests().await.len(),
+        builds,
+        "nothing built the member's session"
     );
 }

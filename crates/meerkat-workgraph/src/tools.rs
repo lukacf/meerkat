@@ -131,7 +131,9 @@ impl WorkGraphToolContract {
             Self::Block => "Mark a WorkGraph item blocked.",
             Self::Close => "Close a WorkGraph item with a terminal status.",
             Self::Link => "Create a dependency or relationship edge.",
-            Self::AddEvidence => "Attach a typed evidence reference to a WorkGraph item.",
+            Self::AddEvidence => {
+                "Attach a typed evidence reference to a WorkGraph item. To withdraw earlier evidence on the same item, list its ids in `evidence.withdraws`: a ref whose id a later ref lists in `withdraws` is withdrawn and stays on the item."
+            }
             Self::AttentionReassign => "Reassign a WorkGraph attention binding.",
         }
     }
@@ -535,6 +537,25 @@ fn evidence_ref_schema() -> Value {
     })
 }
 
+/// The evidence `workgraph_add_evidence` takes: the create shape plus the
+/// ids of earlier evidence on the item that the new ref withdraws. A create
+/// has no earlier evidence on its item, so `workgraph_create` does not
+/// advertise `withdraws`.
+fn withdrawing_evidence_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string" },
+            "id": { "type": "string" },
+            "label": { "type": "string" },
+            "summary": { "type": "string" },
+            "withdraws": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["kind", "id"],
+        "additionalProperties": false
+    })
+}
+
 fn owner_key_schema() -> Value {
     json!({
         "type": "object",
@@ -905,7 +926,7 @@ fn evidence_schema() -> Value {
             "expected_revision".to_string(),
             json!({ "type": "integer", "minimum": 0 }),
         ),
-        ("evidence".to_string(), evidence_ref_schema()),
+        ("evidence".to_string(), withdrawing_evidence_ref_schema()),
     ]);
     object(properties, &["id", "expected_revision", "evidence"])
 }

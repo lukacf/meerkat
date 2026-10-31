@@ -127,6 +127,13 @@ import {
   topologyNodeAgent,
   topologyTeamKey,
 } from "./lib/topology";
+import {
+  EMPTY_TOPOLOGY_RELATIONS,
+  readTopologyRelations,
+  topologyAgentStatus,
+  topologyGrouping,
+  type ConsoleTopologyRelationsState,
+} from "./lib/topology-relations";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
 import {
@@ -3461,31 +3468,63 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [baseUrl, refreshAccessData, loadExperience, accessData, accessScope, experience?.access?.can_administer, frontendReadOnly, experience?.console_policy?.read_only],
   );
 
+  // What the topology reads beside its query: routes from channels (when
+  // the caller may read routing), the typed lineage of helpers (mob events)
+  // and the agents' memory scopes. Each read is optional; one that is not
+  // advertised or fails leaves only its own relation out.
+  const [topologyRelations, setTopologyRelations] =
+    React.useState<ConsoleTopologyRelationsState>(EMPTY_TOPOLOGY_RELATIONS);
+  // Only a refresh someone asked for shows "Updating"; the background
+  // refreshes keep the map still.
+  const [topologyRefreshing, setTopologyRefreshing] = React.useState(false);
+  const topologyMemoryReadable = experience?.memory?.available === true && experience?.memory?.can_read === true;
+  // The map counts messages from the activity ledger, which holds what the
+  // console saw since it opened. The first map read of a timeline scope
+  // also counts the recent history once, so "messages in the last hour" is
+  // not only what arrived since the page loaded.
+  const topologyBackfilledLedgerRef = React.useRef<object | null>(null);
   const refreshTopologyData = React.useCallback(() => panelRefreshFlight("topology", async () => {
+    const ledger = timelineScopeRef.current?.ledger;
+    if (ledger && topologyBackfilledLedgerRef.current !== ledger) {
+      topologyBackfilledLedgerRef.current = ledger;
+      void consoleController.timeline.query({ mode: "recent", limit: 1000 })
+        .then((page) => { ledger.ingestMany(page.value.frames); })
+        .catch(() => { topologyBackfilledLedgerRef.current = null; });
+    }
     try {
       const capabilities = await consoleTransport.capabilities();
       setTopologyCapabilities(capabilities.topologyControl || null);
+      const relations = readTopologyRelations({
+        methods: capabilities.methods,
+        methodOf: consoleCommandMethod,
+        execute: (command, kind, params) => executeHeadlessCommand(command, controlWorkbenchTarget(kind), params),
+        memoryAvailable: topologyMemoryReadable,
+      });
       const queryMethod = consoleCommandMethod(CONSOLE_COMMAND_NAMES.topologyQuery);
       if (!capabilities.methods.includes(queryMethod)) {
         // Older and topology-unaware runtimes retain the passive graph/roles
         // console. Mutation UI is never inferred from generic wiring support.
         setTopologyQueryResult(null);
-        return;
+      } else {
+        const result = await executeHeadlessCommand(
+          CONSOLE_COMMAND_NAMES.topologyQuery,
+          controlWorkbenchTarget("topology"),
+        );
+        setTopologyQueryResult(result);
       }
-      const result = await executeHeadlessCommand(
-        CONSOLE_COMMAND_NAMES.topologyQuery,
-        controlWorkbenchTarget("topology"),
-      );
-      setTopologyQueryResult(result);
+      setTopologyRelations({ ...(await relations), updatedAtMs: Date.now(), error: null });
     } catch (error) {
       // Capability loss, an authorization change, or a failed refresh must
       // revoke stale edit affordances immediately. The passive topology view
       // remains available from the experience snapshot.
       setTopologyCapabilities(null);
       setTopologyQueryResult(null);
+      setTopologyRelations((current) => ({ ...current, error: errorMessage(error) }));
       throw error;
     }
-  }), [panelRefreshFlight, consoleTransport]);
+    // The timeline scope's ledger is a ref, read when the refresh runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [panelRefreshFlight, consoleTransport, consoleController, topologyMemoryReadable]);
 
   // Access is read when its panel opens or its scope changes, on Refresh and
   // after a save, and when the owner signals a newer access revision
@@ -5759,6 +5798,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           nodes={normalizedTopology?.nodes || experience?.topology?.live_snapshot?.nodes || []}
           agents={agents}
           activity={liveFrames}
+          activitySource={timelineScope.ledger}
+          links={normalizedTopology?.links ?? null}
+          routes={topologyRelations.routes}
+          routesAccess={topologyRelations.routesAccess}
+          lineage={topologyRelations.lineage}
+          memoryScopes={topologyRelations.memoryScopes}
+          stores={topologyRelations.stores}
+          grouping={topologyGrouping(experience?.console_config?.agent_list)}
+          statusOf={topologyAgentStatus}
           management={normalizedTopology?.management || null}
           connectionSourceId={topologyConnectionSourceId}
           onConnectionSourceChange={setTopologyConnectionSourceId}
@@ -5768,6 +5816,27 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
           }}
+          onOpenAgentDetails={(id) => {
+            const agent = topologyNodeAgent(agents, id);
+            if (!agent) return;
+            const inspect = buildInspectTarget(agent);
+            dock.openTarget(inspect, "split_right");
+            void refreshInspectIdentity(inspect.identity).catch(() => {});
+          }}
+          onOpenMemory={visibleControls.includes("memory")
+            ? () => dock.openTarget(buildControlTarget("memory"), "split_right")
+            : undefined}
+          updatedAtMs={topologyRelations.updatedAtMs}
+          refreshing={topologyRefreshing}
+          loading={topologyRelations.updatedAtMs === null && agents.length === 0}
+          error={topologyRelations.error}
+          onRefresh={() => {
+            setTopologyRefreshing(true);
+            void refreshTopologyData()
+              .catch(() => {})
+              .finally(() => setTopologyRefreshing(false));
+          }}
+          canWireMembers={experience?.runtime_capabilities?.can_wire_members === true}
           teamName={teamKey ? teamName(teamKey) : undefined}
           teamKey={teamKey}
         />

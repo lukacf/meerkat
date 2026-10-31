@@ -15220,12 +15220,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// embedding host's runtime that stopped), answered without degrading
     /// anything. A surface asks it before it judges the session's live actor
     /// ahead of an input's admission: such an actor takes no commands, so it
-    /// is not judged and the input is admitted. The runtime's own check
-    /// ([`Self::runtime_turn_lost_its_host_runtime`], asked by the pre-dequeue
-    /// handle and the apply) then degrades the registration and leaves the
-    /// input to the session's next registration. Degrading here instead
-    /// would refuse the input: admission refuses a registration that must
-    /// reload.
+    /// is not judged, and the input goes on to its admission unless the
+    /// surface refuses it on its own account (an input to a help session,
+    /// which is never rebuilt from storage, for example). The runtime's own
+    /// check ([`Self::runtime_turn_lost_its_host_runtime`], asked by the
+    /// pre-dequeue handle and the apply) then degrades the registration and
+    /// leaves the input to the session's next registration. Degrading here
+    /// instead would refuse the input: admission refuses a registration that
+    /// must reload.
     pub async fn session_task_ended_with_its_runtime(&self, id: &SessionId) -> bool {
         self.inner.session_task_ended_with_its_runtime(id).await
     }

@@ -521,10 +521,10 @@ mod ops {
         /// Every fact is read body-free, so a provisional tail standing ahead
         /// of the committed boundary never fails the judgement:
         /// - a live actor whose task ended with its host's runtime is not
-        ///   judged: it takes no commands, so the caller admits its input,
-        ///   and the runtime's lost host runtime check degrades the
-        ///   registration and leaves the input to the session's next
-        ///   registration
+        ///   judged: it takes no commands, so the judgement leaves the input
+        ///   to the caller's admission, and the runtime's lost host runtime
+        ///   check degrades the registration and leaves an admitted input to
+        ///   the session's next registration
         ///   (`PersistentSessionService::session_task_ended_with_its_runtime`);
         /// - an archived session is never stale, and a session with no
         ///   committed source has nothing to be stale against;

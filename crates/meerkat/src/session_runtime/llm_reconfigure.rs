@@ -1544,11 +1544,14 @@ mod tests {
             unreachable!("realm selection does not inspect the transcript")
         }
 
+        /// This service holds no live session actor.
         async fn live_session_own_operator_instruction_entry_placement(
             &self,
-            _session_id: &SessionId,
+            session_id: &SessionId,
         ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
-            unreachable!("realm selection does not inspect the transcript")
+            Err(SessionError::NotFound {
+                id: session_id.clone(),
+            })
         }
 
         async fn live_realm_id(
@@ -1875,6 +1878,108 @@ mod tests {
     /// The host holds its service weakly (the service owns the machine the
     /// host is installed on). Once the service is gone, every host entry point
     /// answers with a typed `Destroyed`; none panics.
+    /// A session staged before its first build has no live actor; its staged
+    /// build carries the session it resumes, so a model change is judged on
+    /// that session's own operator-instruction entries. A target that cannot
+    /// carry the entry where it stands (after the conversation) is refused at
+    /// the plan step, typed, rather than by the build that would resume it.
+    #[tokio::test]
+    async fn a_staged_session_is_judged_on_the_session_its_build_resumes() {
+        let service: Arc<dyn SessionRuntimeLlmReconfigureService> =
+            Arc::new(RealmOnlyService { realm_id: None });
+        let mut resumed = meerkat_core::Session::new();
+        let session_id = resumed.id().clone();
+        resumed.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        resumed
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry after the conversation row");
+        let current = SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let mut build_config = crate::AgentBuildConfig::new("gpt-5.5");
+        build_config.resume_session = Some(resumed);
+        let staged = Arc::new(StagedSessionRegistry::new());
+        staged
+            .stage(
+                session_id.clone(),
+                crate::StagedSlot::new_staged(
+                    &session_id,
+                    build_config,
+                    current.clone(),
+                    None,
+                    None,
+                    Vec::new(),
+                    0,
+                    0,
+                    false,
+                )
+                .expect("a staged slot"),
+            )
+            .await
+            .expect("stage the session");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                config,
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        ));
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: Arc::downgrade(&service),
+            staged_sessions: staged,
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::new(std::sync::RwLock::new(None)),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(Some(config_runtime))),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+
+        let error = host
+            .resolve_target_session_llm_identity_for_session(
+                &session_id,
+                &reconfigure_request(Some("custom-prefix-model"), None, None),
+                &current,
+            )
+            .await
+            .expect_err("a target that cannot carry the staged session's own entry is refused");
+        assert!(
+            matches!(
+                &error,
+                RuntimeDriverError::ValidationFailed { reason }
+                    if reason.contains("cannot represent the operator-instruction entries")
+            ),
+            "unexpected refusal: {error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_host_whose_service_was_dropped_answers_destroyed_on_every_call() {
         let service: Arc<dyn SessionRuntimeLlmReconfigureService> =

@@ -117,6 +117,8 @@ impl SessionGeneration {
 }
 
 #[cfg(test)]
+mod activation_places_tests;
+#[cfg(test)]
 mod assistant_message_identity_tests;
 pub mod context_control;
 mod digest_accumulator;

@@ -689,8 +689,9 @@ the fork, the fork activates the same revision and body in the side chat as
 the host. Any other stays inactive, and the side chat refuses its first turn
 naming it until a host activates it (`meta/member_activate_instruction`). The
 result lists each with `state` `inherited` or `inactive` and a `reason`
-(`not_effective_in_source`, `body_unreadable`, `head_body_retired` (a compaction
-of the source retired the copied head's body) or `activation_refused`). Under
+(`not_effective_in_source`, `body_unreadable`, `head_body_retired` (the
+source's own head of the key holds a retired body, which only a torn source
+document does at the tail) or `activation_refused`). Under
 the `refuse` fork instruction policy a fork of an activated agent answers
 Meerkat's `-32037` `fork_instruction_refused`.
 

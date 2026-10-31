@@ -547,9 +547,11 @@ pub enum SideChatInstructionGap {
     NotEffectiveInSource,
     /// The copied row's body does not match its declared content digest.
     BodyUnreadable,
-    /// A compaction of the source retired the copied head's body: a later
-    /// activation of its key superseded it, and the fork's prefix ends
-    /// before that activation, so there is no body to activate here.
+    /// The key's head is an activation the source made itself, and its body
+    /// is retired, so there is no body to activate here. A side chat forks
+    /// at the tail, where a compaction never retires the source's own head
+    /// of a key, so only a torn source document holds one (its own model
+    /// requests fail closed).
     HeadBodyRetired,
     /// Meerkat refused the activation in the side chat.
     ActivationRefused { message: String },

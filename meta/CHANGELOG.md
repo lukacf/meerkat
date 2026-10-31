@@ -513,12 +513,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     no longer joins `after_create` calls or drains reset distillations of its
     own.
 
-- A side chat (`meta/fork_member`) gives a copied instruction whose body a
-  compaction of the source retired its own reason, `head_body_retired` (a
-  later activation of its key superseded it, and the fork's prefix ends
-  before that activation, so there is no body to activate); it read as
-  `body_unreadable` before. The Console names it. The reason is advisory:
-  a reader that does not know a kind shows the key without one.
+- A side chat (`meta/fork_member`) gives an inherited head the source
+  activated itself and holds with a retired body its own reason,
+  `head_body_retired` (there is no body to activate; a side chat forks at
+  the tail, where a compaction never retires the source's own head, so only
+  a torn source document holds one); it read as `body_unreadable` before.
+  The Console names it. The reason is advisory: a reader that does not know
+  a kind shows the key without one.
 
 ### Fixed
 

@@ -138,9 +138,10 @@ of them.
 
 A session whose document 0.9.9 writes at session envelope 5 does not
 downgrade: one that carries operator-instruction facts, one in which a
-compaction retired a superseded instruction activation body (or a fork child
-that copied such a row), and one in which a rewrite moved an instruction
-activation row to another offset. 0.9.8 refuses such a session;
+compaction, or a system-row prune with
+`retire_superseded_activation_bodies`, retired a superseded instruction
+activation body (or a fork child that copied such a row), and one in which
+a rewrite moved an instruction activation row to another offset. 0.9.8 refuses such a session;
 `rkat storage doctor` lists them (Info finding
 `operator-instruction-envelope`) before you roll back. Every other session
 stays at envelope 4 and reads on 0.9.8 unchanged.

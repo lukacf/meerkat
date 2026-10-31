@@ -1843,8 +1843,9 @@ them.
 - A downgrade to 0.9.8 is refused for every session whose document 0.9.9
   writes at session envelope 5: a session that carries operator-instruction
   facts (an entry row, current or retained in its rewrite graph, or the
-  recorded instruction state), a session in which a 0.9.9 compaction retired
-  a superseded instruction activation body (and a fork child that copied
+  recorded instruction state), a session in which a 0.9.9 compaction, or a
+  system-row prune with `retire_superseded_activation_bodies`, retired a
+  superseded instruction activation body (and a fork child that copied
   such a row), and a session in which a rewrite (a keyed prompt update, a
   generic rewrite, a restore or a system-row prune) moved an instruction
   activation row to another offset. 0.9.8 refuses such a document typed at

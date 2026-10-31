@@ -102,7 +102,7 @@ test("instructions a fork could not inherit are named, with why", () => {
     inactiveInstructionNotice([
       { namespace: "app.skills", key: "calendar", state: "inactive", reason: "head_body_retired" },
     ]),
-    "Not inherited: app.skills/calendar (a compaction of the source retired its text). This side chat cannot answer until it is activated.",
+    "Not inherited: app.skills/calendar (its text is retired in the source). This side chat cannot answer until it is activated.",
   );
 });
 

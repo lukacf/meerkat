@@ -4445,7 +4445,7 @@ fn console_rpc_access_requirements(
         // requires the unscoped read grant (a rule with no resource
         // selector), same as realm-scope record reads. The handlers then list
         // a realm's runs only to a caller who may read every memory scope in
-        // it (`memory_panel_realm_fully_readable`).
+        // it and its quarantined content (`memory_panel_realm_fully_readable`).
         "meta/memory/panel/dreams" => one(ACTION_AGENT_MEMORY_READ, None),
         // Durable dream verdict sheets + the usage-audit review queue: same
         // realm-level read posture as dream history.
@@ -4887,9 +4887,17 @@ fn memory_panel_record_visible(
         return false;
     }
     if memory_panel_record_is_quarantine_evidence(record) {
-        return view.allows(ACTION_MEMORY_QUARANTINE_REVIEW);
+        return memory_panel_quarantine_evidence_visible(Some(view));
     }
     true
+}
+
+/// The quarantine half of [`memory_panel_record_visible`]: quarantine
+/// evidence (a quarantined record, or a tombstoned one that was ever
+/// quarantined) is reviewer-only.
+fn memory_panel_quarantine_evidence_visible(view: Option<&AccessView>) -> bool {
+    view.filter(|view| view.enforced())
+        .is_none_or(|view| view.allows(ACTION_MEMORY_QUARANTINE_REVIEW))
 }
 
 /// The scope half of [`memory_panel_record_visible`]: whether the caller may
@@ -4965,10 +4973,13 @@ async fn memory_panel_retain_readable_records<T>(
 /// Whether the caller may read every memory scope `realm` holds, each by
 /// [`memory_panel_scope_visible`]: every identity with memory there, its mobs
 /// (`mob.memory.read`), the operator scope once operator records exist
-/// (`operator.memory.read`) and the realm scope. A steward dream spans the
-/// realm's scopes, so its runs are listed only to such a caller. Call it
-/// after reading the runs: the store never deletes a record, so every scope
-/// a run read before touched is then among the realm's scopes.
+/// (`operator.memory.read`) and the realm scope. While the realm holds
+/// quarantined content, the caller must also pass the quarantine half of the
+/// record rule ([`memory_panel_quarantine_evidence_visible`]). A steward
+/// dream spans the realm's scopes and can describe quarantined content, so
+/// its runs are listed only to such a caller. Call it after reading the
+/// runs: the store never deletes a record, so every scope a run read before
+/// touched is then among the realm's scopes, and quarantine evidence stays.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     view: Option<&AccessView>,
@@ -4977,11 +4988,16 @@ async fn memory_panel_realm_fully_readable(
     if !view.is_some_and(AccessView::enforced) {
         return Ok(true);
     }
-    Ok(store
+    let every_scope = store
         .scope_overview(realm)
         .await?
         .iter()
-        .all(|row| memory_panel_scope_visible(view, &row.scope)))
+        .all(|row| memory_panel_scope_visible(view, &row.scope));
+    if !every_scope {
+        return Ok(false);
+    }
+    Ok(memory_panel_quarantine_evidence_visible(view)
+        || !store.holds_quarantine_evidence(realm).await?)
 }
 
 /// Quarantined content is reviewer-only, and stays so across the status
@@ -5511,11 +5527,12 @@ fn memory_quarantine_refusal_error(
 }
 
 /// Steward dream-run summaries reconstructed from the audit rows, newest
-/// first. A run spans its realm's scopes, so a realm's runs are listed only
-/// to a caller who may read every memory scope there
-/// ([`memory_panel_realm_fully_readable`]). For any other caller they are
-/// left out and `withheld_by_access` is true, so the panel can tell withheld
-/// history from none.
+/// first. A run spans its realm's scopes and can describe quarantined
+/// content, so a realm's runs are listed only to a caller who may read every
+/// memory scope there and, while the realm holds quarantined content, holds
+/// the review grant ([`memory_panel_realm_fully_readable`]). For any other
+/// caller they are left out and `withheld_by_access` is true, so the panel
+/// can tell withheld history from none.
 async fn handle_memory_panel_dreams(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
     view: Option<&AccessView>,

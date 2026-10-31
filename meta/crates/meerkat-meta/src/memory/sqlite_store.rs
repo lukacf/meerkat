@@ -2730,6 +2730,23 @@ impl MemoryPanelStore for SqliteAgentMemoryStore {
         })
         .await
     }
+
+    async fn holds_quarantine_evidence(&self, realm: &str) -> Result<bool, AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM records WHERE status_kind = 'quarantined' \
+                     OR (status_kind = 'tombstoned' AND ever_quarantined = 1))",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sql_err)
+            })
+        })
+        .await
+    }
 }
 
 impl SqliteAgentMemoryStore {

@@ -468,4 +468,14 @@ pub trait MemoryPanelStore: StewardStore {
         realm: &str,
         max_runs: usize,
     ) -> Result<Vec<DreamRunAudit>, AgentMemoryError>;
+
+    /// Whether `realm` holds quarantined content: a quarantined record, or a
+    /// tombstoned one that was ever quarantined. The panel shows such
+    /// content only to `memory.quarantine.review`, and while any exists it
+    /// lists the realm's dream history, which can describe it, only to that
+    /// grant. The default answers `true`, so a store that cannot tell keeps
+    /// the history to reviewers.
+    async fn holds_quarantine_evidence(&self, _realm: &str) -> Result<bool, AgentMemoryError> {
+        Ok(true)
+    }
 }

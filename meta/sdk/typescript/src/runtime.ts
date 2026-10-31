@@ -2562,6 +2562,21 @@ export class MetaRuntime {
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 
+  /** Remove named ordinary System rows from a member's current session. */
+  async pruneMemberSystemRows(
+    identity: string,
+    remove: ReadonlyArray<{ index: number; content_sha256: string }>,
+    options: {
+      retireSupersededActivationBodies?: boolean;
+      expectedParentRevision?: string;
+      note?: string;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    throw new Error(
+      `meta/prune_member_system_rows is not implemented (${identity}, ${remove.length} rows, ${JSON.stringify(options)})`,
+    );
+  }
+
   /**
    * Start the identity over: its earlier session is no longer resumed, and
    * its next session starts empty. A live identity moves to a fresh session

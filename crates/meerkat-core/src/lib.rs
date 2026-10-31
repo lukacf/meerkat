@@ -522,10 +522,10 @@ pub use service::{
     SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
     SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TranscriptEditError,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
-    WorkGraphNamespaceGrant,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult, TranscriptEditError, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection,
+    TranscriptRewriteSemantic, TurnToolOverlay, WorkGraphNamespaceGrant,
 };
 pub use session::{
     AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX, ActivationWindow, AuditedEndpointDivergence,
@@ -589,8 +589,9 @@ pub use session::{
     InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
     InvalidInstructionRevision, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
     MAX_OPERATOR_INSTRUCTION_SLOTS, RunStartInstructionApplication, RunStartInstructionOutcome,
-    SESSION_ENVELOPE_BASELINE_VERSION, SESSION_INSTRUCTION_STATE_KEY, SessionInstructionChange,
-    SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
+    SESSION_ENVELOPE_BASELINE_VERSION, SESSION_INSTRUCTION_STATE_KEY, SYSTEM_ROW_PRUNE_REASON_KIND,
+    SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
+    SessionInstructionWrite, SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef,
     effective_operator_instructions, materialize_operator_instruction_messages,
     validate_operator_instruction_messages,
 };

@@ -942,6 +942,26 @@ describe("Identity-first runtime APIs (REQ-47)", () => {
     });
   });
 
+  it("pruneMemberSystemRows(identity, remove, options)", async () => {
+    const { rt, calls } = await makeRuntime();
+    const remove = [{ index: 0, content_sha256: `sha256:${"0".repeat(64)}` }];
+    await rt.pruneMemberSystemRows("worker:1", remove);
+    assert.equal(calls[0].method, "meta/prune_member_system_rows");
+    assert.deepEqual(calls[0].params, { identity: "worker:1", remove });
+    await rt.pruneMemberSystemRows("worker:1", remove, {
+      retireSupersededActivationBodies: true,
+      expectedParentRevision: `sha256:${"1".repeat(64)}`,
+      note: "legacy prompts",
+    });
+    assert.deepEqual(calls[1].params, {
+      identity: "worker:1",
+      remove,
+      retire_superseded_activation_bodies: true,
+      expected_parent_revision: `sha256:${"1".repeat(64)}`,
+      note: "legacy prompts",
+    });
+  });
+
   it("reset(identity)", async () => {
     const { rt, calls } = await makeRuntime();
     await rt.reset("worker:1");

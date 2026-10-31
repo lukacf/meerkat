@@ -3218,6 +3218,179 @@ comms = true
         harness.teardown().await;
     }
 
+    /// `method` with `params`, sent again while the member's session answers
+    /// busy (`-32015`): a turn that just finished can hold its runtime
+    /// admission for a moment.
+    async fn rpc_when_idle(harness: &OperatorVerbHarness, method: &str, params: Value) -> Value {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = rpc(harness, method, params.clone()).await;
+            if response["error"]["code"] == serde_json::json!(OPERATOR_SESSION_BUSY_CODE)
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            return response;
+        }
+    }
+
+    /// `meta/prune_member_system_rows` maps onto Meerkat's
+    /// `prune_system_rows`: the ordinary System rows the host names (index
+    /// and content digest, from a history read) go in one audited rewrite of
+    /// the member's session; a stale reference is refused typed (`-32602`,
+    /// `data.kind` `system_row_prune_refused` with the row's index and
+    /// cause) and nothing is written; a request that names no row prunes
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_member_system_rows_maps_to_the_core_door() {
+        let harness = operator_verb_harness("worker:main", "operator-prune-verb").await;
+        let service: Arc<dyn crate::memory::hygienist::TranscriptEditSessionService> =
+            Arc::clone(&harness.concrete) as _;
+        const SEED_TURN: &str = "seed one committed turn";
+        harness.run_turn(SEED_TURN.to_string()).await;
+        let session_id = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("identity status")
+            .session_id
+            .expect("identity session");
+        wait_for_durable_turn(&service, &session_id, SEED_TURN).await;
+        let seeded_len = settled_transcript_len(&service, &session_id).await;
+        // Two prompts an earlier boot wrote, after the committed turn.
+        let legacy = [
+            "Legacy prompt one: you keep the team's schedule.",
+            "Legacy prompt two: you keep the team's schedule and travel.",
+        ];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let request = meerkat_core::service::SessionTranscriptRewriteRequest {
+                selection: meerkat_core::TranscriptRewriteSelection::MessageRange {
+                    start: seeded_len,
+                    end: seeded_len,
+                },
+                replacement: legacy
+                    .iter()
+                    .map(|content| {
+                        Message::System(meerkat_core::types::SystemMessage::new(
+                            (*content).to_string(),
+                        ))
+                    })
+                    .collect(),
+                reason: meerkat_core::TranscriptRewriteReason::new("test_seed"),
+                actor: Some("operator-verb-test".to_string()),
+                expected_parent_revision: None,
+                running_behavior: meerkat_core::TranscriptEditRunningBehavior::default(),
+            };
+            match service
+                .rewrite_session_transcript(&session_id, request)
+                .await
+            {
+                Ok(_) => break,
+                Err(SessionError::Busy { .. }) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(err) => panic!("legacy prompt seed rewrite failed: {err}"),
+            }
+        }
+        let staged_len = transcript_len(&service, &session_id).await;
+        assert_eq!(staged_len, seeded_len + 2, "the seed is the whole growth");
+        let digest = |content: &str| {
+            meerkat_core::InstructionContentDigest::for_body(content)
+                .as_str()
+                .to_string()
+        };
+
+        let stale = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "remove": [{"index": seeded_len, "content_sha256": digest("an earlier read")}],
+            }),
+        )
+        .await;
+        assert_eq!(
+            stale["error"]["code"],
+            serde_json::json!(-32602),
+            "{stale:#?}"
+        );
+        assert_eq!(
+            stale["error"]["data"],
+            serde_json::json!({
+                "kind": "system_row_prune_refused",
+                "index": seeded_len,
+                "cause": "digest_mismatch",
+            }),
+            "{stale:#?}"
+        );
+        assert_eq!(
+            transcript_len(&service, &session_id).await,
+            staged_len,
+            "a refused prune writes nothing"
+        );
+
+        let response = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "remove": [
+                    {"index": seeded_len, "content_sha256": digest(legacy[0])},
+                    {"index": seeded_len + 1, "content_sha256": digest(legacy[1])},
+                ],
+                "note": "legacy prompts",
+            }),
+        )
+        .await;
+        assert!(response["error"].is_null(), "{response:#?}");
+        let result = &response["result"];
+        assert_eq!(result["pruned"], Value::Bool(true), "{result:#?}");
+        assert_eq!(result["removed_rows"], serde_json::json!(2), "{result:#?}");
+        assert_eq!(
+            result["retired_bodies"],
+            serde_json::json!(0),
+            "{result:#?}"
+        );
+        assert_eq!(
+            result["message_count"],
+            serde_json::json!(seeded_len),
+            "{result:#?}"
+        );
+        assert!(result["revision"].as_str().is_some(), "{result:#?}");
+        let page = service
+            .read_history(
+                &session_id,
+                meerkat_core::service::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("read the pruned transcript");
+        assert_eq!(page.messages.len(), seeded_len);
+        assert!(
+            !page.messages.iter().any(|message| matches!(
+                message,
+                Message::System(system) if legacy.contains(&system.content.as_str())
+            )),
+            "the legacy prompts are gone"
+        );
+
+        let quiet = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({"identity": harness.member_alias, "remove": []}),
+        )
+        .await;
+        assert!(quiet["error"].is_null(), "{quiet:#?}");
+        assert_eq!(quiet["result"]["pruned"], Value::Bool(false), "{quiet:#?}");
+        assert_eq!(quiet["result"]["removed_rows"], serde_json::json!(0));
+
+        harness.teardown().await;
+    }
+
     fn instruction_activation(
         revision_id: &str,
         activation_id: &str,
@@ -3316,6 +3489,10 @@ comms = true
             (
                 "meta/bound_member_transcript",
                 serde_json::json!({"identity": "rt:worker:main:1"}),
+            ),
+            (
+                "meta/prune_member_system_rows",
+                serde_json::json!({"identity": "rt:worker:main:1", "remove": []}),
             ),
         ] {
             let response = rpc(&harness, method, params).await;

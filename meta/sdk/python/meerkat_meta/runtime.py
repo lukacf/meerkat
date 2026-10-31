@@ -1795,6 +1795,21 @@ class MetaRuntime:
         raw = await self._rpc("meta/member_instruction_activations", params)
         return raw if isinstance(raw, dict) else {}
 
+    async def prune_member_system_rows(
+        self,
+        identity: str,
+        remove: list[dict[str, Any]],
+        *,
+        retire_superseded_activation_bodies: bool = False,
+        expected_parent_revision: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove named ordinary System rows from a member's current session."""
+        raise NotImplementedError(
+            f"meta/prune_member_system_rows is not implemented ({identity}, {len(remove)} rows, "
+            f"{retire_superseded_activation_bodies}, {expected_parent_revision}, {note})"
+        )
+
     async def reconcile(self) -> Any:
         """Re-run restore_flow with fresh roster from the provider.
 

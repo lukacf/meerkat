@@ -587,6 +587,42 @@ impl SessionError {
         }
     }
 
+    /// Structured-data `kind` of [`Self::system_row_prune_refused`].
+    pub const SYSTEM_ROW_PRUNE_REFUSED_KIND: &'static str = "system_row_prune_refused";
+
+    /// A system-row prune refused the row it names at `index`, for `cause`;
+    /// nothing was written. The structured data carries the index and the
+    /// typed cause, so a host never reads the message.
+    pub fn system_row_prune_refused(index: usize, cause: crate::SystemRowPruneRefusal) -> Self {
+        Self::FailedWithData {
+            message: TranscriptEditError::SystemRowPruneRefused { index, cause }.to_string(),
+            data: serde_json::json!({
+                "kind": Self::SYSTEM_ROW_PRUNE_REFUSED_KIND,
+                "index": index,
+                "cause": cause,
+            }),
+        }
+    }
+
+    /// The row index and typed cause of a [`Self::system_row_prune_refused`].
+    /// Unknown or malformed structured data fails closed as `None`.
+    pub fn system_row_prune_refusal(&self) -> Option<(usize, crate::SystemRowPruneRefusal)> {
+        let Self::FailedWithData { data, .. } = self.primary_error() else {
+            return None;
+        };
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::SYSTEM_ROW_PRUNE_REFUSED_KIND)
+        {
+            return None;
+        }
+        let index = data
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())?;
+        let cause = serde_json::from_value(data.get("cause")?.clone()).ok()?;
+        Some((index, cause))
+    }
+
     /// Whether this error is a [`Self::runtime_teardown_in_progress`].
     pub fn is_runtime_teardown_in_progress(&self) -> bool {
         matches!(
@@ -3620,6 +3656,59 @@ pub struct SessionTranscriptRewriteResult {
     pub commit: TranscriptRewriteCommit,
 }
 
+/// Request to remove named ordinary System rows from a session in one
+/// audited rewrite ([`SessionServiceTranscriptEditExt::prune_system_rows`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SystemRowPruneRequest {
+    /// The ordinary System rows to remove, each named by its index and the
+    /// digest of its content as a history read showed it.
+    #[serde(default)]
+    pub remove: Vec<crate::session::SystemRowRef>,
+    /// Also retire, in the same commit, the body of every instruction
+    /// activation row that a later activation row of its key superseded, as
+    /// a compaction does.
+    #[serde(default)]
+    pub retire_superseded_activation_bodies: bool,
+    /// Refuse the prune unless the transcript head is still this revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    /// Audit note recorded on the commit's reason (kind
+    /// [`crate::session::SYSTEM_ROW_PRUNE_REASON_KIND`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Audit actor recorded on the commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Result of a system-row prune.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SystemRowPruneResult {
+    /// One rewrite commit removed the named rows and retired the bodies.
+    Pruned {
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        session_id: SessionId,
+        parent_revision: String,
+        revision: String,
+        message_count: usize,
+        removed_rows: usize,
+        retired_bodies: usize,
+        commit: TranscriptRewriteCommit,
+    },
+    /// The request named no row and there was no body to retire: nothing
+    /// was written.
+    NothingToPrune {
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        session_id: SessionId,
+        revision: String,
+        message_count: usize,
+    },
+}
+
 impl TranscriptEditError {
     /// Convert a typed edit validation failure into a surface-friendly session
     /// error without widening the `SessionService` error enum.
@@ -4183,6 +4272,27 @@ pub trait SessionServiceTranscriptEditExt: SessionService {
         Err(SessionError::Unsupported(
             "restore_session_transcript_revision".to_string(),
         ))
+    }
+
+    /// Remove named ordinary System rows from an idle session in one audited
+    /// rewrite, without waking it or calling a model, and, with
+    /// `retire_superseded_activation_bodies`, retire every superseded
+    /// instruction activation body in the same commit.
+    ///
+    /// The host names each row as a history read showed it (index and
+    /// content digest); Core never picks rows. A session with a running turn
+    /// is [`SessionError::Busy`]. A named row the prune refuses (not an
+    /// ordinary System row, a stale digest, an index out of range, a row an
+    /// operator-instruction entry follows in its group of System rows)
+    /// refuses the whole prune with its typed cause
+    /// ([`SessionError::system_row_prune_refusal`]), and nothing is written.
+    async fn prune_system_rows(
+        &self,
+        id: &SessionId,
+        req: SystemRowPruneRequest,
+    ) -> Result<SystemRowPruneResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported("prune_system_rows".to_string()))
     }
 }
 

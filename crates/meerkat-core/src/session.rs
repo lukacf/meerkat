@@ -139,6 +139,9 @@ mod operator_instructions;
 #[cfg(test)]
 mod operator_instructions_tests;
 mod system_prompt_update;
+mod system_row_prune;
+#[cfg(test)]
+mod system_row_prune_tests;
 mod transcript_history;
 
 pub(crate) use activation_retirement::{ActivationRetirement, with_retired_activation_bodies};
@@ -196,6 +199,9 @@ pub(crate) use operator_instructions::{
 pub use system_prompt_update::{
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
     SystemPromptUpdateStatus,
+};
+pub use system_row_prune::{
+    SYSTEM_ROW_PRUNE_REASON_KIND, SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef,
 };
 #[cfg(test)]
 pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810;
@@ -425,6 +431,7 @@ impl std::fmt::Display for TranscriptRewriteReason {
 
 /// Invalid typed transcript edit request.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum TranscriptEditError {
     #[error("message index {message_index} out of bounds for {message_count} messages")]
     MessageIndexOutOfBounds {
@@ -468,6 +475,13 @@ pub enum TranscriptEditError {
         revision: String,
         oldest_retained_revision: String,
         retired_rewrites: u64,
+    },
+    /// A system-row prune ([`Session::prune_system_rows`]) refused the row it
+    /// names at `index`, for `cause`; nothing was written.
+    #[error("system row prune refused the row at message index {index}: {cause}")]
+    SystemRowPruneRefused {
+        index: usize,
+        cause: SystemRowPruneRefusal,
     },
 }
 

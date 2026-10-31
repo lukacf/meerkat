@@ -539,9 +539,50 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
 // them. Listed transitions are emitted last, in this order. Append only.
 #[cfg(not(test))]
 const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
+    // The durable-tail classification arm 0.9.8 published last, then the
+    // operator-instruction arms (0.9.9) in catalog order, so 0.9.8's public
+    // TransitionId order stays a prefix. Every SessionDocumentMachine arm
+    // added after them is appended here too.
     (
         "SessionDocumentMachine",
-        &["ClassifyDurableTailContinuable"],
+        &[
+            "ClassifyDurableTailContinuable",
+            "RecoverSessionInstructionState",
+            "RecoverSessionInstructionTarget",
+            "RecoverSessionInstructionEffective",
+            "RecordInstructionTargetAdvance",
+            "RecordInstructionTargetActiveBudgetExceeded",
+            "RecordInstructionTargetSlotLimitExceeded",
+            "RecordInstructionTargetAlreadyRecorded",
+            "RecordInstructionTargetOwnedBySession",
+            "RecordInstructionTargetAdopt",
+            "RecordInstructionTargetAdoptActiveBudgetExceeded",
+            "RecordInstructionTargetAdoptSlotLimitExceeded",
+            "RecordInstructionTargetOwnedByOtherMob",
+            "SetSessionInstructionNew",
+            "SetSessionInstructionAdvance",
+            "SetSessionInstructionActiveBudgetExceeded",
+            "SetSessionInstructionDuplicate",
+            "SetSessionInstructionConflict",
+            "SetSessionInstructionStale",
+            "SetSessionInstructionOwnedByMob",
+            "SetSessionInstructionMemberSession",
+            "SetSessionInstructionSlotLimitExceeded",
+            "SetSessionInstructionUnknownSlot",
+            "RebindInstructionOwner",
+            "RebindInstructionOwnerUnowned",
+            "RebindInstructionOwnerMemberSession",
+            "ReleaseInstructionTarget",
+            "ReleaseInstructionTargetAlreadyUnowned",
+            "ReleaseInstructionTargetOwnedByOtherMob",
+            "ReleaseInstructionTargetOwnedBySession",
+            "ResolveRunStartInstructionsApply",
+            "ResolveRunStartInstructionsNoChange",
+            "ResolveRunStartInstructionsDeferredLeadingPrefix",
+            "ResolveRunStartInstructionsDeferredUnavailable",
+            "AuthorizeInstructionFoldAtRunStart",
+            "AuthorizeInstructionFoldEffective",
+        ],
     ),
     (
         "SessionTurnAdmissionMachine",

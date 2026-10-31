@@ -151,7 +151,13 @@ of them.
 ignores `withdraws` and drops the field when it rewrites such an item (any
 mutation of the item, including a host sweep such as a lease-expiry
 observation). The withdrawing refs stay as ordinary evidence, and the refs
-they withdrew read as current again.
+they withdrew read as current again. Two more effects reach only requests and
+items that carry withdrawals. 0.9.8 digests a keyed create without the field,
+so replaying a key whose request carried `withdraws` answers `Conflict`
+instead of `Replayed`. An item with withdrawals projects without the field, so
+its attention continuation key changes once and a continuation recorded under
+0.9.9 does not match it. Keys, items and continuations without withdrawals
+are unaffected.
 
 ## Upgrading to 0.9.8
 

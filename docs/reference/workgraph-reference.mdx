@@ -159,8 +159,9 @@ hosts read the relation with `WorkItem::is_evidence_withdrawn`.
 - Confirmation evidence (a reserved confirmation kind or classification) and
   execution evidence (`execution_binding_id` set) cannot be withdrawn, and a
   withdrawing ref carries neither. A withdrawal therefore changes no
-  completion-policy accounting and no execution binding: it counts as one more
-  evidence addition.
+  completion-policy accounting and no execution binding: added to an item, it
+  counts as one more evidence addition (refs given at creation are not
+  counted).
 - Withdrawal needs no permission of its own. Whoever may add evidence to an
   item (on an attention-scoped surface, a projection with `can_add_evidence`)
   may withdraw its ordinary evidence, including evidence a host or another
@@ -171,7 +172,9 @@ hosts read the relation with `WorkItem::is_evidence_withdrawn`.
   existed. A release before 0.9.9 reads items with withdrawals but ignores the
   field, and drops it when it rewrites the item (any mutation of the item,
   including a host sweep such as a lease-expiry observation); the withdrawing
-  refs then remain as ordinary evidence.
+  refs then remain as ordinary evidence. The
+  [upgrade guide](/guides/upgrading) lists the effects on keyed-create
+  replays and attention continuation keys.
 
 ## Events And Durable Facts
 

@@ -1330,15 +1330,16 @@ them.
   (`execution_binding_id` set), and a withdrawing ref that carries either;
   withdrawing an id again is allowed. These rules keep a withdrawal out of
   every machine decision: completion-policy accounting and the execution
-  bridge do not change, and a withdrawal counts as one more evidence
-  addition. Withdrawal needs no permission of its own: whoever may add
-  evidence to an item may withdraw its ordinary evidence, including evidence
-  a host or another agent added. A ref without withdrawals keeps its
-  encoding, so the keyed-create admission digests and attention continuation
-  keys of existing items do not change; the manual `WorkItem` schema carries
-  the field. A release before this one ignores the field and drops it when it
-  rewrites the item. The `workgraph-workflow` skill says how to withdraw and
-  how a withdrawal reads.
+  bridge do not change, and a withdrawal added to an item counts as one more
+  evidence addition (refs given at creation are not counted). Withdrawal
+  needs no permission of its own: whoever may add evidence to an item may
+  withdraw its ordinary evidence, including evidence a host or another agent
+  added. A ref without withdrawals keeps its encoding, so the keyed-create
+  admission digests and attention continuation keys of existing items do not
+  change; the manual `WorkItem` schema carries the field. A release before
+  this one ignores the field and drops it when it rewrites the item (the
+  upgrade guide lists the other downgrade effects). The `workgraph-workflow`
+  skill says how to withdraw and how a withdrawal reads.
 
 ### Changed
 

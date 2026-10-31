@@ -345,6 +345,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was listed under Personal, and one with a router or triage role under
   Coordinators. An agent whose group label names no category is still placed
   by its role.
+- The Console Memory panel's realm-level reads (`meta/memory/panel/overview`,
+  `proposals`, `injections`, `harvests` and `audit_verdicts`) return only the
+  rows the caller may read. They admit a caller on the unscoped
+  `agent.memory.read` grant, a check with no resource that a deny written for
+  one identity, role or label does not match, and they returned the rows of
+  every scope: such a caller received the overview counts, injection-ledger
+  rows, pending harvests and audit verdicts of identities whose memory it may
+  not read (a deny on the identity, or no `agent.view` on it), and a caller
+  without `mob.memory.read` or `operator.memory.read` received those scopes'
+  overview rows and proposal titles. Each row now passes the rule the record
+  listing applies: an overview scope row and a proposal by their scope, a
+  harvest by its identity, an audit verdict by its record (quarantined
+  content still needs `memory.quarantine.review`), and an injection-ledger
+  row by both its record and the identity it went into. A record's detail
+  (`meta/memory/panel/record`) likewise lists only the injections into
+  identities the caller may read. Before, the Console hid some of these rows
+  in the browser after they had arrived. Dream history (`dreams`,
+  `dream_runs`) still spans scopes and is not filtered per row.
 
 ### Known limitations
 

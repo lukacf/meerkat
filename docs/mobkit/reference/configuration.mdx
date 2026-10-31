@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from MobKit main at [373888ef7636](https://github.com/lukacf/meerkat-meta/commit/373888ef7636d52565aafe203e07bf97489197d6) on 2026-10-30; MobKit workspace version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [d26df66402bf](https://github.com/lukacf/meerkat-meta/commit/d26df66402bf6690634c0c33f11e6fd69844f131) on 2026-10-31; MobKit workspace version 0.9.7 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -1849,6 +1849,7 @@ empty_text = "Create one in Linear."
 id = "host-items"
 label = "Host"
 url = "/host/attention"
+decide_href = "/host/decide?decision={decision_id}"
 
 [actions]
 inspect_label = "Profile"
@@ -1898,7 +1899,9 @@ The console reads every source with the operator's session (`credentials: "same-
 - Text is trimmed and cut at 300 characters, and the console keeps at most 50 items per source.
 - A source that does not answer within 10 seconds, or whose answer is larger than 256 KiB, fails alone. A slow source delays the other sources' items by at most those 10 seconds.
 
-**Needs you** counts these items with the pending gating approvals. The inbox lists them after the approvals as cards with one **Open** link (named after the item's title), which loads `href` top-level; a single pending approval is still opened directly. A console without a gating surface (an aggregate console) shows only the host items there. The console never approves, rejects or changes an item: the host page decides. A source that fails (network error, non-2xx answer, malformed body) is named in the inbox as `Could not read: <label>` and hides nothing else. Gating approvals do not depend on any source.
+**Needs you** counts the sources' items with the pending gating approvals. The inbox lists them after the approvals as cards with one **Open** link (named after the item's title), which loads `href` top-level; a single pending approval is still opened directly. A console without a gating surface (an aggregate console) shows only the host items there. The console never approves, rejects or changes an item: the host page decides. A source that fails (network error, non-2xx answer, malformed body) is named in the inbox as `Could not read: <label>` and hides nothing else. Gating approvals do not depend on any source.
+
+A source may also name `decide_href`, a same-origin path where the host decides an approval that this console session cannot (a read-only session). On such a session each pending approval card, in the **Approvals** inbox and in an agent's chat, shows one **Decide in** link per source that names `decide_href`, named after the source label and loaded top-level, instead of the disabled decision buttons. A settled or expired card shows no link. `{decision_id}` in `decide_href` is replaced by the request's id, URL-encoded once, so `decide_href = "/host/decide?decision={decision_id}"` opens that request on the host page; without the placeholder the link is the host's page in general. A `decide_href` that is not a same-origin path, before or after the id is filled in, is dropped and the source's items stay. A read-only session with no usable link keeps the disabled buttons.
 
 <Note>
 `ConsoleUiConfig` is intentionally view-level. It controls presentation, ordering, labels, default pins, and links; it does not decide runtime authorization, routing, or whether an agent exists.

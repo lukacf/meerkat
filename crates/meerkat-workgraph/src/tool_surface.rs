@@ -1688,4 +1688,58 @@ mod tests {
             ToolError::ExecutionFailed { ref message } if message.contains("revision")
         ));
     }
+
+    /// Guard: a projection whose evidence refs withdraw nothing encodes, and
+    /// so keys its continuation, exactly as it did before evidence refs could
+    /// carry `withdraws`, so a continuation recorded by an earlier release
+    /// still matches. The encoding and the key are pinned byte for byte.
+    #[test]
+    fn attention_continuation_key_is_unchanged_for_evidence_without_withdrawals() {
+        let projection: AttentionContextProjection = serde_json::from_value(json!({
+            "binding_id": "binding-guard",
+            "work_ref": { "realm_id": "realm", "namespace": "default", "item_id": "item-guard" },
+            "mode": "review",
+            "binding_revision": 2,
+            "item_revision": 3,
+            "evidence_refs": [{ "kind": "note", "id": "e1", "summary": "first finding" }],
+            "authority": {
+                "can_get": true,
+                "can_add_evidence": true,
+                "can_release": false,
+                "can_update": false,
+                "can_block": false,
+                "can_create": false,
+                "can_link": false,
+                "can_link_parent": false,
+                "can_link_related": false,
+                "can_link_derived_from": false,
+                "can_close_own_review_item": false,
+                "can_close_if_policy_allows": false
+            },
+            "text": { "title": "guard", "rendered": "guard", "truncated": false }
+        }))
+        .expect("projection from its wire form");
+        assert_eq!(
+            serde_json::to_string(&projection).expect("encode the projection"),
+            concat!(
+                r#"{"binding_id":"binding-guard","#,
+                r#""work_ref":{"realm_id":"realm","namespace":"default","item_id":"item-guard"},"#,
+                r#""mode":"review","binding_revision":2,"item_revision":3,"#,
+                r#""evidence_refs":[{"kind":"note","id":"e1","summary":"first finding"}],"#,
+                r#""authority":{"can_get":true,"can_add_evidence":true,"can_release":false,"#,
+                r#""can_update":false,"can_block":false,"can_create":false,"can_link":false,"#,
+                r#""can_link_parent":false,"can_link_related":false,"#,
+                r#""can_link_derived_from":false,"can_close_own_review_item":false,"#,
+                r#""can_close_if_policy_allows":false},"#,
+                r#""text":{"title":"guard","rendered":"guard","truncated":false}}"#,
+            )
+        );
+        assert_eq!(
+            workgraph_attention_continuation_key(&projection).expect("continuation key"),
+            concat!(
+                "workgraph_attention:realm:default:binding-guard:2:3:",
+                "301ceb38468bc0f685dd07f9069b4f930e8a017709131b795772f1f7a5d59c75",
+            )
+        );
+    }
 }

@@ -1323,4 +1323,128 @@ mod tests {
             assert_schema_is_provider_safe(name, &tool["inputSchema"]);
         }
     }
+
+    fn listed_tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .expect("the tool is listed")
+    }
+
+    #[test]
+    fn workgraph_add_evidence_advertises_withdraws_and_create_does_not() {
+        let tools = workgraph_tools_list();
+        let add_evidence = listed_tool(&tools, "workgraph_add_evidence");
+        assert_eq!(
+            add_evidence["inputSchema"]["properties"]["evidence"]["properties"]["withdraws"],
+            json!({ "type": "array", "items": { "type": "string" } })
+        );
+        let description = add_evidence["description"]
+            .as_str()
+            .expect("tool description");
+        assert!(description.contains("`withdraws`"), "{description}");
+        // A create has no earlier evidence on its item to withdraw.
+        let create = listed_tool(&tools, "workgraph_create");
+        assert!(
+            create["inputSchema"]["properties"]["evidence_refs"]["items"]["properties"]
+                .get("withdraws")
+                .is_none()
+        );
+    }
+
+    /// An item with one evidence ref, `e1`, created and evidenced through the
+    /// tools.
+    async fn tool_item_with_evidence(service: &WorkGraphService) -> Value {
+        let created = handle_workgraph_tools_call(
+            service,
+            "workgraph_create",
+            &json!({ "title": "evidence withdrawal" }),
+        )
+        .await
+        .expect("create");
+        let evidenced = handle_workgraph_tools_call(
+            service,
+            "workgraph_add_evidence",
+            &json!({
+                "id": created["item"]["id"],
+                "expected_revision": created["item"]["revision"],
+                "evidence": { "kind": "finding", "id": "e1", "summary": "first reading" }
+            }),
+        )
+        .await
+        .expect("first evidence");
+        evidenced["item"].clone()
+    }
+
+    #[tokio::test]
+    async fn workgraph_add_evidence_records_a_withdrawal_on_the_later_ref() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = tool_item_with_evidence(&service).await;
+        let withdrawn = handle_workgraph_tools_call(
+            &service,
+            "workgraph_add_evidence",
+            &json!({
+                "id": item["id"],
+                "expected_revision": item["revision"],
+                "evidence": {
+                    "kind": "finding",
+                    "id": "e2",
+                    "summary": "corrected reading",
+                    "withdraws": ["e1"]
+                }
+            }),
+        )
+        .await
+        .expect("withdrawing evidence");
+        let refs = &withdrawn["item"]["evidence_refs"];
+        assert_eq!(refs[1]["withdraws"], json!(["e1"]), "{refs}");
+        assert_eq!(
+            refs[0], item["evidence_refs"][0],
+            "the withdrawn ref is unchanged"
+        );
+        let read =
+            handle_workgraph_tools_call(&service, "workgraph_get", &json!({ "id": item["id"] }))
+                .await
+                .expect("read back");
+        assert_eq!(
+            &read["item"]["evidence_refs"], refs,
+            "the relation is stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn workgraph_add_evidence_refuses_an_invalid_withdrawal_without_writing() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = tool_item_with_evidence(&service).await;
+        let error = handle_workgraph_tools_call(
+            &service,
+            "workgraph_add_evidence",
+            &json!({
+                "id": item["id"],
+                "expected_revision": item["revision"],
+                "evidence": { "kind": "finding", "id": "e2", "withdraws": ["e9"] }
+            }),
+        )
+        .await
+        .expect_err("a withdrawal must name earlier evidence on the same item");
+        assert_eq!(
+            error.code,
+            WorkGraphToolErrorCode::InvalidArguments,
+            "{}",
+            error.message
+        );
+        let read =
+            handle_workgraph_tools_call(&service, "workgraph_get", &json!({ "id": item["id"] }))
+                .await
+                .expect("read back");
+        assert_eq!(read["item"], item, "a refused withdrawal writes nothing");
+    }
 }

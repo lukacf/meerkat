@@ -317,4 +317,32 @@ mod workgraph_workflow_skill_tests {
             "skill must not claim any terminal blocker satisfies a blocks edge"
         );
     }
+
+    #[test]
+    fn skill_states_how_to_withdraw_evidence_and_how_a_withdrawal_reads() {
+        // The skill names the wire field, so pin the field to the type: a
+        // renamed or dropped field fails here, not only in the prose.
+        let round_trip =
+            serde_json::from_value::<crate::types::WorkEvidenceRef>(serde_json::json!({
+                "kind": "finding",
+                "id": "e2",
+                "withdraws": ["e1"]
+            }))
+            .and_then(serde_json::to_value)
+            .expect("evidence ref round trip");
+        assert_eq!(
+            round_trip["withdraws"],
+            serde_json::json!(["e1"]),
+            "WorkEvidenceRef must carry `withdraws` on the wire"
+        );
+        let text = skill_text();
+        assert!(
+            text.contains("lists the earlier ref's `id` in `withdraws`"),
+            "skill must say how to withdraw evidence"
+        );
+        assert!(
+            text.contains("a ref whose `id` a later ref lists in `withdraws` is withdrawn"),
+            "skill must say how a withdrawal reads"
+        );
+    }
 }

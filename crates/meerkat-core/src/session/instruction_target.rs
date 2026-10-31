@@ -1404,6 +1404,36 @@ impl Session {
         }
     }
 
+    /// Record a mob member's whole snapshot, as
+    /// [`Self::record_instruction_target`] does, on a session the member's
+    /// mob may have adopted: a member seated over an existing session (an
+    /// attach) whose own host holds the target hands the target to the mob
+    /// at the mob's first delivery. The session-document authority rebinds
+    /// it to the mob first ([`Self::rebind_instruction_owner`]: the mob
+    /// starts from what is in effect), then records the snapshot, which
+    /// replaces it. Both land together or neither does. A target another mob
+    /// holds stays that mob's, and the record is refused; an unowned target
+    /// or the mob's own records as ever.
+    pub fn adopt_instruction_target(
+        &mut self,
+        record: InstructionTargetRecord,
+    ) -> Result<InstructionRecordReceipt, InstructionWriteError> {
+        let session_owned = self
+            .instruction_target_state()?
+            .is_some_and(|state| *state.owner() == InstructionTargetOwner::Session);
+        if !session_owned {
+            return self.record_instruction_target(record);
+        }
+        let mut adopted = self.clone();
+        adopted.rebind_instruction_owner(InstructionTargetOwner::Mob {
+            mob_id: record.mob_id.clone(),
+            agent_identity: record.agent_identity.clone(),
+        })?;
+        let receipt = adopted.record_instruction_target(record)?;
+        *self = adopted;
+        Ok(receipt)
+    }
+
     /// Rebind the target to a new owner, on an explicit attach or a host's
     /// standalone adoption; the generation restarts. A mob that attaches to
     /// a session-owned target starts from what is in effect: the target

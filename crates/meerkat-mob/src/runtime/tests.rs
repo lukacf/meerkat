@@ -5706,11 +5706,11 @@ impl MobSessionService for MockSessionService {
                 .ok_or_else(|| SessionError::NotFound {
                     id: session_id.clone(),
                 })?;
-            let receipt = committed.record_instruction_target(record.clone())?;
+            let receipt = committed.adopt_instruction_target(record.clone())?;
             let wrote = receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded;
             if wrote {
                 if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
-                    let _ = live.record_instruction_target(record);
+                    let _ = live.adopt_instruction_target(record);
                 }
                 self.persisted_sessions
                     .write()

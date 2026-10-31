@@ -171,14 +171,19 @@ pub const FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED: &str
 /// transitions, and the physical/runtime owner references that keep exact
 /// states reachable.
 pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
-/// Sessions written at the envelope that carries operator-instruction facts
-/// (an entry row or the recorded target state). A release before operator
-/// instructions refuses them typed until a roll-forward; an operator lists
-/// them before a rollback. Informational. The census covers the realms whose
-/// documents are on disk: SQLite realms (head rows and documents in
-/// `sessions.sqlite3`) and JSONL realms (the WholeBlob documents of their
-/// runtime store, `runtime.sqlite3`). A host-store realm keeps its documents
-/// in the host's store, not on disk, so the disk sweep cannot list them.
+/// Sessions written at session envelope 5, which a release before 0.9.9
+/// cannot read: their documents hold operator-instruction entries (or the
+/// recorded instruction state), a rewrite record that moved an instruction
+/// activation row to another offset, or a retired instruction activation
+/// body. Such a release refuses them until a roll-forward: typed at the
+/// envelope where it reads a store's head row first, and as malformed
+/// instruction activation history where it decodes a whole document that
+/// holds a retired body. An operator lists them before a rollback.
+/// Informational. The census covers the realms whose documents are on disk:
+/// SQLite realms (head rows and documents in `sessions.sqlite3`) and JSONL
+/// realms (the WholeBlob documents of their runtime store,
+/// `runtime.sqlite3`). A host-store realm keeps its documents in the host's
+/// store, not on disk, so the disk sweep cannot list them.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
@@ -1968,10 +1973,7 @@ fn census_operator_instruction_envelopes(
                 StorageFinding::new(
                     FindingSeverity::Warning,
                     FINDING_STORAGE_CENSUS_UNMEASURED,
-                    format!(
-                        "could not list the sessions at the operator-instruction envelope \
-                         {envelope}: {error}"
-                    ),
+                    format!("could not list the sessions at session envelope {envelope}: {error}"),
                 )
                 .with_path(db_path.to_path_buf())
                 .with_realm(realm),
@@ -2001,11 +2003,18 @@ fn census_operator_instruction_envelopes(
             FindingSeverity::Info,
             FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
             format!(
-                "{} session(s) carry operator instructions at session envelope {envelope}: \
-                 {listed}{overflow_note}; a release before operator instructions refuses them \
-                 typed until a roll-forward. The census reads the realms whose documents are \
-                 on disk (SQLite realms, and JSONL realms through runtime.sqlite3); host-store \
-                 realms keep their documents in the host's store and are not listed",
+                "{} session(s) at session envelope {envelope}: {listed}{overflow_note}. A \
+                 session is written at envelope {envelope} when its document holds \
+                 operator-instruction entries (or the recorded instruction state), a rewrite \
+                 record that moved an instruction activation row to another offset, or a \
+                 retired instruction activation body. A release before 0.9.9 refuses such a \
+                 session until a roll-forward: typed at its envelope where it reads a head row \
+                 first (a SQLite realm's session heads), and as malformed instruction \
+                 activation history where it decodes a whole document (a head-less SQLite \
+                 document, a JSONL realm's runtime store) that holds a retired body. The \
+                 census reads the realms whose documents are on disk (SQLite realms, and JSONL \
+                 realms through runtime.sqlite3); host-store realms keep their documents in \
+                 the host's store and are not listed",
                 sessions.len()
             ),
         )

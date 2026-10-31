@@ -1160,7 +1160,10 @@ pub use runtime_event::{
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
-pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_handle};
+pub use service_ext::{
+    PreDequeueHostRuntimeCheck, SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_handle,
+    persistent_runtime_pre_dequeue_handle_with_host_runtime_check,
+};
 pub use store::{
     CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
     CommittedWholeBlobSnapshot, CommittingWholeBlobSession, ContinuationAdmission,

@@ -234,6 +234,22 @@ them.
   overrides it, and a member's runtime executor asks it before the steps ahead
   of a turn that need the live actor (see Fixed and Upgrade notes).
 
+- `meerkat-runtime`, `meerkat`:
+  `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the
+  shared pre-dequeue realization handle with a surface's
+  `PreDequeueHostRuntimeCheck` as its precondition, and `meerkat::surface`
+  re-exports both. Before it realizes committed model-routing handoffs, the
+  handle asks the check whether the session's task ended with the host's
+  runtime it ran on. If it did, the check degrades the session's registration
+  to a cold reload and answers a refusal, which the handle returns as
+  `CoreExecutorError::control_failed_runtime` without realizing anything, so
+  the runtime loop leaves the queued inputs to the session's next
+  registration; otherwise the handle realizes as before.
+  `persistent_runtime_pre_dequeue_handle` is unchanged. The RPC session
+  executors and a mob member's runtime executor pass a check that asks their
+  session service's `runtime_turn_lost_its_host_runtime`, instead of wrapping
+  the handle.
+
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
   with the same notice record as `PromptInput::detached_job_completed`.

@@ -13570,40 +13570,34 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
     }
 }
 
-/// A member's pre-dequeue handle: the runtime's realization of committed
-/// model-routing handoffs, after the member's session service has checked
-/// that the member's session task did not end with the host's runtime. A
-/// realization reconfigures the live actor, so for a member whose host's
-/// runtime stopped it would fail, and the runtime loop's cleanup would then
-/// end the queued inputs as stopped; the check degrades the registration
-/// first, so the loop leaves them to the session's next registration.
+/// A member's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the member's session service checks that the member's session
+/// task did not end with the host's runtime. A realization reconfigures the
+/// live actor, so for a member whose host's runtime stopped it would fail,
+/// and the runtime loop's cleanup would then end the queued inputs as
+/// stopped; the check degrades the registration first, so the loop leaves
+/// them to the session's next registration.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-struct HostRuntimeCheckedPreDequeueHandle {
+struct MemberHostRuntimeCheck {
     session_service: Arc<dyn MobSessionService>,
     session_id: SessionId,
-    inner: Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>,
 }
 
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 #[async_trait::async_trait]
-impl meerkat_core::lifecycle::CoreExecutorPreDequeueHandle for HostRuntimeCheckedPreDequeueHandle {
-    async fn realize_committed_handoffs_under_turn_finalization_boundary(
-        &self,
-    ) -> Result<meerkat_core::lifecycle::CorePreDequeueOutcome, CoreExecutorError> {
-        if self
-            .session_service
+impl meerkat_runtime::PreDequeueHostRuntimeCheck for MemberHostRuntimeCheck {
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.session_service
             .runtime_turn_lost_its_host_runtime(&self.session_id, None)
             .await
-        {
-            return Err(CoreExecutorError::control_failed_runtime(format!(
-                "member session '{}' lost its session task to the runtime it ran on; its \
-                 queued work is left to the session's next registration",
-                self.session_id
-            )));
-        }
-        self.inner
-            .realize_committed_handoffs_under_turn_finalization_boundary()
-            .await
+            .then(|| {
+                format!(
+                    "member session '{}' lost its session task to the runtime it ran on; its \
+                     queued work is left to the session's next registration",
+                    self.session_id
+                )
+            })
     }
 }
 
@@ -13688,7 +13682,8 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         }))
     }
 
-    /// The one shared realization handle.
+    /// The one shared realization handle, with the member's lost host runtime
+    /// check as its precondition.
     ///
     /// Mob members are ordinary runtime-backed sessions; a member that stages a
     /// permanent switch must get the same cross-run realization the top-level
@@ -13708,14 +13703,16 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(Arc::new(HostRuntimeCheckedPreDequeueHandle {
-            session_service: Arc::clone(&self.session_service),
-            session_id: self.bridge_session_id.clone(),
-            inner: meerkat_runtime::persistent_runtime_pre_dequeue_handle(
+        Some(
+            meerkat_runtime::persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
                 Arc::clone(&self.runtime_adapter),
                 self.bridge_session_id.clone(),
+                Arc::new(MemberHostRuntimeCheck {
+                    session_service: Arc::clone(&self.session_service),
+                    session_id: self.bridge_session_id.clone(),
+                }),
             ),
-        }))
+        )
     }
 
     /// Typed system notices (such as an interrupted-run notice after an

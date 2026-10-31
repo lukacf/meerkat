@@ -800,55 +800,42 @@ mod typed_context_append_tests {
 /// as [`CoreExecutorError::Suspended`], never as a failure or a cancellation.
 pub(crate) const CORE_EXECUTOR_SUSPENDED_RUN_ID_KEY: &str = "core_executor_suspended_run_id";
 
-/// A session's pre-dequeue handle: the runtime's realization of committed
-/// model-routing handoffs, after the session service has checked that the
-/// session's task did not end with the host's runtime. A realization
-/// reconfigures the live actor, so for a session whose host's runtime
-/// stopped it would fail, and the runtime loop's cleanup would then end the
-/// queued inputs as stopped; the check degrades the registration first, so
-/// the loop leaves them to the session's next registration.
-struct HostRuntimeCheckedPreDequeueHandle {
+/// A session's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the session service checks that the session's task did not end
+/// with the host's runtime. A realization reconfigures the live actor, so for
+/// a session whose host's runtime stopped it would fail, and the runtime
+/// loop's cleanup would then end the queued inputs as stopped; the check
+/// degrades the registration first, so the loop leaves them to the session's
+/// next registration.
+struct SessionHostRuntimeCheck {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
-    inner: Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>,
 }
 
-impl HostRuntimeCheckedPreDequeueHandle {
-    fn new(
-        runtime: &Arc<SessionRuntime>,
-        session_id: &SessionId,
-    ) -> Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle> {
+impl SessionHostRuntimeCheck {
+    fn new(runtime: &Arc<SessionRuntime>, session_id: &SessionId) -> Arc<Self> {
         Arc::new(Self {
             runtime: Arc::clone(runtime),
             session_id: session_id.clone(),
-            inner: meerkat::surface::persistent_runtime_pre_dequeue_handle(
-                runtime.runtime_adapter(),
-                session_id.clone(),
-            ),
         })
     }
 }
 
 #[async_trait::async_trait]
-impl meerkat_core::lifecycle::CoreExecutorPreDequeueHandle for HostRuntimeCheckedPreDequeueHandle {
-    async fn realize_committed_handoffs_under_turn_finalization_boundary(
-        &self,
-    ) -> Result<meerkat_core::lifecycle::CorePreDequeueOutcome, CoreExecutorError> {
-        if self
-            .runtime
+impl meerkat::surface::PreDequeueHostRuntimeCheck for SessionHostRuntimeCheck {
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.runtime
             .persistent_service()
             .runtime_turn_lost_its_host_runtime(&self.session_id, None)
             .await
-        {
-            return Err(CoreExecutorError::control_failed_runtime(format!(
-                "session '{}' lost its session task to the runtime it ran on; its queued work \
-                 is left to the session's next registration",
-                self.session_id
-            )));
-        }
-        self.inner
-            .realize_committed_handoffs_under_turn_finalization_boundary()
-            .await
+            .then(|| {
+                format!(
+                    "session '{}' lost its session task to the runtime it ran on; its queued work \
+                     is left to the session's next registration",
+                    self.session_id
+                )
+            })
     }
 }
 
@@ -956,15 +943,18 @@ impl CoreExecutor for SessionRuntimeExecutor {
         )
     }
 
-    /// The one shared facade-owned realization handle, behind the session's
-    /// lost host runtime check.
+    /// The one shared realization handle, with the session's lost host
+    /// runtime check as its precondition.
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(HostRuntimeCheckedPreDequeueHandle::new(
-            &self.runtime,
-            &self.session_id,
-        ))
+        Some(
+            meerkat::surface::persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                self.runtime.runtime_adapter(),
+                self.session_id.clone(),
+                SessionHostRuntimeCheck::new(&self.runtime, &self.session_id),
+            ),
+        )
     }
 
     fn transcript_notice_handle(
@@ -1367,8 +1357,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         }))
     }
 
-    /// The one shared facade-owned realization handle, when this mob member is
-    /// bound to a runtime at all.
+    /// The one shared realization handle, with the session's lost host
+    /// runtime check as its precondition, when this mob member is bound to a
+    /// runtime at all.
     ///
     /// A `MobRpcRuntimeExecutor` without a `SessionRuntime` is driving a member
     /// whose turns never pass through a runtime loop, so there is no
@@ -1376,9 +1367,13 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        self.runtime
-            .as_ref()
-            .map(|runtime| HostRuntimeCheckedPreDequeueHandle::new(runtime, &self.session_id))
+        self.runtime.as_ref().map(|runtime| {
+            meerkat::surface::persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                runtime.runtime_adapter(),
+                self.session_id.clone(),
+                SessionHostRuntimeCheck::new(runtime, &self.session_id),
+            )
+        })
     }
 
     fn transcript_notice_handle(

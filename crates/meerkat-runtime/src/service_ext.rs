@@ -422,9 +422,10 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
 /// generated lifecycle, the boundary receipts, and the reconfigure host that
 /// reads and writes the durable log. Keeping it here is also what lets the mob
 /// provisioner return the same handle: mob depends on the runtime, but not on
-/// the facade's `session-store` feature. The facade re-exports this function,
-/// so `meerkat::surface::persistent_runtime_pre_dequeue_handle` remains the
-/// name every surface calls.
+/// the facade's `session-store` feature. The facade re-exports this function
+/// and its `_with_host_runtime_check` variant, so
+/// `meerkat::surface::persistent_runtime_pre_dequeue_handle` and that variant
+/// remain the names every surface calls.
 #[must_use]
 pub fn persistent_runtime_pre_dequeue_handle(
     adapter: std::sync::Arc<crate::MeerkatMachine>,
@@ -433,12 +434,63 @@ pub fn persistent_runtime_pre_dequeue_handle(
     std::sync::Arc::new(RuntimeModelRoutingHandoffPreDequeueHandle {
         adapter,
         session_id,
+        host_runtime_check: None,
     })
+}
+
+/// Build the shared pre-dequeue realization handle for one runtime-backed
+/// session, with a surface's lost host runtime check as its precondition.
+///
+/// This is the handle `persistent_runtime_pre_dequeue_handle` builds, not a
+/// second implementation: on every pass it asks `host_runtime_check` first.
+/// When the check answers a refusal, the handle returns it as
+/// `CoreExecutorError::control_failed_runtime` and realizes nothing.
+/// Otherwise it realizes exactly as the handle without a check does. A
+/// surface whose sessions run on the host's runtime supplies the check here
+/// instead of wrapping the handle (see `PreDequeueHostRuntimeCheck`).
+#[must_use]
+pub fn persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+    adapter: std::sync::Arc<crate::MeerkatMachine>,
+    session_id: SessionId,
+    host_runtime_check: std::sync::Arc<dyn PreDequeueHostRuntimeCheck>,
+) -> std::sync::Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle> {
+    std::sync::Arc::new(RuntimeModelRoutingHandoffPreDequeueHandle {
+        adapter,
+        session_id,
+        host_runtime_check: Some(host_runtime_check),
+    })
+}
+
+/// A surface's check, asked by the shared pre-dequeue handle before it
+/// realizes committed model-routing handoffs: whether the session's task
+/// ended with the host's runtime it ran on.
+///
+/// A realization reconfigures the session's live actor. For a session whose
+/// host's runtime stopped, that actor ended with the runtime, so the
+/// realization would fail, and the runtime loop's cleanup would then end the
+/// queued inputs as stopped. The check degrades the session's registration
+/// first, so the loop leaves the queued inputs to the session's next
+/// registration. A surface supplies it through
+/// `persistent_runtime_pre_dequeue_handle_with_host_runtime_check`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait PreDequeueHostRuntimeCheck: Send + Sync {
+    /// `None` while the session's task has not ended with its host's
+    /// runtime: the handle then realizes as it does without a check.
+    ///
+    /// When the task did end with that runtime, the implementation degrades
+    /// the session's registration to require a cold reload from durable
+    /// state (as `PersistentSessionService::runtime_turn_lost_its_host_runtime`
+    /// does) and answers the refusal's message. The handle returns it as
+    /// `CoreExecutorError::control_failed_runtime` and realizes nothing.
+    async fn lost_host_runtime_refusal(&self) -> Option<String>;
 }
 
 struct RuntimeModelRoutingHandoffPreDequeueHandle {
     adapter: std::sync::Arc<crate::MeerkatMachine>,
     session_id: SessionId,
+    /// The surface's lost host runtime check, asked before anything else.
+    host_runtime_check: Option<std::sync::Arc<dyn PreDequeueHostRuntimeCheck>>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -453,6 +505,15 @@ impl meerkat_core::lifecycle::CoreExecutorPreDequeueHandle
         meerkat_core::lifecycle::CoreExecutorError,
     > {
         use meerkat_core::lifecycle::{CoreExecutorError, CorePreDequeueOutcome};
+
+        // A session whose task ended with its host's runtime has no actor to
+        // reconfigure: the surface's check degrades its registration and
+        // answers the refusal, and nothing is realized.
+        if let Some(check) = &self.host_runtime_check
+            && let Some(refusal) = check.lost_host_runtime_refusal().await
+        {
+            return Err(CoreExecutorError::control_failed_runtime(refusal));
+        }
 
         // One read of the committed log answers both questions: which terminals
         // the machine has not caught up to, and what is still owed. A settled

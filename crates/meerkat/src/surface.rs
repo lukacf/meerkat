@@ -121,9 +121,9 @@ pub use runtime_backed::install_default_mcp_auth_resolver_for_realm;
 pub(crate) use runtime_backed::materialize_session_actor_unattached_with_reserved_admission_and_actor_slot;
 #[cfg(feature = "session-store")]
 pub use runtime_backed::{
-    AttachedActorPublicationRefreshFn, PersistentRuntimeExecutor, RuntimeBackedCompositionError,
-    RuntimeBackedInitialTurn, SurfaceRuntimeMaterializeError, build_runtime_backed_service,
-    build_runtime_backed_service_with_capacities,
+    AttachedActorPublicationRefreshFn, PersistentRuntimeExecutor, PreDequeueHostRuntimeCheck,
+    RuntimeBackedCompositionError, RuntimeBackedInitialTurn, SurfaceRuntimeMaterializeError,
+    build_runtime_backed_service, build_runtime_backed_service_with_capacities,
     build_runtime_backed_service_with_capacities_and_default_reconfigure_host,
     build_runtime_backed_service_with_default_reconfigure_host, default_persistent_executor,
     default_persistent_executor_with_workgraph_service, install_prepared_runtime_interrupt_handle,
@@ -139,8 +139,9 @@ pub use runtime_backed::{
     materialize_session_with_reserved_admission_under_runtime_turn_boundary_and_publication_refresh,
     persistent_runtime_post_stop_cleanup_handle,
     persistent_runtime_post_stop_cleanup_handle_for_actor_slot,
-    persistent_runtime_pre_dequeue_handle, persistent_runtime_publication_handle,
-    persistent_runtime_publication_handle_for_actor_slot,
+    persistent_runtime_pre_dequeue_handle,
+    persistent_runtime_pre_dequeue_handle_with_host_runtime_check,
+    persistent_runtime_publication_handle, persistent_runtime_publication_handle_for_actor_slot,
     persistent_runtime_transcript_notice_handle,
     persistent_runtime_turn_finalization_boundary_handle,
     run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,

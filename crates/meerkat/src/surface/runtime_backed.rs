@@ -1848,9 +1848,22 @@ pub fn persistent_runtime_post_stop_cleanup_handle_for_actor_slot<
 /// It lives there because the handle needs only the `MeerkatMachine` and the
 /// session id, and because the mob provisioner must return the SAME handle
 /// while depending on the runtime rather than on this crate's `session-store`
-/// feature. Keeping this name here preserves the one helper every surface
-/// calls.
+/// feature. Keeping this name here, with its `_with_host_runtime_check`
+/// variant below, preserves the one helper every surface calls.
 pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle;
+
+/// Build the same shared pre-dequeue realization handle with a surface's
+/// lost host runtime check as its precondition.
+///
+/// Re-exported from `meerkat_runtime` beside the handle it builds: the one
+/// implementation asks the check before it realizes anything, so a surface
+/// whose sessions run on the host's runtime supplies the check instead of
+/// wrapping the handle.
+pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle_with_host_runtime_check;
+
+/// A surface's lost host runtime check for the shared pre-dequeue handle,
+/// re-exported from `meerkat_runtime`.
+pub use meerkat_runtime::PreDequeueHostRuntimeCheck;
 
 /// Build the endpoint that records typed system notices in one session's
 /// durable transcript without a turn.

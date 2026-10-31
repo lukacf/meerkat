@@ -6102,10 +6102,10 @@ machine! {
             }
         }
 
-        // A fresh run start of an owned target with pending changes, on a
-        // lowering that can carry the entry here, applies all of them in one
-        // entry: the target's Active slots become effective when the run
-        // commits, and a revoked slot leaves the slots in effect.
+        // A fresh run start with pending changes, on a lowering that can
+        // carry the entry here, applies all of them in one entry: the
+        // target's Active slots become effective when the run commits, and a
+        // revoked slot leaves the slots in effect.
         transition ResolveRunStartInstructionsApply {
             on input ResolveRunStartInstructions {
                 session_id,
@@ -6164,7 +6164,7 @@ machine! {
             }
         }
 
-        // Not a fresh run start, an unowned target, or nothing pending.
+        // Not a fresh run start, or nothing pending.
         transition ResolveRunStartInstructionsNoChange {
             on input ResolveRunStartInstructions {
                 session_id,
@@ -6248,9 +6248,9 @@ machine! {
         }
 
         // A compaction at a fresh run's first request folds the recorded
-        // target of an owned session: its snapshot sits in the leading
-        // prefix, so a leading-prefix-only model can take it. The target's
-        // Active slots become effective, as at an application.
+        // target: its snapshot sits in the leading prefix, so a
+        // leading-prefix-only model can take it. The target's Active slots
+        // become effective, as at an application.
         transition AuthorizeInstructionFoldAtRunStart {
             on input AuthorizeInstructionFold { session_id, at_run_start, lowering }
             guard {

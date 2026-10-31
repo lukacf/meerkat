@@ -2445,6 +2445,13 @@ where
         let saved_runtime_execution_kind = self.runtime_execution_kind;
         let saved_runtime_started_run_id = self.runtime_started_run_id.take();
         let saved_run_started_fresh = self.run_started_fresh;
+        // The member's own run start: what its operator-instruction entry
+        // changed, whether its run started and a checkpoint holds the entry,
+        // and the run id it reserved. The bridge run neither notes nor adopts
+        // them.
+        let saved_unconcluded_run_start_instructions =
+            self.unconcluded_run_start_instructions.take();
+        let saved_run_start_reserved_run_id = self.run_start_reserved_run_id.take();
         let saved_runtime_terminal_failure_witness = self.runtime_terminal_failure_witness.take();
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
@@ -2540,6 +2547,8 @@ where
         self.runtime_execution_kind = saved_runtime_execution_kind;
         self.runtime_started_run_id = saved_runtime_started_run_id;
         self.run_started_fresh = saved_run_started_fresh;
+        self.unconcluded_run_start_instructions = saved_unconcluded_run_start_instructions;
+        self.run_start_reserved_run_id = saved_run_start_reserved_run_id;
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;

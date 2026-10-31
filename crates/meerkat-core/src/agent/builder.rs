@@ -704,7 +704,11 @@ impl AgentBuilder {
 
         // Seed active model limits only from the captured effective registry
         // and the durable session identity. The LLM client is an execution
-        // adapter, not capability or token-limit authority.
+        // adapter, not capability or token-limit authority. This catalog
+        // witness names no binding: the operator-instruction lowering it
+        // states is the model row's, not the one the binding's backend
+        // serves, which the factory passes on its own
+        // (`with_operator_instruction_lowering`).
         let active_model_profile = self.effective_model_registry.as_ref().and_then(|registry| {
             session.session_metadata().and_then(|metadata| {
                 let identity = metadata.llm_identity();

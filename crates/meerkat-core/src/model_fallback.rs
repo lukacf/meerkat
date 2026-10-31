@@ -147,8 +147,8 @@ pub fn admit_model_fallback(
         }));
     }
     // The request's operator-instruction entry rows ride every later request
-    // where they stand: a target that cannot lower them there is skipped as
-    // a request it cannot lower, before its adapter is consulted.
+    // where they stand: a target whose witness cannot lower them there is
+    // skipped as a request it cannot lower, before its adapter is consulted.
     if crate::InstructionEntryPlacement::of_request(request.messages)
         .refusal(profile.instruction_lowering())
         .is_some()

@@ -701,9 +701,11 @@ fn prompt_update(
 /// A keyed system-prompt update inserts each later version right after the
 /// current one, so before the entry rows that follow the head prompt. Entry
 /// rows are told apart by their identity and their place among the
-/// conversation rows, not by their offset: two later versions both commit,
-/// the entry row is unchanged and still reaches the model after the newest
-/// prompt, and every rewrite record of the reloaded graph validates.
+/// conversation rows and the System rows of their gap that the model reads,
+/// not by their offset: each later version takes the place of the version it
+/// supersedes. Two later versions both commit, the entry row is unchanged
+/// and still reaches the model after the newest prompt, and every rewrite
+/// record of the reloaded graph validates.
 #[test]
 fn update_system_prompt_inserts_a_later_version_before_entry_rows() {
     use super::SystemPromptUpdateStatus;

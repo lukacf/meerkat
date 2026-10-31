@@ -746,23 +746,26 @@ pub(crate) fn operator_instruction_entry_rows(messages: &[Message]) -> Vec<(usiz
 
 /// Every operator-instruction entry row with its place: the number of rows
 /// before it that are not System rows, and its order among the System rows
-/// of its gap (the rows after the last of those) that are not later prompt
-/// versions. A row carries its typed identity (origin session and entry
-/// sequence), so two of these lists are equal when the same entry rows
-/// stand at the same places, whatever their offsets. A keyed system-prompt
-/// update leaves the list as it was: the first version of a key replaces
-/// the ordinary System row it adopts and stands where that row stood, and a
-/// later version, inserted right after the current one, does not count.
-/// Minting, altering or erasing an entry row, or moving one across a
-/// conversation row or another System row that counts, changes it.
+/// of its gap (the rows after the last of those) that the model reads, that
+/// is every System row but a prompt version a later version of its key
+/// supersedes ([`crate::types::superseded_system_prompt_offsets`]). A row
+/// carries its typed identity (origin session and entry sequence), so two of
+/// these lists are equal when the same entry rows stand at the same places,
+/// whatever their offsets. A keyed system-prompt update leaves the list as
+/// it was: the first version of a key replaces the ordinary System row it
+/// adopts and stands where that row stood, and a later version, inserted
+/// right after the current one, takes the place the current one leaves when
+/// it is superseded. Minting, altering or erasing an entry row, or moving
+/// one across a conversation row or a System row the model reads, changes
+/// it.
 pub(crate) fn operator_instruction_entry_places(
     messages: &[Message],
 ) -> Vec<(usize, usize, &Message)> {
+    let superseded = crate::types::superseded_system_prompt_offsets(messages);
     let mut conversation_rows = 0;
     let mut gap_rows = 0;
-    let mut prompt_keys = std::collections::BTreeSet::new();
     let mut places = Vec::new();
-    for message in messages {
+    for (offset, message) in messages.iter().enumerate() {
         let Message::System(system) = message else {
             conversation_rows += 1;
             gap_rows = 0;
@@ -771,11 +774,7 @@ pub(crate) fn operator_instruction_entry_places(
         if system.instruction_entry.is_some() {
             places.push((conversation_rows, gap_rows, message));
         }
-        let later_prompt_version = system
-            .prompt_version
-            .as_ref()
-            .is_some_and(|version| !prompt_keys.insert(&version.key));
-        if !later_prompt_version {
+        if !superseded.contains(&offset) {
             gap_rows += 1;
         }
     }

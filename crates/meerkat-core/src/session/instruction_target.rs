@@ -1622,10 +1622,10 @@ impl Session {
     /// and mint the snapshot it renders. `at_run_start` is whether the
     /// compaction runs before the first model response of a fresh run,
     /// `lowering` how the session's model carries System rows, and `run_id`
-    /// the run in flight. The authority folds the recorded target of an
-    /// owned session at a run's first request (unless the model carries no
-    /// System row), and what is in effect otherwise. None when the session
-    /// carries no operator-instruction fact: its compaction is unchanged.
+    /// the run in flight. The authority folds the recorded target at a run's
+    /// first request (unless the model carries no System row), and what is
+    /// in effect otherwise. None when the session carries no
+    /// operator-instruction fact: its compaction is unchanged.
     ///
     /// Nothing changes here: the caller inserts the snapshot in the rebuilt
     /// transcript and records the fold with the rewrite

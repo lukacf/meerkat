@@ -618,12 +618,14 @@ impl BackendProfile {
     /// Whether requests through this backend can carry an ordered System
     /// message after the leading system prefix, as the provider matrix
     /// declares it ([`OpenAiBackendKind::admits_mid_conversation_system_messages`]).
-    /// A backend of another provider, or a backend kind this version does not
-    /// know, leaves the model's own capability standing.
+    /// A backend of another provider leaves the model's own capability
+    /// standing. An OpenAI backend kind this version does not know fails
+    /// closed, as a binding the config does not resolve does: it may be a
+    /// backend whose wire carries no System row after the leading prefix.
     pub fn admits_mid_conversation_system_messages(&self) -> bool {
         match self.provider {
             Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
-                .is_none_or(OpenAiBackendKind::admits_mid_conversation_system_messages),
+                .is_some_and(OpenAiBackendKind::admits_mid_conversation_system_messages),
             _ => true,
         }
     }

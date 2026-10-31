@@ -443,7 +443,8 @@ impl ModelRegistry {
     /// resolved from `config`, and it only ever names a provider's API-key
     /// backend. A named binding that `config` does not resolve fails closed:
     /// its backend is unknown, so the profile does not claim
-    /// `supports_mid_conversation_system_messages`.
+    /// `supports_mid_conversation_system_messages`, nor does it for a binding
+    /// to an OpenAI backend kind this version does not know.
     pub fn profile_for_identity(
         &self,
         config: &crate::Config,

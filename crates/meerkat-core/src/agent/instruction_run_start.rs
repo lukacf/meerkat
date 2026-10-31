@@ -26,8 +26,11 @@ pub(crate) struct UnconcludedRunStartInstructions {
     application: RunStartInstructionApplication,
     /// The run loop started the run: the one the entry names.
     run_started: bool,
-    /// A checkpoint of the session landed (a round commit or a save of the
-    /// run, on either store profile): the entry is durable.
+    /// A run checkpoint of the session landed through its checkpointer (a
+    /// round commit, or an end-of-run or closing save, on either store
+    /// profile): the entry is durable. A save through the plain session
+    /// store (an agent without a checkpointer) is not recorded: the run loop
+    /// saves only a run it started, whose entry is kept already.
     committed: bool,
 }
 
@@ -118,9 +121,10 @@ where
     /// started (a refusal or a veto before it, an interrupt before it began)
     /// takes its entry back and restores the recorded target, so no entry
     /// names a run that never ran and the changes stay pending for the next
-    /// fresh run start. An entry a checkpoint of the session holds (a round
-    /// commit or a save of the run, on either store profile) is never taken
-    /// back: that is refused. Returns whether an entry was taken back.
+    /// fresh run start. An entry a run checkpoint holds (a round commit, or
+    /// an end-of-run or closing save through the session checkpointer, on
+    /// either store profile) is never taken back: that is refused. Returns
+    /// whether an entry was taken back.
     pub fn conclude_run_start_operator_instructions(&mut self) -> Result<bool, AgentError> {
         // A run id a run start reserved never outlives the run start.
         self.run_start_reserved_run_id = None;
@@ -157,8 +161,9 @@ where
         }
     }
 
-    /// A checkpoint of the session landed: the entry a run start applied is
-    /// durable, and its conclusion never takes it back.
+    /// A run checkpoint of the session landed through its checkpointer: the
+    /// entry a run start applied is durable, and its conclusion never takes
+    /// it back.
     pub(super) fn note_operator_instruction_checkpoint(&mut self) {
         if let Some(unconcluded) = self.unconcluded_run_start_instructions.as_mut() {
             unconcluded.committed = true;

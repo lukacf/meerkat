@@ -3917,9 +3917,15 @@ where
     }
 
     /// A resumed session whose active identity is a model-fallback target
-    /// re-admits that fallback before the next attempt. Synchronous and kept
-    /// out of line: the session-metadata decode and its temporaries never sit
-    /// in the retry loop's poll frame.
+    /// re-admits that fallback before the next attempt. It judges with the
+    /// active model profile. After a resumed build that is the catalog
+    /// witness the builder seeds, which names no binding, so its check of the
+    /// request's operator-instruction entry rows reads the model row's
+    /// lowering, not the one the target's backend serves. The resumed build
+    /// itself refuses, before its client is built, a session whose own entry
+    /// rows that backend cannot carry (`AgentFactory::build_agent`).
+    /// Synchronous and kept out of line: the session-metadata decode and its
+    /// temporaries never sit in the retry loop's poll frame.
     #[inline(never)]
     fn admit_fallback_origin_resume(
         &self,

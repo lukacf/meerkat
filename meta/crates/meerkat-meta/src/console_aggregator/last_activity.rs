@@ -195,6 +195,9 @@ impl LastActivityCache {
         store: &dyn ConsoleLogStore,
         identities: &[String],
     ) -> ConsoleLogResult<HashMap<String, u64>> {
+        // Counted before the seed, so no eviction during it (one an append
+        // starts between chunks) takes this read's own earlier chunks.
+        self.note_read_size(identities.len());
         if !self.unseeded(identities).is_empty() {
             let _seeding = self.seeding.lock().await;
             // A seed that held the lock first may have walked some already.
@@ -211,7 +214,7 @@ impl LastActivityCache {
             }
         }
         let known = self.known(identities);
-        self.evict_over_capacity(identities.len()).await;
+        self.evict_over_capacity().await;
         Ok(known)
     }
 
@@ -240,7 +243,7 @@ impl LastActivityCache {
         };
         if acted {
             // The merge may have taken the map past its capacity.
-            self.evict_over_capacity(0).await;
+            self.evict_over_capacity().await;
         } else if outcome.disposition == AppendDisposition::Inserted
             && is_departure_frame(&outcome.frame)
         {
@@ -268,13 +271,17 @@ impl LastActivityCache {
         self.entries().map.remove(identity);
     }
 
+    /// Count a read's identities into the capacity in force.
+    fn note_read_size(&self, read_size: usize) {
+        let mut entries = self.entries();
+        entries.largest_read = entries.largest_read.max(read_size);
+    }
+
     /// Past the capacity in force, evict the least recently used entries down
-    /// to three quarters of it, holding `log` alone as a drop does. A read
-    /// first counts its own identities into the capacity.
-    async fn evict_over_capacity(&self, read_size: usize) {
+    /// to three quarters of it, holding `log` alone as a drop does.
+    async fn evict_over_capacity(&self) {
         {
-            let mut entries = self.entries();
-            entries.largest_read = entries.largest_read.max(read_size);
+            let entries = self.entries();
             if entries.map.len() <= entries.capacity(self.capacity) {
                 return;
             }

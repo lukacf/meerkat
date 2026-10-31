@@ -852,6 +852,37 @@ async fn past_its_capacity_the_least_recently_used_entries_are_evicted() {
     }
 }
 
+/// A read counts its identities before it walks, so an eviction an append
+/// starts between its chunks keeps room for every identity it lists.
+#[tokio::test]
+async fn a_read_larger_than_the_capacity_keeps_its_own_earlier_chunks() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let identities = ["a", "b", "c", "d", "e", "f"];
+        for (identity, time) in identities.iter().zip(100_u64..) {
+            stored_before(
+                &observed,
+                acting(&format!("{identity}-acted"), identity, time),
+            )
+            .await;
+        }
+        let cache = LastActivityCache::with_limits(1, 4);
+        let (cache, store) = (&cache, observed.as_ref());
+        let HoldHandle { reached, resume } = observed.hold_walk(5);
+        let (seeded, (_, ())) = tokio::join!(read_cache(cache, store, &identities), async move {
+            reached.await.expect("the fifth chunk walked");
+            tokio::join!(
+                append_cache(cache, store, acting("z-acted", "z", 900)),
+                async move {
+                    tokio::task::yield_now().await;
+                    resume.send(()).expect("resume the fifth chunk");
+                }
+            )
+        });
+        assert_eq!(seeded.len(), identities.len(), "{name}: {seeded:?}");
+    }
+}
+
 /// A replayed departure (a dedupe key the log already holds) keeps the
 /// entry: the departure dropped it when it was first stored.
 #[tokio::test]

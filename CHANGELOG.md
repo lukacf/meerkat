@@ -118,10 +118,12 @@ them.
   non-terminal, nothing is written for them after the stop, and the next
   start resumes them. An input that reaches the session after the stop, from
   a part of the process that outlives the host's runtime, waits for the next
-  start the same way. A turn whose session task panicked, or whose actor
-  the service retired, still fails with its error, and so does a turn its
-  caller drives directly rather than through the runtime (see Upgrade notes
-  and Fixed).
+  start the same way. On an RPC session runtime, a governed input is refused
+  instead, and so is an input to a help session
+  (`help_session_not_resumable`), which is never rebuilt from storage. A
+  turn whose session task panicked, or whose actor the service retired,
+  still fails with its error, and so does a turn its caller drives directly
+  rather than through the runtime (see Upgrade notes and Fixed).
 
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds kept governed work that waits
@@ -238,7 +240,10 @@ them.
   the turn reservation (`reserve_runtime_turn_admission`) ask it ahead of an
   input's admission and leave such a session's actor unjudged, since it takes
   no commands: the input is admitted, and the runtime loop's check leaves it
-  to the session's next registration.
+  to the session's next registration. The RPC session runtime's check that
+  refuses an input which would rebuild a help session asks it as well, and
+  counts such a session as not live, so an input to a help session whose
+  actor ended that way is refused there (`help_session_not_resumable`).
 
 - `meerkat-runtime`, `meerkat`:
   `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the
@@ -327,16 +332,19 @@ them.
 
 ### Fixed
 
-- `meerkat-mob`, `meerkat-rpc`: a run kept open at a committed round, by a
-  requeue stop or a crash, whose input carries a per-turn LLM selection (a
-  model, provider, self-hosted server, provider params or auth binding) now
-  resumes at the next start, under the LLM identity that selection saved with
-  the session before the run's first round. Before, a mob member's runtime
-  executor applied the selection again ahead of the resumed dispatch, and an
-  RPC session runtime swapped its client the same way; the resumed session
-  reads as ahead of its committed boundary until the run commits, so that step
-  was refused before the turn on every attempt, and the run's input never
-  completed. A fresh run's selection is applied as before.
+- `meerkat-mob`, `meerkat-rpc`: a mob member's run kept open at a committed
+  round, by a requeue stop or a crash, whose input carries a per-turn LLM
+  selection (a model, provider, self-hosted server, provider params or auth
+  binding) now resumes at the next start, under the LLM identity that
+  selection saved with the session before the run's first round (a field
+  the member's profile lists in `resume_overrides` takes the profile's
+  value, as on any member resume). Before, the member's runtime executor
+  applied the selection again ahead of the resumed dispatch; the resumed
+  session reads as ahead of its committed boundary until the run commits,
+  so that step was refused before the turn on every attempt, and the run's
+  input never completed. A fresh run's selection is applied as before. The
+  RPC session runtime applies the same rule: it does not swap the session's
+  LLM client for a resumed run whose actor is live.
 
 - `meerkat-core`: a pending or approved human consent (R3) is now kept
   across unrelated authorization changes and past the end of its decision's

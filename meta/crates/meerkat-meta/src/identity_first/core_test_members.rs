@@ -243,6 +243,16 @@ impl CoreTestMembers {
         })
     }
 
+    /// From now on Core's member history reads `identity`'s member as
+    /// retired, whatever Core holds: a history that disagrees with Core's
+    /// standing of the member ([`Self::member_standing`]).
+    pub(crate) fn read_retired_in_history(&self, identity: &AgentIdentity) {
+        self.retired_in_history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
     fn reads_retired_in_history(&self, identity: &AgentIdentity) -> bool {
         self.retired_in_history
             .lock()

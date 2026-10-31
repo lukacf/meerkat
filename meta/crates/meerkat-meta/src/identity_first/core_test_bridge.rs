@@ -251,6 +251,12 @@ impl CoreReadsBridge {
         self.binding_reads_refused.store(true, Ordering::SeqCst);
     }
 
+    /// From now on Core's standing of an identity's member answers
+    /// `Unsupported`: a bridge without that read.
+    pub(crate) fn refuse_standing_reads(&self) {
+        self.standing_reads_refused.store(true, Ordering::SeqCst);
+    }
+
     /// One read of Core's member history against the fault, if any.
     fn take_history_read(&self) -> Result<(), BridgeError> {
         let mut guard = self

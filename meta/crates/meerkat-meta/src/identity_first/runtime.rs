@@ -3594,6 +3594,10 @@ pub struct IdentityRuntime {
     /// Test seam: runs in a held bootstrap right after its freshness read.
     #[cfg(test)]
     held_after_freshness_hook: StdMutex<Option<HeldFreshnessHook>>,
+    /// Test seam: runs in a fresh life (a reset, a delete) right after Core
+    /// answered its rotation, before anything after it.
+    #[cfg(test)]
+    fresh_life_answered_hook: StdMutex<Option<HeldFreshnessHook>>,
     bootstrap_task: Mutex<Option<JoinHandle<()>>>,
     bootstrap_cancel: StdRwLock<Option<watch::Sender<bool>>>,
     bootstrap_shutdown: AtomicBool,
@@ -4118,6 +4122,32 @@ impl IdentityRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
+    /// Test seam: run `hook` in the next fresh life (a reset, a delete)
+    /// right after Core answered its rotation, before anything after it.
+    #[cfg(test)]
+    pub(crate) fn set_fresh_life_answered_hook(&self, hook: HeldFreshnessHook) {
+        *self
+            .fresh_life_answered_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Test seam: run the hook a test set to run right after Core answered
+    /// a fresh life's rotation.
+    async fn run_fresh_life_answered_hook(&self) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .fresh_life_answered_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
+    }
+
     /// The held bootstrap pass in progress, if any.
     pub(crate) fn held_create_pass(&self) -> Option<Arc<super::held_bootstrap::HeldCreatePass>> {
         self.held_create_pass
@@ -4396,6 +4426,8 @@ impl IdentityRuntime {
             process_identity_records: Arc::new(crate::runtime::InMemoryMetadataStore::new()),
             #[cfg(test)]
             held_after_freshness_hook: StdMutex::new(None),
+            #[cfg(test)]
+            fresh_life_answered_hook: StdMutex::new(None),
             bootstrap_task: Mutex::new(None),
             bootstrap_cancel: StdRwLock::new(None),
             bootstrap_shutdown: AtomicBool::new(false),
@@ -14725,6 +14757,7 @@ impl IdentityRuntime {
                     .await);
             }
         };
+        self.run_fresh_life_answered_hook().await;
         self.bind_lifecycle_build(identity, &session_id);
         self.clear_rotation_intent(identity).await;
         self.settle_lifecycle_retirement(retiring).await;

@@ -16,6 +16,12 @@
 //! step, and ends the process from inside the effect under test, with no
 //! shutdown. The parent then boots over the same directory and checks what
 //! its start delivered.
+//!
+//! Which effect a step owes is read from the facts Core journals of it,
+//! never from where they sit in the journal: the rows below the kills take
+//! steps whose journal events neighbour each other while the projection is
+//! held, and read what Core's journal says of them through the session
+//! bridge.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -32,8 +38,8 @@ use crate::identity_first::{
     AgentMemoryConfig, AgentMemoryRuntimeInjector, AgentRuntimeServices, ContinuityStore,
     CustomizerError, DurabilityPolicy, DurableAgentSpec, FirstBootManifest, FirstBootRow,
     IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
-    LocalLeaseProvider, MobSessionBridge, MutableRosterProvider, RetiredIdentityMember,
-    RosterProvider,
+    LocalLeaseProvider, MemberLifecycleFact, MemberLifecycleFactRecord, MobSessionBridge,
+    MutableRosterProvider, RetiredIdentityMember, RosterProvider,
 };
 use crate::memory::StewardStore;
 use crate::memory::distiller::{
@@ -537,6 +543,80 @@ fn hook_stuck_on(
             Ok(())
         })
     })
+}
+
+/// The host's retirement hook, recording each incarnation it hears of, that
+/// answers for an incarnation of `held` only once `gate` has a permit: the
+/// projection that calls it waits inside it until then.
+fn hook_held_on(
+    held: &AgentIdentity,
+    seen: &Arc<Mutex<Vec<RetiredIdentityMember>>>,
+    gate: &Arc<tokio::sync::Semaphore>,
+) -> RetiredMemberObserver {
+    let held = held.clone();
+    let seen = Arc::clone(seen);
+    let gate = Arc::clone(gate);
+    Arc::new(move |retired| {
+        let holds = retired.identity == held;
+        seen.lock().unwrap().push(retired);
+        let gate = Arc::clone(&gate);
+        Box::pin(async move {
+            if holds {
+                let _ = gate.acquire().await;
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Hold `boot`'s lifecycle projection inside `held`'s retirement hook
+/// ([`hook_held_on`]): the roster stops listing `held`, Core retires its
+/// member, and the projection waits in the hook it calls for that
+/// retirement until the hook's gate opens. A step journaled meanwhile is
+/// read only after that, with every other step journaled by then.
+async fn hold_the_projection(
+    boot: &Boot,
+    held: &DurableAgentSpec,
+    seen: &Mutex<Vec<RetiredIdentityMember>>,
+) {
+    assert!(boot.roster.remove(&held.identity));
+    let _ = boot.context.refresh_desired_topology_tracked().await;
+    eventually("the projection held in the retirement hook", || {
+        (!hook_calls_of(seen, &held.identity).is_empty()).then_some(())
+    })
+    .await;
+}
+
+/// The Core member id of `identity`'s member.
+fn member_id(identity: &AgentIdentity) -> meerkat_mob::AgentIdentity {
+    crate::member_comms_id::roster_member_id_for_identity(identity.as_str())
+}
+
+/// The facts Core's member lifecycle journal holds of `identity`'s member,
+/// each at its cursor, as `boot`'s session bridge reads them.
+async fn member_records(boot: &Boot, identity: &AgentIdentity) -> Vec<MemberLifecycleFactRecord> {
+    let bridge = boot
+        .identities
+        .bridge()
+        .expect("the runtime has a session bridge");
+    let member = member_id(identity);
+    let mut records = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = bridge
+            .member_lifecycle_journal_page(after, 256)
+            .await
+            .expect("Core's member lifecycle journal reads");
+        if page.next <= after {
+            return records;
+        }
+        after = page.next;
+        records.extend(
+            page.records
+                .into_iter()
+                .filter(|record| record.fact.member() == Some(&member)),
+        );
+    }
 }
 
 /// The incarnations of `identity` the hook heard of, each with its cause.
@@ -1213,6 +1293,503 @@ async fn an_exit_interview_write_that_always_fails_is_reported_and_later_effects
             .await
             .is_empty(),
         "the refused write queued nothing"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A reset of an identity whose incarnation Core had already retired (a
+/// host's raw retire) seats the identity's fresh life, and the process is
+/// killed right after Core answered the reset's rotation. The next start
+/// distills the session the retired incarnation left, once: the reset
+/// recorded what it owes for the incarnation Core had retired before it
+/// asked Core, and Core's journal names that incarnation at the fresh life's
+/// seat.
+///
+/// RED before the projection ran a reset's memory side effects for an
+/// incarnation Core had already retired: the reset distilled that session in
+/// a task of the process that took it, so the kill lost it, and the next
+/// start found nothing owed (Core's retirement and the reset's seat are no
+/// rotation, and another member's retirement lies between them).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_after_a_reset_of_an_unseated_identity_distills_its_last_session_after_the_restart()
+{
+    const NAME: &str =
+        "a_kill_after_a_reset_of_an_unseated_identity_distills_its_last_session_after_the_restart";
+    const MOB: &str = "lifecycle-effect-unseated-reset";
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    if let Some(state) = child_state() {
+        let boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone(), beta.clone()],
+            Wiring {
+                memory: Some(memory_injector(
+                    &state.join("memory"),
+                    Arc::new(RecordingTranscripts::default()),
+                )),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        let retired = boot.session_of(&alpha.identity).await;
+        std::fs::write(state.join("retired-session"), retired.to_string())
+            .expect("note the session Core's retirement leaves");
+        // A host retires alpha's member, then beta's.
+        boot.runtime
+            .mob_handle()
+            .retire(member_id(&alpha.identity))
+            .await
+            .expect("a host retires alpha's member");
+        boot.runtime
+            .mob_handle()
+            .retire(member_id(&beta.identity))
+            .await
+            .expect("a host retires beta's member");
+        // The kill lands right after Core answered the reset's rotation.
+        boot.identities
+            .set_fresh_life_answered_hook(Box::new(move || {
+                Box::pin(async move { exit_now::<()>() })
+            }));
+        let _ = boot.identities.reset_tracked(&alpha.identity).await;
+        std::future::pending::<()>().await;
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    let retired = SessionId::parse(
+        &std::fs::read_to_string(temp.path().join("retired-session"))
+            .expect("the child noted the retired session"),
+    )
+    .expect("a session id");
+
+    let transcripts = Arc::new(RecordingTranscripts::default());
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            memory: Some(memory_injector(
+                &temp.path().join("memory"),
+                Arc::clone(&transcripts) as Arc<dyn TranscriptSource>,
+            )),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    eventually("the retired session's distillation", || {
+        (transcripts.reads_of(&retired) > 0).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        transcripts.reads_of(&retired),
+        1,
+        "the session the retired incarnation left is distilled once after the restart"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A delete of an identity whose incarnation Core had already retired seats
+/// the identity's fresh life, and the process is killed right after Core
+/// answered the delete's rotation. The next start queues the identity's
+/// exit interview (`delete`), once.
+///
+/// RED before the projection ran a delete's memory side effects for an
+/// incarnation Core had already retired: the delete queued the exit
+/// interview inline once Core's rotation answered, so the kill lost it, and
+/// the next start found nothing owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_after_a_delete_of_an_unseated_identity_queues_its_exit_interview_after_the_restart()
+{
+    const NAME: &str =
+        "a_kill_after_a_delete_of_an_unseated_identity_queues_its_exit_interview_after_the_restart";
+    const MOB: &str = "lifecycle-effect-unseated-delete";
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    if let Some(state) = child_state() {
+        let boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone(), beta.clone()],
+            Wiring {
+                memory: Some(memory_injector(
+                    &state.join("memory"),
+                    Arc::new(RecordingTranscripts::default()),
+                )),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        boot.runtime
+            .mob_handle()
+            .retire(member_id(&alpha.identity))
+            .await
+            .expect("a host retires alpha's member");
+        boot.runtime
+            .mob_handle()
+            .retire(member_id(&beta.identity))
+            .await
+            .expect("a host retires beta's member");
+        // The kill lands right after Core answered the delete's rotation.
+        boot.identities
+            .set_fresh_life_answered_hook(Box::new(move || {
+                Box::pin(async move { exit_now::<()>() })
+            }));
+        let _ = boot
+            .identities
+            .delete_identity_tracked(&alpha.identity)
+            .await;
+        std::future::pending::<()>().await;
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    {
+        let store = SqliteAgentMemoryStore::open(temp.path().join("memory"))
+            .expect("open the memory store");
+        assert!(
+            pending_harvests_of(&store, &alpha.identity)
+                .await
+                .is_empty(),
+            "the kill came before the exit interview"
+        );
+    }
+
+    let (memory, memory_store) = memory_over(
+        &temp.path().join("memory"),
+        Arc::new(RecordingTranscripts::default()),
+    );
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            memory: Some(memory),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + EFFECT_DEADLINE;
+    let harvests = loop {
+        let harvests = pending_harvests_of(&memory_store, &alpha.identity).await;
+        if !harvests.is_empty() {
+            break harvests;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exit interview was not queued within {EFFECT_DEADLINE:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(harvests, vec!["delete".to_string()]);
+    assert_eq!(
+        pending_harvests_of(&memory_store, &alpha.identity).await,
+        vec!["delete".to_string()],
+        "the exit interview is queued once"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A host's raw retire of an identity's member, then Meta's reset of the
+/// identity it left unseated, journaled one right after the other before the
+/// projection reads either: two steps, not one rotation. Core's own
+/// retirement owes nothing, no Meta verb having asked for it; the reset's
+/// fresh life distills the session the retired incarnation left, once,
+/// behind the reset's boundary, and the retirement hook hears nothing of
+/// alpha: the reset ended no incarnation, Core had.
+///
+/// RED before the projection paired a retirement with a seat from Core's
+/// facts: it paired them by their positions, so the hook heard `rotated` for
+/// the incarnation Core retired on its own, and the session was distilled
+/// twice (as that rotation's, and by the reset's own task).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_core_retirement_then_a_reset_of_the_unseated_identity_is_not_one_rotation() {
+    const MOB: &str = "lifecycle-fact-retire-then-reset";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let transcripts = Arc::new(RecordingTranscripts::default());
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone(), beta.clone()],
+        Wiring {
+            observer: Some(hook_held_on(&beta.identity, &seen, &gate)),
+            memory: Some(memory_injector(
+                &temp.path().join("memory"),
+                Arc::clone(&transcripts) as Arc<dyn TranscriptSource>,
+            )),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let retired = boot.session_of(&alpha.identity).await;
+    hold_the_projection(&boot, &beta, &seen).await;
+
+    boot.runtime
+        .mob_handle()
+        .retire(member_id(&alpha.identity))
+        .await
+        .expect("a host retires alpha's member");
+    boot.identities
+        .reset_tracked(&alpha.identity)
+        .await
+        .expect("the reset gives the unseated identity its fresh life");
+    let records = member_records(&boot, &alpha.identity).await;
+    let ended = records
+        .iter()
+        .find(|record| {
+            matches!(
+                record.fact,
+                MemberLifecycleFact::Retired { generation: 0, .. }
+            )
+        })
+        .expect("Core's retirement of alpha's incarnation")
+        .cursor;
+    let seated = records
+        .iter()
+        .find(|record| {
+            matches!(
+                record.fact,
+                MemberLifecycleFact::Seated { generation: 1, .. }
+            )
+        })
+        .expect("the reset's seat of alpha's fresh life")
+        .cursor;
+    assert_eq!(
+        seated,
+        ended + 1,
+        "the reset's seat is the journal's next event after Core's retirement: their positions \
+         alone read as one rotation"
+    );
+
+    gate.add_permits(1024);
+    boot.identities.settle_lifecycle_projection().await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        hook_calls_of(&seen, &alpha.identity),
+        Vec::<String>::new(),
+        "the hook hears nothing of alpha: no step a hook owes ended its incarnation"
+    );
+    assert_eq!(
+        transcripts.reads_of(&retired),
+        1,
+        "the session the retired incarnation left is distilled once, as the reset's"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A host's own rotation of an identity's member onto a fresh session, and a
+/// respawn of the next incarnation on that session, both before the
+/// projection reads either. The rotation owes its side effects all the same:
+/// the hook hears of the incarnation it ended (`rotated`) and the session
+/// that incarnation left is distilled, read from what Core's journal says of
+/// the retirement (its session and its rotation's successor and role). The
+/// respawn on the same session owes nothing.
+///
+/// RED before a rotation's side effects were read from Core's facts: the
+/// projection looked the rotation's incarnations up in Core's member
+/// history, which by then named the respawned incarnation on the
+/// successor's session, so it dropped the rotation's side effects.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrecorded_rotation_whose_successor_was_respawned_before_the_read_still_owes_its_effects()
+ {
+    const MOB: &str = "lifecycle-fact-respawned-successor";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let transcripts = Arc::new(RecordingTranscripts::default());
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone(), beta.clone()],
+        Wiring {
+            observer: Some(hook_held_on(&beta.identity, &seen, &gate)),
+            memory: Some(memory_injector(
+                &temp.path().join("memory"),
+                Arc::clone(&transcripts) as Arc<dyn TranscriptSource>,
+            )),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let first = boot.session_of(&alpha.identity).await;
+    hold_the_projection(&boot, &beta, &seen).await;
+
+    // A host rotates alpha onto a fresh session, wakes the next incarnation
+    // (its session is created), and respawns it on that session.
+    let bridge = boot
+        .identities
+        .bridge()
+        .expect("the runtime has a session bridge");
+    bridge
+        .rotate_member(
+            &alpha.identity,
+            &alpha,
+            &IdentityRuntime::base_build_draft(&alpha),
+        )
+        .await
+        .expect("the host's rotation");
+    boot.runtime
+        .mob_handle()
+        .ensure_member_live(&member_id(&alpha.identity))
+        .await
+        .expect("the host wakes the next incarnation");
+    boot.runtime
+        .mob_handle()
+        .respawn_member(
+            member_id(&alpha.identity),
+            meerkat_mob::MemberRespawn::new(),
+        )
+        .await
+        .expect("the host respawns the next incarnation on its session");
+
+    gate.add_permits(1024);
+    boot.identities.settle_lifecycle_projection().await;
+    tokio::time::sleep(SETTLE).await;
+    let calls = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|retired| retired.identity == alpha.identity)
+        .map(|retired| (retired.cause.as_str().to_string(), retired.generation))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![("rotated".to_string(), 0)],
+        "the rotation's ended incarnation reaches the hook, and the respawn owes nothing"
+    );
+    assert_eq!(
+        transcripts.reads_of(&first),
+        1,
+        "the session the rotation's incarnation left is distilled once"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// Meta's session bridge forwards Core's member lifecycle facts with what
+/// Core's journal says of each: a rotation's retirement start with its
+/// target, the retirement it ended with its session and the rotation (its
+/// target, successor and role), the next incarnation's seat with its session
+/// and the rotation that seated it, a plain retirement with its session, and
+/// an unseated identity's fresh life naming the incarnation it follows.
+///
+/// RED before the bridge forwarded them: it dropped the retirement starts,
+/// and read every seat and retirement with no session and no rotation.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bridge_forwards_every_lifecycle_fact() {
+    const MOB: &str = "lifecycle-fact-forwarding";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let boot = boot(temp.path(), MOB, vec![alpha.clone()], Wiring::default()).await;
+    let first = boot.session_of(&alpha.identity).await;
+    boot.identities
+        .reset_tracked(&alpha.identity)
+        .await
+        .expect("the reset rotates the identity");
+    let second = boot.session_of(&alpha.identity).await;
+    boot.runtime
+        .mob_handle()
+        .retire(member_id(&alpha.identity))
+        .await
+        .expect("a host retires alpha's member");
+    boot.identities
+        .reset_tracked(&alpha.identity)
+        .await
+        .expect("the reset gives the unseated identity its fresh life");
+    let third = boot.session_of(&alpha.identity).await;
+    let facts = member_records(&boot, &alpha.identity)
+        .await
+        .into_iter()
+        .map(|record| record.fact)
+        .collect::<Vec<_>>();
+    let lead = meerkat_mob::ProfileName::from("lead");
+
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Seated {
+                generation: 0,
+                session: Some(session),
+                rotation: None,
+                ..
+            } if *session == first
+        )),
+        "the first seat names its session: {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::RetirementStarted {
+                generation: 0,
+                rotation: Some(meerkat_mob::RotationTarget::FreshSession),
+                ..
+            }
+        )),
+        "the reset's retirement start names its rotation's target: {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Retired {
+                generation: 0,
+                session: Some(session),
+                rotation: Some(rotation),
+                ..
+            } if *session == first
+                && rotation.target == meerkat_mob::RotationTarget::FreshSession
+                && rotation.successor.get() == 1
+                && rotation.successor_role == lead
+        )),
+        "the reset's retirement names its session and its rotation: {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Seated {
+                generation: 1,
+                session: Some(session),
+                rotation: Some(meerkat_mob::SeatRotation::Successor {
+                    predecessor,
+                    target: meerkat_mob::RotationTarget::FreshSession,
+                    ..
+                }),
+                ..
+            } if *session == second && predecessor.get() == 0
+        )),
+        "the reset's seat names its session and the incarnation the same step retired: \
+         {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Retired {
+                generation: 1,
+                session: Some(session),
+                cause: None,
+                rotation: None,
+                ..
+            } if *session == second
+        )),
+        "the host's retirement names its session and no rotation: {facts:#?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            MemberLifecycleFact::Seated {
+                generation: 2,
+                session: Some(session),
+                rotation: Some(meerkat_mob::SeatRotation::FreshLifeAfter { predecessor, .. }),
+                ..
+            } if *session == third && predecessor.get() == 1
+        )),
+        "the fresh life names the incarnation it follows: {facts:#?}"
     );
     let _ = boot.runtime.shutdown().await;
 }

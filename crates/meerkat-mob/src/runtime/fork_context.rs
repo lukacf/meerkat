@@ -107,8 +107,11 @@ impl ForkContextPlan {
     ///
     /// Under [`ForkInstructionPolicy::Refuse`] a fork whose rows hold an
     /// activation row or a `load_skill` result is refused with the typed
-    /// refusal a durable fork reports. A fork whose newest carried row alone
-    /// does not fit the budget is refused with
+    /// refusal a durable fork reports. Under
+    /// [`ForkInstructionPolicy::ReactivateInherited`] a fork whose effective
+    /// head of a key holds a body a compaction retired is refused with
+    /// [`ForkInstructionRefusalCause::HeadBodyRetired`]. A fork whose newest
+    /// carried row alone does not fit the budget is refused with
     /// [`MobError::ForkContextTooLarge`].
     ///
     /// `source_session` is the session the rows were read from. Only the
@@ -197,6 +200,36 @@ impl ForkContextPlan {
                 _ => false,
             })
             .collect();
+        // A head whose body a compaction retired has no body to carry (its
+        // source session unknown, a copied row can be the newest of its
+        // key): under `reactivate_inherited` the fork is refused before
+        // anything is planned, as a durable fork of a retired copied head
+        // is, instead of carrying the retired header as the instruction.
+        if carries_session_state {
+            let retired = heads
+                .iter()
+                .filter(|(_, index)| {
+                    effective_heads.contains(*index)
+                        && matches!(
+                            &rows[**index].0,
+                            WireSessionMessage::System {
+                                retired_instruction_body: Some(_),
+                                ..
+                            }
+                        )
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            if !retired.is_empty() {
+                return Err(MobError::ForkInstructionRefused {
+                    source_member_id: source_member_id.clone(),
+                    refusal: ForkInstructionRefusal::new(
+                        ForkInstructionRefusalCause::HeadBodyRetired,
+                        retired,
+                    ),
+                });
+            }
+        }
         let mut instruction_keys = instruction_keys_seen
             .iter()
             .filter(|key| {

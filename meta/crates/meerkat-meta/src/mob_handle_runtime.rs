@@ -4041,7 +4041,7 @@ macro_rules! delegate_mob_session_service {
         impl MobSessionService for $wrapper {
             // Forwarded exactly: the inner service's agent builds keep the
             // members' comms identities, and the mob seats dormant members
-            // under the root it reports. Required since meerkat 0.9.8.
+            // under the root it reports. Required since meerkat 0.9.9.
             fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
                 self.inner.session_comms_identity_root()
             }

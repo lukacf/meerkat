@@ -4189,7 +4189,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "PinnedByPlacedPeer",
                 ],
             ),
-            // Identity entries (0.9.8).
+            // Identity entries (0.9.9).
             NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared"]),
             NamedTypeBinding::string_enum(
                 "LegacyIdentityEntryAdoptionKind",

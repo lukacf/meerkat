@@ -174,26 +174,16 @@ impl MobActor {
             .state()
             .identity_to_runtime
             .contains_key(&dsl_identity);
-        // A fresh life of an identity no member holds follows the identity's
-        // last incarnation: the generation MobMachine retains for it (none
-        // for an identity no incarnation preceded since the mob's last
-        // reset). The rotation is this request's, and the seat that takes it
-        // is an ordinary one: its row records the generation it follows.
-        let fresh_life_after = if seated {
-            None
-        } else {
-            self.dsl_authority
-                .state()
-                .identity_runtime_generations
-                .get(&dsl_identity)
-                .map(|generation| crate::ids::Generation::new(generation.0))
-        };
         match self
             .plan_dormant_seat(spec, SeatPlanMode::Rotation, None)
             .await?
         {
+            // The rotation of an identity no member holds is a fresh life: the
+            // rotation is this request's, and the seat that takes it is an
+            // ordinary one, whose row names the incarnation it follows (read
+            // from the machine state before the seat's step).
             DormantSeatPlanEntry::Seat(mut candidate) => {
-                candidate.fresh_life_after = fresh_life_after;
+                candidate.fresh_life = !seated;
                 Ok(MemberRotationPlan::Seat {
                     candidate,
                     seated,
@@ -201,7 +191,7 @@ impl MobActor {
                 })
             }
             DormantSeatPlanEntry::Embody(mut spec) if !seated => {
-                spec.fresh_life_after = fresh_life_after;
+                spec.fresh_life = true;
                 Ok(MemberRotationPlan::Embody(spec))
             }
             _ => Err(MobError::Internal(format!(
@@ -570,7 +560,7 @@ impl MobActor {
             session_archived: false,
             history_unavailable: spec.history_unavailable.clone(),
             // Set by the plan of a rotation of an identity no member holds.
-            fresh_life_after: None,
+            fresh_life: false,
             resume_from_role: spec.launch_mode.resume_from_role().cloned(),
             runtime_mode,
             labels: spec.labels.clone().unwrap_or_default(),
@@ -963,6 +953,18 @@ impl MobActor {
             // chunk's declared edges read it.
             definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
+        // A fresh life's row names the incarnation it follows: the generation
+        // MobMachine retains for the identity before the seat's step (the
+        // chunk's seats name distinct identities, so the state before the
+        // chunk is the state before each seat).
+        let seat_rotation = if candidate.fresh_life {
+            super::super::identity_entry::fresh_life_rotation(
+                self.dsl_authority.state(),
+                agent_identity,
+            )
+        } else {
+            None
+        };
         Ok(StagedSeat {
             inputs: [candidate.authorize_input.clone(), begin, seat],
             fence_token,
@@ -971,6 +973,7 @@ impl MobActor {
             creation,
             candidate,
             endpoint,
+            seat_rotation,
         })
     }
 
@@ -2093,6 +2096,9 @@ struct StagedSeat {
     creation: crate::MemberCreationRecord,
     candidate: Box<DormantSeatCandidate>,
     endpoint: Option<TrustedPeerDescriptor>,
+    /// What the seat's row names of the rotation that seated it: a fresh
+    /// life's predecessor, read before the seat's step.
+    seat_rotation: Option<crate::runtime::SeatRotation>,
 }
 
 impl StagedSeat {
@@ -2261,11 +2267,7 @@ impl SettledSeatChunk {
                     .with_history_unavailable(seat.candidate.history_unavailable.clone())
                     // A fresh life of an identity no member held (a rotation's
                     // request) names the incarnation it follows.
-                    .with_seat_rotation(
-                        seat.candidate
-                            .fresh_life_after
-                            .map(crate::runtime::SeatRotation::fresh_life_after),
-                    )
+                    .with_seat_rotation(seat.seat_rotation)
                     // A resume seat that takes another role than its session
                     // was last built under records the declared migration,
                     // which the session's next build declares.

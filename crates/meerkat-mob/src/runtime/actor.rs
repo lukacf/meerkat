@@ -7004,9 +7004,10 @@ pub(super) struct PendingSpawn {
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries, for the spawn's row.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
-    /// The incarnation a fresh life of an identity no member held follows,
-    /// when `rotate_member` embodies it: the spawn's row records it.
-    pub(super) fresh_life_after: Option<crate::ids::Generation>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    pub(super) fresh_life: bool,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7930,9 +7931,10 @@ struct SpawnFinalizeCtx {
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     history_unavailable: Option<crate::runtime::HistoryUnavailable>,
-    /// The incarnation a fresh life of an identity no member held follows,
-    /// when `rotate_member` embodies it: the spawn's row records it.
-    fresh_life_after: Option<crate::ids::Generation>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    fresh_life: bool,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8049,7 +8051,7 @@ impl SpawnActivateState {
             entry_custody: _,
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
-            fresh_life_after: _,
+            fresh_life: _,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -35760,7 +35762,7 @@ impl MobActor {
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
             history_unavailable: None,
-            fresh_life_after: None,
+            fresh_life: false,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -36154,8 +36156,8 @@ impl MobActor {
             // row does.
             history_unavailable,
             // A fresh life `rotate_member` embodies for an identity no member
-            // held: its spawn row records the incarnation it follows.
-            fresh_life_after,
+            // held: its spawn row names the incarnation it follows.
+            fresh_life,
             // Read only by the dormant seat of a created entry owed its seat;
             // a spawn ignores it.
             created_custody: _,
@@ -36381,7 +36383,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
-            fresh_life_after,
+            fresh_life,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -37012,7 +37014,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
-            fresh_life_after,
+            fresh_life,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -37225,7 +37227,7 @@ impl MobActor {
                 definition_wiring,
                 entry_custody,
                 history_unavailable,
-                fresh_life_after,
+                fresh_life,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -37430,7 +37432,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
-            fresh_life_after,
+            fresh_life,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -38453,7 +38455,7 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
-            fresh_life_after: _,
+            fresh_life: _,
             // A placed spawn never acts for a created entry: only a dormant
             // seat does.
             created_custody: _,
@@ -39369,7 +39371,7 @@ impl MobActor {
             // Refused above: a placed spawn never acts for an identity entry.
             entry_custody: false,
             history_unavailable: None,
-            fresh_life_after: None,
+            fresh_life: false,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39666,7 +39668,7 @@ impl MobActor {
                 definition_wiring,
                 entry_custody,
                 history_unavailable,
-                fresh_life_after,
+                fresh_life,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39872,7 +39874,7 @@ impl MobActor {
                                 definition_wiring,
                                 entry_custody,
                                 history_unavailable,
-                                fresh_life_after,
+                                fresh_life,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39958,7 +39960,7 @@ impl MobActor {
                                 definition_wiring,
                                 entry_custody,
                                 history_unavailable,
-                                fresh_life_after,
+                                fresh_life,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40108,7 +40110,7 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
-            fresh_life_after: _,
+            fresh_life: _,
             // A policy auto-spawn is a worker's.
             created_custody: _,
         } = member_spec;
@@ -40328,7 +40330,7 @@ impl MobActor {
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
             history_unavailable: None,
-            fresh_life_after: None,
+            fresh_life: false,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41392,11 +41394,14 @@ impl MobActor {
         // session records the notice, as a dormant seat's row does.
         spawned_event = spawned_event.with_history_unavailable(ctx.history_unavailable.clone());
         // A fresh life `rotate_member` embodied for an identity no member
-        // held names the incarnation it follows, as its seat's row would.
-        spawned_event = spawned_event.with_seat_rotation(
-            ctx.fresh_life_after
-                .map(crate::runtime::SeatRotation::fresh_life_after),
-        );
+        // held names the incarnation it follows, as its seat's row would:
+        // the generation MobMachine retains for the identity before this
+        // membership step.
+        if ctx.fresh_life {
+            spawned_event = spawned_event.with_seat_rotation(
+                super::identity_entry::fresh_life_rotation(self.dsl_authority.state(), &identity),
+            );
+        }
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(

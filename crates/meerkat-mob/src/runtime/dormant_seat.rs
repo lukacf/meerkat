@@ -431,13 +431,13 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// The notice a fresh seat carries when the identity's archived session
     /// is gone from the store: its row records it.
     pub(in crate::runtime) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
-    /// The incarnation a fresh life of an identity no member holds follows
-    /// (`rotate_member` of an identity whose last incarnation's retirement
-    /// had ended): the generation MobMachine retained for the identity, which
-    /// the rotation's plan read. Its row records it
-    /// ([`crate::runtime::SeatRotation::FreshLifeAfter`]). Set only by that
-    /// plan.
-    pub(in crate::runtime) fresh_life_after: Option<crate::ids::Generation>,
+    /// Whether the seat is `rotate_member`'s fresh life of an identity no
+    /// member holds (its last incarnation's retirement had ended): its row
+    /// names the incarnation it follows
+    /// ([`crate::runtime::SeatRotation::FreshLifeAfter`]), the generation
+    /// MobMachine retains for the identity before the seat's step. Set only
+    /// by the rotation's plan.
+    pub(in crate::runtime) fresh_life: bool,
     /// The role a resume seat's session was last built under, when the seat
     /// takes another one (a declared role migration, from the spec's
     /// `MemberLaunchMode::Resume::resume_from_role`): its row records it,

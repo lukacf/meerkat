@@ -7264,14 +7264,13 @@ pub struct SpawnMemberSpec {
     /// archived session is gone from the store: the dormant seat's row
     /// records it. Set only by the declared apply; a spawn ignores it.
     pub(crate) history_unavailable: Option<super::HistoryUnavailable>,
-    /// The incarnation a fresh life of an identity no member holds follows
-    /// when [`MobHandle::rotate_member`]'s spec owes a kickoff, so a spawn
-    /// embodies the fresh life: the generation MobMachine retained for the
-    /// identity, which the rotation's plan read. The spawn's row records it
-    /// ([`super::SeatRotation::FreshLifeAfter`]). Set only by that plan;
-    /// never taken from caller-supplied arguments, and any other spawn
-    /// leaves it unset.
-    pub(crate) fresh_life_after: Option<crate::ids::Generation>,
+    /// Whether the spawn embodies [`MobHandle::rotate_member`]'s fresh life
+    /// of an identity no member holds (its spec owes a kickoff): the spawn's
+    /// row names the incarnation it follows
+    /// ([`super::SeatRotation::FreshLifeAfter`]), the generation MobMachine
+    /// retains for the identity before the spawn's membership step. Set only
+    /// by the rotation's plan; never taken from caller-supplied arguments.
+    pub(crate) fresh_life: bool,
     /// Whether the request acts for the created identity entry of its name
     /// ([`crate::IdentityEntryOrigin::Created`]), owed its seat: the seat of
     /// such an entry on its archived session at a start. A dormant seat with
@@ -7410,7 +7409,7 @@ impl SpawnMemberSpec {
             inherited_operator_authority_bound: None,
             fresh_session_id: None,
             history_unavailable: None,
-            fresh_life_after: None,
+            fresh_life: false,
             created_custody: false,
         }
     }

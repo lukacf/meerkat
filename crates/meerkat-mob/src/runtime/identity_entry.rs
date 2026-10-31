@@ -1241,6 +1241,23 @@ pub(crate) fn plain_retirement_facts(
     ))
 }
 
+/// What the row of `rotate_member`'s fresh life of an identity no member
+/// holds names ([`SeatRotation::FreshLifeAfter`]): the incarnation it
+/// follows, the generation MobMachine retains for the identity
+/// (`identity_runtime_generations`, which a retirement keeps) in `state`, the
+/// machine state before the step that seats the fresh life, whose seat arm
+/// mints the next generation from it. None for an identity no incarnation
+/// preceded since the mob's last reset.
+pub(crate) fn fresh_life_rotation(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Option<SeatRotation> {
+    state
+        .identity_runtime_generations
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+        .map(|generation| SeatRotation::fresh_life_after(Generation::new(generation.0)))
+}
+
 /// The link a rotation's terminal step journals on both of its rows, as
 /// MobMachine decided it: the rotation's target, which the machine recorded
 /// at the rotation's start and the step consumes (`member_rotation_targets`

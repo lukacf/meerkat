@@ -391,6 +391,53 @@ const LIB_TARGET_KINDS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib"]
 // and 900 s on run 38859112297 (798 s and 621 s of it building), against
 // 293 s for its default-feature row, which the pull request keeps.
 const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
+// The known reds of the toolkit-mobkit[native-host] suite below. Each names
+// its class: a heading anchor of the crate's test-debt page, which says what
+// fails, why, and the fix. The plan checks this list and the page both ways
+// (checkKnownRedsDoc), so neither can name a test the other does not. The
+// suite runs without them, then runs the ones that fail every time and fails
+// unless every one still fails, each within a minute (the ci-known-reds
+// nextest profile): a fixed test leaves the list and the page in the same
+// change. An intermittent one stays out of both runs.
+export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md";
+const COLD_RESTORE = "cold-restore-refusals";
+const TOOL_RESULT = "tool-result-payload";
+const STALE = "stale-expectations";
+const INTERMITTENT = "intermittent-races";
+export const TOOLKIT_MOBKIT_KNOWN_REDS = [
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
+  ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn", TOOL_RESULT],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper", TOOL_RESULT],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", TOOL_RESULT],
+  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", TOOL_RESULT],
+  ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
+  ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
+  ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],
+  ["installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication", STALE],
+  ["installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write", STALE],
+  ["private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b", STALE],
+  ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input", STALE],
+  ["private_originals::service_approved_input::admission_tests::source_status_tests::unrelated_publication_is_readable_but_terminal_bound_association_mismatch_refuses", STALE],
+  ["private_originals::service_grants::mcp::tests::application_policy_pending_record_keeps_exact_provenance_without_reissue", STALE],
+  ["private_originals::service_approved_input::admission_tests::application_policy_tests::application_task_cancellation_before_issue_keeps_only_native_a", STALE],
+  ["private_originals::service_approved_input::admission_tests::application_policy_tests::invalidated_application_policy_keeps_only_native_a", STALE],
+  ["private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child", STALE],
+  ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
+  ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
+  ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
+  ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
+  ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
+  ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
+].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
+
 export const FEATURE_UNIT_SUITES = [
   // The shipping public GPT Live path (experimental_gpt_live::tests,
   // session_runtime::live_summary, service_factory) plus the realtime
@@ -431,6 +478,21 @@ export const FEATURE_UNIT_SUITES = [
   // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
   // the unit jobs export.
   { package: "meerkat-connect", id: "console", features: ["console"] },
+  // toolkit-mobkit's native host (its installed host, private originals,
+  // private host and original ingress) compiles only under `native-host`,
+  // which meerkat-connect turns on, so the package's own unit lane runs a
+  // few dozen of its tests. This suite builds it with meerkat-connect (`with`),
+  // the form those tests were written for, and runs toolkit-mobkit's tests
+  // only, without its known reds (TOOLKIT_MOBKIT_KNOWN_REDS). Push only, like
+  // meerkat-connect's own lanes.
+  {
+    package: "toolkit-mobkit",
+    id: "native-host",
+    features: ["native-host"],
+    with: ["meerkat-connect"],
+    knownReds: { doc: TOOLKIT_MOBKIT_TEST_DEBT, tests: TOOLKIT_MOBKIT_KNOWN_REDS },
+    pullRequest: false,
+  },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
@@ -1547,6 +1609,68 @@ function shortName(name) {
   return name.startsWith("meerkat-") ? name.slice("meerkat-".length) : name;
 }
 
+// A feature suite's package flags: its package with its features, or, for a
+// suite built `with` other packages, all of them and its features named by
+// package (`--features <package>/<feature>`).
+export function featureSuiteFlags(suite) {
+  const companions = suite.with ?? [];
+  if (companions.length === 0) return `-p ${suite.package} --features ${suite.features.join(",")}`;
+  const packages = [suite.package, ...companions].map((name) => `-p ${name}`).join(" ");
+  return `${packages} --features ${suite.features.map((feature) => `${suite.package}/${feature}`).join(",")}`;
+}
+
+// A feature suite's nextest filters: a suite built `with` other packages runs
+// its own package's tests only, and a suite with known reds runs without
+// them (`filter`), then runs the ones that are not intermittent on their own
+// (`known_reds`), all of which must fail (`known_red_count` of them).
+export function featureSuiteFilters(suite) {
+  const scope = suite.with?.length ? `package(${suite.package})` : null;
+  const tests = suite.knownReds?.tests ?? [];
+  if (!scope && tests.length === 0) return {};
+  const any = (entries) => entries.map((entry) => `test(=${entry.test})`).join(" | ");
+  const within = (expression) => (scope ? `${scope} and ${expression}` : expression);
+  if (tests.length === 0) return { filter: scope };
+  const steady = tests.filter((entry) => !entry.intermittent);
+  return {
+    filter: within(`not (${any(tests)})`),
+    ...(steady.length ? { known_reds: within(`(${any(steady)})`), known_red_count: steady.length } : {}),
+  };
+}
+
+// A known-red list against its test-debt page: every entry names a test
+// once, under a class heading of the page (its anchor), and every test the
+// page lists (a bullet or a table row that opens with the test's path in
+// backticks) is an entry under the same anchor. Throws on the first drift.
+export function checkKnownRedsDoc(text, tests, docPath) {
+  const listed = new Map();
+  let anchor = null;
+  for (const line of text.split("\n")) {
+    const heading = /^## (.+)$/.exec(line);
+    if (heading) {
+      anchor = heading[1].trim().toLowerCase().replaceAll(/[^a-z0-9 -]/g, "").replaceAll(" ", "-");
+      continue;
+    }
+    const named = /^(?:- |\| )`([a-z0-9_]+(?:::[a-z0-9_]+)+)`/.exec(line);
+    if (!named) continue;
+    if (anchor === null) throw new Error(`${docPath}: ${named[1]} is listed outside a class heading`);
+    if (listed.has(named[1])) throw new Error(`${docPath}: ${named[1]} is listed twice`);
+    listed.set(named[1], anchor);
+  }
+  const seen = new Set();
+  for (const entry of tests) {
+    if (seen.has(entry.test)) throw new Error(`known reds: ${entry.test} is listed twice`);
+    seen.add(entry.test);
+    const at = listed.get(entry.test);
+    if (at === undefined) throw new Error(`known reds: ${entry.test} is not on ${docPath}`);
+    if (at !== entry.anchor) {
+      throw new Error(`known reds: ${entry.test} names #${entry.anchor}, but ${docPath} lists it under #${at}`);
+    }
+  }
+  for (const [test, at] of listed) {
+    if (!seen.has(test)) throw new Error(`${docPath}: ${test} (#${at}) is not a known red of its suite`);
+  }
+}
+
 // In-crate documentation a crate compiles in (see the header): a reader of
 // package scope whose .md or .mdx input lies in the reader's own crate
 // directory. Another crate's reader of the same file is an ordinary reader.
@@ -2371,14 +2495,23 @@ function plan(args) {
         throw new Error(`feature unit suite ${suite.package}[${suite.id}] names unknown feature ${feature}`);
       }
     }
+    for (const companion of suite.with ?? []) {
+      if (!byName.has(companion)) {
+        throw new Error(`feature unit suite ${suite.package}[${suite.id}] builds with unknown package ${companion}`);
+      }
+    }
+    if (suite.knownReds) {
+      checkKnownRedsDoc(readFileSync(suite.knownReds.doc, "utf8"), suite.knownReds.tests, suite.knownReds.doc);
+    }
     const row = {
       name: `${shortName(suite.package)}[${suite.id}]`,
       packages: [suite.package],
       features: [...suite.features],
-      package_flags: `-p ${suite.package} --features ${suite.features.join(",")}`,
+      package_flags: featureSuiteFlags(suite),
       estimated_minutes: estimatedMinutes(weights.get(suite.package)),
       pull_request: suite.pullRequest !== false,
       ...(suite.rustMinStack ? { rust_min_stack: suite.rustMinStack } : {}),
+      ...featureSuiteFilters(suite),
     };
     // A suite names its product; a product's suite runs on its test stack.
     return withProduct(row, productOf.get(suite.package) ?? CORE);
@@ -3127,6 +3260,8 @@ function matrixOf(shards, { placeholder = true } = {}) {
     ...(shard.test_flags ? { tests: shard.test_flags } : {}),
     ...(shard.rust_min_stack ? { rust_min_stack: String(shard.rust_min_stack) } : {}),
     ...(shard.partition ? { partition: shard.partition } : {}),
+    ...(shard.filter ? { filter: shard.filter } : {}),
+    ...(shard.known_reds ? { known_reds: shard.known_reds, known_red_count: String(shard.known_red_count) } : {}),
   }));
   if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });
   return JSON.stringify({ include });

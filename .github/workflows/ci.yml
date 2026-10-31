@@ -1185,6 +1185,12 @@ jobs:
           # Set only on the rows of a partitioned lane (PARTITIONED_UNIT_PACKAGES):
           # the row builds the lane and runs one hash partition of its tests.
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
@@ -1198,6 +1204,10 @@ jobs:
           partition_args=()
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
+          fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
           fi
           # Tests of crates that dev-depend on mcp-test-server spawn this exact
           # fixture and fail without it (mcp_test_server::fixture_binary).
@@ -1213,8 +1223,23 @@ jobs:
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1869,6 +1894,12 @@ jobs:
           # Set only on the rows of a partitioned lane (PARTITIONED_UNIT_PACKAGES):
           # the row builds the lane and runs one hash partition of its tests.
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
@@ -1882,6 +1913,10 @@ jobs:
           partition_args=()
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
+          fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
           fi
           # Tests of crates that dev-depend on mcp-test-server spawn this exact
           # fixture and fail without it (mcp_test_server::fixture_binary).
@@ -1897,8 +1932,23 @@ jobs:
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1964,6 +2014,12 @@ jobs:
           MIN_STACK: ${{ matrix.rust_min_stack }}
           # A partitioned lane's rows only (see main-unit).
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
@@ -1975,6 +2031,10 @@ jobs:
           partition_args=()
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
+          fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
           fi
           # shellcheck disable=SC2086
           fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
@@ -1988,8 +2048,23 @@ jobs:
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}

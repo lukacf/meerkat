@@ -45,8 +45,8 @@ import {
   IDENTITY_VIEWPORT,
   ZOOM,
   centreOn,
-  contentOverflows,
   fitViewport,
+  needsMinimap,
   revealViewport,
   viewportTransform,
   wheelPixels,
@@ -59,6 +59,8 @@ import type { FitLimits } from "./zoom-pan";
 /** Above these the canvas renderer draws (A3.9). */
 export const SVG_LIMITS = { nodes: 300, edges: 800 } as const;
 const MOVE_MS = 320;
+/** Lanes never fit below this: further out the marks would crowd their labels. */
+const LANE_MIN_SCALE = 0.6;
 const EXIT_MS = 200;
 const LABEL_SETTLE_MS = 120;
 
@@ -294,7 +296,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const hiddenSet = React.useMemo(() => new Set(hiddenList), [hiddenList]);
   const [focusMode, setFocusMode] = React.useState(false);
   const focusTarget = focusMode ? selection[0] ?? null : null;
-  const [legendCollapsed, setLegendCollapsed] = React.useState(false);
+  const [legendCollapsed, setLegendCollapsed] = React.useState(legend === "collapsed");
   const panel = panelOfKey(cacheKey) || testIdPrefix || "";
   const [minimapHidden, setMinimapHidden] = React.useState(() => readMinimapHidden(panel));
 
@@ -310,6 +312,23 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   // Layout. Lanes and clusters spread across the frame; force settles in idle chunks.
   const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * ZOOM.pad) : 960;
   const layoutHeight = size.height > 0 ? Math.max(200, size.height - 2 * ZOOM.pad) : 560;
+  // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
+  const chromeRef = React.useRef<HTMLDivElement | null>(null);
+  const [chromeHeight, setChromeHeight] = React.useState(0);
+  React.useLayoutEffect(() => {
+    const element = chromeRef.current;
+    if (!element) {
+      setChromeHeight(0);
+      return undefined;
+    }
+    const apply = () => setChromeHeight(Math.round(element.getBoundingClientRect().height));
+    apply();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(apply);
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+  const fitBottom = chromeHeight > 0 ? Math.max(ZOOM.pad, chromeHeight + 20) : ZOOM.pad;
   const cachedRef = React.useRef<Map<string, LayoutPoint> | null>(null);
   if (cachedRef.current === null) cachedRef.current = cacheKey ? readPositionCache(cacheKey) : new Map();
   const [settled, setSettled] = React.useState<Map<string, LayoutPoint> | null>(null);
@@ -321,7 +340,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       if (model.nodes.length > 0 && model.nodes.every((node) => known.has(node.id))) return forceLayoutFrom(layoutNodes, known);
       return computeGraphLayout({ nodes: model.nodes, edges: model.edges, layout: "force", lanes, density, measure: measures.label, positions: known });
     }
-    return computeGraphLayout({
+    const input = {
       nodes: model.nodes,
       edges: model.edges,
       layout: kind,
@@ -330,10 +349,20 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       center,
       density,
       width: layoutWidth,
-      height: layoutHeight,
+      // Lanes share the height the fit leaves them (clear of the chrome).
+      height: kind === "lanes" && size.height > 0 ? Math.max(120, size.height - ZOOM.pad - fitBottom) : layoutHeight,
       measure: measures.label,
-    });
-  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled]);
+    };
+    const first = computeGraphLayout(input);
+    // Lanes spread across the width at the scale the fit will use: a tall
+    // picture fitted below 1 is laid out wider by as much, so it still fills
+    // the frame from side to side.
+    if (kind === "lanes" && first.bounds.h > 0 && size.height > 0) {
+      const fitScale = Math.max(LANE_MIN_SCALE, Math.min(1, (size.height - ZOOM.pad - fitBottom) / first.bounds.h));
+      if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
+    }
+    return first;
+  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitBottom]);
   const layoutRef = React.useRef(layout);
   layoutRef.current = layout;
 
@@ -447,31 +476,30 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const limits: FitLimits = cards
     ? { minScale: 0.85, maxScale: 1 }
     : kind === "lanes"
-      ? { minScale: 0.6, maxScale: 1 }
+      ? { minScale: LANE_MIN_SCALE, maxScale: 1 }
       : kind === "clusters"
-        ? { minScale: 0.3, maxScale: 1.25 }
+        ? { minScale: 0.3, maxScale: 1.6 }
         : { minScale: 0.45, maxScale: 1.5 };
-  // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
-  const chromeRef = React.useRef<HTMLDivElement | null>(null);
-  const [chromeHeight, setChromeHeight] = React.useState(0);
-  React.useLayoutEffect(() => {
-    const element = chromeRef.current;
-    if (!element) {
-      setChromeHeight(0);
-      return undefined;
+  // What the fit must show: the layout, and every mark's label and helper around it.
+  const fitBounds = React.useMemo(() => {
+    let { x: x0, y: y0 } = layout.bounds;
+    let x1 = layout.bounds.x + layout.bounds.w;
+    let y1 = layout.bounds.y + layout.bounds.h;
+    for (const node of model.nodes) {
+      const box = layout.nodes.get(node.id);
+      if (!box || isCardKind(node.kind)) continue;
+      const half = Math.max(box.w / 2, measures.label(node.label) / 2 + 4);
+      x0 = Math.min(x0, box.x - half);
+      x1 = Math.max(x1, box.x + half);
+      y0 = Math.min(y0, box.y - box.h / 2 - 4);
+      y1 = Math.max(y1, box.y + box.h / 2 + 22);
     }
-    const apply = () => setChromeHeight(Math.round(element.getBoundingClientRect().height));
-    apply();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(apply);
-    observer.observe(element);
-    return () => observer.disconnect();
-  });
-  const fitBottom = chromeHeight > 0 ? Math.max(ZOOM.pad, chromeHeight + 20) : ZOOM.pad;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }, [layout, model.nodes, measures.label]);
   const fit = React.useMemo(
-    () => fitViewport(layout.bounds, size.width, size.height, limits, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad }),
+    () => fitViewport(fitBounds, size.width, size.height, limits, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layout.bounds.x, layout.bounds.y, layout.bounds.w, layout.bounds.h, size.width, size.height, limits.minScale, limits.maxScale, fitBottom],
+    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, fitBottom],
   );
   const fitRef = React.useRef(fit);
   fitRef.current = fit;
@@ -1064,8 +1092,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   }, [useCanvas, size.width, size.height, viewport, model, boxes, layout, dots, kind, tokens, highlight, selectedSet, flashes, liveIds, accentNodes, accentEdges, reduced, pulsePhase]);
 
   // Chrome visibility.
-  const showLegend = legend === "on" || (legend === "auto" && (model.relations.size >= 2 || model.kinds.size >= 2 || Boolean(props.legendNote)));
-  const minimapWanted = minimap === "on" || (minimap === "auto" && (contentOverflows(layout.bounds, viewport, size.width, size.height) || viewport.scale > 1.001));
+  const showLegend = legend === "on" || legend === "collapsed" || (legend === "auto" && (model.relations.size >= 2 || model.kinds.size >= 2 || Boolean(props.legendNote)));
+  const minimapWanted = minimap === "on" || (minimap === "auto" && needsMinimap(layout.bounds, viewport, size.width, size.height));
   const minimapAvailable = minimap !== "off" && minimapWanted && model.nodes.length > 0;
   const showMinimap = minimapAvailable && !minimapHidden && size.width >= 420;
 

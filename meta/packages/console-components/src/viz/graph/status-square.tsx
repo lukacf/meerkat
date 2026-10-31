@@ -27,6 +27,7 @@ export function StatusSquare({ status, live = false, size = 12, label, className
       className={className ? `cc-viz-status-square ${className}` : "cc-viz-status-square"}
       width={box}
       height={box}
+      style={{ width: box, height: box }}
       viewBox={`${-box / 2} ${-box / 2} ${box} ${box}`}
       // Not data-status: the WorkGraph drawer pins exactly one [data-status].
       data-square={item}

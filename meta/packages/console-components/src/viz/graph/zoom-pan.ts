@@ -113,10 +113,24 @@ export function visibleWorld(viewport: VizViewport, width: number, height: numbe
   return { x: -viewport.tx / viewport.scale, y: -viewport.ty / viewport.scale, w: width / viewport.scale, h: height / viewport.scale };
 }
 
-/** Whether the content overflows the frame by 20 % at this zoom (the minimap's cue). */
+/** Whether the content overflows the frame by 20 % at this zoom. */
 export function contentOverflows(bounds: LayoutBounds, viewport: VizViewport, width: number, height: number): boolean {
   if (width <= 0 || height <= 0) return false;
   return bounds.w * viewport.scale > width * 1.2 || bounds.h * viewport.scale > height * 1.2;
+}
+
+/**
+ * The minimap's cue (A3.9): the content overflows the frame by 20 %, or the
+ * view is zoomed in past what shows it all (part of it lies out of view).
+ */
+export function needsMinimap(bounds: LayoutBounds, viewport: VizViewport, width: number, height: number, slack = 24): boolean {
+  if (width <= 0 || height <= 0 || bounds.w <= 0 || bounds.h <= 0) return false;
+  if (contentOverflows(bounds, viewport, width, height)) return true;
+  const x0 = bounds.x * viewport.scale + viewport.tx;
+  const y0 = bounds.y * viewport.scale + viewport.ty;
+  const x1 = x0 + bounds.w * viewport.scale;
+  const y1 = y0 + bounds.h * viewport.scale;
+  return x0 < -slack || y0 < -slack || x1 > width + slack || y1 > height + slack;
 }
 
 export function viewportTransform(viewport: VizViewport): string {

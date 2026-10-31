@@ -36,6 +36,21 @@
   overflow: hidden;
 }
 
+/* A host's icon reset (the console's svg { fill: none; stroke: currentColor;
+   stroke-width: 2; width and height 16px }) must not reach the kit's
+   drawings: back to SVG's own defaults, so only the classes below paint. */
+.cc-viz-graph__svg,
+.cc-viz-legend__sample,
+.cc-viz-minimap svg,
+.cc-viz-status-square,
+.cc-viz-list__mark {
+  fill: initial;
+  stroke: none;
+  stroke-width: 1;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
 .cc-viz-graph text {
   font-family: inherit;
   stroke: none;
@@ -1139,11 +1154,10 @@
   font-size: 11px;
 }
 
+/* Node kinds start a row of their own under the relations. */
 .cc-viz-legend__rule {
-  align-self: stretch;
-  width: 1px;
-  margin: 4px 6px;
-  background: var(--_cc-border-soft);
+  flex-basis: 100%;
+  height: 0;
 }
 
 .cc-viz-minimap {

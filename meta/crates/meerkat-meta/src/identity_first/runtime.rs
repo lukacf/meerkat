@@ -5797,9 +5797,7 @@ impl IdentityRuntime {
         binding: &meerkat_mob::MemberBinding,
         cause: super::types::RetiredIdentityCause,
     ) -> Option<super::types::RetiredIdentityMember> {
-        if self.retired_member_observer().is_none() {
-            return None;
-        }
+        self.retired_member_observer()?;
         let agent_runtime_id = live_binding_runtime_id(binding)?;
         let registration = match (binding.session_id(), self.bridge.as_ref()) {
             (Some(session_id), Some(bridge)) => bridge.member_registration(session_id).await,

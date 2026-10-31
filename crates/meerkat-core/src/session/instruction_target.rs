@@ -1158,6 +1158,20 @@ impl Session {
         })
     }
 
+    /// The session's binding fact for the session-document authority:
+    /// whether its metadata names a mob member binding, which a mob stamps
+    /// when it seats the session as a member's. Metadata that does not read
+    /// fails the write, typed, instead of reading as a session no mob seated.
+    fn instruction_member_bound(&self) -> Result<bool, InstructionWriteError> {
+        self.try_session_metadata()
+            .map(|metadata| metadata.is_some_and(|metadata| metadata.mob_member_binding.is_some()))
+            .map_err(|error| {
+                InstructionWriteError::Malformed(InstructionStateError::MalformedState(format!(
+                    "the session's metadata does not read: {error}"
+                )))
+            })
+    }
+
     /// Whether the recorded target or the effective set names `slot`: such
     /// a slot takes no instruction activation.
     pub(crate) fn names_operator_instruction_slot(
@@ -1173,7 +1187,11 @@ impl Session {
     /// Record one session-owned write in the target. The session-document
     /// authority decides it against the slot it holds; a recorded write
     /// changes only the target (it applies at the next fresh run start), and
-    /// a refusal or a duplicate changes nothing.
+    /// a refusal or a duplicate changes nothing. A mob member's session (its
+    /// metadata names a mob member binding) takes no write of its own host:
+    /// the authority refuses it `owned_by_mob` from that binding fact, whether
+    /// or not the mob has recorded a target yet, because the member's
+    /// instructions come from its mob.
     pub fn set_session_instruction(
         &mut self,
         write: SessionInstructionWrite,
@@ -1201,6 +1219,7 @@ impl Session {
         if self.slot_has_activation_rows(&write.slot) {
             return Err(InstructionWriteError::SlotManagedByActivation { slot: write.slot });
         }
+        let member_bound = self.instruction_member_bound()?;
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
         let mut bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
@@ -1226,6 +1245,7 @@ impl Session {
                     .as_ref()
                     .map_or_else(String::new, |digest| digest.as_str().to_owned()),
                 body_bytes,
+                member_bound,
             )
             .map_err(|error| refused_by_authority(&error))?;
         let receipt = |disposition, target_generation| SessionInstructionReceipt {
@@ -1282,7 +1302,15 @@ impl Session {
     /// only from the mob that owns the target (or into an unowned one): a
     /// generation at or below the recorded one answers "already recorded" and
     /// writes nothing, so a repeated delivery never writes twice, and another
-    /// mob's snapshot is refused until the owning mob releases the target. It
+    /// mob's snapshot is refused until the owning mob releases the target. A
+    /// member seated over an existing session whose own host wrote its target
+    /// before the mob seated it (an attach) hands that target to the mob at
+    /// the mob's first snapshot: from the session's binding fact (its
+    /// metadata names a mob member binding), the authority makes the mob the
+    /// owner and records the snapshot in one step, so the mob starts from its
+    /// snapshot and what the host had in effect is revoked at the next fresh
+    /// run start unless the snapshot keeps it. A session-owned target of a
+    /// session no mob seated is refused (`owned_by_session`). The authority
     /// also decides the slot limit and the active budget. A snapshot never
     /// names a slot that instruction activations manage in this session,
     /// whether it records the slot Active or Absent. Recording changes only
@@ -1307,6 +1335,7 @@ impl Session {
         if record.slots.len() > MAX_OPERATOR_INSTRUCTION_SLOTS {
             return Err(InstructionWriteError::SlotLimitExceeded);
         }
+        let member_bound = self.instruction_member_bound()?;
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
         let mut bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
@@ -1361,6 +1390,7 @@ impl Session {
                 snapshot.effect,
                 snapshot.digest,
                 snapshot.bytes,
+                member_bound,
             )
             .map_err(|error| refused_by_authority(&error))?;
         match write_verdict(&effects)? {
@@ -1404,36 +1434,6 @@ impl Session {
         }
     }
 
-    /// Record a mob member's whole snapshot, as
-    /// [`Self::record_instruction_target`] does, on a session the member's
-    /// mob may have adopted: a member seated over an existing session (an
-    /// attach) whose own host holds the target hands the target to the mob
-    /// at the mob's first delivery. The session-document authority rebinds
-    /// it to the mob first ([`Self::rebind_instruction_owner`]: the mob
-    /// starts from what is in effect), then records the snapshot, which
-    /// replaces it. Both land together or neither does. A target another mob
-    /// holds stays that mob's, and the record is refused; an unowned target
-    /// or the mob's own records as ever.
-    pub fn adopt_instruction_target(
-        &mut self,
-        record: InstructionTargetRecord,
-    ) -> Result<InstructionRecordReceipt, InstructionWriteError> {
-        let session_owned = self
-            .instruction_target_state()?
-            .is_some_and(|state| *state.owner() == InstructionTargetOwner::Session);
-        if !session_owned {
-            return self.record_instruction_target(record);
-        }
-        let mut adopted = self.clone();
-        adopted.rebind_instruction_owner(InstructionTargetOwner::Mob {
-            mob_id: record.mob_id.clone(),
-            agent_identity: record.agent_identity.clone(),
-        })?;
-        let receipt = adopted.record_instruction_target(record)?;
-        *self = adopted;
-        Ok(receipt)
-    }
-
     /// Rebind the target to a new owner, on an explicit attach or a host's
     /// standalone adoption; the generation restarts. A mob that attaches to
     /// a session-owned target starts from what is in effect: the target
@@ -1443,25 +1443,37 @@ impl Session {
     /// target, so what is still in effect is revoked at the next fresh run
     /// start. The authority refuses a rebind to the owner the target already
     /// has, to no owner, and of a mob-owned target, which only its mob's
-    /// release frees.
+    /// release frees; a mob member's session refuses its own host's adoption
+    /// (`owned_by_mob`), as it refuses its host's writes.
     pub fn rebind_instruction_owner(
         &mut self,
         owner: InstructionTargetOwner,
     ) -> Result<(), InstructionWriteError> {
+        let member_bound = self.instruction_member_bound()?;
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
         let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
         let (owner_kind, mob_id) = owner.machine_owner();
-        document
+        let effects = document
             .authority
-            .rebind_instruction_owner(key, owner_kind, mob_id)
+            .rebind_instruction_owner(key, owner_kind, mob_id, member_bound)
             .map_err(|error| {
                 InstructionWriteError::InvalidRequest(format!(
                     "the operator instruction target cannot be rebound to this owner: {error}"
                 ))
             })?;
+        if effects.iter().any(|effect| {
+            matches!(
+                effect,
+                document::SessionDocumentEffect::InstructionTargetRefused {
+                    refusal: document::InstructionWriteRefusal::OwnedByMob,
+                }
+            )
+        }) {
+            return Err(InstructionWriteError::OwnedByMob);
+        }
         let next = document.recorded_state(owner, &bodies)?;
         self.store_instruction_target_state(&next)?;
         Ok(())

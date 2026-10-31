@@ -585,11 +585,11 @@ impl SessionAgent for FactoryAgent {
         meerkat_core::InstructionRecordReceipt,
         meerkat_core::service::SessionInstructionError,
     > {
-        // A mob's delivery: a target its session's own host holds is the
-        // mob's from its first delivery (the attach rebind).
+        // A mob's delivery: a target the session's own host wrote before
+        // the mob seated it (an attach) is the mob's from its first delivery.
         self.agent
             .session_mut()
-            .adopt_instruction_target(record)
+            .record_instruction_target(record)
             .map_err(meerkat_core::service::SessionInstructionError::from)
     }
 

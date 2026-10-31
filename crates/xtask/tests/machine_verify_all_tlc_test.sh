@@ -823,14 +823,16 @@ fi
 # a leading System prefix, a mob-owned target changes owner only by its own
 # mob's release, a release empties the target and the next fresh run start
 # revokes what the released mob had in effect, a rebind starts from the
-# right target, and the target stays within the active budget. It first
-# checks that the generated model defines every arm it drives, and requires
-# its five witnesses reached, one run each. --mutants refuses ten seeded
-# defects, each by the invariant it targets, run as the only invariant. No
-# run uses -continue, which prints a trace for every violating state TLC
-# checks: one run of the five witnesses hit the 900 s per-run cap in this
-# shard. Not yet measured on a hosted runner; it joins this shard as the
-# lightest one measured locally.
+# right target, the target stays within the active budget, a mob member's
+# session takes no write or adoption of its own host, and a mob record takes
+# over a session-owned target only on a member's session (an attach). It
+# first checks that the generated model defines every arm it drives, and
+# requires its six witnesses reached, one run each. --mutants refuses twelve
+# seeded defects, each by the invariant it targets, run as the only
+# invariant. No run uses -continue, which prints a trace for every violating
+# state TLC checks: one run of the five witnesses hit the 900 s per-run cap
+# in this shard. Not yet measured on a hosted runner; it joins this shard as
+# the lightest one measured locally.
 instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
 if [[ ! -x "${instruction_boundary_audit}" ]]; then
   echo "error: instruction boundary audit runner is missing from workspace runfiles: ${instruction_boundary_audit}" >&2
@@ -1144,13 +1146,16 @@ run_machine_verify() {
 # measurements: its sixteen runs (a safety run over 9203 distinct states,
 # five witness runs and ten mutant runs, over a model that does not extend
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
-# 4-worker local run (2026-10-31); the MobMachine operator-instruction
-# delivery audit with --mutants joined it after these measurements (not yet
-# measured: two whole-space runs, eleven witness runs and six mutant runs over
-# the MobMachine model, whose JVM start and model parse are about 5 s a run
-# in audits-i, so an estimated 110-200 s locally with its small spaces, and
-# the shard about 230-320 s; if the first hosted run takes the shard past 10
-# minutes, the audit moves to a shard of its own);
+# 4-worker local run (2026-10-31), and it has since grown to nineteen runs
+# (six witness runs and twelve mutant runs) over a space the session's
+# binding fact at most doubles, not yet re-measured; the MobMachine
+# operator-instruction delivery audit with --mutants joined it after these
+# measurements (not yet measured: two whole-space runs, eleven witness runs
+# and six mutant runs over the MobMachine model, whose JVM start and model
+# parse are about 5 s a run in audits-i, so an estimated 110-200 s locally
+# with its small spaces, and the shard about 230-320 s; if the first hosted
+# run takes the shard past 10 minutes, the audit moves to a shard of its
+# own);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

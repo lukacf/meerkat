@@ -1425,8 +1425,8 @@ pub trait MobSessionService:
     /// under its hosting claim while it is dormant, never waking,
     /// registering or materializing it. A generation the session already
     /// recorded answers "already recorded" and writes nothing. A target the
-    /// session's own host holds (a member seated over an existing session)
-    /// becomes the mob's with this snapshot; another mob's target is refused.
+    /// session's own host wrote before the mob seated it (an attach) becomes
+    /// the mob's with this snapshot; another mob's target is refused.
     ///
     /// The default is a typed refusal, never a silent success: a decorator
     /// that does not forward it blocks its members' deliveries visibly

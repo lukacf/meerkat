@@ -19254,7 +19254,7 @@ impl OperatorInstructionControl {
                 .map(OperatorInstructionReceipt::Set)
                 .map_err(meerkat_core::service::SessionInstructionError::from),
             Self::Record(record) => session
-                .adopt_instruction_target(record)
+                .record_instruction_target(record)
                 .map(OperatorInstructionReceipt::Record)
                 .map_err(meerkat_core::service::SessionInstructionError::from),
             Self::Release(mob_id) => session
@@ -19455,9 +19455,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// a host or agent surface. A generation the session already recorded
     /// answers "already recorded" and writes nothing; another mob's target
     /// is refused until that mob releases it. A target the session's own
-    /// host holds (the member was seated over an existing session) is the
+    /// host wrote before the mob seated the session (an attach) is the
     /// mob's from this snapshot on
-    /// ([`meerkat_core::Session::adopt_instruction_target`]). A live session
+    /// ([`meerkat_core::Session::record_instruction_target`]). A live session
     /// records it through its actor under the turn-finalization boundary, a
     /// dormant one store-only under its hosting claim; neither wakes the
     /// session.
@@ -26924,7 +26924,7 @@ mod tests {
             self.session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .adopt_instruction_target(record)
+                .record_instruction_target(record)
                 .map_err(meerkat_core::service::SessionInstructionError::from)
         }
 

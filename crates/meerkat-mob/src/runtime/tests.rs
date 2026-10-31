@@ -4487,6 +4487,22 @@ impl MockSessionService {
             session
                 .set_session_metadata(metadata)
                 .expect("mock session metadata should serialize");
+        } else if let Some(binding) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.mob_member_binding.clone())
+        {
+            // Mirror the factory, which stamps a mob build's member binding on
+            // every build, a resumed session's included: a session a mob
+            // seats over an existing one (an attach) is a member's from then
+            // on.
+            let mut metadata = session
+                .session_metadata()
+                .expect("a resumed mock session carries metadata");
+            metadata.mob_member_binding = Some(binding);
+            session
+                .set_session_metadata(metadata)
+                .expect("mock session metadata should serialize");
         }
         // Mirror the factory, which persists every build's application context
         // in the session's durable build state, unconditionally: a build that
@@ -5776,11 +5792,11 @@ impl MobSessionService for MockSessionService {
                 .ok_or_else(|| SessionError::NotFound {
                     id: session_id.clone(),
                 })?;
-            let receipt = committed.adopt_instruction_target(record.clone())?;
+            let receipt = committed.record_instruction_target(record.clone())?;
             let wrote = receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded;
             if wrote {
                 if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
-                    let _ = live.adopt_instruction_target(record);
+                    let _ = live.record_instruction_target(record);
                 }
                 self.persisted_sessions
                     .write()

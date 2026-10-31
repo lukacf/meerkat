@@ -81,7 +81,11 @@ pub struct SessionInstructionRead {
 pub trait SessionServiceInstructionExt: SessionService {
     /// Record one session-owned write in the session's target. The receipt
     /// returns once the target is in the session document; the write applies
-    /// at the session's next fresh run start.
+    /// at the session's next fresh run start. A mob member's session takes no
+    /// write of its own host: it is refused `owned_by_mob` from the moment a
+    /// mob seats the session, whether or not the mob has written yet (a
+    /// member's instructions come from its mob, through
+    /// `MobHandle::set_operator_instruction` with a member target).
     async fn set_session_instruction(
         self: Arc<Self>,
         id: &SessionId,

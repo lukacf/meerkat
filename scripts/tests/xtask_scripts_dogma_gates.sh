@@ -419,7 +419,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # durable_decision_audit) generated a state, its fifteen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
-# instruction_boundary_audit.sh (session_document) requires its five
+# instruction_boundary_audit.sh (session_document) requires its six
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
@@ -585,6 +585,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessReleasedInstructionsRevoked is violated."' \
   'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
   'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Invariant AuditMemberSessionTakesNoHostWrite is violated."' \
+  'echo "Error: Invariant AuditOnlyAMemberSessionTargetIsTakenOver is violated."' \
   'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \

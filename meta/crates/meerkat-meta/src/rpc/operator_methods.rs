@@ -1348,35 +1348,48 @@ pub(super) async fn handle_prune_member_system_rows(
                 "revision": revision,
             }),
         ),
-        Err(SessionError::Busy { id }) => rpc_error(
+        Err(err) => prune_member_system_rows_error(response_id, &identity, &session_id, err),
+    }
+}
+
+/// The answer of `meta/prune_member_system_rows` when the transcript edit
+/// door refuses or fails for the member `identity` on `session_id`.
+fn prune_member_system_rows_error(
+    response_id: Value,
+    _identity: &AgentIdentity,
+    _session_id: &meerkat_core::SessionId,
+    err: SessionError,
+) -> JsonRpcResponse {
+    if let SessionError::Busy { id } = &err {
+        return rpc_error(
             response_id,
             OPERATOR_SESSION_BUSY_CODE,
             format!(
                 "session {id} is running a turn; prune_member_system_rows refuses while work \
                  is active - retry when the member is idle"
             ),
-        ),
-        Err(err) => match err.system_row_prune_refusal() {
-            Some((index, cause)) => JsonRpcResponse {
-                jsonrpc: JSONRPC_VERSION.to_string(),
-                id: response_id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32602,
-                    message: err.to_string(),
-                    data: Some(serde_json::json!({
-                        "kind": meerkat_core::SessionError::SYSTEM_ROW_PRUNE_REFUSED_KIND,
-                        "index": index,
-                        "cause": cause,
-                    })),
-                }),
-            },
-            None => rpc_error(
-                response_id,
-                -32000,
-                format!("prune_member_system_rows failed: {err}"),
-            ),
+        );
+    }
+    match err.system_row_prune_refusal() {
+        Some((index, cause)) => JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32602,
+                message: err.to_string(),
+                data: Some(serde_json::json!({
+                    "kind": meerkat_core::SessionError::SYSTEM_ROW_PRUNE_REFUSED_KIND,
+                    "index": index,
+                    "cause": cause,
+                })),
+            }),
         },
+        None => rpc_error(
+            response_id,
+            -32000,
+            format!("prune_member_system_rows failed: {err}"),
+        ),
     }
 }
 
@@ -3592,6 +3605,198 @@ comms = true
         assert_eq!(quiet["result"]["removed_rows"], serde_json::json!(0));
 
         harness.teardown().await;
+    }
+
+    /// A stale `expected_parent_revision` answers typed: `-32602` with data
+    /// `{kind: "transcript_revision_conflict", expected, actual}`, nothing
+    /// written. The host reads again: a retry on `actual` commits.
+    #[tokio::test]
+    async fn prune_member_system_rows_answers_a_stale_revision_typed() {
+        let harness = operator_verb_harness("worker:main", "operator-prune-stale-revision").await;
+        let service: Arc<dyn crate::memory::hygienist::TranscriptEditSessionService> =
+            Arc::clone(&harness.concrete) as _;
+        const SEED_TURN: &str = "seed one committed turn";
+        const LEGACY: &str = "Legacy prompt: you keep the team's schedule.";
+        harness.run_turn(SEED_TURN.to_string()).await;
+        let session_id = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("identity status")
+            .session_id
+            .expect("identity session");
+        wait_for_durable_turn(&service, &session_id, SEED_TURN).await;
+        let seeded_len = settled_transcript_len(&service, &session_id).await;
+
+        // The revision a host read, then a later write.
+        let read = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({"identity": harness.member_alias, "remove": []}),
+        )
+        .await;
+        let read_revision = read["result"]["revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an empty prune answers the revision: {read:#?}"))
+            .to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let request = meerkat_core::service::SessionTranscriptRewriteRequest {
+                selection: meerkat_core::TranscriptRewriteSelection::MessageRange {
+                    start: seeded_len,
+                    end: seeded_len,
+                },
+                replacement: vec![Message::System(meerkat_core::types::SystemMessage::new(
+                    LEGACY.to_string(),
+                ))],
+                reason: meerkat_core::TranscriptRewriteReason::new("test_seed"),
+                actor: Some("operator-verb-test".to_string()),
+                expected_parent_revision: None,
+                running_behavior: meerkat_core::TranscriptEditRunningBehavior::default(),
+            };
+            match service
+                .rewrite_session_transcript(&session_id, request)
+                .await
+            {
+                Ok(_) => break,
+                Err(SessionError::Busy { .. }) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(err) => panic!("legacy prompt seed rewrite failed: {err}"),
+            }
+        }
+        let staged_len = transcript_len(&service, &session_id).await;
+        let legacy_row = serde_json::json!({
+            "index": seeded_len,
+            "content_sha256": meerkat_core::InstructionContentDigest::for_body(LEGACY)
+                .as_str()
+                .to_string(),
+        });
+
+        let stale = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "remove": [legacy_row.clone()],
+                "expected_parent_revision": read_revision,
+            }),
+        )
+        .await;
+        assert_eq!(
+            stale["error"]["code"],
+            serde_json::json!(-32602),
+            "{stale:#?}"
+        );
+        assert_eq!(
+            stale["error"]["data"]["kind"],
+            serde_json::json!("transcript_revision_conflict"),
+            "{stale:#?}"
+        );
+        assert_eq!(
+            stale["error"]["data"]["expected"],
+            serde_json::json!(read_revision),
+            "{stale:#?}"
+        );
+        let actual = stale["error"]["data"]["actual"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the conflict names the current revision: {stale:#?}"))
+            .to_string();
+        assert_ne!(actual, read_revision, "the transcript moved since the read");
+        assert_eq!(
+            transcript_len(&service, &session_id).await,
+            staged_len,
+            "a stale prune writes nothing"
+        );
+
+        let retried = rpc_when_idle(
+            &harness,
+            "meta/prune_member_system_rows",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "remove": [legacy_row],
+                "expected_parent_revision": actual,
+            }),
+        )
+        .await;
+        assert!(retried["error"].is_null(), "{retried:#?}");
+        assert_eq!(
+            retried["result"]["parent_revision"],
+            serde_json::json!(actual),
+            "{retried:#?}"
+        );
+        assert_eq!(
+            retried["result"]["removed_rows"],
+            serde_json::json!(1),
+            "{retried:#?}"
+        );
+
+        harness.teardown().await;
+    }
+
+    /// A session Core holds (a durable tail held for recovery, a refused
+    /// recovery, quarantined evidence, an audited-endpoint divergence)
+    /// answers with the kinds and code Meta answers a held wake with:
+    /// `mob_member_session_resume_held`, or
+    /// `mob_member_session_repair_required` with its operator path, both
+    /// carrying the `durable_resume_hold`.
+    #[test]
+    fn a_prune_on_a_held_session_answers_the_wake_held_kinds() {
+        let identity = AgentIdentity::from("worker:main");
+        let session_id = meerkat_core::SessionId::new();
+        for hold in [
+            meerkat_core::service::DurableResumeHold::TailHeldForRecovery,
+            meerkat_core::service::DurableResumeHold::RecoveryRefused,
+            meerkat_core::service::DurableResumeHold::EvidenceQuarantined,
+            meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence,
+        ] {
+            let response = prune_member_system_rows_error(
+                serde_json::json!(1),
+                &identity,
+                &session_id,
+                hold.session_error(session_id.clone()),
+            );
+            let expected = crate::rpc::identity_json_rpc_error(
+                &crate::identity_first::IdentityRuntimeError::WakeHeld {
+                    identity: identity.clone(),
+                    session_id: session_id.clone(),
+                    hold: crate::identity_first::WakeHold::DurableResume(hold),
+                    detail: String::new(),
+                },
+            );
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{hold}: an error answer"));
+            assert_eq!(error.code, expected.code, "{hold}");
+            assert_eq!(
+                error.data, expected.data,
+                "{hold}: the held-wake kind and data, reused"
+            );
+        }
+    }
+
+    /// Every other failure is the catch-all `-32000`, its message naming
+    /// it: an archived or missing session, a malformed document.
+    #[test]
+    fn other_prune_failures_answer_the_catch_all() {
+        let identity = AgentIdentity::from("worker:main");
+        let session_id = meerkat_core::SessionId::new();
+        for err in [
+            SessionError::NotFound {
+                id: session_id.clone(),
+            },
+            SessionError::Agent(meerkat_core::error::AgentError::ConfigError(
+                "transcript history state is malformed: the activation rows are torn".to_string(),
+            )),
+        ] {
+            let message = err.to_string();
+            let response =
+                prune_member_system_rows_error(serde_json::json!(1), &identity, &session_id, err);
+            let error = response.error.expect("an error answer");
+            assert_eq!(error.code, -32000, "{message}");
+            assert!(error.message.contains(&message), "{}", error.message);
+            assert!(error.data.is_none(), "{message}");
+        }
     }
 
     fn instruction_activation(

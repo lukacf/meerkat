@@ -2588,6 +2588,39 @@ def test_a_refused_binding_is_a_typed_error():
     assert type(plain) is RpcError
 
 
+def test_a_stale_prune_revision_is_a_typed_error():
+    from meerkat_meta import TRANSCRIPT_REVISION_CONFLICT_KIND as exported_kind
+    from meerkat_meta import TranscriptRevisionConflictError as exported_error
+    from meerkat_meta.errors import (
+        TRANSCRIPT_REVISION_CONFLICT_KIND,
+        SystemRowPruneRefusedError,
+        TranscriptRevisionConflictError,
+    )
+    from meerkat_meta.runtime import _rpc_error_from_payload
+
+    assert TRANSCRIPT_REVISION_CONFLICT_KIND == "transcript_revision_conflict"
+    assert exported_kind == TRANSCRIPT_REVISION_CONFLICT_KIND
+    assert exported_error is TranscriptRevisionConflictError
+    error = _rpc_error_from_payload(
+        {
+            "code": -32602,
+            "message": "transcript revision conflict: expected rev-a, actual rev-b",
+            "data": {
+                "kind": "transcript_revision_conflict",
+                "expected": "rev-a",
+                "actual": "rev-b",
+            },
+        },
+        request_id="r-1",
+        method="meta/prune_member_system_rows",
+    )
+    assert isinstance(error, TranscriptRevisionConflictError)
+    assert not isinstance(error, SystemRowPruneRefusedError)
+    assert error.code == -32602
+    assert error.expected == "rev-a"
+    assert error.actual == "rev-b"
+
+
 def test_a_refused_prune_row_is_a_typed_error():
     from meerkat_meta.errors import (
         SYSTEM_ROW_PRUNE_REFUSAL_CAUSES,

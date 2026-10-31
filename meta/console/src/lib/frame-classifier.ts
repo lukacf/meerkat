@@ -283,7 +283,9 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
       verb: "got a request",
       segments: words.after ? [words.before, who, words.after] : [words.before, who],
       snippet: snippetOf(textOf(data.content ?? data.input ?? data.prompt ?? data.text)),
-      eventKey: `input:${frame.id || interactionIdOf(frame, data)}`,
+      // The console's send record and the session's saved copy of one input
+      // name the same interaction.
+      eventKey: `input:${agent ?? ""}:${interactionIdOf(frame, data) || frame.id}`,
     };
   }
   if (event === "interaction_started") {
@@ -478,6 +480,8 @@ function classifyTool(frame: ConsoleFrame, data: Data, who: FrameSegment, direct
   const callId = toolCallIdOf(data);
   const callKey = `${agent ?? ""}:${callId || frame.id}`;
   const toolWords = humanizeEnum(name).toLowerCase() || "a tool";
+  // "Billing's web search failed"; a saved copy that names no tool: "Billing's tool call failed".
+  const toolPossessive = name ? humanizeEnum(name).toLowerCase() : "tool call";
   const toolSpan = (edge: "start" | "end", outcome?: FrameSpan["outcome"]): FrameSpan | undefined =>
     agent && callId ? { kind: "tool", key: `tool:${agent}:${callId}`, edge, ...(outcome ? { outcome } : {}) } : undefined;
 
@@ -514,8 +518,8 @@ function classifyTool(frame: ConsoleFrame, data: Data, who: FrameSegment, direct
       family: "tool",
       tone: "warn",
       title: "Tool timed out",
-      verb: `${toolWords} timed out`,
-      segments: [who, `'s ${toolWords} timed out`],
+      verb: `${toolPossessive} timed out`,
+      segments: [who, `'s ${toolPossessive} timed out`],
       snippet: timeout !== undefined ? `No result after ${formatSeconds(timeout)}` : undefined,
       span: toolSpan("end", "timed_out"),
       eventKey: `tool-problem:${callKey}`,
@@ -528,8 +532,8 @@ function classifyTool(frame: ConsoleFrame, data: Data, who: FrameSegment, direct
       family: name.startsWith("workgraph_") ? "workgraph" : "tool",
       tone: failed ? "warn" : "ok",
       title: failed ? "Tool failed" : "Tool finished",
-      verb: failed ? `${toolWords} failed` : `finished ${toolWords}`,
-      segments: failed ? [who, `'s ${toolWords} failed`] : [who, ` finished ${toolWords}`],
+      verb: failed ? `${toolPossessive} failed` : `finished ${toolWords}`,
+      segments: failed ? [who, `'s ${toolPossessive} failed`] : [who, ` finished ${toolWords}`],
       snippet: failed ? snippetOf(textOf(data.content ?? data.result) || describeFailure(data, "")) : undefined,
       ...(event === "tool_execution_completed" ? { span: toolSpan("end", failed ? "failed" : "ok") } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),

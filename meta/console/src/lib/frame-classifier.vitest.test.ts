@@ -97,6 +97,8 @@ describe("payload-aware severity", () => {
     expect([toolError.severity, toolError.internal, toolError.title, toolError.snippet]).toEqual(["warn", false, "Tool failed", "rate limited"]);
     const toolDone = classifyFrame(frame("tool_execution_completed", { id: "t2", name: "web_search", is_error: false, duration_ms: 4200 }));
     expect([toolDone.severity, toolDone.internal, toolDone.durationMs]).toEqual(["info", true, 4200]);
+    // A saved copy names no tool.
+    expect(sentence(frame("tool_execution_completed", { id: "t2b", is_error: true, content: "denied" }))).toBe("domain:billing's tool call failed");
     const timedOut = classifyFrame(frame("tool_execution_timed_out", { id: "t-timeout", name: "payment_api", timeout_ms: 30_000 }));
     expect([timedOut.severity, timedOut.snippet, timedOut.span?.outcome]).toEqual(["warn", "No result after 30 s", "timed_out"]);
     const delivery = classifyFrame(frame("message_delivery_failed", { reason: "agent is retired" }));
@@ -181,6 +183,10 @@ describe("spans", () => {
     const completed = classifyFrame(frame("interaction_complete", {}, { runId: "run-5" }));
     const projected = classifyFrame(frame("run_completed", {}, { runId: "run-5" }));
     expect(completed.eventKey).toBe(projected.eventKey);
+    // An input's send record and the session's saved copy of it.
+    const sent = classifyFrame(frame("user_input", { content: "Reconcile" }, { sourceKind: "send", interactionId: "i-7" }));
+    const savedInput = classifyFrame(frame("user_input", { content: "Reconcile" }, { sourceKind: "session_history", interactionId: "i-7" }));
+    expect(sent.eventKey).toBe(savedInput.eventKey);
     const live = classifyFrame(frame("tool_call_requested", { id: "c9", name: "web_search" }, { sourceKind: "console_event" }));
     const saved = classifyFrame(frame("tool_call_requested", { id: "c9", name: "web_search" }, { sourceKind: "session_history" }));
     expect(live.eventKey).toBe(saved.eventKey);

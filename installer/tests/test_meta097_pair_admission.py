@@ -1,4 +1,4 @@
-"""L130 byte admission and inert readback; no native or published product proof."""
+"""Meta 0.9.7 pair byte admission and inert readback; no native or published product proof."""
 from dataclasses import replace
 
 import pytest

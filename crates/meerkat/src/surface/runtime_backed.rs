@@ -2324,6 +2324,37 @@ fn start_turn_request_from_primitive(
     })
 }
 
+/// A session's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the session service checks that the session's task did not end
+/// with the host's runtime it ran on. A realization reconfigures the live
+/// actor, so for a session whose host's runtime stopped it would fail, and the
+/// runtime loop's cleanup would then end the queued inputs as stopped; the
+/// check degrades the registration first, so the loop leaves them to the
+/// session's next registration.
+struct PersistentSessionHostRuntimeCheck<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> PreDequeueHostRuntimeCheck
+    for PersistentSessionHostRuntimeCheck<B>
+{
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+            .then(|| {
+                format!(
+                    "session '{}' lost its session task to the runtime it ran on; its queued work \
+                     is left to the session's next registration",
+                    self.session_id
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecutor<B> {
     fn supports_work_authorization(&self) -> bool {
@@ -2374,13 +2405,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         ))
     }
 
+    /// The one shared realization handle, with the session's lost host
+    /// runtime check as its precondition.
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(persistent_runtime_pre_dequeue_handle(
-            Arc::clone(&self.adapter),
-            self.session_id.clone(),
-        ))
+        Some(
+            persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                Arc::clone(&self.adapter),
+                self.session_id.clone(),
+                Arc::new(PersistentSessionHostRuntimeCheck {
+                    service: Arc::clone(&self.service),
+                    session_id: self.session_id.clone(),
+                }),
+            ),
+        )
     }
 
     fn transcript_notice_handle(

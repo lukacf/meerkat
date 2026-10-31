@@ -72,7 +72,15 @@ export {
   usePanelPreference,
   useShowTechnicalIds,
 } from "./preferences";
-export { RelativeTime, useNow } from "./relative-time";
+export { RelativeTime, RelativeTimeChip, useNow } from "./relative-time";
+export { Countdown, countdownTone, formatCountdown } from "./countdown";
+export { EntityCard, EntityRow, TrustLadder } from "./entity-card";
+export type { EntityCardProps, EntityKind, EntityNow, EntityTrend } from "./entity-card";
+export { FilterBar, FilterChip } from "./filter-bar";
+export type { FilterBarSearch, FilterChipProps } from "./filter-bar";
+export { ConsoleNavigationProvider, EntityLink, useConsoleNavigation, wantsAlternate } from "./navigation";
+export type { ConsoleNavigation, EntityLinkKind } from "./navigation";
+export { NewItemsPill } from "./live";
 export { SplitDetail } from "./split-detail";
 export { EmptyState, LoadingState, Notice } from "./states";
 export type { EmptyStateKind, LoadingVariant } from "./states";

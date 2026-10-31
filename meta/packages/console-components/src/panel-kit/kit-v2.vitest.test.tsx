@@ -4,6 +4,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AgentAvatar,
+  AgentName,
+  ConsoleNavigationProvider,
+  Countdown,
+  EntityCard,
+  EntityLink,
+  EntityRow,
+  FilterBar,
+  NewItemsPill,
+  RelativeTimeChip,
+  TrustLadder,
+  countdownTone,
+  formatCountdown,
   Button,
   Chip,
   DetailDrawer,
@@ -575,5 +587,160 @@ describe("states and illustrations", () => {
     expect(view.getByRole("button", { name: "Copy all" }) !== null).toBe(true);
     expect(view.getByTestId("inline").tagName).toBe("DIV");
     expect(view.getByTestId("inline").querySelector(".cc-tech-id") !== null).toBe(true);
+  });
+});
+
+describe("entities", () => {
+  it("makes the title the entity's button and keeps actions beside it", () => {
+    const onActivate = vi.fn();
+    const onAction = vi.fn();
+    const view = render(
+      <EntityCard
+        kind="agent"
+        title="Billing"
+        subtitle="Lead · Domains"
+        mark={<AgentAvatar name="Billing" size={28} />}
+        status={<StatusPill tone="neutral">Idle</StatusPill>}
+        now={{ text: "Replying to Support Triage", live: true }}
+        trend={{ values: [1, 2, 4], label: "12 turns today" }}
+        figures={["12 turns today"]}
+        actions={<Button size="sm" onClick={onAction}>Open chat</Button>}
+        onActivate={onActivate}
+        selected
+        live
+        testId="card"
+      />,
+    );
+    const card = view.getByTestId("card");
+    expect(card.className).toBe("cc-entity cc-entity--card cc-reveal-host is-interactive is-selected is-live");
+    const title = view.getByRole("button", { name: "Billing" });
+    expect(title.getAttribute("aria-current")).toBe("true");
+    fireEvent.click(view.getByRole("button", { name: "Open chat" }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(onActivate).toHaveBeenCalledTimes(0);
+    fireEvent.click(card.querySelector(".cc-entity__facts") as Element);
+    expect(onActivate).toHaveBeenCalledTimes(1);
+    expect(card.querySelector('.cc-entity__now .cc-mark[data-tone="live"]') !== null).toBe(true);
+  });
+
+  it("lays a row out in one line and shows the trust ladder in words", () => {
+    const view = render(
+      <EntityRow kind="memory" title="Prefers short replies" subtitle="Billing's memory" figures={[<TrustLadder key="t" level={4} />]} testId="row" />,
+    );
+    expect(view.getByTestId("row").className).toBe("cc-entity cc-entity--row cc-reveal-host");
+    expect(view.getByRole("img", { name: "Trust: Steward verified, 4 of 5" }) !== null).toBe(true);
+    expect(view.getByTestId("row").querySelectorAll(".cc-trust__bar.is-on").length).toBe(4);
+  });
+});
+
+describe("time", () => {
+  it("words a countdown and tones it by distance", () => {
+    const MIN = 60_000;
+    expect(formatCountdown(45_000)).toBe("in 45s");
+    expect(formatCountdown(90_000)).toBe("in 1m 30s");
+    expect(formatCountdown(25 * MIN)).toBe("in 25m");
+    expect(formatCountdown(125 * MIN)).toBe("in 2h 5m");
+    expect(formatCountdown((2 * 24 + 4) * 60 * MIN)).toBe("in 2d 4h");
+    expect(formatCountdown(-5 * MIN)).toBe("5m overdue");
+    expect([countdownTone(2 * 60 * MIN), countdownTone(30 * MIN), countdownTone(5 * MIN), countdownTone(-1)]).toEqual(["neutral", "info", "warn", "crit"]);
+    const now = Date.UTC(2026, 9, 30, 12, 0, 0);
+    const view = render(<Countdown to={now + 5 * MIN} now={now} chip testId="countdown" />);
+    expect(view.getByTestId("countdown").getAttribute("data-tone")).toBe("warn");
+    expect(view.getByTestId("countdown").textContent).toBe("in 5m");
+  });
+
+  it("ticks every second under two minutes and stops when it unmounts", () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      const view = render(<Countdown to={start + 65_000} testId="countdown" />);
+      expect(view.getByTestId("countdown").textContent).toBe("in 1m 5s");
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(view.getByTestId("countdown").textContent).toBe("in 1m 2s");
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("puts a relative time in a chip with the clock glyph", () => {
+    const now = Date.UTC(2026, 9, 30, 12, 0, 0);
+    const view = render(<RelativeTimeChip value={now - 4 * 60_000} now={now} testId="chip" />);
+    expect(view.getByTestId("chip").textContent).toBe("4m ago");
+    expect(view.getByTestId("chip").querySelector('svg[data-glyph="clock"]') !== null).toBe(true);
+  });
+});
+
+function FilterFixture() {
+  const [query, setQuery] = useState("");
+  const [blocked, setBlocked] = useState(false);
+  return (
+    <section className="cc-panel">
+      <button type="button" data-testid="elsewhere">Elsewhere</button>
+      <FilterBar
+        search={{ label: "Search agents", value: query, onChange: setQuery, testId: "filter-search" }}
+        chips={[{ label: "Blocked", count: 2, tone: "warn", pressed: blocked, onToggle: setBlocked, testId: "filter-blocked" }]}
+        onClear={() => {
+          setQuery("");
+          setBlocked(false);
+        }}
+        testId="filters"
+      />
+    </section>
+  );
+}
+
+describe("filter bar", () => {
+  it("toggles chips, shows Clear only when something differs, and focuses search on /", () => {
+    const view = render(<FilterFixture />);
+    expect(view.queryByRole("button", { name: "Clear" }) === null).toBe(true);
+    const chip = view.getByTestId("filter-blocked");
+    fireEvent.click(chip);
+    expect(chip.getAttribute("aria-pressed")).toBe("true");
+    expect(chip.textContent).toBe("Blocked2");
+    fireEvent.click(view.getByRole("button", { name: "Clear" }));
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
+    view.getByTestId("elsewhere").focus();
+    fireEvent.keyDown(view.getByTestId("elsewhere"), { key: "/" });
+    expect(document.activeElement === view.getByTestId("filter-search")).toBe(true);
+  });
+});
+
+describe("navigation", () => {
+  it("links names only when asked and when the host can open them", () => {
+    const openAgent = vi.fn();
+    const openWorkItem = vi.fn();
+    const plain = render(<AgentName id="identity:billing" link />);
+    expect(plain.container.querySelector("button") === null).toBe(true);
+    const view = render(
+      <ConsoleNavigationProvider value={{ openAgent, openWorkItem }}>
+        <AgentName id="identity:billing" link testId="name" />
+        <AgentName id="identity:support" testId="unlinked" />
+        <EntityLink kind="work-item" id="item-1">Publish to all regions</EntityLink>
+        <EntityLink kind="approval" id="ap-1">Deploy</EntityLink>
+      </ConsoleNavigationProvider>,
+    );
+    const name = view.getByTestId("name");
+    expect(name.tagName).toBe("BUTTON");
+    fireEvent.click(name);
+    expect(openAgent).toHaveBeenLastCalledWith("identity:billing", "details");
+    fireEvent.click(name, { ctrlKey: true });
+    expect(openAgent).toHaveBeenLastCalledWith("identity:billing", "chat");
+    expect(view.getByTestId("unlinked").tagName).toBe("SPAN");
+    fireEvent.click(view.getByRole("button", { name: "Publish to all regions" }));
+    expect(openWorkItem).toHaveBeenCalledWith("item-1");
+    expect(view.queryByRole("button", { name: "Deploy" }) === null).toBe(true);
+  });
+
+  it("offers the new-items pill only when there is something new", () => {
+    const onClick = vi.fn();
+    const view = render(<NewItemsPill count={0} onClick={onClick} />);
+    expect(view.container.innerHTML).toBe("");
+    view.rerender(<NewItemsPill count={3} onClick={onClick} />);
+    fireEvent.click(view.getByRole("button", { name: "3 new events" }));
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 });

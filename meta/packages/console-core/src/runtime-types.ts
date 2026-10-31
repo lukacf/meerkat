@@ -207,6 +207,17 @@ export interface ConsoleActionsUiConfig {
   show_reset?: boolean;
 }
 
+export interface ConsoleAttentionSourceConfig {
+  id: string;
+  label: string;
+  /** Same-origin path answering {"items": [...]} (host-provided attention items). */
+  url: string;
+}
+
+export interface ConsoleAttentionUiConfig {
+  sources?: ConsoleAttentionSourceConfig[];
+}
+
 export interface ConsoleUiConfig {
   /** Trusted same-origin ES modules exporting a ConsolePanel. */
   panel_modules?: string[];
@@ -221,6 +232,7 @@ export interface ConsoleUiConfig {
   sidebar?: ConsoleSidebarUiConfig;
   agent_list?: ConsoleAgentListConfig;
   actions?: ConsoleActionsUiConfig;
+  attention?: ConsoleAttentionUiConfig;
 }
 
 export interface ConsolePolicyConfig {

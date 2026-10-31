@@ -1,6 +1,6 @@
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApprovalAttention, ApprovalCard } from "./approval-card";
+import { ApprovalAttention, ApprovalCard, HostAttentionCard } from "./approval-card";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 
 afterEach(cleanup);
@@ -156,5 +156,61 @@ describe("ApprovalCard", () => {
     const view = render(<ApprovalAttention snapshot={{ ...snapshot(), decisions: { "request:1": { phase: "settled", action: "approve" } } }} onOpen={vi.fn()} />);
     expect(view.getByRole("button", { name: "Needs you, 0 pending approvals" })).toBeTruthy();
     expect(view.getByRole("status").textContent).toBe("0 pending approvals");
+  });
+});
+
+describe("host-provided attention", () => {
+  const item = { sourceId: "host", sourceLabel: "Host", id: "a", title: "Confirm a setting", href: "/host/items/a",
+    details: [{ label: "For", value: "plugin:x" }, { label: "Fingerprint", value: "1a2b3c4d" }] };
+  it("is a link card: details, its source and one Open link, never a decision", () => {
+    const view = render(<HostAttentionCard item={item} />);
+    expect(view.getByText("Confirm a setting").classList.contains("cc-approval__title")).toBe(true);
+    // The source is a neutral kit chip; the details are a kit key/value list.
+    const source = view.getByText("From Host");
+    expect(source.classList.contains("cc-host-attention__source")).toBe(true);
+    expect(source.classList.contains("cc-chip")).toBe(true);
+    expect(source.getAttribute("data-tone")).toBe("neutral");
+    expect(view.getByText("Fingerprint").nextElementSibling?.textContent).toBe("1a2b3c4d");
+    expect(view.getByText("For").closest(".cc-kv") !== null).toBe(true);
+    // One Open link, drawn as a console button, that leaves the console.
+    const open = view.getByRole("link", { name: "Open: Confirm a setting" });
+    expect(open.getAttribute("href")).toBe("/host/items/a");
+    expect(open.getAttribute("target")).toBe("_top");
+    expect(open.textContent).toBe("Open");
+    expect(open.classList.contains("cc-btn")).toBe(true);
+    expect(view.queryByRole("button") === null).toBe(true);
+    // Not dressed as a pending gating approval.
+    const card = view.getByTestId("host-attention:host:a");
+    expect(card.getAttribute("data-kind")).toBe("host");
+    expect(card.getAttribute("data-state")).toBeNull();
+    expect(view.queryByRole("status") === null).toBe(true);
+    expect(view.queryByText("Approval needed") === null).toBe(true);
+  });
+  it("names every Open link after its item", () => {
+    const view = render(<>{[item, { ...item, id: "b", title: "Renew a token" }].map((entry) => <HostAttentionCard key={entry.id} item={entry} />)}</>);
+    expect(view.getAllByRole("link").map((link) => link.getAttribute("aria-label"))).toEqual(["Open: Confirm a setting", "Open: Renew a token"]);
+  });
+  it("shows a card without details as its title, source and Open link", () => {
+    const view = render(<HostAttentionCard item={{ ...item, details: [] }} />);
+    expect(view.container.querySelector(".cc-kv") === null).toBe(true);
+    expect(view.getByRole("link", { name: "Open: Confirm a setting" }).getAttribute("href")).toBe("/host/items/a");
+  });
+  it("adds to the Needs you count and still opens a single approval directly", () => {
+    const onOpen = vi.fn();
+    const view = render(<ApprovalAttention snapshot={snapshot()} hostItems={2} onOpen={onOpen} />);
+    const button = view.getByRole("button", { name: "Needs you, 1 pending approval, 2 items from the host" });
+    expect(button.querySelector(".cc-approval-attention__count")?.textContent).toBe("3");
+    fireEvent.click(button);
+    expect(onOpen).toHaveBeenCalledWith("request:1");
+  });
+  it.each(["forbidden", "unsupported"] as const)("still shows host items when approval access is %s", (status) => {
+    const view = render(<ApprovalAttention snapshot={snapshot(status)} hostItems={1} onOpen={vi.fn()} />);
+    expect(view.getByRole("button", { name: "Needs you, 1 item from the host" })).toBeTruthy();
+  });
+  it("shows host items without an approval resource and hides when there is nothing", () => {
+    const view = render(<ApprovalAttention hostItems={1} onOpen={vi.fn()} />);
+    expect(view.getByTestId("approval-attention")).toBeTruthy();
+    view.rerender(<ApprovalAttention hostItems={0} onOpen={vi.fn()} />);
+    expect(view.queryByTestId("approval-attention") === null).toBe(true);
   });
 });

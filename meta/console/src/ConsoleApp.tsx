@@ -43,12 +43,15 @@ import type {
   IdentityStatusRow,
   TopologyMutationIntent,
   TopologyOperationReceipt,
+  HostAttentionSnapshot,
+  HostAttentionSourceConfig,
 } from "@console-core";
 import {
   collectConsoleDockPanelIds,
   consoleMobStatus,
   createPendingApprovalResource,
   identityStateLabel,
+  startHostAttentionPolling,
   migrateConsoleWorkbenchTarget,
   normalizeConsoleDockState,
   normalizeIdentityInspectViewState,
@@ -2792,6 +2795,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
+  // Host-provided attention items ("Needs you"): read from the configured
+  // same-origin sources every 30 s while the page is visible. Each source
+  // fails alone; approvals never depend on them.
+  const hostAttentionSources = experience?.console_config?.attention?.sources;
+  const hostAttentionKey = JSON.stringify(hostAttentionSources || []);
+  const [hostAttention, setHostAttention] = React.useState<HostAttentionSnapshot>();
+  React.useEffect(() => {
+    setHostAttention(undefined);
+    const sources = (JSON.parse(hostAttentionKey) as HostAttentionSourceConfig[]);
+    if (!sources.length) return;
+    return startHostAttentionPolling(sources, setHostAttention, {
+      fetch: window.fetch.bind(window),
+      visible: () => document.visibilityState !== "hidden",
+      onVisible: (callback) => {
+        const listener = () => { if (document.visibilityState === "visible") callback(); };
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      setInterval: (callback, ms) => window.setInterval(callback, ms),
+      clearInterval: (handle) => window.clearInterval(handle as number),
+    });
+  }, [hostAttentionKey]);
   function openApproval(pendingId?: string) {
     setSelectedApprovalId(pendingId);
     dock.openTarget(buildControlTarget("gating"), "replace_focused");
@@ -5612,6 +5637,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (target.kind === "identity-inspect") {
       return renderInspectPanel(target);
     }
+    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface
+      && hostAttentionSources?.length) {
+      // No gating surface here (an aggregate console), but "Needs you" counts
+      // host-provided items: show them, with approvals marked unavailable.
+      return (
+        <GatingInboxPanel
+          pending={[]}
+          resource={{ scopeKey: approvalScope, status: "unsupported", requests: [], decisions: {}, readOnly: true }}
+          audit={[]}
+          onDecide={() => {}}
+          readOnly
+          hostAttention={hostAttention || { status: "loading", items: [], failedSources: [] }}
+        />
+      );
+    }
     if (
       (target.kind === "routing" ||
         target.kind === "gating" ||
@@ -5642,6 +5682,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
+          hostAttention={hostAttention}
         />
       );
     if (target.kind === "topology") {
@@ -5709,6 +5750,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
+          hostAttention={hostAttention}
         />
       );
     if (target.kind === "logs")
@@ -5911,6 +5953,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenOperatorPanel={openOperatorPanel}
           approvals={activeApprovals}
           onOpenApproval={openApproval}
+          hostAttentionCount={hostAttention?.items.length || 0}
         />
         <div
           className="pane-resizer"

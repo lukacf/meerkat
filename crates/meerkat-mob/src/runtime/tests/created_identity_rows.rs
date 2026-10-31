@@ -745,6 +745,47 @@ async fn a_spawn_under_way_when_its_name_is_reserved_is_aborted_and_the_name_not
     );
 }
 
+/// A fresh-life respawn of a worker whose name is reserved is refused before
+/// anything is retired: its successor's spawn would be refused by the
+/// reservation, so the respawn answers the name's admission refusal,
+/// `MobError::IdentityMember`, and the member keeps its seat, generation
+/// and session.
+///
+/// RED: let the respawn retire the member before its successor's admission
+/// is checked (the shape before this fix): the member is retired, the
+/// successor is refused (`MobRespawnError::SpawnAfterRetireWithCause`), and
+/// the name keeps no member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawn_under_a_reserved_name_is_refused_before_the_member_is_retired() {
+    let mut mob = CreatedMob::new("created-reserved-respawn").await;
+    let session = mob.spawn_worker("held").await;
+    mob.put_raw("held", later_build_row()).await;
+    mob.restart().await;
+    assert!(matches!(
+        mob.read("held"),
+        IdentityEntryRead::Unreadable { member: Some(_) }
+    ));
+    let generation = mob.generation("held").await;
+    let journal = mob.journal_len().await;
+
+    let error = tokio::time::timeout(STEP, mob.handle.respawn(id("held"), None))
+        .await
+        .expect("the respawn answers")
+        .expect_err("the respawn of a reserved name's member is refused");
+    assert!(
+        matches!(
+            &error,
+            crate::runtime::handle::MobRespawnError::Mob(error)
+                if is_identity_member(error, "held")
+        ),
+        "{error:?}"
+    );
+    assert!(mob.is_member("held").await, "the member is kept");
+    assert_eq!(mob.session("held").await, Some(session));
+    assert_eq!(mob.generation("held").await, generation);
+    assert_eq!(mob.journal_len().await, journal, "nothing is journaled");
+}
+
 /// The census counts created entries apart from declared ones, by standing
 /// and cause, counts removed and unreadable names apart, and is incomplete
 /// while a name is unreadable; the reads list an unreadable name as such and

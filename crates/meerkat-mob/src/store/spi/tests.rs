@@ -1517,6 +1517,52 @@ async fn a_group_rewrite_keeps_an_undecodable_row_byte_identical() {
     );
 }
 
+/// A created entry's row stored under another identity's key reads
+/// unreadable for the key it sits under in every reader of a host store, as
+/// it does on SQLite: the created identity scan answers it unreadable, so
+/// MobMachine reserves the name, and the member binding history answers
+/// `IntentUnreadable`, never `CreatedEntry`. The row is written back as it
+/// was stored.
+///
+/// RED: keep the row by its entry's key at import without comparing the
+/// record's own mob and identity (the shape before this fix): the binding
+/// history answers `CreatedEntry` while the created scan answers
+/// `Unreadable`.
+#[tokio::test]
+async fn a_created_row_under_another_identitys_key_reads_unreadable_on_a_host_store() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let sealed_elsewhere = created_record("sealed-elsewhere", CreatedIdentityPresence::Present);
+    write_intents(&process, move |identity| {
+        identity.created.insert(
+            (MobId::from("mob"), AgentIdentity::from("mismatched")),
+            sealed_elsewhere,
+        );
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    let storage = process.stores.storage();
+    assert!(matches!(
+        created_rows(storage.identity.as_ref())
+            .await
+            .get(&AgentIdentity::from("mismatched")),
+        Some(CreatedIdentityObservation::Unreadable { .. })
+    ));
+    let history = storage
+        .identity_member
+        .as_ref()
+        .expect("a host store pairs its identities with its members")
+        .read_member_binding_journal(&MobId::from("mob"))
+        .await
+        .expect("the member binding history reads");
+    assert_eq!(
+        history.intent_rows.get(&AgentIdentity::from("mismatched")),
+        Some(&crate::runtime::MemberIdentityManagement::IntentUnreadable)
+    );
+}
+
 /// Rollback of a host store holding created identities, in-process leg: the
 /// decode a published predecessor runs (the whole identity intents group as
 /// host-adopted intents, whose records deny unknown fields) fails on a group

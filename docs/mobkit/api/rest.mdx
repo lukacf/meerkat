@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from MobKit main at [d5fde91c2854](https://github.com/lukacf/meerkat/commit/d5fde91c2854948d31f84a1f6e259ecd6db3e660) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [0ea2eb63c73e](https://github.com/lukacf/meerkat/commit/0ea2eb63c73edcac714c3e02dd802f35f752d8c5) on 2026-10-31; MobKit version 0.9.6 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -73,7 +73,8 @@ Returns experience metadata describing the current runtime state. This is the pr
     "title": "Topology",
     "live_snapshot": {
       "nodes": [...],
-      "node_count": 5
+      "node_count": 5,
+      "mob_id": "ops-team"
     }
   },
   "health_overview": {
@@ -88,6 +89,33 @@ Returns experience metadata describing the current runtime state. This is the pr
 ```
 
 When a Meerkat mob runtime is configured, the response includes live agent data from the mob. Without a mob runtime, only module-level information is returned. When console UI config is loaded, the response includes `console_config`, the view-level contract consumed by the bundled console.
+
+An agent row in `agent_sidebar.live_snapshot.agents`, and its rows in
+`identity_status` and `health_overview`, can carry `last_activity_ms`: the
+newest time, in milliseconds since the epoch, that the console's frame log
+recorded the agent acting (a live runtime event, a console send or a tool
+application). Frames rebuilt from session history or synthesized by the
+console do not count, and neither do lifecycle records (respawn, retire,
+reset, delete), interaction failures and memory events, which record
+something done to the agent. The field is advisory: a row without it has no
+known activity, and reading it wakes no agent. A row answered pending (below)
+keeps it, since the frame log answers it, not the read model.
+
+The gateway reads each agent's newest acting frame from the log on the first
+experience after it starts that lists the agent, 256 agents per store call,
+and keeps the time in memory after that. At 10,000 agents that first read
+takes about 56 ms in all when the agents' newest frames record them acting,
+and longer when many of those frames do not (rebuilt history, for example),
+at about 0.4 to 0.9 microseconds per such frame. A retire, a delete or a
+clear made meanwhile waits for at most one such call, and so do the console
+writes queued behind it.
+
+`topology.live_snapshot.mob_id` is the id of the mob whose members the
+topology shows, when one mob is known: a runtime's console reports its own
+mob, and a shared console the mob of its one registered runtime. It is absent
+on a shared console over several runtimes or none, and from a snapshot a host
+builds without it. The console names the topology's team from it, never from
+`runtime_id`.
 
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for
@@ -211,7 +239,11 @@ never made, answers HTTP **404** with `{"error":"send_not_found"}`. A
 candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) settles no send and answers HTTP **409** with
 `{"error":"candidate_launch"}`, as `/console/send` does: recover the send on
-the authoritative launch.
+the authoritative launch. It waits for the runtime's admission evidence as
+the RPC does: up to 45 seconds in all when the store is slow (after a restart,
+reading the evidence loads the session the send recorded), so an HTTP client
+whose timeout is shorter gives up first. `console_fetch_timeout_ms`, the bundled
+console's fetch timeout, should stay above 45 seconds.
 
 ### `POST /console/rpc`
 

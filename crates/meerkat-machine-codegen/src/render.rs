@@ -587,7 +587,7 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "AuthorizeSpawnProfileSeatedRunning",
             "ExemptMemberFromDefinitionWiringSeatedRunning",
             "ExemptMemberFromDefinitionWiringSeatedStopped",
-            // Identity entries (0.9.8): the admission probe's entry arm, the
+            // Identity entries (0.9.9): the admission probe's entry arm, the
             // replay of an entry's row, the legacy adoption and the agent
             // lane's member admission.
             "ProbeMemberAdmissionIdentityMemberRunning",

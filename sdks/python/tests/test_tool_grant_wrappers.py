@@ -37,7 +37,7 @@ RUN_RESULT = {
 
 def fake_client(
     results: dict[str, dict[str, Any]],
-    contract_version: str = "0.9.8",
+    contract_version: str = "0.9.9",
 ) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]]]:
     client = MeerkatClient()
     client._server_contract_version = contract_version
@@ -173,6 +173,43 @@ async def test_a_grant_gate_is_refused_before_an_older_server_could_drop_it() ->
     await client.create_session("hello")
     assert [method for method, _ in calls] == ["session/create"]
     assert "grant_gated_tools" not in calls[0][1]
+
+
+# Released contract 0.9.8 has no grant gate: its session/create ignores
+# `grant_gated_tools` and builds the session with the gated tools ungated.
+RELEASED_0_9_8_REFUSAL = (
+    r"grant_gated_tools needs a server contract >= 0\.9\.9; "
+    r"this server reports 0\.9\.8"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_grant_gate_is_refused_before_a_released_0_9_8_server_could_drop_it() -> None:
+    client, calls = fake_client(
+        {"session/create": RUN_RESULT}, contract_version="0.9.8"
+    )
+
+    with pytest.raises(CapabilityUnavailableError, match=RELEASED_0_9_8_REFUSAL):
+        await client.create_session("hello", grant_gated_tools={"families": ["shell"]})
+    with pytest.raises(CapabilityUnavailableError, match=RELEASED_0_9_8_REFUSAL):
+        await client.create_deferred_session(
+            "hello", grant_gated_tools={"families": ["shell"]}
+        )
+    assert calls == []
+
+
+def test_a_streaming_create_refuses_a_grant_gate_on_a_released_0_9_8_server() -> None:
+    client, _ = fake_client({}, contract_version="0.9.8")
+    client._process = MagicMock()
+    client._dispatcher = MagicMock()
+
+    with pytest.raises(CapabilityUnavailableError, match=RELEASED_0_9_8_REFUSAL):
+        client.create_session_streaming(
+            "hello", grant_gated_tools={"families": ["shell"]}
+        )
+    # Nothing was staged for sending.
+    client._dispatcher.subscribe_pending_stream.assert_not_called()
+    client._dispatcher.expect_response.assert_not_called()
 
 
 def test_a_streaming_create_refuses_a_grant_gate_on_an_older_server() -> None:

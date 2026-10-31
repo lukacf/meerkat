@@ -23,14 +23,15 @@ import tempfile
 def release_url(version):
     """Where Meta's release of `version` publishes its assets.
 
-    Meta releases up to 0.9.6 stay in the standalone repository under v tags;
-    later ones come from the monorepo under meta-v tags (its v tags are
-    Core's). Both publish the same archive and checksum manifest names.
+    Meta releases up to 0.9.7 stay in the standalone repository under v tags
+    (0.9.7, the last of them, was published there); later ones come from the
+    monorepo under meta-v tags (its v tags are Core's). Both publish the same
+    archive and checksum manifest names.
     """
     found = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version) if isinstance(version, str) else None
     if found is None:
         raise ValueError(f"The Meta release version {version!r} is invalid.")
-    if tuple(int(part) for part in found.groups()) <= (0, 9, 6):
+    if tuple(int(part) for part in found.groups()) <= (0, 9, 7):
         return f"https://github.com/lukacf/meerkat-meta/releases/download/v{version}"
     return f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}"
 

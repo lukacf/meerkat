@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - A host's own `MobSessionService` wrapper (around the session service it
   passes to `MobBootstrapSpec::new`) or `SessionAgentBuilder` wrapper must
-  implement `session_comms_identity_root`, which Meerkat 0.9.8 makes a
+  implement `session_comms_identity_root`, which Meerkat 0.9.9 makes a
   required method with no default: forward it to the service or builder it
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   runnables may not take it.
 
 - Documentation: GitHub Copilot with a service-account token. From Meerkat
-  0.9.8, Copilot routes with `auth_method = "github_copilot_token"` are
+  0.9.9, Copilot routes with `auth_method = "github_copilot_token"` are
   `[realm]` tables in the host config like any other binding, so they work in
   `rpc_gateway` and `meta_gateway` with `COPILOT_GITHUB_TOKEN` (then
   `GH_TOKEN`, then `GITHUB_TOKEN`) in the gateway's environment, or with a
@@ -181,7 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A host that composes its own session service (`MobBootstrapSpec::new`)
   no longer declares the root its agent factory keeps the members' session
   comms identities under: the mob seats dormant in-process members under the
-  root the session service reports for its agent builds (Meerkat 0.9.8's
+  root the session service reports for its agent builds (Meerkat 0.9.9's
   `MobSessionService::session_comms_identity_root`, which a service over
   `FactoryAgentBuilder` answers from its factory's `user_config_root`), so a
   member's first materialization uses the endpoint identity the factory

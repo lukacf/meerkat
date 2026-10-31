@@ -943,6 +943,26 @@ mod tests {
         .expect("durable member definition")
     }
 
+    /// Shut `runtime`'s mob down and wait for its actor task to return. The
+    /// actor answers the Shutdown first and drops the stores it owns after
+    /// (`MobHandle::actor_task_watch`), Core's execution custody of
+    /// `runtime.sqlite` among them: read right after the answer, the
+    /// directory can still show that lock held once the runtime store has
+    /// dropped, which the custody probe refuses as another holder's.
+    async fn shut_down_and_wait_for_the_actor(runtime: &crate::MobRuntime) {
+        let mut actor_task = runtime.handle().actor_task_watch();
+        runtime
+            .handle()
+            .shutdown()
+            .await
+            .expect("shut the mob down");
+        assert_eq!(
+            actor_task.wait().await,
+            meerkat_mob::MobActorTaskWait::Returned,
+            "the mob actor's task returns after its Shutdown"
+        );
+    }
+
     /// The bindings check counts Core's durable member bindings too. A
     /// durable identity spawned through Core (a 0.9.4-born identity, with no
     /// continuity record at all) whose binding names a session refuses startup
@@ -982,11 +1002,7 @@ mod tests {
             Box::pin(runtime.handle().ensure_member(member))
                 .await
                 .expect("spawn the durable identity");
-            runtime
-                .handle()
-                .shutdown()
-                .await
-                .expect("shut the mob down");
+            shut_down_and_wait_for_the_actor(&runtime).await;
         }
         assert_eq!(
             bound_identity_count(state, None)
@@ -1088,11 +1104,7 @@ mod tests {
             )
             .await
             .expect("the first wake creates the woken identity's session");
-            runtime
-                .handle()
-                .shutdown()
-                .await
-                .expect("shut the mob down");
+            shut_down_and_wait_for_the_actor(&runtime).await;
         }
         assert_eq!(
             bound_identity_count(state, Some(&mob_store))
@@ -1171,11 +1183,7 @@ mod tests {
                 runtime.handle().session_unborn(&next_life),
                 "the reset seats the next life unborn"
             );
-            runtime
-                .handle()
-                .shutdown()
-                .await
-                .expect("shut the mob down");
+            shut_down_and_wait_for_the_actor(&runtime).await;
         }
         assert_eq!(
             bound_identity_count(state, Some(&mob_store))

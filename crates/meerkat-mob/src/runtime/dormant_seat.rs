@@ -598,10 +598,26 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
 }
 
 /// Prepare one seat off the actor: its session's archived state, whether a
-/// fresh seat's session is unborn, and its endpoint. Nothing is built or
-/// created. A spec this refuses is answered with its typed outcome, and
-/// nothing of it is written: so is every spec while the plan found no
-/// endpoint source (`endpoint_source` is `Err`).
+/// fresh seat's session is unborn, its endpoint and, last, the member
+/// binding of a resume seat over a session that names none. Nothing is
+/// built or created. A spec this refuses is answered with its typed
+/// outcome, as is every spec while the plan found no endpoint source
+/// (`endpoint_source` is `Err`).
+///
+/// A refused spec leaves no seat behind. What may stay is idempotent: the
+/// comms key pair the endpoint step may mint for a session that has none
+/// (the one its first build loads), and a binding stamped before the seat
+/// was refused (by MobMachine's commit, or by the stamp's own save failing
+/// after it landed), which is never cleared. That binding is harmless
+/// beyond what a failed attach leaves: it is the one the session's own
+/// comms name already claims for this member, so a retried seat finds it
+/// and any build of the member writes the same one; the refused seat put
+/// no member on the session, so it owes the session no delivery; and the
+/// session's host has its operator-instruction writes and adoption refused
+/// from then on, with what it wrote before still in effect until a seat of
+/// the member takes it over. A refusal does not clear it: the refused
+/// seat may be the second of two seats of the member on this session,
+/// and the first holds it.
 pub(in crate::runtime) async fn prepare_dormant_seat(
     session_service: &dyn super::session_service::MobSessionService,
     endpoint_source: Result<&MemberSeatEndpointSource, &MemberSeatEndpointsUnavailable>,
@@ -707,29 +723,6 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             }
         }
     };
-    // A resume seat over a session that names no member binding (its host's
-    // own, or one a build before member bindings wrote) makes it the member's
-    // session at the seat, as a build of this mob would: the binding its
-    // comms name implies is stamped store-only before the seat commits, so
-    // its host's later operator-instruction writes are refused and the mob's
-    // first snapshot takes over the target its host wrote before, with no
-    // wake. A session a build of this mob created already names it.
-    if candidate.launch == DormantSeatLaunch::Resume
-        && !candidate.session_unborn
-        && !candidate.session_archived
-    {
-        let unbound = session_service
-            .load_persisted_session_metadata(&session_id)
-            .await
-            .map_err(|error| refused(MobError::from(error)))?
-            .is_some_and(|metadata| metadata.mob_member_binding().is_none());
-        if unbound {
-            session_service
-                .bind_seated_member_session(&session_id, mob_id.as_str(), agent_identity.as_str())
-                .await
-                .map_err(|error| refused(MobError::from(error)))?;
-        }
-    }
     let endpoint = match endpoint_source {
         MemberSeatEndpointSource::Network => None,
         MemberSeatEndpointSource::SessionScopedInproc { identity_root } => {
@@ -775,6 +768,30 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             )
         }
     };
+    // A resume seat over a session that names no member binding (its host's
+    // own, or one a build before member bindings wrote) makes it the member's
+    // session at the seat, as a build of this mob would: the binding its
+    // comms name implies is stamped store-only before the seat commits, so
+    // its host's later operator-instruction writes are refused and the mob's
+    // first snapshot takes over the target its host wrote before, with no
+    // wake. A session a build of this mob created already names it. It is
+    // the preparation's last step, so no refusal here comes after it.
+    if candidate.launch == DormantSeatLaunch::Resume
+        && !candidate.session_unborn
+        && !candidate.session_archived
+    {
+        let unbound = session_service
+            .load_persisted_session_metadata(&session_id)
+            .await
+            .map_err(|error| refused(MobError::from(error)))?
+            .is_some_and(|metadata| metadata.mob_member_binding().is_none());
+        if unbound {
+            session_service
+                .bind_seated_member_session(&session_id, mob_id.as_str(), agent_identity.as_str())
+                .await
+                .map_err(|error| refused(MobError::from(error)))?;
+        }
+    }
     Ok(DormantSeatCommitEntry::Seat {
         candidate,
         endpoint,

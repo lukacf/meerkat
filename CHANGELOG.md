@@ -1518,10 +1518,11 @@ them.
   was recorded; a dormant resume seat stamps the member binding at the seat,
   without a wake, on a session that names none. The member binding is never
   cleared, so a session a mob seated keeps refusing its host's own writes
-  after the member retires with the session kept, or after a failed attach
-  rolls back. A failed attach, or a member that retires before the mob's first
-  write, therefore leaves the instructions its host wrote before the attach in
-  effect, and its host can no longer change or revoke them. A host's
+  after the member retires with the session kept, after a failed attach rolls
+  back, or after a dormant seat that stamped it is refused. A failed attach,
+  or a member that retires before the mob's first write, therefore leaves the
+  instructions its host wrote before the attach in effect, and its host can no
+  longer change or revoke them. A host's
   standalone adoption (`Session::rebind_instruction_owner` to the session) of
   a session a mob built or seated is refused `owned_by_mob`. A member seated
   over an existing session whose own host wrote its target before (an attach)

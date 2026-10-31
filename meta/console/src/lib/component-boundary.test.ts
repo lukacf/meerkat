@@ -258,6 +258,25 @@ test("the Topology Edges tag uses the text-safe meta ink, not the faint ink", ()
   assert.doesNotMatch(rule, /--ink-faint/);
 });
 
+test("an approval card stacks its details below a kit panel's narrow width, in any parent", () => {
+  // The kit stacks .cc-kv only in a narrow .cc-panel, and a chat transcript
+  // has none, so the card is its own size container. A size query reads the
+  // content box: the card's breakpoint is the kit's less its inline padding
+  // and border.
+  const kit = fs.readFileSync(path.join(componentsSrc, "styles", "panel-kit.css"), "utf8");
+  const css = fs.readFileSync(path.join(componentsSrc, "conversation", "approvals.css"), "utf8");
+  const panel = /@container cc-panel \(max-width: (\d+)px\) \{\s*\.cc-kv \{ grid-template-columns: minmax\(0, 1fr\); row-gap: 2px; \}\s*\.cc-kv dd \{ margin-bottom: 6px; \}\s*\}/.exec(kit);
+  assert.ok(panel, "the kit stacks .cc-kv in a narrow panel");
+  const card = /^\.cc-approval \{([^}]*)\}/m.exec(css)?.[1] ?? "";
+  assert.match(card, /container-type: inline-size;\s*container-name: cc-approval;/);
+  const padding = Number(/\bpadding: \d+px (\d+)px;/.exec(card)?.[1]);
+  const border = Number(/\bborder: (\d+)px solid/.exec(card)?.[1]);
+  // The card's selectors outrank the kit's .cc-kv rules, which load later.
+  const narrow = /@container cc-approval \(max-width: (\d+)px\) \{\s*\.cc-approval \.cc-kv \{ grid-template-columns: minmax\(0, 1fr\); row-gap: 2px; \}\s*\.cc-approval \.cc-kv dd \{ margin-bottom: 6px; \}\s*\}/.exec(css);
+  assert.ok(narrow, "the card stacks its .cc-kv lists in its own narrow query");
+  assert.equal(Number(narrow[1]), Number(panel[1]) - 2 * padding - 2 * border);
+});
+
 test("console and kit inline styles use only custom properties a stylesheet defines", () => {
   // An undefined custom property silently paints the inherited colour:
   // the composer's attachment error once used a var(--bad) nothing defines.

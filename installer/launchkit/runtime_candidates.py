@@ -346,6 +346,95 @@ def declared_glibc_floor(target):
         raise CandidateArtifactError("The selected native product has an absent, changed or malformed input.") from error
 
 
+def _product_build_association(assembly, build, candidate, directory, related, *, report=None,
+        staging=None):
+    """Join retained transformation evidence without opening producer paths.
+
+    The admitted producer owns ELF equivalence and native qualification. These
+    checks preserve its original Cargo identity and bind the shipped candidate
+    to the same recorded transformation and installed verifier.
+    """
+    derived = assembly.get("derived_binary")
+    observed = report["installed_inputs"] if report is not None else {}
+    if "derived_binary" not in assembly:
+        _require("derived_binary" not in observed
+            and (staging is None or "derived_binary" not in staging)
+            and {key: build["binary"][key] for key in ("sha256", "size")} == candidate["binary"],
+            "The selected native build differs from its direct candidate.")
+        return
+
+    def absolute(value):
+        return (isinstance(value, str) and 0 < len(value) <= 4096 and "\x00" not in value
+            and Path(value).is_absolute() and str(Path(value)) == value and ".." not in Path(value).parts)
+
+    def identity(value):
+        return (type(value) is dict and set(value) == {"path", "sha256", "size"}
+            and absolute(value["path"]) and _hex(value["sha256"]) and _positive(value["size"]))
+
+    kind = "meerkat_connect_derived_gateway"
+    record_name = "derived-binary-record.json"
+    _require(candidate["target"] == "linux-x86_64" and candidate["binary_kind"] == "toolkit_gateway"
+        and type(derived) is dict
+        and set(derived) == {"record_sha256", "kind", "derivation", "original", "derived",
+            "transformation", "validation"}
+        and derived["kind"] == kind and derived["derivation"] == "strip_debug"
+        and _hex(derived["record_sha256"]) and type(derived["validation"]) is dict
+        and (staging is None or staging.get("derived_binary") == derived),
+        "The selected native derivation differs from its staging or supported kind.")
+    size = None
+    if report is not None:
+        selected = observed.get("derived_binary")
+        _require(type(selected) is dict and set(selected) == {"path", "sha256", "bytes"}
+            and absolute(selected["path"]) and absolute(observed["staging"]["path"])
+            and Path(selected["path"]) == Path(observed["staging"]["path"]).parent / record_name
+            and selected["sha256"] == derived["record_sha256"] and _positive(selected["bytes"]),
+            "The installed verifier used another native derivation record.")
+        size = selected["bytes"]
+    record = related(directory / record_name, derived["record_sha256"], size=size)
+    _require(set(record) == {"schema_version", "kind", "derivation", "binary_kind", "original",
+            "tool", "argv", "derived", "transformation"}
+        and type(record["schema_version"]) is int and record["schema_version"] == 1
+        and record["kind"] == kind and record["derivation"] == "strip_debug"
+        and record["binary_kind"] == "toolkit_gateway"
+        and identity(record["original"]) and identity(record["derived"]),
+        "The original native derivation record is malformed.")
+    original, shipped, tool = record["original"], record["derived"], record["tool"]
+    _require({key: build["binary"][key] for key in original} == original
+        and original["path"] != shipped["path"] and shipped["size"] <= original["size"]
+        and derived["original"] == {key: original[key] for key in ("sha256", "size")}
+        and derived["derived"] == {key: shipped[key] for key in ("sha256", "size")} == candidate["binary"]
+        and type(tool) is dict and set(tool) == {"path", "sha256", "version"}
+        and absolute(tool["path"]) and _hex(tool["sha256"])
+        and isinstance(tool["version"], str) and 0 < len(tool["version"]) <= 4096
+        and record["argv"] == [tool["path"], "--strip-debug", original["path"], shipped["path"]],
+        "The native derivation does not join the original Cargo output to the shipped candidate.")
+    links = record["transformation"]
+    _require(type(links) is dict and set(links) == {"start", "result"},
+        "The native derivation lacks its original START and RESULT pins.")
+    for pin in links.values():
+        _require(type(pin) is dict and set(pin) == {"path", "sha256"}
+            and absolute(pin["path"]) and _hex(pin["sha256"]),
+            "A native transformation evidence pin is malformed.")
+    _require(links["start"]["path"] != links["result"]["path"]
+        and derived["transformation"] == {"start_sha256": links["start"]["sha256"],
+            "result_sha256": links["result"]["sha256"], "argv": record["argv"], "tool": tool, "exit_code": 0},
+        "The native transformation summary differs from its retained records.")
+    start = related(directory / "transformation-start.json", links["start"]["sha256"])
+    result = related(directory / "transformation-result.json", links["result"]["sha256"])
+    _require(type(start.get("schema_version")) is int and start["schema_version"] == 1
+        and start.get("kind") == "meerkat_connect_strip_debug_start"
+        and start.get("binary_kind") == "toolkit_gateway" and start.get("argv") == record["argv"]
+        and start.get("tool") == tool and start.get("input") == original
+        and start.get("output") == {"path": shipped["path"]}
+        and type(result.get("schema_version")) is int and result["schema_version"] == 1
+        and result.get("kind") == "meerkat_connect_strip_debug_result"
+        and result.get("start_sha256") == links["start"]["sha256"]
+        and type(result.get("exit_code")) is int and result["exit_code"] == 0 and result.get("class") == "ok"
+        and result.get("input") == original and result.get("output") == shipped
+        and result.get("tool") == {key: tool[key] for key in ("path", "sha256")},
+        "The retained native transformation was not the selected successful original-to-shipped run.")
+
+
 def _read_meta_toolkit_artifacts(target, retained=None):
     """Read existing producer relationships against an already selected input.
 
@@ -362,8 +451,8 @@ def _read_meta_toolkit_artifacts(target, retained=None):
         _require(type(item) is ArtifactFile and _positive(item.size),
             "A native product artifact binding is invalid.")
         return inputs.read(item.path, item.sha256, limit, size=item.size, keep=keep)[1]
-    def related(path, hashed):
-        _, raw = inputs.read(path, hashed, MAX_PRODUCT_METADATA)
+    def related(path, hashed, *, size=None):
+        _, raw = inputs.read(path, hashed, MAX_PRODUCT_METADATA, size=size)
         return _json(raw)
     assembly = _json(read(target.assembly))
     development = assembly.get("scope") == "source_built_development_gateway"
@@ -372,6 +461,7 @@ def _read_meta_toolkit_artifacts(target, retained=None):
             "staging_record_sha256", "build_record_sha256", "resource_build_record_sha256",
             "resource_component_sha256", "archive", "archive_sha256", "archive_bytes",
             "model_catalog", "sdk_wheels"}
+        expected |= {"derived_binary"} if "derived_binary" in assembly else set()
         _require(set(assembly) == expected and type(assembly.get("schema_version")) is int
             and assembly.get("origin") == "source-built-development"
             and target.source_manifest is not None,
@@ -392,6 +482,7 @@ def _read_meta_toolkit_artifacts(target, retained=None):
         "The selected native product is not its original supported assembly.")
     platform = assembly["target"]
     prefix = "meerkat-connect-" + platform
+    staging = None
     qualification = None if development else assembly["qualification"]
     candidate = assembly["candidate"] if development else qualification["candidate"]
     _require(type(candidate) is dict and set(candidate) == {"target", "source_manifest_sha256",
@@ -427,9 +518,10 @@ def _read_meta_toolkit_artifacts(target, retained=None):
         report = None
     else:
         report = related(directory / "gateway-verification.json", qualification["installed_gateway_verification_sha256"])
+    _product_build_association(assembly, build, candidate, directory, related,
+        report=report, staging=staging)
     _require(build.get("schema_version") == 1 and build.get("target") == platform
         and build.get("binary_kind") == "toolkit_gateway"
-        and {key: build["binary"][key] for key in ("sha256", "size")} == candidate["binary"]
         and build["resources_sha256"] == candidate["resources_sha256"]
         and build["resource_build_record_sha256"] == candidate["resource_build_record_sha256"]
         and build["source_manifest"]["sha256"] == candidate["source_manifest_sha256"]

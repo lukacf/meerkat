@@ -952,11 +952,23 @@ async fn roll_forward_reprojects_on_the_same_session_in_process() {
     assert_eq!(mob.wired_to("owner").await, BTreeSet::from([id("peer")]));
 }
 
+/// The member a created owner's rollback fixture holds beside the owner.
+#[derive(Clone, Copy)]
+enum FixturePeer {
+    /// None.
+    Absent,
+    /// `peer`, unwired: an identity a predecessor's identity-first host can
+    /// try to adopt in the same mob.
+    Unwired,
+    /// `peer`, wired to the owner.
+    Wired,
+}
+
 /// The created owner's fixture of the rollback rows: a persistent mob store
 /// (SQLite) at `$MEERKAT_ROLLBACK_FIXTURE_DIR/<name>/mob.sqlite` holding the
-/// member `owner`, wired to the member `peer` when `wired`, and `owner`'s
-/// created entry row (present), as this build leaves a created entry.
-async fn write_created_owner_fixture(name: &str, wired: bool) {
+/// member `owner`, the member `peer` as `peer` says, and `owner`'s created
+/// entry row (present), as this build leaves a created entry.
+async fn write_created_owner_fixture(name: &str, peer: FixturePeer) {
     let dir = rollback_fixture_dir(name);
     let mob_id = format!("rollback-{name}");
     super::identity_entry_rows::write_rollback_fixture(&dir, &mob_id, |handle| async move {
@@ -964,11 +976,13 @@ async fn write_created_owner_fixture(name: &str, wired: bool) {
             .spawn_spec(worker_spec("owner"))
             .await
             .expect("spawn the owner");
-        if wired {
+        if !matches!(peer, FixturePeer::Absent) {
             handle
                 .spawn_spec(worker_spec("peer"))
                 .await
                 .expect("spawn the peer");
+        }
+        if matches!(peer, FixturePeer::Wired) {
             handle
                 .wire(id("owner"), id("peer"))
                 .await
@@ -1010,16 +1024,20 @@ fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
 /// for each published pair it runs against, with the pair's recorded
 /// artifacts.
 ///
-/// This build writes the fixture (`write_created_owner_fixture`). The lane
-/// runs the pair's identity-first host over it and checks: the created row
-/// reads unreadable to the predecessor (its member binding history reads
-/// `IntentUnreadable`), its identity-first roster pass and verbs refuse the
-/// identity, nothing retires the member, and nothing is deleted (the row is
-/// byte-identical afterwards).
+/// This build writes the fixture (`write_created_owner_fixture`): the
+/// created owner and an unwired member `peer`. The lane runs the pair's
+/// identity-first host over it and checks: the created row reads unreadable
+/// to the predecessor (its member binding history reads `IntentUnreadable`),
+/// its identity-first roster pass and verbs refuse the identity, nothing
+/// retires the member, and nothing is deleted (the row is byte-identical
+/// afterwards). It then adopts `peer` under the predecessor and asserts the
+/// whole-mob refusal the downgrade guide states: on SQLite a published 0.9.7
+/// or 0.9.8 refuses every new identity-first adoption in a mob that holds a
+/// created entry's row, while its reads stay per identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published pairs run"]
 async fn fresh_created_owner_is_not_retired_by_the_identity_first_pass_fixture() {
-    write_created_owner_fixture("fresh-created-owner", false).await;
+    write_created_owner_fixture("fresh-created-owner", FixturePeer::Unwired).await;
 }
 
 /// Rollback of a created owner rolled forward, lane-run leg:
@@ -1032,7 +1050,7 @@ async fn fresh_created_owner_is_not_retired_by_the_identity_first_pass_fixture()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published pairs run"]
 async fn roll_forward_reprojects_on_the_same_session_fixture() {
-    write_created_owner_fixture("created-owner-roll-forward", true).await;
+    write_created_owner_fixture("created-owner-roll-forward", FixturePeer::Wired).await;
 }
 
 /// Rollback of a created owner under a retire-stale reconcile, lane-run leg:
@@ -1048,5 +1066,5 @@ async fn roll_forward_reprojects_on_the_same_session_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published pairs run"]
 async fn a_retire_stale_reconcile_archives_and_roll_forward_reseats_on_the_same_session_fixture() {
-    write_created_owner_fixture("created-owner-retire-stale", false).await;
+    write_created_owner_fixture("created-owner-retire-stale", FixturePeer::Absent).await;
 }

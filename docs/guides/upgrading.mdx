@@ -149,13 +149,17 @@ of them.
 
 A created identity entry's row is a row 0.9.8 does not know. On SQLite, 0.9.8
 reads it as an identity intent row it cannot read, for that identity alone:
-its member binding history answers `IntentUnreadable`. A worker reconcile of
-0.9.8 that retires stale members can retire a created entry's member; once
-the host runs 0.9.9 again, the start re-seats the entry on the session that
-retirement archived. A host store is different: 0.9.8 decodes a mob's
-identity intents as a whole and does not open the mob's storage while one of
-them is a created entry's row. Before a downgrade, a mob on a host store must
-hold no created identity entry.
+its member binding history answers `IntentUnreadable`. Its identity-first
+adoption, though, decodes every intent row of the mob, so 0.9.7 and 0.9.8
+refuse every new identity-first adoption in a mob that holds a created
+entry's row, while their reads stay per identity. Before a downgrade of a
+SQLite mob whose host adopts identities, export or remove its created
+identities. A worker reconcile of 0.9.8 that retires stale members can
+retire a created entry's member; once the host runs 0.9.9 again, the start
+re-seats the entry on the session that retirement archived. A host store is
+different: 0.9.8 decodes a mob's identity intents as a whole and does not
+open the mob's storage while one of them is a created entry's row. Before a
+downgrade, a mob on a host store must hold no created identity entry.
 
 ## Upgrading to 0.9.7
 

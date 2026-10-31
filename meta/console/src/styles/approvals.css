@@ -1,0 +1,68 @@
+/* Approvals (gating inbox) panel.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Approvals (gating inbox) ───────────────────────────────── */
+/* A kit panel; its header keeps the pinned .gating__head class. */
+.gating-inbox__content > .cc-notice { margin: 10px var(--_cc-panel-pad-x) 0; }
+.gating-inbox__content > .cc-rows { margin-top: 10px; }
+.gating-inbox__cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px var(--_cc-panel-pad-x) 0;
+}
+.gating-inbox__cards > [data-approval-id] { min-width: 0; outline: none; }
+.gating-inbox__cards .cc-approval { margin: 0; }
+/* Recorded events and requests without the approval resource: the action,
+   its decision and time, then the recorded facts, each one "Label: value"
+   span, wrapping between facts. The risk dot pairs with "Tier: ...". */
+.gitem .cc-row__sub {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.gitem__facts {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 2px;
+  min-width: 0;
+}
+/* Facts wrap between each other; one longer than the line wraps inside. */
+.gitem__fact { max-width: 100%; overflow-wrap: anywhere; }
+.gitem__fact + .gitem__fact::before {
+  content: "\00B7";
+  margin: 0 6px;
+  color: var(--ink-meta);
+}
+.gitem__waited { color: var(--ink-muted); }
+/* Rows run to several lines: the dot and the meta sit on the title line. */
+.gitem { align-items: start; }
+.gitem .cc-row__lead { height: 1.45em; }
+@container cc-panel (max-width: 359px) {
+  .gitem {
+    grid-template-columns: 18px minmax(0, 1fr);
+    grid-template-areas: "lead main" ". meta" ". actions";
+  }
+  .gitem .cc-row__meta { justify-content: flex-start; flex-wrap: wrap; }
+}
+/* Decisions on a pending request are the point of the row: always shown. */
+.gitem .cc-row__actions { opacity: 1; }
+.gitem.is-expanded { background: var(--bg-sunken); }
+.gitem__details {
+  padding: 4px var(--_cc-panel-pad-x) 12px calc(var(--_cc-panel-pad-x) + 28px);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.gitem__code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.gitem__none {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-meta);
+}
+

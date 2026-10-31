@@ -1,0 +1,415 @@
+/* WorkGraph panel and its graph view.
+   Split from console-host.css (imported there, in this order). */
+
+/* === WorkGraph panel (goals, work items, attention) === */
+/* A goal with its items is the one place a card fits; everything else is
+   flat rows under the kit's section labels. Tones come from data-tone (the
+   kit's tone map): in progress is info, never the accent. */
+.workgraph__goals {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px var(--_cc-panel-pad-x) 0;
+}
+/* A refresh error keeps 160 px to be read in: in a pane narrower than
+   about 200 px the status row gives up its side padding, down to none. */
+.workgraph > .cc-status-row {
+  padding-left: clamp(0px, calc((100cqi - 160px) / 2), var(--_cc-panel-pad-x));
+  padding-right: clamp(0px, calc((100cqi - 160px) / 2), var(--_cc-panel-pad-x));
+}
+.workgraph-goal {
+  /* Rows inside a card line up with its inset. */
+  --_cc-panel-pad-x: 14px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-1);
+}
+.workgraph-goal__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+  padding: 12px 14px 10px;
+}
+.workgraph-goal__name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.workgraph-goal__title {
+  min-width: 12ch;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--disp);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.workgraph-goal__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.workgraph-goal__actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--motion-hover);
+}
+.workgraph-goal__head:hover .workgraph-goal__actions,
+.workgraph-goal__head:focus-within .workgraph-goal__actions { opacity: 1; }
+.workgraph-goal__owner {
+  margin-left: auto;
+  max-width: 40%;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.workgraph-goal__actions + .workgraph-goal__owner { margin-left: 0; }
+/* Meter, blockers and attention sit under the title, past the goal's dot. */
+.workgraph-goal__blocked {
+  margin: -4px 14px 10px 31px;
+  font-size: 11.5px;
+  color: var(--warn-ink);
+}
+.workgraph-goal__meter.cc-meter {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 0 14px 12px 31px;
+}
+.workgraph-goal__meter .cc-meter__track { flex: 0 1 220px; }
+.workgraph-goal__bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px 12px 28px;
+}
+.workgraph-goal__tech.cc-tech {
+  margin: 0;
+  padding: 8px 14px 10px 31px;
+}
+
+/* Attention: mode, state and who drives it, then the actions, wrapping. */
+.workgraph-binding { min-width: 0; }
+.workgraph-binding__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.workgraph-binding__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 24ch;
+  min-width: 0;
+  /* Room for the bound ring around the dot. */
+  padding-left: 3px;
+}
+.workgraph-binding__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+.workgraph-binding__mode { font-weight: 500; color: var(--ink); }
+.workgraph-binding__text .cc-agent { color: var(--ink); }
+.workgraph-binding__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.workgraph-binding__reassign {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-left: 18px;
+}
+.workgraph-binding__reassign .cc-input { flex: 1 1 180px; max-width: 320px; }
+
+/* Work item rows: actions sit before the status so the status words line up
+   at the right edge whether or not a row has actions. */
+.workgraph-row {
+  --workgraph-indent: 0px;
+  grid-template-areas: "lead main actions meta";
+  padding-left: calc(var(--_cc-panel-pad-x) + var(--workgraph-indent));
+}
+.workgraph-row[data-depth="2"] { --workgraph-indent: 16px; }
+.workgraph-row[data-depth="3"] { --workgraph-indent: 32px; }
+.workgraph-row[data-depth="4"] { --workgraph-indent: 48px; }
+.workgraph-row[data-depth="5"] { --workgraph-indent: 64px; }
+.workgraph-row[data-depth="6"] { --workgraph-indent: 80px; }
+.workgraph-row[data-depth="7"] { --workgraph-indent: 96px; }
+.workgraph-row[data-depth="8"] { --workgraph-indent: 112px; }
+/* Tree guide: a 1 px rule under the parent's dot, beside its nested rows. */
+.workgraph-row:not([data-depth="0"]):not([data-depth="1"]) {
+  background-image: linear-gradient(var(--line), var(--line));
+  background-repeat: no-repeat;
+  background-size: 1px 100%;
+  background-position: calc(var(--_cc-panel-pad-x) + var(--workgraph-indent) - 7px) 0;
+}
+.workgraph-row .cc-row__sub { color: var(--warn-ink); }
+.workgraph-row .cc-row__meta { gap: 10px; }
+.workgraph-row__status {
+  order: 3;
+  min-width: 7em;
+  text-align: right;
+  color: var(--ink-muted);
+}
+.workgraph-row__priority { order: 1; }
+.workgraph-row__owner { order: 2; max-width: 160px; }
+.workgraph-row__unassigned { color: var(--ink-meta); }
+.workgraph-row__bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 2px 25px;
+}
+
+.workgraph__overflow {
+  margin: 10px var(--_cc-panel-pad-x) 0;
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.workgraph__attention {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px var(--_cc-panel-pad-x) 4px;
+}
+.workgraph-event .cc-row__title {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+@media (hover: none) {
+  .workgraph-goal__actions { opacity: 1; }
+}
+@container cc-panel (max-width: 479px) {
+  .workgraph-goal__actions { opacity: 1; }
+  .workgraph-goal__owner { max-width: 100%; }
+  /* Actions, always shown here, move under the title instead of pushing
+     the row past the pane's edge. */
+  .workgraph-row {
+    grid-template-columns: 18px minmax(12ch, 1fr) auto;
+    grid-template-areas: "lead main meta" ". actions actions";
+  }
+  .workgraph-row .cc-row__actions { margin-top: 2px; }
+  .workgraph-row__status { min-width: 0; }
+  .workgraph-graph__hint { display: none; }
+}
+@container cc-panel (max-width: 359px) {
+  /* Very narrow: the status and the actions stack under the title. */
+  .workgraph-row {
+    grid-template-columns: 18px minmax(0, 1fr);
+    grid-template-areas: "lead main" ". meta" ". actions";
+  }
+  .workgraph-row .cc-row__meta { justify-content: flex-start; flex-wrap: wrap; }
+  .workgraph-goal__title { min-width: 0; }
+  .workgraph-goal__blocked,
+  .workgraph-goal__tech.cc-tech { padding-left: 14px; }
+  .workgraph-goal__bindings { padding-left: 11px; }
+  .workgraph-goal__meter.cc-meter {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding-left: 14px;
+  }
+  .workgraph-goal__meter .cc-meter__track { flex: none; }
+}
+
+/* === WorkGraph graph view (layered DAG inside the workgraph panel) === */
+.workgraph-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.workgraph-graph__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.workgraph-graph__stats {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+  font-variant-numeric: tabular-nums;
+}
+.workgraph-graph__overflow {
+  font-size: 11.5px;
+  color: var(--warn-ink);
+}
+.workgraph-graph__hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ink-meta);
+}
+.workgraph-graph__svg {
+  box-sizing: border-box;
+  width: 100%;
+  height: clamp(320px, 60vh, 560px);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  cursor: grab;
+  touch-action: none;
+  /* The viewBox is the frame size (1 user unit = 1 CSS px), so the label
+     sizes below are real pixel sizes at the fit scale. Labels use the
+     console's own font tokens, and geometricPrecision keeps glyph advances
+     linear under the zoom transform (hinted advances collapse word gaps
+     at fractional scales). */
+  font-family: var(--sans);
+  text-rendering: geometricPrecision;
+  /* Opt out of the global icon reset (svg { stroke: currentColor;
+     stroke-width: 2 }). Inherited, it outlined every label, status dot
+     and arrowhead with a 2-unit currentColor stroke, which smeared the
+     glyphs. Shapes that want a stroke set their own below. */
+  stroke: none;
+  stroke-width: 1;
+}
+.workgraph-graph__svg.is-dragging { cursor: grabbing; }
+.workgraph-graph__arrow path { fill: var(--ink-dim); }
+.workgraph-graph__arrow.is-blocks path { fill: var(--warn); }
+.workgraph-graph__edge {
+  fill: none;
+  stroke: var(--ink-dim);
+  stroke-width: 1.5;
+}
+.workgraph-graph__edge.is-blocks {
+  stroke: var(--warn);
+  stroke-dasharray: 5 4;
+}
+/* Any non-parent, non-blocks kind: dotted muted with its kind label. */
+.workgraph-graph__edge:not(.is-parent):not(.is-blocks) { stroke-dasharray: 2 3; }
+.workgraph-graph__edge-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--ink-muted);
+  /* Halo in the canvas colour so the label stays readable where it
+     crosses an edge or a node border. */
+  paint-order: stroke;
+  stroke: var(--bg-sunken);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+/* Node tone (data-tone, the kit's tone map) drives the border, the dot and
+   the attention ring; the accent only marks the selected node. */
+.workgraph-graph__node {
+  --workgraph-node-tone: var(--ink-dim);
+  --workgraph-node-line: var(--line-strong);
+  cursor: pointer;
+  outline: none;
+}
+.workgraph-graph__node[data-tone="info"] { --workgraph-node-tone: var(--focus); --workgraph-node-line: var(--focus); }
+.workgraph-graph__node[data-tone="ok"] { --workgraph-node-tone: var(--ok); --workgraph-node-line: var(--ok); }
+.workgraph-graph__node[data-tone="warn"] { --workgraph-node-tone: var(--warn); --workgraph-node-line: var(--warn); }
+.workgraph-graph__node[data-tone="crit"] { --workgraph-node-tone: var(--crit); --workgraph-node-line: var(--crit); }
+.workgraph-graph__node-box {
+  fill: var(--bg-elev-1);
+  stroke: var(--workgraph-node-line);
+  stroke-width: 1;
+  rx: var(--r-md);
+}
+.workgraph-graph__node:hover .workgraph-graph__node-box { fill: var(--bg-elev-2); }
+.workgraph-graph__node:focus-visible .workgraph-graph__node-box {
+  stroke: var(--focus-ring);
+  stroke-width: 2;
+}
+.workgraph-graph__node-dot { fill: var(--workgraph-node-tone); }
+.workgraph-graph__node-goal-ring {
+  fill: none;
+  stroke: var(--workgraph-node-tone);
+  stroke-width: 1;
+}
+.workgraph-graph__node-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  rx: calc(var(--r-md) + 4px);
+  pointer-events: none;
+}
+/* Keep in sync with TITLE_FONT / META_FONT in WorkGraphGraphView.tsx,
+   which measure these labels for truncation. */
+.workgraph-graph__node-title {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  fill: var(--ink);
+}
+.workgraph-graph__node-meta {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 400;
+  fill: var(--ink-muted);
+}
+.workgraph-graph__node.is-cancelled { opacity: 0.55; }
+.workgraph-graph__node.is-cancelled .workgraph-graph__node-title { text-decoration: line-through; }
+.workgraph-graph__detail {
+  min-width: 0;
+  padding-top: 4px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.workgraph-graph__detail-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-meta);
+}
+.workgraph-graph__detail-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.workgraph-graph__detail-title {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.workgraph-graph__detail-status { display: inline-flex; flex: none; }
+.workgraph-graph__detail-description {
+  margin: 6px 0 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--ink-muted);
+}
+.workgraph-graph__detail-facts { margin-top: 10px; }
+.workgraph-graph__detail-id {
+  align-items: flex-start;
+  white-space: normal;
+}
+.workgraph-graph__detail-id code {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+

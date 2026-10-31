@@ -1,0 +1,92 @@
+/* Routing panel.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Routing ─────────────────────────────────────────────────── */
+/* Built on the panel kit: route rows, and the selected route's flow, policy
+   and recent deliveries beside them (stacked under them in a narrow pane, so
+   both stay in view). */
+.routing__body {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  min-width: 0;
+  min-height: 0;
+}
+.routing__body--list { grid-template-columns: minmax(0, 1fr); }
+.routing__list,
+.routing__detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+.routing__detail { border-left: 1px solid var(--line); }
+.routing__quiet {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.routing__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.routing__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 16px;
+}
+/* A dot per step and a rule joining them. */
+.routing__step::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-round);
+  background: var(--ink-dim);
+}
+.routing__step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 16px;
+  bottom: -10px;
+  width: 1px;
+  background: var(--line-strong);
+}
+.routing__step-label {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.routing__step-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.routing__delivery-attempts { flex: none; }
+@container cc-panel (max-width: 719px) {
+  .routing__body { display: block; overflow-y: auto; }
+  .routing__list,
+  .routing__detail { overflow: visible; padding-bottom: 0; }
+  .routing__detail {
+    padding-bottom: 24px;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+

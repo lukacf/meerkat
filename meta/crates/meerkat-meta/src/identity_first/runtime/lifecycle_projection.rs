@@ -2703,4 +2703,59 @@ mod tests {
         assert_eq!(written.attempts, 2);
         assert!(written.outcome.is_ok());
     }
+
+    /// A long run prunes the failures it records as it goes, not only at a
+    /// start: the store never holds more than the kept failures and one
+    /// prune's worth, however many side effects the run gives up on.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn a_long_run_prunes_the_failures_it_records() {
+        const RECORDED: u64 = 2000;
+        /// The most a run leaves: the kept failures and one prune's worth.
+        const MOST: usize = 1024 + 256;
+        let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+            Arc::new(crate::runtime::InMemoryMetadataStore::new());
+        let runtime = IdentityRuntime::new(crate::identity_first::IdentityRuntimeConfig {
+            continuity_store: Arc::new(
+                crate::identity_first::LocalContinuityStore::in_memory().expect("store"),
+            ),
+            lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+            runtime_instance_id: "long-run".to_string(),
+            has_runtime_store: true,
+            durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+            bridge: None,
+            default_timeout: None,
+        });
+        runtime.set_identity_records(Arc::clone(&records), "long-run".to_string());
+        let member = meerkat_mob::AgentIdentity::from("alpha");
+        for index in 0..RECORDED {
+            let identity =
+                AgentIdentity::parse(&format!("personal:failed-{index:04}")).expect("identity");
+            let failed = FailedEffect {
+                identity: &identity,
+                member: &member,
+                generation: 0,
+                session: None,
+                effect: LifecycleEffectKind::AfterCreate,
+                attempts: 3,
+                error: "timed out".to_string(),
+            };
+            runtime
+                .record_lifecycle_effect_failure(
+                    Owed {
+                        incarnation: "long-run",
+                        cursor: index + 1,
+                    },
+                    &failed,
+                )
+                .await
+                .expect("record the failure");
+        }
+        let kept = records
+            .lifecycle_effect_failures("long-run", 0, usize::MAX)
+            .await
+            .expect("read the failures")
+            .len();
+        assert!(kept <= MOST, "the run kept {kept} failures");
+    }
 }

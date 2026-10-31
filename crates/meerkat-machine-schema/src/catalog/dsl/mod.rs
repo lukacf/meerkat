@@ -4250,6 +4250,43 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("RotationTarget", &["FreshSession", "SameSession"]),
             // Why the machine refuses a fresh-life respawn (0.9.8).
             NamedTypeBinding::string_enum("RespawnRefusalReason", &["IdentityEntryKeepsSession"]),
+            // Operator instructions (0.9.9): a record's slot effect and
+            // target kind, why a member's delivery is blocked or deferred,
+            // and why a write is refused.
+            NamedTypeBinding::string_enum("InstructionEffect", &["Absent", "Active"]),
+            NamedTypeBinding::string_enum("InstructionTargetKind", &["Mob", "Profile", "Member"]),
+            NamedTypeBinding::string_enum(
+                "MemberInstructionBlock",
+                &[
+                    "MemberHostUnsupported",
+                    "SlotManagedByActivation",
+                    "DurabilityUnavailable",
+                    "OwnedBySession",
+                    "OwnedByOtherMob",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberInstructionDeferReason",
+                &[
+                    "NotOwed",
+                    "SessionUnborn",
+                    "SessionUnbound",
+                    "Retiring",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OperatorInstructionRefusal",
+                &[
+                    "StaleRevision",
+                    "RevisionConflict",
+                    "UnknownSlot",
+                    "SlotLimitExceeded",
+                    "BodyTooLarge",
+                    "ActiveSetBudgetExceeded",
+                    "MobTerminal",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "LegacyIdentityEntryAdoptionKind",
                 &[

@@ -12249,6 +12249,10 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    IN MapSet(all_statuses, frame_id, after_dependencies)"
         );
+        // Operator instructions: the machine's records reuse the session
+        // document's slot-set natives (one slot set, and the body bytes of
+        // the Active slots).
+        self.render_session_document_native_helpers(out);
     }
 
     fn render_transition(&mut self, out: &mut String, transition: &TransitionSchema) {

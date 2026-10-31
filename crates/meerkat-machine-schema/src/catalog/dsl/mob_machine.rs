@@ -1,6 +1,9 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::OptionValueExt;
+// Operator instructions: the session document's slot effect, one definition
+// for both machines.
+pub use super::session_document::InstructionEffect;
 
 #[macro_export]
 macro_rules! mob_catalog_machine_dsl {
@@ -720,6 +723,33 @@ macro_rules! mob_catalog_machine_dsl {
             // destroy drop it. Never beside entry custody
             // (entry_custodies_are_disjoint).
             spawn_exec_created_custody: Set<AgentIdentity>,
+            // Operator instructions (0.9.9). The mob's desired records, one
+            // per slot (the JSON array [namespace, key]): the revision, the
+            // effect, the body's digest (empty while Absent) and byte length
+            // (zero while Absent), and the target (every member, the members
+            // of one profile, or one member; the member only for a Member
+            // target). The generation advances on every committed write and
+            // on the reset of a mob that has one; a reset clears the
+            // records, and nothing lowers the generation (a member session
+            // accepts a snapshot only above the generation it holds).
+            operator_instruction_revision: Map<String, u64>,
+            operator_instruction_effect: Map<String, Enum<InstructionEffect>>,
+            operator_instruction_digest: Map<String, String>,
+            operator_instruction_body_bytes: Map<String, u64>,
+            operator_instruction_target_kind: Map<String, Enum<InstructionTargetKind>>,
+            operator_instruction_target_profile: Map<String, String>,
+            operator_instruction_target_member: Map<String, AgentIdentity>,
+            operator_instruction_generation: u64,
+            // Per-member delivery facts, for seated members only. Owed: the
+            // generation at which the member's snapshot last changed while
+            // its session had not recorded it (a seat owes the current
+            // generation). Recorded: the generation the member's session
+            // recorded. Blocked: why a delivery cannot land until something
+            // changes (a write that selects the member, or a new seat). A
+            // member is never owed and blocked at once.
+            member_instruction_owed: Map<AgentIdentity, u64>,
+            member_instruction_recorded: Map<AgentIdentity, u64>,
+            member_instruction_blocked: Map<AgentIdentity, Enum<MemberInstructionBlock>>,
         }
 
         init(Running) {
@@ -1034,6 +1064,17 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_tombstones = EmptySet,
             identity_entry_unreadable = EmptySet,
             spawn_exec_created_custody = EmptySet,
+            operator_instruction_revision = EmptyMap,
+            operator_instruction_effect = EmptyMap,
+            operator_instruction_digest = EmptyMap,
+            operator_instruction_body_bytes = EmptyMap,
+            operator_instruction_target_kind = EmptyMap,
+            operator_instruction_target_profile = EmptyMap,
+            operator_instruction_target_member = EmptyMap,
+            operator_instruction_generation = 0,
+            member_instruction_owed = EmptyMap,
+            member_instruction_recorded = EmptyMap,
+            member_instruction_blocked = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -2215,6 +2256,29 @@ macro_rules! mob_catalog_machine_dsl {
             // The replay of a seat row whose origin this build does not know
             // passes Unreadable too.
             RecoverCreatedIdentityEntry { agent_identity: AgentIdentity, presence: Enum<RecoveredPresence>, last_session: Option<SessionId> },
+            // Operator instructions (0.9.9): a host's write of one slot (the
+            // body's digest and byte length; the target as its kind, the
+            // profile name of a Profile target and the member of a Member
+            // target), a revoke at a higher revision, and the replay of a
+            // committed record at its generation.
+            SetOperatorInstruction { slot: String, revision: u64, digest: String, body_bytes: u64, target_kind: Enum<InstructionTargetKind>, target_profile: String, target_member: Option<AgentIdentity> },
+            RevokeOperatorInstruction { slot: String, revision: u64 },
+            RecoverOperatorInstruction { slot: String, revision: u64, effect: Enum<InstructionEffect>, digest: String, body_bytes: u64, target_kind: Enum<InstructionTargetKind>, target_profile: String, target_member: Option<AgentIdentity>, generation: u64 },
+            // The generation the mob had reached when its last reset
+            // committed, from the whole journal, before the epoch replay and
+            // the high-water seal.
+            RecoverOperatorInstructionGenerationHighwater { generation: u64 },
+            // Delivery: the shell asks for one owed member's delivery, then
+            // reports what the member's session did with the snapshot it
+            // carried (recorded at a generation, or refused for a reason no
+            // retry changes). The replay of a journaled record reports it
+            // again.
+            PrepareMemberInstructionDelivery { agent_identity: AgentIdentity },
+            RecordMemberInstructionTarget { agent_identity: AgentIdentity, session_id: SessionId, generation: u64 },
+            RefuseMemberInstructionTarget { agent_identity: AgentIdentity, session_id: SessionId, generation: u64, block: Enum<MemberInstructionBlock> },
+            // A retiring member's session disposal, before its seat clears:
+            // whether its mob releases the member session's target.
+            ResolveMemberInstructionRelease { agent_identity: AgentIdentity, disposal: Enum<MemberSessionDisposal> },
         }
 
         effect MobMachineEffect {
@@ -2639,6 +2703,20 @@ macro_rules! mob_catalog_machine_dsl {
             ExplicitResumeMemberHeld { agent_identity: AgentIdentity, cause: Enum<HostPreparationCause> },
             // The verdict of a declared apply's opening (OpenDeclaredApply).
             DeclaredApplyOpenResolved { verdict: Enum<DeclaredApplyOpenVerdict> },
+            // Operator instructions (0.9.9): a write's verdict (committed at
+            // the new generation, an exact repeat, or a typed refusal with
+            // the slot's current revision), a delivery's preparation or
+            // deferral, a member session's record or block, and a retiring
+            // member's release verdict.
+            OperatorInstructionCommitted { slot: String, revision: u64, effect: Enum<InstructionEffect>, generation: u64 },
+            OperatorInstructionDuplicate { slot: String, revision: u64, generation: u64 },
+            OperatorInstructionRefused { slot: String, refusal: Enum<OperatorInstructionRefusal>, current_revision: Option<u64> },
+            MemberInstructionDeliveryPrepared { agent_identity: AgentIdentity, session_id: SessionId, generation: u64 },
+            MemberInstructionDeliveryDeferred { agent_identity: AgentIdentity, reason: Enum<MemberInstructionDeferReason> },
+            MemberInstructionTargetRecorded { agent_identity: AgentIdentity, session_id: SessionId, generation: u64 },
+            MemberInstructionTargetBlocked { agent_identity: AgentIdentity, generation: u64, block: Enum<MemberInstructionBlock> },
+            MemberInstructionReleaseAuthorized { agent_identity: AgentIdentity, session_id: SessionId },
+            MemberInstructionReleaseNotNeeded { agent_identity: AgentIdentity },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3468,6 +3546,41 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}
         }
 
+        // Operator instructions: whether a record's target selects a
+        // member. A selector is a predicate, not a reference: a profile or a
+        // member that does not exist (yet) selects nobody. The catalog's
+        // `operator_instruction_target_applies` is the same predicate in
+        // Rust, for the shell's member snapshots and status reads.
+        helper operator_instruction_target_applies(
+            kind: Enum<InstructionTargetKind>,
+            profile: String,
+            member: Option<AgentIdentity>,
+            member_profile: Option<String>,
+            agent_identity: AgentIdentity
+        ) -> bool {
+            kind == InstructionTargetKind::Mob
+                || (kind == InstructionTargetKind::Profile && member_profile == Some(profile))
+                || (kind == InstructionTargetKind::Member && member == Some(agent_identity))
+        }
+
+        // A write the shell built from a typed request: a revision of at
+        // least 1, a body digest, and a target whose shape matches its kind
+        // (a profile name only for a Profile target, a member only for a
+        // Member target).
+        helper operator_instruction_write_well_formed(
+            revision: u64,
+            digest: String,
+            kind: Enum<InstructionTargetKind>,
+            profile: String,
+            member: Option<AgentIdentity>
+        ) -> bool {
+            revision >= 1
+                && digest != ""
+                && ((kind == InstructionTargetKind::Mob && profile == "" && member == None)
+                    || (kind == InstructionTargetKind::Profile && profile != "" && member == None)
+                    || (kind == InstructionTargetKind::Member && profile == "" && member != None))
+        }
+
         disposition DefinitionEpochAdvanced => local seam SurfaceResultAlignment,
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
         disposition SpawnProfileAuthorized => local seam NoOwnerRealization,
@@ -3664,6 +3777,24 @@ macro_rules! mob_catalog_machine_dsl {
         disposition ArchivedSessionForgotten => local seam SurfaceResultAlignment,
         disposition ExplicitResumeMemberHeld => local seam SurfaceResultAlignment,
         disposition DeclaredApplyOpenResolved => local seam SurfaceResultAlignment,
+        // Operator instructions (0.9.9). A committed write and a recorded
+        // member target are journaled by the actor store-first, before the
+        // prepared transition commits. A prepared delivery is realized by
+        // the mob's delivery owner (through the member session's actor while
+        // it is live, store-only while it is dormant) and closed by the
+        // record and refusal signals: the member stays owed until one of
+        // them lands, as a materialization attempt stays open until its
+        // resolution signals. A release is realized at the member's
+        // retirement, before its seat clears.
+        disposition OperatorInstructionCommitted => local seam OwnerRealizationOnly,
+        disposition OperatorInstructionDuplicate => local seam SurfaceResultAlignment,
+        disposition OperatorInstructionRefused => local seam SurfaceResultAlignment,
+        disposition MemberInstructionDeliveryPrepared => local seam OwnerRealizationOnly,
+        disposition MemberInstructionDeliveryDeferred => local seam SurfaceResultAlignment,
+        disposition MemberInstructionTargetRecorded => local seam OwnerRealizationOnly,
+        disposition MemberInstructionTargetBlocked => local seam SurfaceResultAlignment,
+        disposition MemberInstructionReleaseAuthorized => local seam OwnerRealizationOnly,
+        disposition MemberInstructionReleaseNotNeeded => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -4822,6 +4953,107 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_restore_failure_codes == EmptyMap
                 && self.remote_runtime_retired_ids == EmptySet
                 && self.remote_supervisor_revoked_ids == EmptySet)
+        }
+
+        // Operator instructions: every record holds all of its fields, and
+        // a member target only for a Member record.
+        invariant operator_instruction_records_lockstep {
+            for_all(slot in self.operator_instruction_revision.keys(),
+                self.operator_instruction_effect.contains_key(slot)
+                && self.operator_instruction_digest.contains_key(slot)
+                && self.operator_instruction_body_bytes.contains_key(slot)
+                && self.operator_instruction_target_kind.contains_key(slot)
+                && self.operator_instruction_target_profile.contains_key(slot))
+            && for_all(slot in self.operator_instruction_effect.keys(),
+                self.operator_instruction_revision.contains_key(slot))
+            && for_all(slot in self.operator_instruction_digest.keys(),
+                self.operator_instruction_revision.contains_key(slot))
+            && for_all(slot in self.operator_instruction_body_bytes.keys(),
+                self.operator_instruction_revision.contains_key(slot))
+            && for_all(slot in self.operator_instruction_target_kind.keys(),
+                self.operator_instruction_revision.contains_key(slot))
+            && for_all(slot in self.operator_instruction_target_profile.keys(),
+                self.operator_instruction_revision.contains_key(slot))
+            && for_all(slot in self.operator_instruction_target_member.keys(),
+                self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member))
+        }
+
+        // Every record is well formed: a revision of at least 1, a body
+        // within the per-slot limit, a digest exactly while Active (an
+        // Absent record keeps no body), and a target whose shape matches
+        // its kind.
+        invariant operator_instruction_records_well_formed {
+            for_all(slot in self.operator_instruction_revision.keys(),
+                self.operator_instruction_revision.get_cloned(slot).get("value") >= 1
+                && self.operator_instruction_body_bytes.get_cloned(slot).get("value") <= 262144
+                && ((self.operator_instruction_effect.get_cloned(slot) == Some(InstructionEffect::Active)
+                        && self.operator_instruction_digest.get_cloned(slot) != Some(""))
+                    || (self.operator_instruction_effect.get_cloned(slot) == Some(InstructionEffect::Absent)
+                        && self.operator_instruction_digest.get_cloned(slot) == Some("")
+                        && self.operator_instruction_body_bytes.get_cloned(slot) == Some(0)))
+                && ((self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Mob)
+                        && self.operator_instruction_target_profile.get_cloned(slot) == Some("")
+                        && self.operator_instruction_target_member.contains_key(slot) == false)
+                    || (self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Profile)
+                        && self.operator_instruction_target_profile.get_cloned(slot) != Some("")
+                        && self.operator_instruction_target_member.contains_key(slot) == false)
+                    || (self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member)
+                        && self.operator_instruction_target_profile.get_cloned(slot) == Some("")
+                        && self.operator_instruction_target_member.contains_key(slot) == true)))
+        }
+
+        // At most 64 records.
+        invariant operator_instruction_slot_count_bounded {
+            self.operator_instruction_revision.len() <= 64
+        }
+
+        // The Active bodies of the records sum to at most 1 MiB.
+        invariant operator_instruction_active_bytes_bounded {
+            session_document_instruction_active_bytes(
+                self.operator_instruction_effect,
+                self.operator_instruction_body_bytes) <= 1048576
+        }
+
+        // Delivery facts name seated members only, and an owed member is
+        // never blocked.
+        invariant member_instruction_facts_only_for_members {
+            for_all(id in self.member_instruction_owed.keys(),
+                self.identity_to_runtime.contains_key(id)
+                && self.member_instruction_blocked.contains_key(id) == false)
+            && for_all(id in self.member_instruction_recorded.keys(),
+                self.identity_to_runtime.contains_key(id))
+            && for_all(id in self.member_instruction_blocked.keys(),
+                self.identity_to_runtime.contains_key(id))
+        }
+
+        // Every delivery fact names a generation the mob minted, and a
+        // member recorded and owed at once is owed a later generation than
+        // the one its session recorded.
+        invariant member_instruction_generations_bounded {
+            for_all(id in self.member_instruction_owed.keys(),
+                self.member_instruction_owed.get_cloned(id).get("value") >= 1
+                && self.member_instruction_owed.get_cloned(id).get("value") <= self.operator_instruction_generation
+                && (self.member_instruction_recorded.contains_key(id) == false
+                    || self.member_instruction_recorded.get_cloned(id).get("value")
+                        < self.member_instruction_owed.get_cloned(id).get("value")))
+            && for_all(id in self.member_instruction_recorded.keys(),
+                self.member_instruction_recorded.get_cloned(id).get("value") >= 1
+                && self.member_instruction_recorded.get_cloned(id).get("value") <= self.operator_instruction_generation)
+        }
+
+        // A destroyed mob holds no record and no delivery fact.
+        invariant destroyed_mob_holds_no_operator_instructions {
+            self.lifecycle_phase != Phase::Destroyed
+            || (self.operator_instruction_revision == EmptyMap
+                && self.operator_instruction_effect == EmptyMap
+                && self.operator_instruction_digest == EmptyMap
+                && self.operator_instruction_body_bytes == EmptyMap
+                && self.operator_instruction_target_kind == EmptyMap
+                && self.operator_instruction_target_profile == EmptyMap
+                && self.operator_instruction_target_member == EmptyMap
+                && self.member_instruction_owed == EmptyMap
+                && self.member_instruction_recorded == EmptyMap
+                && self.member_instruction_blocked == EmptyMap)
         }
 
         // =====================================================================
@@ -7461,6 +7693,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: bridge_session_id.get("value"), attempt: None }
@@ -7587,6 +7830,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal {
@@ -7774,6 +8028,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit CommitPlacedSpawnCarrier {
@@ -9049,6 +9314,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
         }
@@ -9194,6 +9470,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
         }
@@ -9263,6 +9550,17 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
@@ -9572,6 +9870,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
         }
@@ -10113,6 +10422,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
         }
@@ -10257,6 +10571,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
         }
@@ -13340,6 +13659,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -13466,6 +13790,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -13569,6 +13898,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.insert(agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -13684,6 +14018,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -13794,6 +14133,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -13889,6 +14233,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.insert(agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -13997,6 +14346,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -14102,6 +14456,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit PlacedCarrierCleanupRequested {
@@ -14220,6 +14579,11 @@ macro_rules! mob_catalog_machine_dsl {
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit PlacedCarrierCleanupRequested {
@@ -14424,6 +14788,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -14512,6 +14881,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -14594,6 +14968,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -14675,6 +15054,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -14770,6 +15154,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit PlacedCarrierCleanupRequested {
@@ -14871,6 +15260,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: an unseat drops the member's delivery
+                // facts.
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
             }
             to Running
             emit PlacedCarrierCleanupRequested {
@@ -15402,6 +15796,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.coordinator_bound = false;
+                // Operator instructions: a destroyed mob keeps no record and
+                // no delivery fact.
+                self.operator_instruction_revision = EmptyMap;
+                self.operator_instruction_effect = EmptyMap;
+                self.operator_instruction_digest = EmptyMap;
+                self.operator_instruction_body_bytes = EmptyMap;
+                self.operator_instruction_target_kind = EmptyMap;
+                self.operator_instruction_target_profile = EmptyMap;
+                self.operator_instruction_target_member = EmptyMap;
+                self.member_instruction_owed = EmptyMap;
+                self.member_instruction_recorded = EmptyMap;
+                self.member_instruction_blocked = EmptyMap;
             }
             to Destroyed
             emit RequestRuntimeDestroy { session_id: session_id }
@@ -15829,6 +16235,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placed_kickoff_pending_drained" { self.pending_placed_kickoff_outcomes == EmptySet }
             guard "placed_kickoff_resolved_drained" { self.resolved_placed_kickoff_outcomes == EmptySet }
             update {
+                // Operator instructions: the reset clears the records and
+                // the delivery facts, and a mob that has a generation moves
+                // past it, so a session that recorded a cleared record is
+                // owed the emptied snapshot at a higher generation when a
+                // member is seated over it again.
+                self.operator_instruction_revision = EmptyMap;
+                self.operator_instruction_effect = EmptyMap;
+                self.operator_instruction_digest = EmptyMap;
+                self.operator_instruction_body_bytes = EmptyMap;
+                self.operator_instruction_target_kind = EmptyMap;
+                self.operator_instruction_target_profile = EmptyMap;
+                self.operator_instruction_target_member = EmptyMap;
+                self.member_instruction_owed = EmptyMap;
+                self.member_instruction_recorded = EmptyMap;
+                self.member_instruction_blocked = EmptyMap;
+                if self.operator_instruction_generation > 0 {
+                    self.operator_instruction_generation += 1;
+                }
                 self.member_run_starts_held = false;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -22867,6 +23291,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.coordinator_bound = false;
+                // Operator instructions: a destroyed mob keeps no record and
+                // no delivery fact.
+                self.operator_instruction_revision = EmptyMap;
+                self.operator_instruction_effect = EmptyMap;
+                self.operator_instruction_digest = EmptyMap;
+                self.operator_instruction_body_bytes = EmptyMap;
+                self.operator_instruction_target_kind = EmptyMap;
+                self.operator_instruction_target_profile = EmptyMap;
+                self.operator_instruction_target_member = EmptyMap;
+                self.member_instruction_owed = EmptyMap;
+                self.member_instruction_recorded = EmptyMap;
+                self.member_instruction_blocked = EmptyMap;
             }
             to Destroyed
             emit RebuildWakeRoutes
@@ -26659,6 +27095,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_last_progress_at_ms.remove(agent_identity);
                 self.member_last_progress_event.remove(agent_identity);
                 self.member_health_class.remove(agent_identity);
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal {
@@ -27002,6 +27449,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -27204,6 +27662,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -27873,6 +28342,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -28086,6 +28566,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -28273,6 +28764,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -28453,6 +28955,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Operator instructions: a seat owes the member the current
+                // generation once the mob has one (a new session records it
+                // at birth, an existing one by delivery), and drops what an
+                // earlier seat recorded or blocked.
+                self.member_instruction_recorded.remove(agent_identity);
+                self.member_instruction_blocked.remove(agent_identity);
+                if self.operator_instruction_generation > 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                } else {
+                    self.member_instruction_owed.remove(agent_identity);
+                }
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -30353,10 +30866,711 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
         }
+
+        // =====================================================================
+        // Operator instructions (0.9.9)
+        // =====================================================================
+        //
+        // A write commits a record (a new slot, or a higher revision) within
+        // the slot limit, the per-slot body limit and the active budget, and
+        // advances the generation. Every seated member whose snapshot it
+        // changes (the record's old or new target selects the member) is
+        // owed the new generation and unblocked. A repeat of the current
+        // revision with the same content is a duplicate, the same revision
+        // with other content a conflict, a lower revision stale. A completed
+        // or destroyed mob takes no write. Nothing in this region wakes,
+        // materializes or registers a member: a delivery records a dormant
+        // member's session store-only, and an unborn seat waits for the
+        // first wake that creates its session with the snapshot.
+
+        transition SetOperatorInstructionBodyTooLarge {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_too_large" { body_bytes > 262144 }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::BodyTooLarge, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition SetOperatorInstructionSlotLimitExceeded {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
+            guard "slot_limit_reached" { self.operator_instruction_revision.len() >= 64 }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::SlotLimitExceeded, current_revision: None }
+        }
+
+        transition SetOperatorInstructionNewOverBudget {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
+            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "over_budget" {
+                session_document_instruction_active_bytes(
+                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
+                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    > 1048576
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::ActiveSetBudgetExceeded, current_revision: None }
+        }
+
+        transition SetOperatorInstructionNew {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
+            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "within_budget" {
+                1048576
+                    >= session_document_instruction_active_bytes(
+                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
+                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+            }
+            update {
+                // Every seated member the new record selects is owed it.
+                for member_id in self.identity_to_runtime.keys() {
+                    if operator_instruction_target_applies(
+                            target_kind,
+                            target_profile,
+                            target_member,
+                            self.member_profile_names.get_cloned(member_id),
+                            member_id)
+                    {
+                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(member_id);
+                    }
+                }
+                self.operator_instruction_revision.insert(slot, revision);
+                self.operator_instruction_effect.insert(slot, InstructionEffect::Active);
+                self.operator_instruction_digest.insert(slot, digest);
+                self.operator_instruction_body_bytes.insert(slot, body_bytes);
+                self.operator_instruction_target_kind.insert(slot, target_kind);
+                self.operator_instruction_target_profile.insert(slot, target_profile);
+                if target_member != None {
+                    self.operator_instruction_target_member.insert(slot, target_member.get("value"));
+                }
+                self.operator_instruction_generation += 1;
+            }
+            to Running
+            emit OperatorInstructionCommitted { slot: slot, revision: revision, effect: InstructionEffect::Active, generation: self.operator_instruction_generation }
+        }
+
+        transition SetOperatorInstructionStale {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_below_current" {
+                revision < self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::StaleRevision, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition SetOperatorInstructionDuplicate {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_is_current" {
+                revision == self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "same_activation" {
+                self.operator_instruction_effect.get_cloned(slot).get("value") == InstructionEffect::Active
+                && self.operator_instruction_digest.get_cloned(slot).get("value") == digest
+                && self.operator_instruction_body_bytes.get_cloned(slot).get("value") == body_bytes
+                && self.operator_instruction_target_kind.get_cloned(slot).get("value") == target_kind
+                && self.operator_instruction_target_profile.get_cloned(slot).get("value") == target_profile
+                && self.operator_instruction_target_member.get_cloned(slot) == target_member
+            }
+            update {}
+            to Running
+            emit OperatorInstructionDuplicate { slot: slot, revision: revision, generation: self.operator_instruction_generation }
+        }
+
+        transition SetOperatorInstructionConflict {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_is_current" {
+                revision == self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "other_content" {
+                self.operator_instruction_effect.get_cloned(slot).get("value") != InstructionEffect::Active
+                || self.operator_instruction_digest.get_cloned(slot).get("value") != digest
+                || self.operator_instruction_body_bytes.get_cloned(slot).get("value") != body_bytes
+                || self.operator_instruction_target_kind.get_cloned(slot).get("value") != target_kind
+                || self.operator_instruction_target_profile.get_cloned(slot).get("value") != target_profile
+                || self.operator_instruction_target_member.get_cloned(slot) != target_member
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::RevisionConflict, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition SetOperatorInstructionAdvanceOverBudget {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_advances" {
+                revision != self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "over_budget" {
+                session_document_instruction_active_bytes(
+                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
+                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    > 1048576
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::ActiveSetBudgetExceeded, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition SetOperatorInstructionAdvance {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_advances" {
+                revision != self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "within_budget" {
+                1048576
+                    >= session_document_instruction_active_bytes(
+                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
+                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+            }
+            update {
+                // Every seated member the old or the new target selects is
+                // owed the new record (a member that left the selector is
+                // owed the slot's revoke).
+                for member_id in self.identity_to_runtime.keys() {
+                    if operator_instruction_target_applies(
+                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                            self.operator_instruction_target_member.get_cloned(slot),
+                            self.member_profile_names.get_cloned(member_id),
+                            member_id)
+                        || operator_instruction_target_applies(
+                            target_kind,
+                            target_profile,
+                            target_member,
+                            self.member_profile_names.get_cloned(member_id),
+                            member_id)
+                    {
+                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(member_id);
+                    }
+                }
+                self.operator_instruction_revision.insert(slot, revision);
+                self.operator_instruction_effect.insert(slot, InstructionEffect::Active);
+                self.operator_instruction_digest.insert(slot, digest);
+                self.operator_instruction_body_bytes.insert(slot, body_bytes);
+                self.operator_instruction_target_kind.insert(slot, target_kind);
+                self.operator_instruction_target_profile.insert(slot, target_profile);
+                if target_member != None {
+                    self.operator_instruction_target_member.insert(slot, target_member.get("value"));
+                } else {
+                    self.operator_instruction_target_member.remove(slot);
+                }
+                self.operator_instruction_generation += 1;
+            }
+            to Running
+            emit OperatorInstructionCommitted { slot: slot, revision: revision, effect: InstructionEffect::Active, generation: self.operator_instruction_generation }
+        }
+
+        transition SetOperatorInstructionTerminal {
+            per_phase [Completed, Destroyed]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            update {}
+            to Completed
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::MobTerminal, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        // A revoke is a higher revision whose effect is Absent: the record
+        // keeps its target, and the members it selects are owed the revoke.
+        transition RevokeOperatorInstructionUnknownSlot {
+            per_phase [Running, Stopped]
+            on signal RevokeOperatorInstruction { slot, revision }
+            guard "revision_positive" { revision >= 1 }
+            guard "slot_unknown" { self.operator_instruction_revision.contains_key(slot) == false }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::UnknownSlot, current_revision: None }
+        }
+
+        transition RevokeOperatorInstructionStale {
+            per_phase [Running, Stopped]
+            on signal RevokeOperatorInstruction { slot, revision }
+            guard "revision_positive" { revision >= 1 }
+            guard "revision_below_current" {
+                revision < self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::StaleRevision, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition RevokeOperatorInstructionDuplicate {
+            per_phase [Running, Stopped]
+            on signal RevokeOperatorInstruction { slot, revision }
+            guard "revision_positive" { revision >= 1 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_is_current" {
+                revision == self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "already_revoked" {
+                self.operator_instruction_effect.get_cloned(slot).get("value") == InstructionEffect::Absent
+            }
+            update {}
+            to Running
+            emit OperatorInstructionDuplicate { slot: slot, revision: revision, generation: self.operator_instruction_generation }
+        }
+
+        transition RevokeOperatorInstructionConflict {
+            per_phase [Running, Stopped]
+            on signal RevokeOperatorInstruction { slot, revision }
+            guard "revision_positive" { revision >= 1 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_is_current" {
+                revision == self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "revision_active" {
+                self.operator_instruction_effect.get_cloned(slot).get("value") == InstructionEffect::Active
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::RevisionConflict, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        transition RevokeOperatorInstructionAdvance {
+            per_phase [Running, Stopped]
+            on signal RevokeOperatorInstruction { slot, revision }
+            guard "revision_positive" { revision >= 1 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_advances" {
+                revision != self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            update {
+                for member_id in self.identity_to_runtime.keys() {
+                    if operator_instruction_target_applies(
+                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                            self.operator_instruction_target_member.get_cloned(slot),
+                            self.member_profile_names.get_cloned(member_id),
+                            member_id)
+                    {
+                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(member_id);
+                    }
+                }
+                self.operator_instruction_revision.insert(slot, revision);
+                self.operator_instruction_effect.insert(slot, InstructionEffect::Absent);
+                self.operator_instruction_digest.insert(slot, "");
+                self.operator_instruction_body_bytes.insert(slot, 0);
+                self.operator_instruction_generation += 1;
+            }
+            to Running
+            emit OperatorInstructionCommitted { slot: slot, revision: revision, effect: InstructionEffect::Absent, generation: self.operator_instruction_generation }
+        }
+
+        transition RevokeOperatorInstructionTerminal {
+            per_phase [Completed, Destroyed]
+            on signal RevokeOperatorInstruction { slot, revision }
+            update {}
+            to Completed
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::MobTerminal, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
+        // Replay of a committed record at its generation (the epoch replay,
+        // in journal order): the members the old or the new target selects
+        // are owed that generation, as the live write owed them.
+        transition RecoverOperatorInstructionApplied {
+            per_phase [Running, Stopped, Completed]
+            on signal RecoverOperatorInstruction { slot, revision, effect, digest, body_bytes, target_kind, target_profile, target_member, generation }
+            guard "generation_advances" { self.operator_instruction_generation < generation }
+            update {
+                for member_id in self.identity_to_runtime.keys() {
+                    if (self.operator_instruction_revision.contains_key(slot) == true
+                            && operator_instruction_target_applies(
+                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_member.get_cloned(slot),
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id))
+                        || operator_instruction_target_applies(
+                            target_kind,
+                            target_profile,
+                            target_member,
+                            self.member_profile_names.get_cloned(member_id),
+                            member_id)
+                    {
+                        self.member_instruction_owed.insert(member_id, generation);
+                        self.member_instruction_blocked.remove(member_id);
+                    }
+                }
+                self.operator_instruction_revision.insert(slot, revision);
+                self.operator_instruction_effect.insert(slot, effect);
+                self.operator_instruction_digest.insert(slot, digest);
+                self.operator_instruction_body_bytes.insert(slot, body_bytes);
+                self.operator_instruction_target_kind.insert(slot, target_kind);
+                self.operator_instruction_target_profile.insert(slot, target_profile);
+                if target_member != None {
+                    self.operator_instruction_target_member.insert(slot, target_member.get("value"));
+                } else {
+                    self.operator_instruction_target_member.remove(slot);
+                }
+                self.operator_instruction_generation = generation;
+            }
+            to Running
+        }
+
+        // A replayed record at or below the generation the machine holds
+        // changes nothing.
+        transition RecoverOperatorInstructionStale {
+            per_phase [Running, Stopped, Completed]
+            on signal RecoverOperatorInstruction { slot, revision, effect, digest, body_bytes, target_kind, target_profile, target_member, generation }
+            guard "generation_not_above_current" { generation <= self.operator_instruction_generation }
+            update {}
+            to Running
+        }
+
+        // Resume recovers the generation the mob had reached when its last
+        // reset committed (the epoch replay sees only the records after it),
+        // before the epoch replay and the high-water seal, so a member seated
+        // after a restart is owed a generation above any its session holds.
+        transition RecoverOperatorInstructionGenerationHighwaterRaised {
+            on signal RecoverOperatorInstructionGenerationHighwater { generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recovery_window_open" { self.identity_generation_highwater_sealed == false }
+            guard "generation_advances" { self.operator_instruction_generation < generation }
+            update {
+                self.operator_instruction_generation = generation;
+            }
+            to Running
+        }
+
+        transition RecoverOperatorInstructionGenerationHighwaterKept {
+            on signal RecoverOperatorInstructionGenerationHighwater { generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recovery_window_open" { self.identity_generation_highwater_sealed == false }
+            guard "generation_not_above_current" { generation <= self.operator_instruction_generation }
+            update {}
+            to Running
+        }
+
+        // Delivery. An owed member's delivery is prepared at the current
+        // generation for the session bound to it. A placed member's host has
+        // no delivery yet: it is blocked until a write selects it again or it
+        // is seated again. An unborn seat waits for the first wake that
+        // creates its session (carrying the snapshot), a member without a
+        // session for its binding, and a retiring member for its retirement.
+        transition PrepareMemberInstructionDeliveryNotOwed {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "not_owed" { self.member_instruction_owed.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::NotOwed }
+        }
+
+        transition PrepareMemberInstructionDeliveryPlaced {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_placed" { self.member_placement.contains_key(agent_identity) == true }
+            update {
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_blocked.insert(agent_identity, MemberInstructionBlock::MemberHostUnsupported);
+            }
+            to Running
+            emit MemberInstructionTargetBlocked { agent_identity: agent_identity, generation: self.operator_instruction_generation, block: MemberInstructionBlock::MemberHostUnsupported }
+        }
+
+        transition PrepareMemberInstructionDeliveryUnborn {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "seat_session_unborn" { self.member_seat_session_unborn.contains(agent_identity) == true }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::SessionUnborn }
+        }
+
+        transition PrepareMemberInstructionDeliveryUnbound {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::SessionUnbound }
+        }
+
+        transition PrepareMemberInstructionDeliveryRetiring {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "member_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                    == Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::Retiring }
+        }
+
+        transition PrepareMemberInstructionDeliveryDeliver {
+            per_phase [Running, Stopped]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "member_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                    != Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+            emit MemberInstructionDeliveryPrepared {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
+                generation: self.operator_instruction_generation
+            }
+        }
+
+        transition PrepareMemberInstructionDeliveryMobNotRunning {
+            per_phase [Completed, Destroyed]
+            on signal PrepareMemberInstructionDelivery { agent_identity }
+            update {}
+            to Completed
+            emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::MobNotRunning }
+        }
+
+        // A member session recorded a snapshot. It closes the obligation
+        // only for the session the member is bound to, at or above the
+        // generation the member is owed and at most the mob's generation;
+        // anything else (a member no longer owed, another session, a
+        // generation an obligation superseded) changes nothing.
+        transition RecordMemberInstructionTargetNotOwed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecordMemberInstructionTarget { agent_identity, session_id, generation }
+            guard "not_owed" { self.member_instruction_owed.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        transition RecordMemberInstructionTargetStaleSession {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecordMemberInstructionTarget { agent_identity, session_id, generation }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_not_bound" { self.member_session_bindings.get_cloned(agent_identity) != Some(session_id) }
+            update {}
+            to Running
+        }
+
+        transition RecordMemberInstructionTargetSuperseded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecordMemberInstructionTarget { agent_identity, session_id, generation }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_bound" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "below_owed" { generation < self.member_instruction_owed.get_cloned(agent_identity).get("value") }
+            update {}
+            to Running
+        }
+
+        transition RecordMemberInstructionTargetCurrent {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecordMemberInstructionTarget { agent_identity, session_id, generation }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_bound" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "covers_owed" { self.member_instruction_owed.get_cloned(agent_identity).get("value") <= generation }
+            guard "minted" { generation <= self.operator_instruction_generation }
+            update {
+                self.member_instruction_recorded.insert(agent_identity, generation);
+                self.member_instruction_owed.remove(agent_identity);
+            }
+            to Running
+            emit MemberInstructionTargetRecorded { agent_identity: agent_identity, session_id: session_id, generation: generation }
+        }
+
+        transition RecordMemberInstructionTargetUnminted {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecordMemberInstructionTarget { agent_identity, session_id, generation }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_bound" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "covers_owed" { self.member_instruction_owed.get_cloned(agent_identity).get("value") <= generation }
+            guard "not_minted" { self.operator_instruction_generation < generation }
+            update {}
+            to Running
+        }
+
+        // A member session refused the snapshot for a reason no retry
+        // changes: the member is blocked until a write selects it again or
+        // it is seated again. A refusal for another session, or for a
+        // generation an obligation superseded, changes nothing.
+        transition RefuseMemberInstructionTargetNotOwed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RefuseMemberInstructionTarget { agent_identity, session_id, generation, block }
+            guard "not_owed" { self.member_instruction_owed.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        transition RefuseMemberInstructionTargetStaleSession {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RefuseMemberInstructionTarget { agent_identity, session_id, generation, block }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_not_bound" { self.member_session_bindings.get_cloned(agent_identity) != Some(session_id) }
+            update {}
+            to Running
+        }
+
+        transition RefuseMemberInstructionTargetSuperseded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RefuseMemberInstructionTarget { agent_identity, session_id, generation, block }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_bound" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "below_owed" { generation < self.member_instruction_owed.get_cloned(agent_identity).get("value") }
+            update {}
+            to Running
+        }
+
+        transition RefuseMemberInstructionTargetBlocked {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RefuseMemberInstructionTarget { agent_identity, session_id, generation, block }
+            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
+            guard "session_bound" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
+            guard "covers_owed" { self.member_instruction_owed.get_cloned(agent_identity).get("value") <= generation }
+            update {
+                self.member_instruction_owed.remove(agent_identity);
+                self.member_instruction_blocked.insert(agent_identity, block);
+            }
+            to Running
+            emit MemberInstructionTargetBlocked { agent_identity: agent_identity, generation: generation, block: block }
+        }
+
+        // A retiring member's mob releases its session's target when the
+        // runtime released only the member's run and the host keeps the
+        // session (an archived session is the mob's and is never written
+        // again; a session kept for a successor stays the mob's), the
+        // member has a session, and the mob recorded or owes it a snapshot.
+        transition ResolveMemberInstructionReleaseAuthorized {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberInstructionRelease { agent_identity, disposal }
+            guard "host_keeps_session" { disposal == MemberSessionDisposal::RuntimeReleasedOnlyHostOwned }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "snapshot_held" {
+                self.member_instruction_recorded.contains_key(agent_identity) == true
+                || self.member_instruction_owed.contains_key(agent_identity) == true
+            }
+            update {}
+            to Running
+            emit MemberInstructionReleaseAuthorized {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
+        }
+
+        transition ResolveMemberInstructionReleaseNotNeeded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberInstructionRelease { agent_identity, disposal }
+            guard "no_release" {
+                disposal != MemberSessionDisposal::RuntimeReleasedOnlyHostOwned
+                || self.member_session_bindings.contains_key(agent_identity) == false
+                || (self.member_instruction_recorded.contains_key(agent_identity) == false
+                    && self.member_instruction_owed.contains_key(agent_identity) == false)
+            }
+            update {}
+            to Running
+            emit MemberInstructionReleaseNotNeeded { agent_identity: agent_identity }
+        }
     }
         }
 
         impl MobMachineAuthority {
+        // Operator instructions reuse the session document's slot-set
+        // natives: one slot map with one slot set, and the body bytes of a
+        // slot set's Active slots. A slot the bytes map does not name counts
+        // nothing. The TLA model renders them for this machine too.
+        fn session_document_instruction_slot_after_set<V: Clone>(
+            current: &std::collections::BTreeMap<String, V>,
+            slot: &str,
+            value: &V,
+        ) -> std::collections::BTreeMap<String, V> {
+            let mut updated = current.clone();
+            updated.insert(slot.to_owned(), value.clone());
+            updated
+        }
+
+        fn session_document_instruction_active_bytes(
+            effect: &std::collections::BTreeMap<String, InstructionEffect>,
+            bytes: &std::collections::BTreeMap<String, u64>,
+        ) -> u64 {
+            effect
+                .iter()
+                .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)
+                .fold(0_u64, |total, (slot, _)| {
+                    total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
+                })
+        }
+
         fn mob_machine_remote_turn_custody_admits(
             pending: &std::collections::BTreeSet<RemoteTurnObligation>,
             committed: &std::collections::BTreeSet<RemoteTurnObligation>,
@@ -34167,6 +35381,82 @@ pub enum MemberSessionDisposal {
     /// A same-session rotation's retirement released the runtime and kept
     /// the session: its next incarnation is seated on it.
     KeptForSuccessor,
+}
+
+/// What an operator-instruction record targets
+/// (`operator_instruction_target_kind`): every member of the mob, the
+/// members of one profile, or one member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionTargetKind {
+    #[default]
+    Mob,
+    Profile,
+    Member,
+}
+
+/// Why a member's operator-instruction delivery is blocked
+/// (`member_instruction_blocked`) until a write selects the member again or
+/// it is seated again: its member host takes no delivery, its session's
+/// activations manage a slot of the snapshot, its session service keeps no
+/// durable document, or its session's target is owned by the session or by
+/// another mob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberInstructionBlock {
+    #[default]
+    MemberHostUnsupported,
+    SlotManagedByActivation,
+    DurabilityUnavailable,
+    OwnedBySession,
+    OwnedByOtherMob,
+}
+
+/// Why the machine refuses an operator-instruction write
+/// (`OperatorInstructionRefused`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperatorInstructionRefusal {
+    #[default]
+    StaleRevision,
+    RevisionConflict,
+    UnknownSlot,
+    SlotLimitExceeded,
+    BodyTooLarge,
+    ActiveSetBudgetExceeded,
+    MobTerminal,
+}
+
+/// Why the machine prepares no delivery for a member now
+/// (`MemberInstructionDeliveryDeferred`): nothing is owed, the member's
+/// seat has no session yet, its session is not bound, it is retiring, or
+/// the mob is completed or destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberInstructionDeferReason {
+    #[default]
+    NotOwed,
+    SessionUnborn,
+    SessionUnbound,
+    Retiring,
+    MobNotRunning,
+}
+
+/// Whether an operator-instruction record's target selects a member: the
+/// machine's `operator_instruction_target_applies` helper, for the shell's
+/// member snapshots and status reads. `member_profile` is the member's
+/// profile name as the machine holds it (`member_profile_names`). A
+/// selector is a predicate, not a reference: a profile or a member that
+/// does not exist selects nobody.
+#[must_use]
+pub fn operator_instruction_target_applies(
+    kind: InstructionTargetKind,
+    profile: &str,
+    member: Option<&str>,
+    member_profile: Option<&str>,
+    agent_identity: &str,
+) -> bool {
+    match kind {
+        InstructionTargetKind::Mob => true,
+        InstructionTargetKind::Profile => member_profile == Some(profile),
+        InstructionTargetKind::Member => member == Some(agent_identity),
+    }
 }
 
 /// Machine-owned flow-step dispatch verdict (§18.9).

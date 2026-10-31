@@ -55,6 +55,14 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
     UnseatedEntryCause,
 };
+// Operator instructions: a record's slot effect and target kind, why a
+// member's delivery is blocked or deferred, why a write is refused, and the
+// target predicate the machine's helper states. The schema's own types, one
+// definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    InstructionEffect, InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
+    OperatorInstructionRefusal, operator_instruction_target_applies,
+};
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;

@@ -846,8 +846,61 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
 /// Project inherited rows as headers without their bodies, preserving
 /// order. A row the session activated itself reads as it is stored: its
 /// envelope, or the retired header of a body a compaction retired. A row
-/// whose bytes do not match its identity fails the projection.
+/// whose bytes do not match its identity fails the projection, and so does
+/// a transcript whose newest row of a key is the session's own and holds a
+/// retired body (only a torn document holds one: a compaction never retires
+/// a key's newest row): `messages` is the session's whole transcript.
 pub fn materialize_instruction_activation_messages(
+    session_id: &SessionId,
+    messages: &[Message],
+) -> Result<Vec<Message>, String> {
+    refuse_own_retired_activation_head(session_id, messages)?;
+    project_instruction_activation_rows(session_id, messages)
+}
+
+/// Refuse a transcript in which a key's newest instruction activation row
+/// is the session's own and holds a retired body. A compaction never
+/// retires a key's newest row, and a fork copies rows under their source's
+/// origin, so only a torn document holds one; the row validator cannot see
+/// whose a row is, so the projection that knows the session refuses it
+/// instead of letting the model read the header as the key's instruction.
+/// A key whose newest row a fork copied retired is history, and passes.
+pub(crate) fn refuse_own_retired_activation_head(
+    session_id: &SessionId,
+    messages: &[Message],
+) -> Result<(), String> {
+    let mut newest: BTreeMap<(&str, &str), &SystemMessage> = BTreeMap::new();
+    for message in messages {
+        if let Message::System(system) = message
+            && let Some(identity) = system.instruction_activation.as_ref()
+        {
+            newest.insert(
+                (
+                    identity.revision.namespace.as_str(),
+                    identity.revision.key.as_str(),
+                ),
+                system,
+            );
+        }
+    }
+    match newest.into_iter().find(|(_, system)| {
+        system.retired_instruction_body.is_some()
+            && system
+                .instruction_activation
+                .as_ref()
+                .is_some_and(|identity| &identity.origin_session_id == session_id)
+    }) {
+        Some(((namespace, key), _)) => Err(format!(
+            "the newest instruction activation row of key '{key}' in namespace '{namespace}' is the session's own and its body is retired; a compaction never retires a key's newest row"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// [`materialize_instruction_activation_messages`] without the whole-transcript
+/// check, for a projection of a prefix of the rows: the session's model
+/// boundary judges its whole transcript first.
+pub(crate) fn project_instruction_activation_rows(
     session_id: &SessionId,
     messages: &[Message],
 ) -> Result<Vec<Message>, String> {

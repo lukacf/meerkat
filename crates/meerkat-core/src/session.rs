@@ -171,8 +171,9 @@ pub use instruction_activation::{
     validate_instruction_activation_messages,
 };
 pub(crate) use instruction_activation::{
-    instruction_activation_offsets, instruction_activation_places, retired_activation_row,
-    superseded_activation_rows,
+    instruction_activation_offsets, instruction_activation_places,
+    project_instruction_activation_rows, refuse_own_retired_activation_head,
+    retired_activation_row, superseded_activation_rows,
 };
 pub(crate) use instruction_target::InstructionFold;
 pub use instruction_target::{
@@ -7042,7 +7043,10 @@ impl Session {
     /// # Errors
     ///
     /// [`ModelBoundaryProjectionError`] when a row does not hold the bytes
-    /// its typed identity names: the projection fails closed.
+    /// its typed identity names, or when a key's newest instruction
+    /// activation row is the session's own and holds a retired body (a torn
+    /// document: a compaction never retires a key's newest row): the
+    /// projection fails closed.
     pub fn messages_for_model_boundary(
         &self,
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
@@ -7091,11 +7095,23 @@ impl Session {
         );
         let forked = crate::fork_notice::project_fork_rows(self.id(), messages, copied.as_ref());
         let messages = forked.as_deref().unwrap_or(messages);
-        let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
-        let mut projected = materialize_instruction_activation_messages(self.id(), &prompts)
-            .map_err(|reason| ModelBoundaryProjectionError {
+        // A key whose newest activation row is the session's own keeps that
+        // row's body; a torn document that retired it fails closed. The
+        // whole transcript is judged, not `messages`: a prefix may end
+        // before the row that superseded a retired one.
+        refuse_own_retired_activation_head(self.id(), self.messages()).map_err(|reason| {
+            ModelBoundaryProjectionError {
                 session_id: self.id().clone(),
                 reason,
+            }
+        })?;
+        let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
+        let mut projected =
+            project_instruction_activation_rows(self.id(), &prompts).map_err(|reason| {
+                ModelBoundaryProjectionError {
+                    session_id: self.id().clone(),
+                    reason,
+                }
             })?;
         // Operator-instruction entries a fork copied read as history in the
         // child.

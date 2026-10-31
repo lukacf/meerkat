@@ -1253,17 +1253,33 @@ pub(crate) fn retired_session(
 /// destroy's) records for the journal read: the session its `MemberRetired`
 /// journal effect names (`session_id`, none for a peer-only member), and the
 /// cause and the identity entry read from `state`, MobMachine's state before
-/// the step, which may end the entry. No rotation ended it.
+/// the step, which may end the entry. The cause and the entry are the
+/// incarnation's only while the identity is bound to it
+/// (`agent_runtime_id`): the end of a stale runtime, one its identity is no
+/// longer bound to (MobMachine's stale-runtime terminal arms, which touch no
+/// entry state), names neither. No rotation ended it.
 pub(crate) fn plain_retirement_facts(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
     agent_runtime_id: &crate::ids::AgentRuntimeId,
     session_id: Option<&mob_dsl::SessionId>,
 ) -> Result<crate::event::MemberRetiredFacts, MobError> {
+    let bound = state
+        .identity_to_runtime
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+        == Some(&mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id));
+    let (cause, identity_entry) = if bound {
+        (
+            stored_retirement_cause(state, identity),
+            machine_entry_origin(state, identity),
+        )
+    } else {
+        (None, None)
+    };
     Ok(crate::event::MemberRetiredFacts::new(
         retired_session(session_id)?,
-        stored_retirement_cause(state, identity),
-        machine_entry_origin(state, identity),
+        cause,
+        identity_entry,
         None,
     ))
 }

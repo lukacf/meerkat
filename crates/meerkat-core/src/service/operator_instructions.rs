@@ -1,19 +1,21 @@
 //! Operator-instruction extension of the session service.
 //!
-//! A session-owned target is written slot by slot by the session's own host;
-//! a mob-owned one is a whole member snapshot a mob delivers by generation.
-//! Either is recorded in the session document only: a live session's through
-//! its actor, a dormant session's store-only under its hosting claim, which
-//! wakes and registers nothing. The next fresh run start applies the pending
-//! changes. Services without a durable session document refuse with
-//! [`SessionInstructionError::DurabilityUnavailable`].
+//! A session-owned target is written slot by slot by the session's own host
+//! through this extension. A mob-owned one is a whole member snapshot its mob
+//! delivers by generation; only the mob runtime records or releases it,
+//! through its sealed member delivery, never through this extension or any
+//! host or agent surface. Either is recorded in the session document only: a
+//! live session's through its actor, a dormant session's store-only under its
+//! hosting claim, which wakes and registers nothing. The next fresh run start
+//! applies the pending changes. Services without a durable session document
+//! refuse with [`SessionInstructionError::DurabilityUnavailable`].
 
 use super::{SessionError, SessionService};
 use crate::types::SessionId;
 use crate::{
-    EffectiveOperatorInstructions, InstructionRecordReceipt, InstructionSetErrorCode,
-    InstructionStateError, InstructionTargetRecord, InstructionWriteError,
-    SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
+    EffectiveOperatorInstructions, InstructionSetErrorCode, InstructionStateError,
+    InstructionWriteError, SessionInstructionReceipt, SessionInstructionState,
+    SessionInstructionWrite,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -58,9 +60,12 @@ pub struct SessionInstructionRead {
     pub effective: EffectiveOperatorInstructions,
 }
 
-/// Operator-instruction extension for [`SessionService`].
+/// Operator-instruction extension for [`SessionService`]: a session's own
+/// host writes its session-owned target and reads the committed state. A
+/// mob member's snapshot is not written here: the mob runtime records it
+/// through its sealed member delivery.
 ///
-/// The two writes take the service by `Arc`, as
+/// The write takes the service by `Arc`, as
 /// [`SessionService::tool_application`] does, so an implementation can hand
 /// a write to a task it owns: a caller that stops waiting must not leave a
 /// write applied to a live session and missing from its session document.
@@ -76,19 +81,6 @@ pub trait SessionServiceInstructionExt: SessionService {
         write: SessionInstructionWrite,
     ) -> Result<SessionInstructionReceipt, SessionInstructionError> {
         let _ = (id, write);
-        Err(SessionInstructionError::DurabilityUnavailable)
-    }
-
-    /// Record a mob member's whole snapshot in the member session's target,
-    /// for mob delivery only (never a host or agent surface). A generation
-    /// the session already recorded answers "already recorded" and writes
-    /// nothing.
-    async fn record_instruction_target(
-        self: Arc<Self>,
-        id: &SessionId,
-        record: InstructionTargetRecord,
-    ) -> Result<InstructionRecordReceipt, SessionInstructionError> {
-        let _ = (id, record);
         Err(SessionInstructionError::DurabilityUnavailable)
     }
 

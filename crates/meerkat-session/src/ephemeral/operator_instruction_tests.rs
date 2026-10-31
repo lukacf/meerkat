@@ -2,7 +2,9 @@
 //! arrives while a turn runs waits for the turn (it never lands inside it),
 //! and the next fresh run start appends the one entry before the run's own
 //! input. An ephemeral service keeps no durable session document, so its
-//! public operator-instruction surface refuses `durability_unavailable`.
+//! public operator-instruction surface refuses `durability_unavailable`
+//! (a mob member's snapshot is recorded only by the mob runtime's sealed
+//! delivery, not through this surface).
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -22,9 +24,8 @@ use meerkat_core::service::{
 use meerkat_core::types::{InstructionKey, InstructionNamespace, Message};
 use meerkat_core::{
     InstructionLowering, InstructionRevision, InstructionRunStart, InstructionSetErrorCode,
-    InstructionSlot, InstructionTargetRecord, InstructionTargetRecordSlot,
-    InstructionWriteDisposition, RunStartInstructionOutcome, SessionInstructionChange,
-    SessionInstructionWrite, SessionLlmIdentity,
+    InstructionSlot, InstructionWriteDisposition, RunStartInstructionOutcome,
+    SessionInstructionChange, SessionInstructionWrite, SessionLlmIdentity,
 };
 
 /// What every run of the probe agent saw as its request, and the gate a run
@@ -492,22 +493,6 @@ async fn ephemeral_service_refuses_durability_unavailable() {
         Some(InstructionSetErrorCode::DurabilityUnavailable)
     );
 
-    let record = InstructionTargetRecord {
-        mob_id: "mob-1".to_string(),
-        agent_identity: "worker".to_string(),
-        generation: 1,
-        slots: vec![InstructionTargetRecordSlot {
-            slot: write_tone().slot,
-            revision: InstructionRevision::new(1).expect("revision"),
-            body: Some("Be brief.".to_string()),
-        }],
-    };
-    assert!(matches!(
-        Arc::clone(&service)
-            .record_instruction_target(&id, record)
-            .await,
-        Err(SessionInstructionError::DurabilityUnavailable)
-    ));
     assert!(matches!(
         service.read_session_instructions(&id).await,
         Err(SessionInstructionError::DurabilityUnavailable)

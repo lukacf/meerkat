@@ -37,6 +37,13 @@ pub const INSTRUCTION_ENTRY_RENDER_VERSION_V1: u16 = 1;
 pub const MAX_OPERATOR_INSTRUCTION_SLOTS: usize = 64;
 /// The most UTF-8 bytes the Active bodies of one owner sum to.
 pub const MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES: usize = 1024 * 1024;
+/// The stored mob event schema version at which a mob journals its
+/// operator-instruction events: the records it committed and the member
+/// targets its members' sessions recorded. Every other mob event stays at
+/// the current stored version, so a mob that never records an operator
+/// instruction writes nothing at this version; a release before operator
+/// instructions refuses a mob journal that holds one.
+pub const OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION: u32 = 10;
 
 const ENTRY_HEADER_V1: &str = "[meerkat-operator-instructions-v1]";
 const INHERITED_ENTRY_HEADER_V1: &str = "[meerkat-inherited-operator-instructions-v1]";
@@ -59,6 +66,37 @@ pub struct InstructionSlot {
 impl std::fmt::Display for InstructionSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.namespace, self.key)
+    }
+}
+
+impl InstructionSlot {
+    /// The canonical key a machine holds the slot under: the JSON array
+    /// `[namespace, key]`. The session document and a mob's records use the
+    /// same bytes.
+    #[must_use]
+    pub fn machine_key(&self) -> String {
+        serde_json::Value::Array(vec![
+            serde_json::Value::String(self.namespace.as_str().to_owned()),
+            serde_json::Value::String(self.key.as_str().to_owned()),
+        ])
+        .to_string()
+    }
+
+    /// The slot a machine key ([`Self::machine_key`]) names. A key that is
+    /// not a JSON array of a valid namespace and key is malformed state.
+    pub fn from_machine_key(key: &str) -> Result<Self, InstructionStateError> {
+        let malformed = |detail: String| {
+            InstructionStateError::MalformedState(format!(
+                "the session-document authority holds the slot key {key}, which is not a slot: {detail}"
+            ))
+        };
+        let (namespace, slot_key): (String, String) =
+            serde_json::from_str(key).map_err(|error| malformed(error.to_string()))?;
+        Ok(Self {
+            namespace: InstructionNamespace::new(namespace)
+                .map_err(|error| malformed(error.to_string()))?,
+            key: InstructionKey::new(slot_key).map_err(|error| malformed(error.to_string()))?,
+        })
     }
 }
 

@@ -591,6 +591,19 @@ impl SessionAgent for FactoryAgent {
             .map_err(meerkat_core::service::SessionInstructionError::from)
     }
 
+    fn release_instruction_target_control(
+        &mut self,
+        mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .release_instruction_target(mob_id)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
     fn apply_run_start_operator_instructions(
         &mut self,
         run_start: meerkat_core::InstructionRunStart,

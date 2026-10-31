@@ -576,28 +576,13 @@ impl InstructionFold {
 const SESSION_DOCUMENT_INSTRUCTION_KEY: &str = "operator_instructions";
 
 /// The canonical key the session-document authority holds a slot under:
-/// the JSON array `[namespace, key]`.
+/// the JSON array `[namespace, key]` ([`InstructionSlot::machine_key`]).
 fn slot_machine_key(slot: &InstructionSlot) -> String {
-    serde_json::Value::Array(vec![
-        serde_json::Value::String(slot.namespace.as_str().to_owned()),
-        serde_json::Value::String(slot.key.as_str().to_owned()),
-    ])
-    .to_string()
+    slot.machine_key()
 }
 
 fn slot_from_machine_key(key: &str) -> Result<InstructionSlot, InstructionStateError> {
-    let malformed = |detail: String| {
-        InstructionStateError::MalformedState(format!(
-            "the session-document authority holds the slot key {key}, which is not a slot: {detail}"
-        ))
-    };
-    let (namespace, slot_key): (String, String) =
-        serde_json::from_str(key).map_err(|error| malformed(error.to_string()))?;
-    Ok(InstructionSlot {
-        namespace: InstructionNamespace::new(namespace)
-            .map_err(|error| malformed(error.to_string()))?,
-        key: InstructionKey::new(slot_key).map_err(|error| malformed(error.to_string()))?,
-    })
+    InstructionSlot::from_machine_key(key)
 }
 
 /// One slot set as the session-document authority holds it: the revision,

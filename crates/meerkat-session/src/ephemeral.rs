@@ -2575,6 +2575,19 @@ enum SessionCommand {
             >,
         >,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    ReleaseInstructionTargetControl {
+        mob_id: String,
+        reply_tx: oneshot::Sender<
+            Result<
+                Result<
+                    meerkat_core::InstructionReleaseDisposition,
+                    meerkat_core::service::SessionInstructionError,
+                >,
+                AgentError,
+            >,
+        >,
+    },
     PrepareHeadCanonicalRuntimeBoundary {
         request: HeadCanonicalRuntimeBoundaryPrepareRequest,
         reply_tx: oneshot::Sender<Result<PreparedHeadCanonicalRuntimeBoundary, AgentError>>,
@@ -4248,6 +4261,19 @@ pub trait SessionAgent: Send {
         _record: meerkat_core::InstructionTargetRecord,
     ) -> Result<
         meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Release a mob member session's operator-instruction target on behalf
+    /// of the mob that owns it, in the actor-owned canonical Session
+    /// document: the target empties and is unowned.
+    fn release_instruction_target_control(
+        &mut self,
+        _mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
         meerkat_core::service::SessionInstructionError,
     > {
         Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
@@ -7747,6 +7773,29 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)?
     }
 
+    /// Send a mob's release of its member session's operator-instruction
+    /// target to the live actor.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn release_instruction_target_control(
+        &self,
+        id: &SessionId,
+        mob_id: String,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let command_tx = self.session_command_tx(id).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ReleaseInstructionTargetControl { mob_id, reply_tx })
+            .await
+            .map_err(|_| session_task_exited())?;
+        reply_rx
+            .await
+            .map_err(|_| session_task_dropped_reply())?
+            .map_err(SessionError::Agent)?
+    }
+
     pub async fn prepare_head_canonical_runtime_boundary(
         &self,
         id: &SessionId,
@@ -10967,6 +11016,10 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::RecordInstructionTargetControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::ReleaseInstructionTargetControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
             SessionCommand::PrepareHeadCanonicalRuntimeBoundary { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
@@ -12933,6 +12986,14 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::RecordInstructionTargetControl { record, reply_tx } => {
                 let result = match control.archive_snapshot_gate.enter_apply() {
                     Ok(_gate) => Ok(agent.record_instruction_target_control(record)),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::ReleaseInstructionTargetControl { mob_id, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => Ok(agent.release_instruction_target_control(&mob_id)),
                     Err(error) => Err(AgentError::InternalError(error.to_string())),
                 };
                 let _ = reply_tx.send(result);

@@ -180,6 +180,14 @@ pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
 /// runtime store, `runtime.sqlite3`). A host-store realm keeps its documents
 /// in the host's store, not on disk, so the disk sweep cannot list them.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
+/// Mob journals that hold operator-instruction events (the records a mob
+/// committed and the member targets its members' sessions recorded),
+/// written at mob event schema
+/// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`]. A release
+/// before operator instructions refuses such a mob typed until a
+/// roll-forward; an operator lists them before a rollback. Informational.
+/// The census reads the per-mob databases on disk (`mobs/<name>.db`).
+pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-mob-events";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
 /// implying the unmeasured bytes are healthy.
@@ -858,6 +866,7 @@ fn diagnose_realm_dir(
             entry
                 .databases
                 .push(inspect_database(&db_path, &["mob"], realm, diagnosis));
+            census_operator_instruction_mob_events(&db_path, realm, diagnosis);
         }
     }
 
@@ -1856,6 +1865,86 @@ struct EnvelopeVersionLens {
 fn document_is_at_envelope(document: JsonColumnBytes, envelope: u32) -> bool {
     serde_json::from_slice::<EnvelopeVersionLens>(&document.into_bytes())
         .is_ok_and(|lens| lens.version == envelope)
+}
+
+/// Stored mob event lens: its schema version only.
+#[derive(Deserialize)]
+struct StoredMobEventVersionLens {
+    schema_version: u64,
+}
+
+/// How many events of one mob database are written at mob event schema
+/// `schema_version`. An event that does not decode as a stored mob event is
+/// not counted; the mob store's own reads report it.
+fn mob_events_at_schema(conn: &Connection, schema_version: u32) -> Result<u64, rusqlite::Error> {
+    if !table_exists(conn, "mob_events")? {
+        return Ok(0);
+    }
+    let mut statement = conn.prepare("SELECT event_json FROM mob_events ORDER BY cursor")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0_u64;
+    while let Some(row) = rows.next()? {
+        let event: JsonColumnBytes = row.get(0)?;
+        if serde_json::from_slice::<StoredMobEventVersionLens>(&event.into_bytes())
+            .is_ok_and(|lens| lens.schema_version == u64::from(schema_version))
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Census of one mob database's operator-instruction events: a mob that
+/// recorded operator instructions journals them at
+/// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`], which a
+/// release before operator instructions refuses.
+fn census_operator_instruction_mob_events(
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let schema_version = meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION;
+    // No schema preflight: doctor must open future files to report them
+    // (module safety contract). A file that does not open is already
+    // reported by inspect_database.
+    let Ok(conn) = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+    else {
+        return;
+    };
+    let count = match mob_events_at_schema(&conn, schema_version) {
+        Ok(count) => count,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!(
+                        "could not count the mob events at the operator-instruction mob event \
+                         schema {schema_version}: {error}"
+                    ),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    if count == 0 {
+        return;
+    }
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS,
+            format!(
+                "the mob recorded operator instructions: {count} event(s) at mob event schema \
+                 {schema_version}; a release before operator instructions refuses the mob typed \
+                 until a roll-forward"
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
 }
 
 /// The sessions of one database written at the operator-instruction
@@ -4964,6 +5053,64 @@ mod tests {
         assert!(
             listed.message.contains("host-store realms"),
             "the finding says which realm kinds the census covers: {}",
+            listed.message
+        );
+    }
+
+    /// Before a rollback an operator needs the mobs a release without
+    /// operator instructions refuses: the doctor counts the events each mob
+    /// journal holds at the operator-instruction mob event schema, and says
+    /// nothing about a mob that never recorded one.
+    #[tokio::test]
+    async fn mob_journals_with_operator_instruction_events_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "mob-events", "sqlite");
+        let mobs = realm_dir.join("mobs");
+        std::fs::create_dir_all(&mobs).unwrap();
+        let instructed = mobs.join("instructed.db");
+        let plain = mobs.join("plain.db");
+        let write_events = |path: &Path, versions: &[u32]| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mob_events (
+                    cursor INTEGER PRIMARY KEY, mob_id TEXT, event_json BLOB NOT NULL)",
+            )
+            .unwrap();
+            for (index, version) in versions.iter().enumerate() {
+                let stored = format!(r#"{{"schema_version":{version},"event":{{}}}}"#);
+                conn.execute(
+                    "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, 'mob', ?2)",
+                    rusqlite::params![index as i64 + 1, stored.as_bytes()],
+                )
+                .unwrap();
+            }
+        };
+        let schema = meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION;
+        write_events(&instructed, &[9, schema]);
+        write_events(&plain, &[9, 9]);
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.code == FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed.len(),
+            1,
+            "only the mob with such events: {diagnosis:?}"
+        );
+        let listed = listed[0];
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("mob-events"));
+        assert_eq!(listed.path.as_deref(), Some(instructed.as_path()));
+        assert!(
+            listed
+                .message
+                .contains(&format!("1 event(s) at mob event schema {schema}")),
+            "{}",
             listed.message
         );
     }

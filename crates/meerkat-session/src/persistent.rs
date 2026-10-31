@@ -19210,16 +19210,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
-/// One operator-instruction control: a session-owned write or a mob record.
+/// One operator-instruction control: a session-owned write, a mob record,
+/// or a mob's release of its member session's target.
 enum OperatorInstructionControl {
     Set(meerkat_core::SessionInstructionWrite),
     Record(meerkat_core::InstructionTargetRecord),
+    Release(String),
 }
 
 /// The receipt of one operator-instruction control.
 enum OperatorInstructionReceipt {
     Set(meerkat_core::SessionInstructionReceipt),
     Record(meerkat_core::InstructionRecordReceipt),
+    Release(meerkat_core::InstructionReleaseDisposition),
 }
 
 impl OperatorInstructionReceipt {
@@ -19232,6 +19235,9 @@ impl OperatorInstructionReceipt {
             }
             Self::Record(receipt) => {
                 receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded
+            }
+            Self::Release(disposition) => {
+                *disposition == meerkat_core::InstructionReleaseDisposition::Released
             }
         }
     }
@@ -19250,6 +19256,10 @@ impl OperatorInstructionControl {
             Self::Record(record) => session
                 .record_instruction_target(record)
                 .map(OperatorInstructionReceipt::Record)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+            Self::Release(mob_id) => session
+                .release_instruction_target(&mob_id)
+                .map(OperatorInstructionReceipt::Release)
                 .map_err(meerkat_core::service::SessionInstructionError::from),
         }
     }
@@ -19383,6 +19393,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .record_instruction_target_control(id, record)
                 .await
                 .map(OperatorInstructionReceipt::Record)?,
+            OperatorInstructionControl::Release(mob_id) => self
+                .inner
+                .release_instruction_target_control(id, mob_id)
+                .await
+                .map(OperatorInstructionReceipt::Release)?,
         };
         if !receipt.changed() {
             return Ok(receipt);
@@ -19433,6 +19448,77 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Record a mob member's whole operator-instruction snapshot in the
+    /// member session's target. The mob runtime's member delivery only,
+    /// reached through its sealed delivery on the mob session service; never
+    /// a host or agent surface. A generation the session already recorded
+    /// answers "already recorded" and writes nothing; another mob's target
+    /// is refused until that mob releases it. A live session records it
+    /// through its actor under the turn-finalization boundary, a dormant one
+    /// store-only under its hosting claim; neither wakes the session.
+    #[doc(hidden)]
+    pub async fn record_mob_instruction_target(
+        self: &Arc<Self>,
+        id: &SessionId,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(id, OperatorInstructionControl::Record(record))
+            .await?
+        {
+            OperatorInstructionReceipt::Record(receipt) => Ok(receipt),
+            OperatorInstructionReceipt::Set(_) | OperatorInstructionReceipt::Release(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction record answered with another control's receipt"
+                        .to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    /// Release a mob member session's operator-instruction target on behalf
+    /// of `mob_id`, the mob that owns it (its member retires and the host
+    /// keeps the session): the target empties and is unowned, so another
+    /// owner may bind it, and the session's next fresh run start revokes
+    /// what the mob had in effect. The mob runtime's member delivery only,
+    /// reached through its sealed release on the mob session service. A
+    /// target no owner holds answers "already unowned" and writes nothing;
+    /// another owner's target is refused. A live session releases it through
+    /// its actor under the turn-finalization boundary, a dormant one
+    /// store-only under its hosting claim; neither wakes the session.
+    #[doc(hidden)]
+    pub async fn release_mob_instruction_target(
+        self: &Arc<Self>,
+        id: &SessionId,
+        mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(
+                id,
+                OperatorInstructionControl::Release(mob_id.to_owned()),
+            )
+            .await?
+        {
+            OperatorInstructionReceipt::Release(disposition) => Ok(disposition),
+            OperatorInstructionReceipt::Set(_) | OperatorInstructionReceipt::Record(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction release answered with another control's receipt"
+                        .to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInstructionExt
     for PersistentSessionService<B>
@@ -19450,31 +19536,10 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInst
             .await?
         {
             OperatorInstructionReceipt::Set(receipt) => Ok(receipt),
-            OperatorInstructionReceipt::Record(_) => {
+            OperatorInstructionReceipt::Record(_) | OperatorInstructionReceipt::Release(_) => {
                 Err(SessionError::Agent(AgentError::InternalError(
-                    "an operator-instruction write answered with a record receipt".to_string(),
-                ))
-                .into())
-            }
-        }
-    }
-
-    async fn record_instruction_target(
-        self: Arc<Self>,
-        id: &SessionId,
-        record: meerkat_core::InstructionTargetRecord,
-    ) -> Result<
-        meerkat_core::InstructionRecordReceipt,
-        meerkat_core::service::SessionInstructionError,
-    > {
-        match self
-            .operator_instruction_control(id, OperatorInstructionControl::Record(record))
-            .await?
-        {
-            OperatorInstructionReceipt::Record(receipt) => Ok(receipt),
-            OperatorInstructionReceipt::Set(_) => {
-                Err(SessionError::Agent(AgentError::InternalError(
-                    "an operator-instruction record answered with a write receipt".to_string(),
+                    "an operator-instruction write answered with another control's receipt"
+                        .to_string(),
                 ))
                 .into())
             }
@@ -26844,6 +26909,20 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .record_instruction_target(record)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn release_instruction_target_control(
+            &mut self,
+            mob_id: &str,
+        ) -> Result<
+            meerkat_core::InstructionReleaseDisposition,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_instruction_target(mob_id)
                 .map_err(meerkat_core::service::SessionInstructionError::from)
         }
 
@@ -56900,16 +56979,18 @@ mod tests {
     }
 
     /// Rows for operator instructions through the persistent session service.
-    /// A write or a record of a live session goes through its actor and the
-    /// actor boundary commit; a dormant session's is a store-only write under
-    /// the session's hosting claim, which wakes nothing and registers nothing.
+    /// A write, a record or a release of a live session goes through its actor
+    /// and the actor boundary commit; a dormant session's is a store-only write
+    /// under the session's hosting claim, which wakes nothing and registers
+    /// nothing.
     mod operator_instruction_service {
         use super::*;
         use meerkat_core::service::{SessionInstructionError, SessionServiceInstructionExt};
         use meerkat_core::{
-            InstructionRecordDisposition, InstructionRevision, InstructionSetErrorCode,
-            InstructionSlot, InstructionTargetRecord, InstructionTargetRecordSlot,
-            InstructionWriteDisposition, SessionInstructionChange, SessionInstructionWrite,
+            InstructionRecordDisposition, InstructionReleaseDisposition, InstructionRevision,
+            InstructionSetErrorCode, InstructionSlot, InstructionTargetOwner,
+            InstructionTargetRecord, InstructionTargetRecordSlot, InstructionWriteDisposition,
+            SessionInstructionChange, SessionInstructionWrite,
         };
 
         fn slot(key: &str) -> InstructionSlot {
@@ -56931,8 +57012,13 @@ mod tests {
         }
 
         fn record(generation: u64) -> InstructionTargetRecord {
+            record_for("mob-1", generation)
+        }
+
+        /// A member snapshot `mob` delivers at `generation`.
+        fn record_for(mob: &str, generation: u64) -> InstructionTargetRecord {
             InstructionTargetRecord {
-                mob_id: "mob-1".to_string(),
+                mob_id: mob.to_string(),
                 agent_identity: "worker".to_string(),
                 generation,
                 slots: vec![InstructionTargetRecordSlot {
@@ -57050,8 +57136,8 @@ mod tests {
                 .await
                 .expect("create_session should succeed");
             let id = created.session_id;
-            let receipt = Arc::clone(&service)
-                .record_instruction_target(&id, record(1))
+            let receipt = service
+                .record_mob_instruction_target(&id, record(1))
                 .await
                 .expect("a mob records the member's target");
             assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
@@ -57076,8 +57162,8 @@ mod tests {
                     .await
                     .expect("runtime state load");
 
-            let receipt = Arc::clone(&service)
-                .record_instruction_target(&id, record(1))
+            let receipt = service
+                .record_mob_instruction_target(&id, record(1))
                 .await
                 .expect("a dormant session records the target store-only");
             assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
@@ -57141,8 +57227,8 @@ mod tests {
             let (service, _builds) = counting_service(gated.clone());
             let service = Arc::new(service);
             let id = dormant_session(service.as_ref()).await;
-            let first = Arc::clone(&service)
-                .record_instruction_target(&id, record(1))
+            let first = service
+                .record_mob_instruction_target(&id, record(1))
                 .await
                 .expect("the first delivery records");
             assert_eq!(first.disposition, InstructionRecordDisposition::Recorded);
@@ -57150,8 +57236,8 @@ mod tests {
             // From here on every session snapshot commit fails: a repeated
             // delivery that tried to write would fail with it.
             gated.set_fail_snapshot_commits(true);
-            let repeated = Arc::clone(&service)
-                .record_instruction_target(&id, record(1))
+            let repeated = service
+                .record_mob_instruction_target(&id, record(1))
                 .await
                 .expect("a repeated delivery of the same (slot, revision) writes nothing");
             assert_eq!(
@@ -57159,8 +57245,8 @@ mod tests {
                 InstructionRecordDisposition::AlreadyRecorded
             );
             assert_eq!(repeated.target_generation, 1);
-            let refused = Arc::clone(&service)
-                .record_instruction_target(&id, record(2))
+            let refused = service
+                .record_mob_instruction_target(&id, record(2))
                 .await
                 .expect_err("a new generation does write, and the failing store refuses it");
             assert!(
@@ -57186,7 +57272,11 @@ mod tests {
             let blocked = tokio::spawn({
                 let service = Arc::clone(&service);
                 let held = held.clone();
-                async move { service.record_instruction_target(&held, record(1)).await }
+                async move {
+                    service
+                        .record_mob_instruction_target(&held, record(1))
+                        .await
+                }
             });
             gated.await_session_boundary_commit_entered().await;
             // Later commits pass straight through; the stopped write waits
@@ -57195,7 +57285,7 @@ mod tests {
 
             let other = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                Arc::clone(&service).record_instruction_target(&free, record(1)),
+                service.record_mob_instruction_target(&free, record(1)),
             )
             .await
             .expect("another session's record does not wait for a store write in flight")
@@ -57239,7 +57329,7 @@ mod tests {
             // applied the record and the session document does not hold it.
             gated.set_pause_session_boundary_commit(true);
             let caller = Arc::clone(&service);
-            let mut cancelled = Box::pin(caller.record_instruction_target(&id, record(1)));
+            let mut cancelled = Box::pin(caller.record_mob_instruction_target(&id, record(1)));
             tokio::select! {
                 outcome = &mut cancelled => unreachable!(
                     "the record cannot complete while its commit is held: {outcome:?}"
@@ -57252,7 +57342,7 @@ mod tests {
 
             let retry = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                Arc::clone(&service).record_instruction_target(&id, record(1)),
+                service.record_mob_instruction_target(&id, record(1)),
             )
             .await
             .expect("the retry is not left waiting")
@@ -57309,7 +57399,7 @@ mod tests {
             let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
             let (service, builds) = counting_service(runtime_store);
             let error = Arc::new(service)
-                .record_instruction_target(&SessionId::new(), record(1))
+                .record_mob_instruction_target(&SessionId::new(), record(1))
                 .await
                 .expect_err("no session to record in");
             assert!(
@@ -57320,6 +57410,189 @@ mod tests {
                 "{error:?}"
             );
             assert_eq!(builds.load(Ordering::SeqCst), 0);
+        }
+
+        /// The committed document's target: its owner, generation and slot
+        /// count.
+        async fn committed_target<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> (InstructionTargetOwner, u64, usize) {
+            let state = service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .expect("the committed document holds the target state");
+            (
+                state.owner().clone(),
+                state.target_generation(),
+                state.slots().len(),
+            )
+        }
+
+        /// A live session's release goes through its actor and the actor
+        /// boundary commit: the committed target is empty and unowned.
+        #[tokio::test]
+        async fn a_live_session_release_empties_and_unowns_its_target() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("the mob records its member's target");
+            let released = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("the owning mob releases the target");
+            assert_eq!(released, InstructionReleaseDisposition::Released);
+            assert!(service.has_live_session(&id).await.unwrap());
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(owner, InstructionTargetOwner::Unowned),
+                "the released target is unowned: {owner:?}"
+            );
+            assert_eq!(generation, 0, "an unowned target starts over");
+            assert_eq!(slots, 0, "the released target is empty");
+        }
+
+        /// A dormant session's release is a store-only write: it builds no
+        /// agent and registers nothing.
+        #[tokio::test]
+        async fn a_dormant_session_release_is_store_only_and_wakes_nothing() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(Arc::clone(&runtime_store));
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("a dormant session records the target store-only");
+            let builds_before = builds.load(Ordering::SeqCst);
+            let runtime_id =
+                PersistentSessionService::<CountingBuilder>::runtime_id_for_session(&id);
+            let runtime_state_before =
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load");
+
+            let released = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("a dormant session releases the target store-only");
+            assert_eq!(released, InstructionReleaseDisposition::Released);
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "releasing builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            assert_eq!(
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load"),
+                runtime_state_before,
+                "releasing registers nothing with the runtime"
+            );
+            let (owner, _, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(matches!(owner, InstructionTargetOwner::Unowned));
+            assert_eq!(slots, 0);
+        }
+
+        /// A repeated release finds the target unowned and writes nothing.
+        #[tokio::test]
+        async fn a_repeated_release_answers_already_unowned_and_writes_nothing() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("the mob records its member's target");
+            let first = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("the first release writes");
+            assert_eq!(first, InstructionReleaseDisposition::Released);
+
+            // From here on every session snapshot commit fails: a repeated
+            // release that tried to write would fail with it.
+            gated.set_fail_snapshot_commits(true);
+            let repeated = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("a repeated release writes nothing");
+            assert_eq!(repeated, InstructionReleaseDisposition::AlreadyUnowned);
+        }
+
+        /// A mob releases only the target it owns: another mob's release is
+        /// refused, and another mob's record is refused until the owning mob
+        /// releases the target; then the other mob binds it.
+        #[tokio::test]
+        async fn only_the_owning_mob_releases_and_another_mob_binds_after_it() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record_for("mob-a", 1))
+                .await
+                .expect("mob A records its member's target");
+
+            let refused = service
+                .record_mob_instruction_target(&id, record_for("mob-b", 5))
+                .await
+                .expect_err("mob B's record into mob A's target is refused");
+            assert_eq!(
+                refused.code(),
+                Some(InstructionSetErrorCode::OwnedByOtherMob)
+            );
+            let refused = service
+                .release_mob_instruction_target(&id, "mob-b")
+                .await
+                .expect_err("mob B cannot release mob A's target");
+            assert_eq!(
+                refused.code(),
+                Some(InstructionSetErrorCode::OwnedByOtherMob)
+            );
+            let (owner, generation, _) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(&owner, InstructionTargetOwner::Mob { mob_id, .. } if mob_id == "mob-a"),
+                "mob A still owns the target: {owner:?}"
+            );
+            assert_eq!(generation, 1);
+
+            assert_eq!(
+                service
+                    .release_mob_instruction_target(&id, "mob-a")
+                    .await
+                    .expect("mob A releases its target"),
+                InstructionReleaseDisposition::Released
+            );
+            let bound = service
+                .record_mob_instruction_target(&id, record_for("mob-b", 1))
+                .await
+                .expect("after the release mob B binds the target");
+            assert_eq!(bound.disposition, InstructionRecordDisposition::Recorded);
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(&owner, InstructionTargetOwner::Mob { mob_id, .. } if mob_id == "mob-b"),
+                "mob B owns the target: {owner:?}"
+            );
+            assert_eq!(generation, 1);
+            assert_eq!(slots, 1);
         }
     }
 }

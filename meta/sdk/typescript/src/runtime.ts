@@ -37,6 +37,8 @@ import {
   MEMBER_RELOAD_REQUIRED_KIND,
   FLOW_ROLE_TARGETS_REFUSED_KIND,
   FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
+  SYSTEM_ROW_PRUNE_REFUSED_KIND,
+  TRANSCRIPT_REVISION_CONFLICT_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -49,6 +51,8 @@ import {
   FlowRoleTargetsRefusedError,
   FlowRunIdempotencyConflictError,
   MemberReloadRequiredError,
+  SystemRowPruneRefusedError,
+  TranscriptRevisionConflictError,
   ConsoleTimelineReplayUnavailableError,
   RegisteredSpecChangedError,
   StaleScopeError,
@@ -969,6 +973,22 @@ function rpcErrorFromPayload(
     (err.data as Record<string, unknown>).kind === FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND
   ) {
     return new FlowRunIdempotencyConflictError(message, rid, method, err.data);
+  }
+  if (
+    code === -32602 &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).kind === SYSTEM_ROW_PRUNE_REFUSED_KIND
+  ) {
+    return new SystemRowPruneRefusedError(message, rid, method, err.data);
+  }
+  if (
+    code === -32602 &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).kind === TRANSCRIPT_REVISION_CONFLICT_KIND
+  ) {
+    return new TranscriptRevisionConflictError(message, rid, method, err.data);
   }
   if (code === WORKGRAPH_UNAVAILABLE_CODE) {
     return new WorkGraphUnavailableError(message, rid, method, err.data);
@@ -2559,6 +2579,57 @@ export class MetaRuntime {
       if (value !== undefined) params[name] = value;
     }
     const raw = await this._rpc("meta/member_instruction_activations", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Remove named ordinary System rows from a member's current session.
+   *
+   * Host-only. `remove` names each row as a member history read showed it:
+   * `{ index, content_sha256 }`, its 0-based message index and
+   * `sha256:<64 lowercase hex>` over the row's content as UTF-8 text. Only
+   * ordinary System rows are removed; the rows after a removed one move up.
+   * With `retireSupersededActivationBodies` the same commit also retires the
+   * body of every superseded instruction activation (a key's newest body is
+   * never retired). `expectedParentRevision` is an optional extra
+   * compare-and-swap; the per-row digest is the main guard. `note` is the
+   * audit note (the commit's reason kind is always `system-row-prune`). The
+   * member is not woken and no model is called.
+   *
+   * Resolves to `{ identity, session_id, pruned, removed_rows,
+   * retired_bodies, message_count, revision }` (plus `parent_revision` when
+   * `pruned`); `pruned` is `false` when nothing was named and there was
+   * nothing to retire. A refused row rejects with
+   * {@link SystemRowPruneRefusedError} (`-32602`, with its `index` and
+   * `cause`) and a stale `expectedParentRevision` with
+   * {@link TranscriptRevisionConflictError} (`-32602`, with `expected` and
+   * `actual`), nothing written. Chaining calls on the returned `revision`
+   * fails whenever a turn ran in between: the per-row digest is the guard to
+   * rely on, and a conflict means read the history again. A member running a
+   * turn rejects with an RPC error `-32015`: retry when it is idle. A
+   * session Core holds rejects with `IdentityWakeHeldError` (its `kind` and
+   * `durableResumeHold` name the hold). Any other failure is an RPC error
+   * `-32000`, its message naming the cause (no current session, a member
+   * placed on another host, an archived session, a malformed document).
+   */
+  async pruneMemberSystemRows(
+    identity: string,
+    remove: ReadonlyArray<{ index: number; content_sha256: string }>,
+    options: {
+      retireSupersededActivationBodies?: boolean;
+      expectedParentRevision?: string;
+      note?: string;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { identity, remove: [...remove] };
+    if (options.retireSupersededActivationBodies) {
+      params.retire_superseded_activation_bodies = true;
+    }
+    if (options.expectedParentRevision !== undefined) {
+      params.expected_parent_revision = options.expectedParentRevision;
+    }
+    if (options.note !== undefined) params.note = options.note;
+    const raw = await this._rpc("meta/prune_member_system_rows", params);
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 

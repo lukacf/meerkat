@@ -39,6 +39,8 @@ from .errors import (
     MEMBER_RELOAD_REQUIRED_KIND,
     FLOW_ROLE_TARGETS_REFUSED_KIND,
     FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
+    SYSTEM_ROW_PRUNE_REFUSED_KIND,
+    TRANSCRIPT_REVISION_CONFLICT_KIND,
     WORKGRAPH_CONFLICT_CODE,
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
@@ -51,6 +53,8 @@ from .errors import (
     FlowRoleTargetsRefusedError,
     FlowRunIdempotencyConflictError,
     MemberReloadRequiredError,
+    SystemRowPruneRefusedError,
+    TranscriptRevisionConflictError,
     CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE,
     ConsoleTimelineReplayUnavailableError,
     RegisteredSpecChangedError,
@@ -448,6 +452,28 @@ def _rpc_error_from_payload(
         and data.get("kind") == FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND
     ):
         return FlowRunIdempotencyConflictError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if (
+        code == -32602
+        and isinstance(data, dict)
+        and data.get("kind") == SYSTEM_ROW_PRUNE_REFUSED_KIND
+    ):
+        return SystemRowPruneRefusedError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if (
+        code == -32602
+        and isinstance(data, dict)
+        and data.get("kind") == TRANSCRIPT_REVISION_CONFLICT_KIND
+    ):
+        return TranscriptRevisionConflictError(
             message,
             request_id=request_id,
             method=method,
@@ -1793,6 +1819,59 @@ class MetaRuntime:
             if value is not None:
                 params[name] = value
         raw = await self._rpc("meta/member_instruction_activations", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def prune_member_system_rows(
+        self,
+        identity: str,
+        remove: list[dict[str, Any]],
+        *,
+        retire_superseded_activation_bodies: bool = False,
+        expected_parent_revision: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove named ordinary System rows from a member's current session.
+
+        Host-only. ``remove`` names each row as a member history read showed
+        it: ``{"index": <0-based message index>, "content_sha256":
+        "sha256:<64 lowercase hex>"}``, the SHA-256 of the row's content as
+        UTF-8 text (``"sha256:" + hashlib.sha256(content.encode()).hexdigest()``).
+        Only ordinary System rows are removed; the rows after a removed one
+        move up. With ``retire_superseded_activation_bodies`` the same
+        commit also retires the body of every superseded instruction
+        activation (a key's newest body is never retired).
+        ``expected_parent_revision`` is an optional extra compare-and-swap;
+        the per-row digest is the main guard. ``note`` is the audit note (the
+        commit's reason kind is always ``system-row-prune``). The member is
+        not woken and no model is called.
+
+        Returns ``{"identity", "session_id", "pruned", "removed_rows",
+        "retired_bodies", "message_count", "revision"}`` (plus
+        ``"parent_revision"`` when ``pruned``); ``pruned`` is ``False`` when
+        nothing was named and there was nothing to retire.
+
+        Raises :class:`SystemRowPruneRefusedError` (``-32602``) for a refused
+        row, with its ``index`` and ``cause``, and
+        :class:`TranscriptRevisionConflictError` (``-32602``) for a stale
+        ``expected_parent_revision``, with ``expected`` and ``actual``;
+        nothing was written. Chaining calls on the returned ``revision``
+        fails whenever a turn ran in between: the per-row digest is the guard
+        to rely on, and a conflict means read the history again. A member
+        running a turn raises ``RpcError`` ``-32015``: retry when it is idle.
+        A session Core holds raises :class:`IdentityWakeHeldError` (its
+        ``kind`` and ``durable_resume_hold`` name the hold). Any other
+        failure is ``RpcError`` ``-32000``, its message naming the cause (no
+        current session, a member placed on another host, an archived
+        session, a malformed document).
+        """
+        params: dict[str, Any] = {"identity": identity, "remove": list(remove)}
+        if retire_superseded_activation_bodies:
+            params["retire_superseded_activation_bodies"] = True
+        if expected_parent_revision is not None:
+            params["expected_parent_revision"] = expected_parent_revision
+        if note is not None:
+            params["note"] = note
+        raw = await self._rpc("meta/prune_member_system_rows", params)
         return raw if isinstance(raw, dict) else {}
 
     async def reconcile(self) -> Any:

@@ -228,6 +228,29 @@ export const FLOW_ROLE_TARGETS_REFUSED_KIND = "flow_role_targets_refused" as con
  * `{kind: FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND, run_id, flow_id}`.
  */
 export const FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND = "flow_run_idempotency_conflict" as const;
+/**
+ * `meta/prune_member_system_rows` refused a row it names (JSON-RPC invalid
+ * params, `-32602`); nothing was written. The error data is
+ * `{kind: SYSTEM_ROW_PRUNE_REFUSED_KIND, index, cause}`.
+ */
+export const SYSTEM_ROW_PRUNE_REFUSED_KIND = "system_row_prune_refused" as const;
+/** The prune refusal causes, a closed vocabulary: a new cause is a breaking change. */
+export const SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: ReadonlySet<string> = new Set([
+  "out_of_bounds",
+  "duplicate_index",
+  "not_a_system_row",
+  "prompt_version_row",
+  "instruction_activation_row",
+  "operator_instruction_entry_row",
+  "digest_mismatch",
+  "before_operator_instruction_entry",
+]);
+/**
+ * `meta/prune_member_system_rows` refused a stale `expected_parent_revision`
+ * (JSON-RPC invalid params, `-32602`); nothing was written. The error data is
+ * `{kind: TRANSCRIPT_REVISION_CONFLICT_KIND, expected, actual}`.
+ */
+export const TRANSCRIPT_REVISION_CONFLICT_KIND = "transcript_revision_conflict" as const;
 /** The refusal kinds, a closed vocabulary: a new kind is a breaking change. */
 export const FLOW_ROLE_TARGET_REFUSAL_KINDS: ReadonlySet<string> = new Set([
   "role_not_in_flow",
@@ -644,6 +667,71 @@ export class FlowRoleTargetsRefusedError extends RpcError {
         : {};
     this.refusalKind =
       typeof this.refusal.kind === "string" ? this.refusal.kind : null;
+  }
+}
+
+/**
+ * `meta/prune_member_system_rows` refused a row it names; nothing was
+ * written.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"system_row_prune_refused"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `index` is the refused row's index
+ * and `cause` one of {@link SYSTEM_ROW_PRUNE_REFUSAL_CAUSES}, each `null`
+ * when the gateway sent none. A `digest_mismatch` means the transcript
+ * changed since your history read: read it again.
+ */
+export class SystemRowPruneRefusedError extends RpcError {
+  readonly index: number | null;
+  readonly cause: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "SystemRowPruneRefusedError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    this.index = typeof payload.index === "number" ? payload.index : null;
+    this.cause = typeof payload.cause === "string" ? payload.cause : null;
+  }
+}
+
+/**
+ * `meta/prune_member_system_rows` refused a stale `expected_parent_revision`;
+ * nothing was written.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"transcript_revision_conflict"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `expected` is the revision you
+ * passed and `actual` the session's current one, each `null` when the
+ * gateway sent none. The transcript changed since you read it, because a
+ * turn ran or another edit committed: read the member history again before
+ * you name rows or a revision.
+ */
+export class TranscriptRevisionConflictError extends RpcError {
+  readonly expected: string | null;
+  readonly actual: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "TranscriptRevisionConflictError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    this.expected = typeof payload.expected === "string" ? payload.expected : null;
+    this.actual = typeof payload.actual === "string" ? payload.actual : null;
   }
 }
 

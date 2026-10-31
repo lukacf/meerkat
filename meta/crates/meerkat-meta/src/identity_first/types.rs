@@ -1869,7 +1869,7 @@ pub struct LifecycleProjectionStatus {
     /// The journal events whose side effects a stopped predecessor still
     /// owed when this runtime started and that have not run yet: they run
     /// in the background.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub owed_events: u64,
     /// Why the projection is off, or what its runs keep failing on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1877,7 +1877,7 @@ pub struct LifecycleProjectionStatus {
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero(value: &u64) -> bool {
+fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 

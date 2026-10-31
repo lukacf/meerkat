@@ -547,6 +547,12 @@ pub enum SideChatInstructionGap {
     NotEffectiveInSource,
     /// The copied row's body does not match its declared content digest.
     BodyUnreadable,
+    /// The key's head is an activation the source made itself, and its body
+    /// is retired, so there is no body to activate here. A side chat forks
+    /// at the tail, where a compaction never retires the source's own head
+    /// of a key, so only a torn source document holds one (its own model
+    /// requests fail closed).
+    HeadBodyRetired,
     /// Meerkat refused the activation in the side chat.
     ActivationRefused { message: String },
 }
@@ -1142,12 +1148,12 @@ async fn inherit_source_instructions(
     );
     let handle = mob_runtime.handle();
     let mut instructions = Vec::with_capacity(heads.len());
-    for (key, (head, content)) in &heads {
+    for (key, head) in &heads {
         let mut instruction = SideChatInstruction {
             namespace: key.0.as_str().to_string(),
             key: key.1.as_str().to_string(),
-            revision_id: head.revision.revision_id.as_str().to_string(),
-            content_sha256: head.revision.content_sha256.to_string(),
+            revision_id: head.identity.revision.revision_id.as_str().to_string(),
+            content_sha256: head.identity.revision.content_sha256.to_string(),
             state: SideChatInstructionState::Inactive,
             reason: None,
         };
@@ -1158,17 +1164,15 @@ async fn inherit_source_instructions(
             instructions.push(instruction);
             continue;
         }
-        if source_session != Some(&head.origin_session_id) {
-            instruction.reason = Some(SideChatInstructionGap::NotEffectiveInSource);
-            instructions.push(instruction);
-            continue;
-        }
-        let Some(body) = activation_body(head, content) else {
-            instruction.reason = Some(SideChatInstructionGap::BodyUnreadable);
-            instructions.push(instruction);
-            continue;
+        let body = match inherited_head_body(head, source_session) {
+            Ok(body) => body,
+            Err(gap) => {
+                instruction.reason = Some(gap);
+                instructions.push(instruction);
+                continue;
+            }
         };
-        let request = match inherited_activation_request(child_session, head, body) {
+        let request = match inherited_activation_request(child_session, &head.identity, body) {
             Ok(request) => request,
             Err(message) => {
                 instruction.reason = Some(SideChatInstructionGap::ActivationRefused { message });
@@ -1187,12 +1191,23 @@ async fn inherit_source_instructions(
     instructions
 }
 
-/// Each inherited key's head in `messages` (its last copied activation row,
-/// the head at the fork boundary) with the row's stored content.
+/// An inherited key's head: its last copied activation row, the head at the
+/// fork boundary.
+#[derive(Debug, Clone)]
+struct InheritedHead {
+    identity: InstructionActivationIdentity,
+    /// The row's stored content.
+    content: String,
+    /// A compaction of the source retired the row's body: the content is
+    /// its retired header.
+    body_retired: bool,
+}
+
+/// Each inherited key's head in `messages`.
 fn inherited_activation_heads(
     child_session: &SessionId,
     messages: &[Message],
-) -> BTreeMap<(InstructionNamespace, InstructionKey), (InstructionActivationIdentity, String)> {
+) -> BTreeMap<(InstructionNamespace, InstructionKey), InheritedHead> {
     let mut heads = BTreeMap::new();
     for message in messages {
         let Message::System(system) = message else {
@@ -1209,10 +1224,29 @@ fn inherited_activation_heads(
                 identity.revision.namespace.clone(),
                 identity.revision.key.clone(),
             ),
-            (identity.clone(), system.content.clone()),
+            InheritedHead {
+                identity: identity.clone(),
+                content: system.content.clone(),
+                body_retired: system.retired_instruction_body.is_some(),
+            },
         );
     }
     heads
+}
+
+/// The body to activate in the side chat for an inherited head, or why the
+/// key stays inactive.
+fn inherited_head_body<'a>(
+    head: &'a InheritedHead,
+    source_session: Option<&SessionId>,
+) -> Result<&'a str, SideChatInstructionGap> {
+    if source_session != Some(&head.identity.origin_session_id) {
+        return Err(SideChatInstructionGap::NotEffectiveInSource);
+    }
+    if head.body_retired {
+        return Err(SideChatInstructionGap::HeadBodyRetired);
+    }
+    activation_body(&head.identity, &head.content).ok_or(SideChatInstructionGap::BodyUnreadable)
 }
 
 /// The body of an activation row: its envelope's text after the first blank
@@ -1722,8 +1756,39 @@ mod tests {
             InstructionNamespace::new("app.skills").unwrap(),
             InstructionKey::new("calendar").unwrap(),
         );
-        let (head, content) = heads.get(&key).expect("the key has an inherited head");
-        assert_eq!(head.activation_id, second.activation_id);
-        assert_eq!(content, "h\n\ntwo");
+        let head = heads.get(&key).expect("the key has an inherited head");
+        assert_eq!(head.identity.activation_id, second.activation_id);
+        assert_eq!(head.content, "h\n\ntwo");
+        assert!(!head.body_retired);
+    }
+
+    /// A copied head whose body a compaction of the source retired keeps
+    /// the key inactive with its own reason, `head_body_retired`: the side
+    /// chat has no body to activate, and its text was not unreadable.
+    #[test]
+    fn a_retired_inherited_head_is_named_as_retired() {
+        let source_session = SessionId::new();
+        let child_session = SessionId::new();
+        let identity = activation_identity(&source_session, "a1", "one");
+        let mut retired = meerkat_core::types::SystemMessage::new(
+            "[meerkat-retired-instruction-v1]\nstatus=superseded\nbody_bytes=3".to_string(),
+        );
+        retired.instruction_activation = Some(identity);
+        retired.retired_instruction_body = Some(meerkat_core::RetiredInstructionBody {
+            render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+            body_bytes: 3,
+        });
+        let heads = inherited_activation_heads(&child_session, &[Message::System(retired)]);
+        let head = heads
+            .values()
+            .next()
+            .expect("the key has an inherited head");
+        assert!(head.body_retired);
+        let gap = inherited_head_body(head, Some(&source_session))
+            .expect_err("a retired head has no body to activate");
+        assert_eq!(
+            serde_json::to_value(&gap).unwrap(),
+            serde_json::json!({"kind": "head_body_retired"})
+        );
     }
 }

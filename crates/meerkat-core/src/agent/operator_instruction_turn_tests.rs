@@ -865,6 +865,43 @@ async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
     );
 }
 
+/// A build that resumes a session counts a prompt row it may author beside
+/// the session's own entries (the facade's `resumed_build_entry_placement`)
+/// before it knows the exact prompt; the builder then appends nothing when
+/// the prompt is already the newest prompt row. Counting that row changes no
+/// verdict: the newest prompt row is already another System row of the
+/// placement, on every lowering, with the entry in the leading System prefix
+/// or after a conversation row.
+#[test]
+fn a_resume_prompt_the_builder_does_not_append_changes_no_entry_verdict() {
+    let prompt = "You are a careful assistant.";
+    for (case, mut session) in [
+        ("leading prefix", fresh_session()),
+        ("after a conversation row", conversed_session()),
+    ] {
+        session
+            .append_operator_instruction_activation_for_test("app.example", "tone", 1, "Formal.")
+            .unwrap();
+        assert!(
+            session.newest_prompt_row_is(prompt),
+            "{case}: a resume with the session's prompt appends nothing"
+        );
+        let placement = session.own_operator_instruction_entry_placement().unwrap();
+        assert!(!placement.is_empty(), "{case}: the entry is judged");
+        for lowering in [
+            InstructionLowering::MidConversation,
+            InstructionLowering::LeadingPrefixOnly,
+            InstructionLowering::Unavailable,
+        ] {
+            assert_eq!(
+                placement.with_another_system_row().refusal(lowering),
+                placement.refusal(lowering),
+                "{case}, {lowering:?}: the counted prompt row changes no verdict"
+            );
+        }
+    }
+}
+
 /// On a wire that carries one leading System row, an entry the session wrote
 /// itself is carried only as the request's one System row: an entry beside
 /// the prompt, or beside another entry (with or without a prompt), is not.

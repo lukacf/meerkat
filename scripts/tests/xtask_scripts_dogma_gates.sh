@@ -427,6 +427,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # each covered action of every run generated a state, its eighteen step
 # witnesses violated, and with --mutants each seeded defect's generated
 # invariant, totality invariant or action property violated.
+# activation_body_retirement_audit.sh (session_document) requires its three
+# witnesses violated, and with --mutants each seeded defect's target
+# invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -579,6 +582,16 @@ printf '%s\n' \
   'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
   'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
   'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBodyRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCopiedRetiredHeadKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessThreeRowsRetireTwo is violated."' \
+  'echo "Error: Invariant AuditOwnHeadKeepsItsBody is violated."' \
+  'echo "Error: Invariant AuditSupersededRowsRetired is violated."' \
+  'echo "Error: Invariant AuditRetiredChangesOnlyAtTheDecision is violated."' \
+  'echo "Error: Invariant AuditDecisionNeverLowersACount is violated."' \
+  'echo "Error: Invariant AuditDecisionKeepsRowsAndHeads is violated."' \
+  'echo "Error: Invariant activation_body_maps_lockstep is violated."' \
+  'echo "Error: Invariant activation_effective_body_live is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

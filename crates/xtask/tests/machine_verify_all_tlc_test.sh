@@ -890,6 +890,30 @@ if run_part audits-q; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part recovery
 fi
 
+# The SessionDocumentMachine activation-body retirement region: a hand-written
+# audit drives the generated recovery and decision arms as the shell does
+# (one session, two keys, up to three rows per key, own and copied heads; a
+# first recovery from any projection, torn ones included, an own activation
+# as a recovery with one more row, a fork as a recovery of a prefix with
+# every head copied, and the decision) within the ci.cfg step bound, and
+# checks the machine's own per-key state: only the decision retires a body,
+# it retires every superseded row, never lowers a recovered count and
+# changes nothing else, and an own newest row keeps its body. It first
+# checks that the generated model defines both arms it drives, and requires
+# its three witnesses reached, each in a capped run of its own without
+# -continue. --mutants refuses eight seeded defects, each run with the
+# invariant it targets as its only invariant. Not yet measured; it joins the
+# shard of the other session-document audit as a small one.
+activation_body_retirement_audit="${workspace_root}/specs/machines/session_document/activation_body_retirement_audit.sh"
+if [[ ! -x "${activation_body_retirement_audit}" ]]; then
+  echo "error: activation body retirement audit runner is missing from workspace runfiles: ${activation_body_retirement_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded activation body retirement TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${activation_body_retirement_audit}" --mutants
+fi
+
 # The MobMachine arm-coverage gate: every arm of the generated model's Next
 # relation is either in a hand-written audit runner's covered_actions array
 # (each runner checks with TLC coverage that every listed arm fires) or named
@@ -1109,7 +1133,10 @@ run_machine_verify() {
 # measurements: its sixteen runs (a safety run over 9203 distinct states,
 # five witness runs and ten mutant runs, over a model that does not extend
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
-# 4-worker local run (2026-10-31);
+# 4-worker local run (2026-10-31); the SessionDocumentMachine
+# activation-body retirement audit with --mutants joined it later (twelve
+# runs over the same model: a safety run, three witness runs and eight
+# mutant runs; not yet measured);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

@@ -69,7 +69,11 @@ async fn send_exact_retirement(
             authority: handle.command_authority.clone(),
             cmd: MobCommand::Retire {
                 agent_identity: entry.agent_identity.clone(),
-                redrive,
+                redrive: if redrive {
+                    crate::runtime::state::RetirementRedrive::Redrive
+                } else {
+                    crate::runtime::state::RetirementRedrive::Plain
+                },
                 target: RetireTarget::Exact(RetireMemberIncarnation {
                     agent_identity: entry.agent_identity.clone(),
                     agent_runtime_id: entry.agent_runtime_id.clone(),

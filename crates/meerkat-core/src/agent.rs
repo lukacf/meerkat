@@ -3,6 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 #[cfg(all(test, feature = "workspace-tests"))]
+mod activation_retirement_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
 mod assistant_message_identity_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod brain_swap_promotion_tests;

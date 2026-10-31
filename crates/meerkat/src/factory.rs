@@ -1967,6 +1967,11 @@ fn grant_gate_for_build(
 /// ([`Session::own_operator_instruction_entry_placement`]). A prompt row the
 /// build authors (`authors_prompt_row`: the session carries no metadata, or
 /// the build names its prompt) stands beside them as another System row.
+/// The judgment runs before the prompt is assembled, so a named prompt
+/// counts even when the builder will append nothing because it is already
+/// the newest prompt row ([`Session::newest_prompt_row_is`]); that changes
+/// no verdict, since the newest prompt row is then another System row of
+/// the placement already.
 pub(crate) fn resumed_build_entry_placement(
     session: &Session,
     authors_prompt_row: bool,
@@ -8033,7 +8038,9 @@ impl AgentFactory {
         // rows where they stand: a model that cannot carry them there is
         // refused here, before its client is built (credential resolution,
         // lease publication). A prompt row this build authors stands beside
-        // them too.
+        // them too; a named prompt that is already the newest prompt row is
+        // counted though the builder appends nothing, which changes no
+        // verdict (`resumed_build_entry_placement`).
         let authors_prompt_row =
             resumed_session_metadata.is_none() || build_config.system_prompt.is_explicit();
         let primary_llm_client_phase = match prepared_controller.as_deref() {
@@ -9596,7 +9603,9 @@ impl AgentFactory {
         }
         // A bare resume authors nothing. An explicit prompt decision on resume
         // is different: it materializes a new ordinary System message at the
-        // current transcript boundary, whatever the binding. Nothing here
+        // current transcript boundary, whatever the binding, unless the
+        // assembled prompt is exactly the newest prompt row the model reads
+        // (the builder then appends nothing). Nothing here
         // checks the provider wire: a wire that cannot carry a System message
         // at that position refuses the request that would carry it with a
         // typed projection error, and the session's resolved

@@ -320,7 +320,10 @@ impl AgentBuilder {
     ///
     /// On a resumed transcript this is a new instruction boundary, not a
     /// replacement for any earlier System event. Provider projection cannot
-    /// suppress or reposition the authored row.
+    /// suppress or reposition the authored row. A resume whose prompt is
+    /// exactly the newest System row the model reads as a prompt (no append
+    /// identity, instruction activation or operator-instruction entry, and
+    /// not a superseded prompt version) appends nothing.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -597,8 +600,9 @@ impl AgentBuilder {
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
         // An explicitly supplied prompt is an ordinary ordered System append,
-        // including on resume. Only implicit default composition is limited to
-        // a fresh transcript.
+        // including on resume, unless it is exactly the newest prompt row the
+        // model reads: then the resume changes nothing, and appends nothing.
+        // Only implicit default composition is limited to a fresh transcript.
         let system_prompt = if let Some(prompt) = self.system_prompt {
             Some(prompt)
         } else if session.messages().is_empty()
@@ -615,7 +619,9 @@ impl AgentBuilder {
         } else {
             None
         };
-        if let Some(prompt) = system_prompt {
+        if let Some(prompt) = system_prompt
+            && !session.newest_prompt_row_is(&prompt)
+        {
             session.append_system_message(prompt);
         }
 
@@ -2020,6 +2026,154 @@ mod tests {
             &agent.session().messages()[2],
             Message::System(message) if message.content == "Updated system prompt"
         ));
+    }
+
+    /// A resume whose explicit prompt is exactly the newest prompt row the
+    /// model reads appends nothing: the transcript stays as it was.
+    #[tokio::test]
+    async fn test_builder_resume_with_the_same_explicit_prompt_appends_nothing() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        let before = existing_session.messages().to_vec();
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("Original system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.session().messages(),
+            before.as_slice(),
+            "a resume with the newest prompt appends nothing"
+        );
+    }
+
+    /// An earlier prompt sent again after a change is a change again: it is
+    /// appended after the prompt that replaced it.
+    #[tokio::test]
+    async fn a_resume_with_an_earlier_prompt_after_a_change_appends_it() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("First system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session.append_system_message("Second system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Again".to_string())));
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("First system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        let messages = agent.session().messages();
+        assert_eq!(messages.len(), 5, "the earlier prompt is appended again");
+        assert!(matches!(
+            &messages[4],
+            Message::System(message) if message.content == "First system prompt"
+        ));
+    }
+
+    /// The comparison reads only the newest row the model reads as a prompt:
+    /// a later System row with an append identity is context, not a prompt,
+    /// so a resume with the prompt before it appends nothing.
+    #[tokio::test]
+    async fn a_resume_compares_with_the_newest_prompt_row_only() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session
+            .append_system_message_idempotent(
+                "Appended context",
+                Some("example".to_string()),
+                Some("context-1".to_string()),
+                crate::types::message_timestamp_now(),
+            )
+            .unwrap();
+        let before = existing_session.messages().to_vec();
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("Original system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.session().messages(),
+            before.as_slice(),
+            "the appended context row is not a prompt row"
+        );
+    }
+
+    /// A keyed system-prompt slot's current version is a prompt row: a resume
+    /// whose explicit prompt is exactly that version appends nothing. The
+    /// slot's superseded version is not the newest prompt row, so a resume
+    /// with it appends it.
+    #[tokio::test]
+    async fn explicit_resume_prompt_equal_to_the_current_keyed_version_appends_nothing() {
+        let update = |expected_version: Option<u64>,
+                      target_message_index: Option<usize>,
+                      content: &str| crate::SystemPromptUpdateRequest {
+            key: crate::types::SystemPromptKey::new("primary").unwrap(),
+            expected_version: expected_version
+                .map(|version| crate::types::SystemPromptVersion::new(version).unwrap()),
+            target_message_index,
+            content: content.to_string(),
+            actor: Some("host-test".to_string()),
+            expected_parent_revision: None,
+        };
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session
+            .update_system_prompt(update(None, Some(0), "Prompt version one"))
+            .expect("the head prompt is adopted in place");
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session
+            .update_system_prompt(update(Some(1), None, "Prompt version two"))
+            .expect("a later version commits");
+        let before = existing_session.messages().to_vec();
+
+        for (prompt, appends) in [("Prompt version two", false), ("Prompt version one", true)] {
+            let agent = AgentBuilder::new()
+                .resume_session(existing_session.clone())
+                .system_prompt(prompt)
+                .build_standalone(
+                    Arc::new(MockClient),
+                    Arc::new(MockTools),
+                    Arc::new(MockStore),
+                )
+                .await;
+            let messages = agent.session().messages();
+            if appends {
+                assert_eq!(
+                    messages.len(),
+                    before.len() + 1,
+                    "a superseded version is not the newest prompt row: it is appended"
+                );
+                assert!(matches!(
+                    messages.last(),
+                    Some(Message::System(system)) if system.content == prompt
+                ));
+            } else {
+                assert_eq!(
+                    messages,
+                    before.as_slice(),
+                    "the current keyed version appends nothing"
+                );
+            }
+        }
     }
 
     /// Regression test: Resumed sessions without explicit system_prompt should keep their original

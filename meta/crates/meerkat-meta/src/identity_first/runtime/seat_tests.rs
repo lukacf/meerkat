@@ -4425,7 +4425,7 @@ async fn a_page_of_many_seats_reads_core_s_member_history_once() {
 
     let started = tokio::time::Instant::now();
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         runtime.settle_lifecycle_projection(),
     )
     .await

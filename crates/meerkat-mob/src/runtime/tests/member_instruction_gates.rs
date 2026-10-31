@@ -1025,7 +1025,7 @@ async fn reactivation_refuses_a_key_the_source_never_activated() {
     fixture.finish().await;
 }
 
-/// Re-activation that would cross the lineage's retained-body budget is
+/// Re-activation that would cross the budget of live activation bodies is
 /// refused with the budget cause, and nothing is committed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reactivation_refuses_past_the_lineage_body_budget() {

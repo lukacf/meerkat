@@ -4702,6 +4702,19 @@ where
                                 .map_err(|error| {
                                     format!("operator instructions cannot be folded: {error}")
                                 })
+                        })
+                        // The superseded instruction activation bodies this
+                        // rewrite retires; the session-document authority
+                        // decides.
+                        .and_then(|(revision, observations, prefix, fold)| {
+                            self.session
+                                .authorize_activation_body_retirement()
+                                .map(|retirement| (revision, observations, prefix, fold, retirement))
+                                .map_err(|error| {
+                                    format!(
+                                        "superseded instruction activation bodies cannot be retired: {error}"
+                                    )
+                                })
                         });
                         // The summary request's own operation, so a refusal
                         // the host observes names what the audit records.
@@ -4712,6 +4725,7 @@ where
                                 observation_source,
                                 prefix_messages,
                                 instruction_fold,
+                                activation_retirement,
                             )) => {
                                 // Compaction of the admitted controller's own
                                 // context is its housekeeping: it runs on the
@@ -4774,6 +4788,7 @@ where
                                         _ => crate::agent::compact::FoldedCalls::default(),
                                     },
                                     instruction_fold,
+                                    activation_retirement,
                                 };
                                 // The compactor's warnings (a bounded source,
                                 // a rewrite keeping no complete turn) name the
@@ -4940,6 +4955,7 @@ where
                             }
                             let retention = compactor.transcript_history_retention();
                             let instruction_fold = outcome.instruction_fold;
+                            let activation_retirement = outcome.activation_retirement;
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
@@ -4955,6 +4971,20 @@ where
                                         if let Some(fold) = instruction_fold.as_ref() {
                                             compacted_session
                                                 .record_instruction_fold(fold)
+                                                .map_err(|error| {
+                                                    crate::TranscriptEditError::HistoryStateMalformed(
+                                                        error.to_string(),
+                                                    )
+                                                })?;
+                                        }
+                                        // A rewrite that retired activation
+                                        // bodies records the envelope-5
+                                        // marker with it, so a release that
+                                        // cannot read a retired body refuses
+                                        // the document typed.
+                                        if let Some(retirement) = activation_retirement.as_ref() {
+                                            compacted_session
+                                                .record_activation_body_retirement(retirement)
                                                 .map_err(|error| {
                                                     crate::TranscriptEditError::HistoryStateMalformed(
                                                         error.to_string(),

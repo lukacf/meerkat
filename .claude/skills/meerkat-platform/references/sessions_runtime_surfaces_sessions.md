@@ -219,12 +219,16 @@ settings before the turn, so REST can change build settings that RPC refuses.
   is refused before anything is committed with `FORK_INSTRUCTION_REFUSED`
   (-32037, HTTP 422), `data.kind` `fork_instruction_refused` and
   `data.fork_instruction_refusal` (`cause`: `policy_refuses`,
-  `not_effective_in_source`, `lineage_body_budget_exceeded`, `activation` or
-  `member_host_unsupported`; `keys`). `reactivate_inherited` appends the
-  child's own activation of every key that was effective in the source; the
-  result's `reactivated_instruction_count` counts those rows, which
-  `message_count` includes. A prefix without activation rows forks the same
-  way under every value. In 0.9.3 such a fork succeeded and the child's turns
+  `not_effective_in_source`, `lineage_body_budget_exceeded`, `activation`,
+  `member_host_unsupported` or `head_body_retired`; `keys`).
+  `reactivate_inherited` appends the child's own activation of every key
+  that was effective in the source; the result's
+  `reactivated_instruction_count` counts those rows, which `message_count`
+  includes. Under it, a prefix whose last row of a key holds a body a
+  compaction of the source retired (0.9.9: a later row of that key, past the
+  prefix, superseded it) is refused with `head_body_retired`; fork at a
+  later boundary, which copies the superseding row with its body. A prefix
+  without activation rows forks the same way under every value. In 0.9.3 such a fork succeeded and the child's turns
   then failed. SDKs: Python `fork_session_at(..., inherited_instructions=...)`
   and `SessionForkResult.reactivated_instruction_count`; TypeScript
   `forkSessionAt(id, index, { inheritedInstructions })` and

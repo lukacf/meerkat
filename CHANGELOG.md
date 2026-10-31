@@ -725,6 +725,49 @@ them.
   fields stay public for reading and assignment. A field added later is then
   not a break.
 
+- `meerkat-core`, `meerkat-contracts`: a compaction retires superseded
+  instruction activation bodies in place (see Added). `SystemMessage` gains
+  the public field `retired_instruction_body: Option<RetiredInstructionBody>`,
+  so code that builds a `SystemMessage` literally must set it (`None` keeps
+  the previous behaviour). `WireSessionMessage::System` gains the read-only
+  field `retired_instruction_body: Option<WireRetiredInstructionBody>`
+  (`Known` or `Raw`), so code that builds the variant literally or
+  destructures it without `..` must name it.
+
+- `meerkat-core`: `ForkInstructionRefusalCause` gains `HeadBodyRetired` (wire
+  kind `head_body_retired`), appended last: the refusal of a
+  `reactivate_inherited` fork whose copied head a compaction of the source
+  retired (see Added). The Rust enum is `#[non_exhaustive]`; the generated
+  Python, TypeScript and Web SDK types gain the kind in their closed
+  refusal-cause unions, so SDK code that handles every cause must handle it.
+  A 0.9.8 controller cannot decode the kind: when a 0.9.9 member host
+  refuses a placed forked participant with it (only under
+  `reactivate_inherited`), the 0.9.8 controller fails the create closed
+  with an untyped internal error (`failed to decode command bridge reply`)
+  in place of `ForkInstructionRefused`; nothing is created on either side
+  and nothing is retried. A 0.9.9 controller reads the typed refusal (see
+  Upgrade notes).
+
+- `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  `SessionDocumentMachine` decides which superseded instruction activation
+  bodies a compaction retires (see Added). The generated session-document
+  authority (`meerkat_core::generated::session_document`), the catalog
+  (`meerkat_machine_schema::catalog::dsl::session_document`) and the kernel
+  `generated::session_document` gain, appended last, the inputs
+  `RecoverSessionActivationBodies` and `AuthorizeActivationBodyRetirement`,
+  the effect `ActivationBodyRetirementAuthorized` and the transitions
+  `RecoverSessionActivationBodies` and `AuthorizeActivationBodyRetirement`
+  that decide them; the machine state gains the maps
+  `session_activation_rows`, `session_activation_retired` and
+  `session_activation_head_origin`; and the enum `ActivationHeadOrigin` is
+  new. Exhaustive matches must add the new variants, and code that builds
+  the state struct literally must set the new fields.
+
+- `meerkat-core`: `TranscriptEditError` is now `#[non_exhaustive]` and gains
+  `SystemRowPruneRefused { index, cause }`, the typed refusal of a
+  system-row prune (see Added). A match over `TranscriptEditError` outside
+  meerkat-core needs a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1443,6 +1486,69 @@ them.
   upgrade guide lists the other downgrade effects). The `workgraph-workflow`
   skill says how to withdraw and how a withdrawal reads.
 
+- `meerkat-core`: a compaction retires the body of every instruction
+  activation row that a later activation row of its key follows.
+  `SessionDocumentMachine` decides which rows; the newest row of every key
+  keeps its body, so a key's effective activation is never retired. The
+  retired row keeps its activation identity, timestamp, place and activation
+  ordinal; its content becomes the retired header
+  (`[meerkat-retired-instruction-v1]`, which names the key, the revision,
+  `status=superseded` and the body's length), and it carries the typed
+  marker `RetiredInstructionBody` (`render_version`, `body_bytes`;
+  `RETIRED_INSTRUCTION_RENDER_VERSION_V1`), which a history read carries
+  beside the row's activation identity as `WireRetiredInstructionBody`, raw
+  for a form the reader does not know. The model, the summarizer and a host
+  curator read the retired header, never the superseded body. The 1 MiB
+  activation budget counts live bodies only: a retired body stops counting
+  at the compaction that retires it. An exact retry of a retired activation
+  answers `recorded_but_not_effective`, as for a live superseded row, and a
+  retired revision stays bound to its digest. A compactor's own rebuild
+  still keeps every activation row byte for byte, and a generic rewrite or
+  restore cannot retire or revive a body. A fork child reads a copied
+  retired row as its inherited header, and its first compaction retires the
+  copied rows its own activations supersede; `reactivate_inherited` refuses
+  a fork whose copied head was retired with the cause `head_body_retired`
+  before anything is committed (a fork at a later boundary copies the
+  superseding row with its body). A document that holds a retired body is
+  written at session envelope 5 (see Upgrade notes). No compaction retires
+  a key's newest row, so a document whose own newest row of a key holds a
+  retired body is torn: its model requests fail closed with a projection
+  error that names the key.
+
+- `meerkat-core`, `meerkat-session`, `meerkat`: a host removes ordinary
+  System rows it names from an idle session in one audited rewrite, without
+  waking it or calling a model:
+  `SessionServiceTranscriptEditExt::prune_system_rows`
+  (`SystemRowPruneRequest`, `SystemRowPruneResult`, re-exported by the
+  facade with the other prune types; the default method answers
+  `Unsupported`, and `PersistentSessionService` implements it) and
+  `Session::prune_system_rows` (`SystemRowPruneCommit`). Each row is named
+  as a history read showed it (`SystemRowRef`): its 0-based message index
+  and `sha256:<64 lowercase hex>` over its content as UTF-8 text; Core never
+  picks rows, and nothing guards the last ordinary System row. The commit's
+  reason kind is `system-row-prune` (`SYSTEM_ROW_PRUNE_REASON_KIND`) with the
+  request's note, and an optional `expected_parent_revision` adds a
+  compare-and-swap; the per-row digest is the main guard. A named row that
+  is not an ordinary System row, a stale digest, an index out of range or
+  named twice, or a row an operator-instruction entry follows in its group of
+  System rows refuses the whole prune with
+  `TranscriptEditError::SystemRowPruneRefused` (`SystemRowPruneRefusal`),
+  which a session service keeps typed as
+  `SessionError::system_row_prune_refused` structured data
+  (`SessionError::system_row_prune_refusal`); nothing is written. A stale
+  `expected_parent_revision` writes nothing either, and the persistent
+  service keeps it typed as `SessionError::transcript_revision_conflict`
+  (kind `transcript_revision_conflict`, with the expected and the actual
+  revision; `SessionError::transcript_revision_conflict_revisions`). With
+  `retire_superseded_activation_bodies` the same commit retires every
+  superseded instruction activation body in place, as a compaction does; a
+  key's newest body is never retired. A running session answers `Busy`; a
+  dormant one is written store-only and stays dormant, a live idle one
+  converges on the commit, and pending compaction projection intents carry
+  forward unchanged. A prune that moves an instruction activation row to
+  another offset, or retires a body, writes the document at envelope 5; any
+  other stays at envelope 4.
+
 ### Changed
 
 - `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
@@ -1541,6 +1647,13 @@ them.
   created entry's row, or any row of a later schema, no longer refuses every
   adoption in its mob; and the intent list (`list_identity_intents`) leaves
   such rows out, as the intent scan does.
+
+- `meerkat-store`: `rkat storage doctor`'s `operator-instruction-envelope`
+  finding, which lists every session at session envelope 5, names the three
+  facts that write envelope 5 (operator-instruction entries, a rewrite record
+  that moved an instruction activation row, a retired instruction activation
+  body) and how a release before 0.9.9 refuses such a session per store kind,
+  instead of saying every listed session carries operator instructions.
 
 ### Fixed
 
@@ -1828,6 +1941,39 @@ them.
   `LlmClient::authored_cache_breakpoints` requires; the request itself is
   unchanged.
 
+- `meerkat-core`: a keyed system-prompt update, a generic transcript rewrite
+  and a restore keep each instruction activation row at its place among the
+  conversation rows (the same rows, in order, each after the same number of
+  non-System rows) instead of at its transcript offset. Before, a keyed
+  prompt update was refused once an activation row followed the prompt's
+  current version, because the update inserts the later version right after
+  the current one, before the activation row, and so moved the row's
+  offset; so was any rewrite that added or removed an ordinary System row
+  before an activation row.
+  Moving an activation across a conversation row, and minting, altering,
+  erasing or reordering one, are still refused. A rewrite that turns an
+  ordinary System row before an activation row into a conversation row at
+  the same offset is now refused too (the offset comparison accepted it),
+  since the activation row's place changes. A rewrite record that moved an
+  activation row to another offset is written at session envelope 5 (see
+  Upgrade notes).
+
+- `meerkat-core`, `meerkat`: a resume whose explicit prompt is exactly the
+  newest System row the model reads as a prompt (one without an append
+  identity, an instruction activation or an operator-instruction entry, that
+  is not a superseded prompt version) appends nothing. Before, every such
+  resume appended another identical System row. A different prompt, and an
+  earlier prompt sent again after a change, still append, a bare resume
+  still appends nothing, and `StartTurnRequest.system_prompt` keeps its
+  per-turn append. `Session::newest_prompt_row_is` answers the rule for a
+  host that materializes a resumed session itself.
+
+- `meerkat-mob`: a prompt-context fork under `reactivate_inherited` whose
+  carried head of a key holds a body a compaction retired is refused with
+  the typed cause `head_body_retired`, as a durable fork of a retired copied
+  head is. Before, when the source session was unknown, it carried the
+  retired header as the key's instruction text.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
@@ -1854,6 +2000,43 @@ them.
   decision waits for its owner to settle the permit (record the commit, or
   release or refuse the permit). Back the file up with the state root, as a
   WAL-complete copy.
+
+- Upgrade mob controllers together with their member hosts before relying
+  on `reactivate_inherited` for placed forks of members whose instruction
+  heads a compaction may have retired. A 0.9.8 controller cannot decode a
+  0.9.9 host's `head_body_retired` refusal: the placed fork fails closed
+  with an untyped internal error, and creates nothing. A 0.9.8 temporary
+  council that meets it ends `participant_seating_failed` and keeps an
+  "acquisition is ambiguous" cleanup debt for that seat, and nothing clears
+  that debt: the seat stays `Pending`, the controller holds no local record
+  of a create on a member host, and the council store has no operation that
+  forgets a record, so every recovery sweep records the debt again;
+  destroying the council's temporary mob or the source mob does not clear
+  it, and neither does upgrading that controller (0.9.9 reconciles the seat
+  the same way). With a 0.9.9 controller the refusal is typed: the council
+  ends `participant_fork_instruction_refused` and its seat settles with no
+  debt.
+
+- A downgrade to 0.9.8 is refused for every session whose document 0.9.9
+  writes at session envelope 5: a session that carries operator-instruction
+  facts (an entry row, current or retained in its rewrite graph, or the
+  recorded instruction state), a session in which a 0.9.9 compaction, or a
+  system-row prune with `retire_superseded_activation_bodies`, retired a
+  superseded instruction activation body (and a fork child that copied
+  such a row), and a session in which a rewrite (a keyed prompt update, a
+  generic rewrite, a restore or a system-row prune) moved an instruction
+  activation row to another offset. 0.9.8 refuses such a document typed at
+  its envelope where it reads a store's head row first; where it decodes the
+  whole document, it refuses a retired activation row as malformed
+  instruction activation history. Every other session stays at envelope 4,
+  byte for byte, and still reads on 0.9.8.
+  `rkat storage doctor` lists the sessions at envelope 5 (Info finding
+  `operator-instruction-envelope`) before a rollback. The marker of a
+  retired body or a moved row is the recorded operator-instruction state,
+  unowned and empty: such a session reads back an unowned, empty target
+  (`read_session_instructions`), and its fresh run starts and compactions
+  run the operator-instruction resolution and fold, which find nothing to
+  apply (the empty fold still advances the entry sequence).
 
 ### Known limitations
 

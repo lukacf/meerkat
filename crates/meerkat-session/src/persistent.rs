@@ -52,7 +52,8 @@ use meerkat_core::service::{
     SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult,
 };
 use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
@@ -19001,6 +19002,63 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
             parent_revision: commit.parent_revision.clone(),
             revision: commit.revision.clone(),
             message_count: saved.messages().len(),
+            commit,
+        })
+    }
+
+    /// The prune takes the path of every same-session rewrite: the
+    /// transcript-edit mutation guard (an active runtime admission or a
+    /// running turn is `Busy`), the committed source, the core prune, the
+    /// session-document authorization of the rewrite, and the persisted
+    /// commit under the session's hosting claim. A dormant session is
+    /// written store-only and is not woken; a live idle one converges on
+    /// the commit. The session's pending compaction projection intents
+    /// carry forward unchanged, as for every rewrite, and the runtime's
+    /// finalization settles them; an unsettled projection does not refuse
+    /// the prune.
+    async fn prune_system_rows(
+        &self,
+        id: &SessionId,
+        req: SystemRowPruneRequest,
+    ) -> Result<SystemRowPruneResult, SessionError> {
+        let _mutation_guard = self.transcript_edit_mutation_guard(id).await?;
+        let mut source = self.source_session_for_transcript_edit_locked(id).await?;
+        source = self.normalized_session_for_persistence(source).await?;
+        // A stale expected revision answers typed, with both revisions, so
+        // the host reads again; every other refusal maps as on the shared
+        // rewrite path.
+        let Some(pruned) = source.prune_system_rows(req).map_err(|error| match error {
+            meerkat_core::TranscriptEditError::RevisionConflict { expected, actual } => {
+                SessionError::transcript_revision_conflict(expected, actual)
+            }
+            other => other.into_session_error(),
+        })?
+        else {
+            let revision = source.transcript_revision().map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to read transcript head revision: {err}"
+                )))
+            })?;
+            return Ok(SystemRowPruneResult::NothingToPrune {
+                session_id: id.clone(),
+                revision,
+                message_count: source.messages().len(),
+            });
+        };
+        self.authorize_transcript_edit(id, TranscriptEditKind::Rewrite)?;
+        let meerkat_core::SystemRowPruneCommit {
+            commit,
+            removed_rows,
+            retired_bodies,
+        } = pruned;
+        let saved = self.persist_transcript_rewrite(source, &commit).await?;
+        Ok(SystemRowPruneResult::Pruned {
+            session_id: saved.id().clone(),
+            parent_revision: commit.parent_revision.clone(),
+            revision: commit.revision.clone(),
+            message_count: saved.messages().len(),
+            removed_rows,
+            retired_bodies,
             commit,
         })
     }
@@ -57320,6 +57378,547 @@ mod tests {
                 "{error:?}"
             );
             assert_eq!(builds.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    /// Rows for pruning ordinary System rows through the persistent session
+    /// service. The rows a host names go in one audited rewrite: a dormant
+    /// session's is a store-only write that wakes nothing (its next run
+    /// builds from the pruned transcript), a live idle session converges on
+    /// it, a running session is busy, and a refused row reaches the host
+    /// typed, with nothing written.
+    mod system_row_prune_service {
+        use super::*;
+        use meerkat_core::service::{
+            SessionServiceTranscriptEditExt, SystemRowPruneRequest, SystemRowPruneResult,
+        };
+        use meerkat_core::{SystemRowPruneRefusal, SystemRowRef};
+
+        const LEGACY_ONE: &str = "Legacy prompt one: you plan the team's calendar.";
+        const LEGACY_TWO: &str = "Legacy prompt two: you plan the team's calendar and travel.";
+        const CURRENT: &str = "You plan the team's calendar, travel and billing.";
+
+        /// Counts every agent the service builds: a build is a wake.
+        #[derive(Clone, Default)]
+        struct CountingBuilder {
+            builds: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for CountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.builds.fetch_add(1, Ordering::SeqCst);
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+        }
+
+        fn whole_blob_service() -> (
+            PersistentSessionService<CountingBuilder>,
+            Arc<dyn RuntimeStore>,
+            Arc<AtomicUsize>,
+        ) {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            );
+            (service, runtime_store, builds)
+        }
+
+        fn head_canonical_service(
+            directory: &tempfile::TempDir,
+        ) -> (
+            PersistentSessionService<CountingBuilder>,
+            Arc<dyn RuntimeStore>,
+            Arc<AtomicUsize>,
+        ) {
+            let database_path = directory.path().join("runtime.sqlite3");
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                    .expect("head-canonical runtime store"),
+            );
+            let store: Arc<dyn SessionStore> = Arc::new(
+                meerkat_store::SqliteSessionStore::open(&database_path)
+                    .expect("co-located head-canonical session store"),
+            );
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                store,
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            );
+            (service, runtime_store, builds)
+        }
+
+        /// A session holding `[legacy one, legacy two, current, question,
+        /// answer]`: two prompts earlier boots wrote before the current one,
+        /// and one committed turn.
+        async fn seeded_session<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            runtime_store: &dyn RuntimeStore,
+        ) -> SessionId {
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            committed_content_turn(service, runtime_store, &id, "What is on the calendar?").await;
+            service
+                .rewrite_session_transcript(
+                    &id,
+                    meerkat_core::SessionTranscriptRewriteRequest {
+                        selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                        replacement: [LEGACY_ONE, LEGACY_TWO, CURRENT]
+                            .into_iter()
+                            .map(|content| {
+                                Message::System(meerkat_core::types::SystemMessage::new(
+                                    content.to_string(),
+                                ))
+                            })
+                            .collect(),
+                        reason: TranscriptRewriteReason::new("seed legacy prompts"),
+                        actor: Some("test".to_string()),
+                        expected_parent_revision: None,
+                        running_behavior: TranscriptEditRunningBehavior::Reject,
+                    },
+                )
+                .await
+                .expect("seed the legacy prompts");
+            id
+        }
+
+        fn request(remove: Vec<SystemRowRef>) -> SystemRowPruneRequest {
+            SystemRowPruneRequest {
+                remove,
+                retire_superseded_activation_bodies: false,
+                expected_parent_revision: None,
+                note: Some("legacy prompts".to_string()),
+                actor: Some("test".to_string()),
+            }
+        }
+
+        /// The reference to the System row at `index` of a history read.
+        fn system_row(messages: &[Message], index: usize) -> SystemRowRef {
+            let Message::System(system) = &messages[index] else {
+                panic!("row {index} is a System row");
+            };
+            SystemRowRef::for_row(index, &system.content)
+        }
+
+        async fn history<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Vec<Message> {
+            service
+                .read_history(id, SessionHistoryQuery::default())
+                .await
+                .expect("read the session history")
+                .messages
+        }
+
+        /// A dormant session's rows go in a store-only write: the prune
+        /// builds no agent and the session stays dormant, the committed
+        /// document holds the pruned transcript, and the session's next run
+        /// builds from it.
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking(
+            service: PersistentSessionService<CountingBuilder>,
+            runtime_store: Arc<dyn RuntimeStore>,
+            builds: Arc<AtomicUsize>,
+        ) {
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            let before = history(&service, &id).await;
+            let builds_before = builds.load(Ordering::SeqCst);
+
+            let result = service
+                .prune_system_rows(
+                    &id,
+                    request(vec![system_row(&before, 0), system_row(&before, 1)]),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("the legacy prompts are pruned: {error}"));
+            let SystemRowPruneResult::Pruned {
+                removed_rows,
+                message_count,
+                ..
+            } = result
+            else {
+                panic!("the prune commits: {result:?}");
+            };
+            assert_eq!(removed_rows, 2);
+            assert_eq!(message_count, before.len() - 2);
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "the prune builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            assert_eq!(stored.messages(), &before[2..]);
+
+            committed_content_turn(&service, runtime_store.as_ref(), &id, "And tomorrow?").await;
+            let after = history(&service, &id).await;
+            assert_eq!(
+                &after[..before.len() - 2],
+                &before[2..],
+                "the next run builds from the pruned transcript"
+            );
+            assert!(
+                !after.iter().any(|message| matches!(
+                    message,
+                    Message::System(system)
+                        if system.content == LEGACY_ONE || system.content == LEGACY_TWO
+                )),
+                "the pruned rows do not come back"
+            );
+        }
+
+        #[tokio::test]
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking_whole_blob() {
+            let (service, runtime_store, builds) = whole_blob_service();
+            prune_removes_named_rows_of_a_dormant_session_without_waking(
+                service,
+                runtime_store,
+                builds,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking_head_canonical() {
+            let directory = tempfile::tempdir().expect("prune test directory");
+            let (service, runtime_store, builds) = head_canonical_service(&directory);
+            prune_removes_named_rows_of_a_dormant_session_without_waking(
+                service,
+                runtime_store,
+                builds,
+            )
+            .await;
+        }
+
+        /// A live idle session converges on the pruned transcript.
+        #[tokio::test]
+        async fn prune_converges_a_live_idle_session() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            assert!(
+                service.has_live_session(&id).await.unwrap(),
+                "the session is live and idle"
+            );
+            let before = history(&service, &id).await;
+            let result = service
+                .prune_system_rows(&id, request(vec![system_row(&before, 0)]))
+                .await
+                .unwrap_or_else(|error| panic!("the legacy prompt is pruned: {error}"));
+            assert!(
+                matches!(
+                    result,
+                    SystemRowPruneResult::Pruned {
+                        removed_rows: 1,
+                        ..
+                    }
+                ),
+                "{result:?}"
+            );
+            let live = service
+                .export_live_session(&id)
+                .await
+                .expect("the live session converged on the committed transcript");
+            assert_eq!(live.messages(), &before[1..]);
+        }
+
+        /// A session with a running turn refuses the prune as busy, before
+        /// anything is read or written.
+        #[tokio::test]
+        async fn prune_is_busy_while_a_turn_runs() {
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                4,
+                Arc::clone(&store),
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            ));
+            let created = service
+                .create_session(create_request("seed", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let session_id = created.session_id;
+            let admission = service
+                .reserve_runtime_turn_admission(&session_id)
+                .await
+                .expect("runtime turn admission should be reserved");
+            let turn_service = Arc::clone(&service);
+            let turn_id = session_id.clone();
+            let active_turn = tokio::spawn(async move {
+                turn_service
+                    .apply_runtime_turn_with_reserved_admission(
+                        &turn_id,
+                        RunId::new(),
+                        runtime_content_turn_request("a slow question"),
+                        RunApplyBoundary::RunStart,
+                        vec![InputId::new()],
+                        admission,
+                    )
+                    .await
+            });
+            builder.wait_for_entered_runs(1).await;
+
+            let refused = service
+                .prune_system_rows(&session_id, request(Vec::new()))
+                .await;
+            assert!(
+                matches!(refused, Err(SessionError::Busy { ref id }) if id == &session_id),
+                "a prune refuses a running session: {refused:?}"
+            );
+
+            builder.release_notify.add_permits(1);
+            active_turn
+                .await
+                .expect("active turn task should join")
+                .expect("active turn should complete after the refusal");
+        }
+
+        const CALENDAR_ONE: &str = "CALENDAR-ONE: book meetings in the morning only.";
+        const CALENDAR_TWO: &str = "CALENDAR-TWO: book meetings in the afternoon only.";
+
+        /// Commit one activation of the `calendar` key on the live session
+        /// `id`, under its turn finalization boundary.
+        async fn activate<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+            activation: &str,
+            supersedes: Option<&str>,
+            body: &str,
+        ) {
+            let boundary = service.acquire_runtime_turn_finalization_guard(id).await;
+            service
+                .activate_instruction_under_runtime_turn_boundary(
+                    id,
+                    InstructionActivationRequest {
+                        revision: InstructionRevisionRef {
+                            namespace: InstructionNamespace::new("app.skills").unwrap(),
+                            key: InstructionKey::new("calendar").unwrap(),
+                            revision_id: InstructionRevisionId::new(format!("rev-{activation}"))
+                                .unwrap(),
+                            content_sha256: InstructionContentDigest::for_body(body),
+                        },
+                        activation_id: meerkat_core::InstructionActivationId::new(activation)
+                            .unwrap(),
+                        expectation: supersedes.map_or(
+                            InstructionActivationExpectation::Absent,
+                            |previous| {
+                                InstructionActivationExpectation::Effective(
+                                    meerkat_core::InstructionActivationId::new(previous).unwrap(),
+                                )
+                            },
+                        ),
+                        supersedes: supersedes.map(|previous| {
+                            meerkat_core::InstructionActivationId::new(previous).unwrap()
+                        }),
+                        body: body.to_string(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("commit activation {activation}: {error}"));
+            drop(boundary);
+        }
+
+        /// A retiring prune through the service: a live idle session holding
+        /// `[legacy one, legacy two, current, question, answer, act-1,
+        /// act-2]` prunes the first legacy row and retires act-1's body in
+        /// one commit, whose span runs over the conversation rows. The
+        /// authoritative document holds the retired row with its marker at
+        /// envelope 5 and reloads; the live session converges on it.
+        async fn a_retiring_prune_persists_at_envelope_5(
+            service: &PersistentSessionService<CountingBuilder>,
+            runtime_store: &dyn RuntimeStore,
+        ) -> SessionId {
+            let id = seeded_session(service, runtime_store).await;
+            activate(service, &id, "act-1", None, CALENDAR_ONE).await;
+            activate(service, &id, "act-2", Some("act-1"), CALENDAR_TWO).await;
+            assert!(
+                service.has_live_session(&id).await.unwrap(),
+                "the session is live and idle"
+            );
+            let before = history(service, &id).await;
+            let mut retiring = request(vec![system_row(&before, 0)]);
+            retiring.retire_superseded_activation_bodies = true;
+            let result = service
+                .prune_system_rows(&id, retiring)
+                .await
+                .unwrap_or_else(|error| panic!("the retiring prune commits: {error}"));
+            let SystemRowPruneResult::Pruned {
+                removed_rows,
+                retired_bodies,
+                ..
+            } = result
+            else {
+                panic!("the prune commits: {result:?}");
+            };
+            assert_eq!((removed_rows, retired_bodies), (1, 1));
+
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            let retired = stored
+                .messages()
+                .iter()
+                .find_map(|message| match message {
+                    Message::System(system)
+                        if system
+                            .instruction_activation
+                            .as_ref()
+                            .is_some_and(|identity| identity.activation_id.as_str() == "act-1") =>
+                    {
+                        Some(system.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the superseded activation row stays");
+            assert!(
+                retired.retired_instruction_body.is_some()
+                    && !retired.content.contains(CALENDAR_ONE),
+                "the stored row holds the retired form: {}",
+                retired.content
+            );
+            assert_eq!(
+                stored.persisted_envelope_version(),
+                5,
+                "a retired body is written at envelope 5"
+            );
+            let reloaded = Session::from_persisted_bytes(&stored.to_persisted_bytes().unwrap())
+                .expect("the document reloads");
+            assert_eq!(reloaded.messages(), stored.messages());
+            let live = service
+                .export_live_session(&id)
+                .await
+                .expect("the live session converged on the retired row");
+            assert_eq!(live.messages(), stored.messages());
+            id
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_whole_blob() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_head_canonical() {
+            let directory = tempfile::tempdir().expect("prune test directory");
+            let (service, runtime_store, _builds) = head_canonical_service(&directory);
+            let id =
+                a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+            let store =
+                meerkat_store::SqliteSessionStore::open(directory.path().join("runtime.sqlite3"))
+                    .expect("a second handle on the head-canonical session store");
+            let head = meerkat_core::session_store::IncrementalSessionStore::load_head(&store, &id)
+                .await
+                .expect("the head reads")
+                .expect("the head row");
+            assert_eq!(head.version, 5, "the head row is at envelope 5");
+        }
+
+        /// A stale `expected_parent_revision` reaches the host typed, with the
+        /// revision it passed and the current one, and nothing is written.
+        #[tokio::test]
+        async fn a_stale_expected_revision_reaches_the_host_typed() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            let SystemRowPruneResult::NothingToPrune {
+                revision: read_revision,
+                ..
+            } = service
+                .prune_system_rows(&id, request(Vec::new()))
+                .await
+                .expect("an empty prune answers the revision")
+            else {
+                panic!("an empty prune writes nothing");
+            };
+            let before = history(&service, &id).await;
+            let SystemRowPruneResult::Pruned {
+                revision: current, ..
+            } = service
+                .prune_system_rows(&id, request(vec![system_row(&before, 0)]))
+                .await
+                .expect("a later write")
+            else {
+                panic!("the prune commits");
+            };
+            let after = history(&service, &id).await;
+
+            let mut stale = request(vec![system_row(&after, 0)]);
+            stale.expected_parent_revision = Some(read_revision.clone());
+            let error = service
+                .prune_system_rows(&id, stale)
+                .await
+                .expect_err("a stale revision refuses the prune");
+            assert_eq!(
+                error.transcript_revision_conflict_revisions(),
+                Some((read_revision, current)),
+                "{error:?}"
+            );
+            assert_eq!(history(&service, &id).await, after, "nothing is written");
+        }
+
+        /// A refused row reaches the host typed (the row's index and cause in
+        /// the error's structured data), and nothing is written.
+        #[tokio::test]
+        async fn a_refused_row_reaches_the_host_typed() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            let before = history(&service, &id).await;
+            let mut stale = system_row(&before, 0);
+            stale.content_sha256 =
+                meerkat_core::InstructionContentDigest::for_body("what an earlier read showed");
+            let error = service
+                .prune_system_rows(&id, request(vec![stale]))
+                .await
+                .expect_err("a stale row refuses the prune");
+            assert_eq!(
+                error.system_row_prune_refusal(),
+                Some((0, SystemRowPruneRefusal::DigestMismatch)),
+                "{error:?}"
+            );
+            assert_eq!(history(&service, &id).await, before, "nothing is written");
         }
     }
 }

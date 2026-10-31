@@ -1788,6 +1788,23 @@ pub struct InstructionActivationIdentity {
     pub render_version: u16,
 }
 
+/// The typed marker of an instruction activation row whose body a
+/// compaction retired, because a later activation row of its key superseded
+/// it. The row keeps its [`InstructionActivationIdentity`], whose digest
+/// still binds the body, and this marker keeps the body's length; the row's
+/// content is the retired header (`[meerkat-retired-instruction-v1]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RetiredInstructionBody {
+    /// The render version of the retired header:
+    /// [`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are
+    /// additive and permanently ratcheted.
+    pub render_version: u16,
+    /// The UTF-8 byte length of the retired body.
+    pub body_bytes: u64,
+}
+
 /// Stable host-chosen identity for one replaceable system-prompt slot.
 ///
 /// The key is domain identity, not an idempotency token. Every explicit
@@ -1925,6 +1942,31 @@ pub fn superseded_system_prompt_offsets(messages: &[Message]) -> std::collection
             .then_some(offset)
         })
         .collect()
+}
+
+/// Whether the newest System row the model reads as a prompt holds exactly
+/// `prompt`. A prompt row is a System row without an append identity, an
+/// instruction activation or an operator-instruction entry, that is not a
+/// superseded prompt version; the rows after it that are not prompt rows do
+/// not count.
+pub(crate) fn newest_prompt_row_is(messages: &[Message], prompt: &str) -> bool {
+    let superseded = superseded_system_prompt_offsets(messages);
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(offset, message)| match message {
+            Message::System(system)
+                if system.identity.is_none()
+                    && system.instruction_activation.is_none()
+                    && system.instruction_entry.is_none()
+                    && !superseded.contains(&offset) =>
+            {
+                Some(system)
+            }
+            _ => None,
+        })
+        .is_some_and(|system| system.content == prompt)
 }
 
 /// Materialize the transcript view presented to a model or summarizer.
@@ -2231,6 +2273,14 @@ pub struct SystemMessage {
     /// by re-rendering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_entry: Option<crate::session::InstructionEntryIdentity>,
+    /// The marker of an instruction activation row whose body a compaction
+    /// retired. The row keeps its activation identity, its timestamp and its
+    /// place; its content is the retired header the identity and this marker
+    /// render, which names the key, the revision and the body's length and
+    /// holds no body. Only valid beside `instruction_activation`, and only a
+    /// compaction's authorized retirement sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_instruction_body: Option<RetiredInstructionBody>,
 }
 
 impl SystemMessage {
@@ -2242,6 +2292,7 @@ impl SystemMessage {
             prompt_version: None,
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         }
     }
 
@@ -2274,6 +2325,7 @@ impl SystemMessage {
             prompt_version: None,
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         }
     }
 }

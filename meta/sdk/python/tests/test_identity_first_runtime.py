@@ -606,6 +606,30 @@ class TestLifecycleMethods:
         }
 
     @pytest.mark.asyncio
+    async def test_prune_member_system_rows_rpc(self):
+        result = {"identity": "agent:1", "pruned": True, "removed_rows": 1, "retired_bodies": 0}
+        rt, transport = _make_runtime(result=result)
+        remove = [{"index": 0, "content_sha256": "sha256:" + "0" * 64}]
+        pruned = await rt.prune_member_system_rows("agent:1", remove)
+        assert transport.calls[0]["method"] == "meta/prune_member_system_rows"
+        assert transport.calls[0]["params"] == {"identity": "agent:1", "remove": remove}
+        assert pruned["removed_rows"] == 1
+        await rt.prune_member_system_rows(
+            "agent:1",
+            remove,
+            retire_superseded_activation_bodies=True,
+            expected_parent_revision="sha256:" + "1" * 64,
+            note="legacy prompts",
+        )
+        assert transport.calls[1]["params"] == {
+            "identity": "agent:1",
+            "remove": remove,
+            "retire_superseded_activation_bodies": True,
+            "expected_parent_revision": "sha256:" + "1" * 64,
+            "note": "legacy prompts",
+        }
+
+    @pytest.mark.asyncio
     async def test_reset_rpc(self):
         rt, transport = _make_runtime(result={"accepted": True})
         await rt.reset("agent:1")

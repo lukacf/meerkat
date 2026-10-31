@@ -347,6 +347,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sets (`[]` when absent), so a ref a caller builds still type-checks; the
   Python SDK passes evidence dicts through, `withdraws` included.
 
+- `meta/prune_member_system_rows` (host-only): removes the ordinary System
+  rows a host names from a member's current session in one audited rewrite,
+  through Meerkat's `SessionServiceTranscriptEditExt::prune_system_rows`,
+  without waking the member or calling a model. Each row is named by its
+  0-based index and the `sha256:<hex>` digest of its content, as a member
+  history read showed it; a stale or wrong row is refused typed (`-32602`,
+  `data.kind` `system_row_prune_refused` with the row's `index` and `cause`)
+  and nothing is written. `retire_superseded_activation_bodies` also retires
+  the bodies of superseded instruction activations in the same commit. A
+  stale `expected_parent_revision` is refused typed too (`-32602`,
+  `data.kind` `transcript_revision_conflict` with `expected` and `actual`);
+  the per-row digest is the guard to rely on, since a revision the verb
+  returned is stale once a turn ran. A running member answers `-32015`, a
+  session Core holds answers as a held wake does (`-32603`,
+  `mob_member_session_resume_held` or `mob_member_session_repair_required`),
+  any other failure is the catch-all `-32000` with a message naming it, and
+  a candidate launch refuses the verb (`-32047` `candidate_launch`). The
+  SDKs add `MetaRuntime.prune_member_system_rows` (Python) and
+  `MetaRuntime.pruneMemberSystemRows` (TypeScript), the typed
+  `SystemRowPruneRefusedError` with its `index` and `cause` and
+  `TranscriptRevisionConflictError` with `expected` and `actual`, and the
+  constants `SYSTEM_ROW_PRUNE_REFUSED_KIND`,
+  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary) and
+  `TRANSCRIPT_REVISION_CONFLICT_KIND`.
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's
@@ -500,6 +525,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     no longer joins `after_create` calls or drains reset distillations of its
     own.
 
+- A side chat (`meta/fork_member`) gives an inherited head the source
+  activated itself and holds with a retired body its own reason,
+  `head_body_retired` (there is no body to activate; a side chat forks at
+  the tail, where a compaction never retires the source's own head, so only
+  a torn source document holds one); it read as `body_unreadable` before.
+  The Console names it. The reason is advisory: a reader that does not know
+  a kind shows the key without one.
+
 ### Fixed
 
 - `POST /console/send` on a Console with no local runtime records the
@@ -612,6 +645,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   width, so a narrow pane left the values a column too narrow to read ("Not
   specified" ran down the card a letter at a time). A card narrower than
   360 px now lists each value under its label, wherever it is shown.
+
+- A candidate launch
+  (`runtime_options.mob_composition.authority = "candidate"`) refuses
+  `meta/bound_member_transcript` with `-32047` `candidate_launch`, as it
+  refuses `meta/compact_member`: the verb rewrites a member's session
+  transcript, which is the authoritative launch's to change. Before, a
+  candidate ran it.
 
 ### Known limitations
 

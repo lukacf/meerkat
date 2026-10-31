@@ -107,8 +107,11 @@ impl ForkContextPlan {
     ///
     /// Under [`ForkInstructionPolicy::Refuse`] a fork whose rows hold an
     /// activation row or a `load_skill` result is refused with the typed
-    /// refusal a durable fork reports. A fork whose newest carried row alone
-    /// does not fit the budget is refused with
+    /// refusal a durable fork reports. Under
+    /// [`ForkInstructionPolicy::ReactivateInherited`] a fork whose effective
+    /// head of a key holds a body a compaction retired is refused with
+    /// [`ForkInstructionRefusalCause::HeadBodyRetired`]. A fork whose newest
+    /// carried row alone does not fit the budget is refused with
     /// [`MobError::ForkContextTooLarge`].
     ///
     /// `source_session` is the session the rows were read from. Only the
@@ -197,6 +200,36 @@ impl ForkContextPlan {
                 _ => false,
             })
             .collect();
+        // A head whose body a compaction retired has no body to carry (its
+        // source session unknown, a copied row can be the newest of its
+        // key): under `reactivate_inherited` the fork is refused before
+        // anything is planned, as a durable fork of a retired copied head
+        // is, instead of carrying the retired header as the instruction.
+        if carries_session_state {
+            let retired = heads
+                .iter()
+                .filter(|(_, index)| {
+                    effective_heads.contains(*index)
+                        && matches!(
+                            &rows[**index].0,
+                            WireSessionMessage::System {
+                                retired_instruction_body: Some(_),
+                                ..
+                            }
+                        )
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            if !retired.is_empty() {
+                return Err(MobError::ForkInstructionRefused {
+                    source_member_id: source_member_id.clone(),
+                    refusal: ForkInstructionRefusal::new(
+                        ForkInstructionRefusalCause::HeadBodyRetired,
+                        retired,
+                    ),
+                });
+            }
+        }
         let mut instruction_keys = instruction_keys_seen
             .iter()
             .filter(|key| {
@@ -690,6 +723,7 @@ mod tests {
             prompt_version: None,
             instruction_activation: None,
             instruction_entry: None,
+            retired_instruction_body: None,
         })
     }
 
@@ -713,7 +747,34 @@ mod tests {
             prompt_version: None,
             instruction_activation: Some(identity),
             instruction_entry: None,
+            retired_instruction_body: None,
         })
+    }
+
+    /// `activation(key, activation, body)` with its body retired by a
+    /// compaction: the retired header in place of the envelope, and the
+    /// typed marker of the body's length.
+    fn retired_activation(key: &str, activation_id: &str, body: &str) -> WireHistoryRow {
+        let WireHistoryRow(mut row) = activation(key, activation_id, body);
+        if let WireSessionMessage::System {
+            content,
+            retired_instruction_body,
+            ..
+        } = &mut row
+        {
+            *content = format!(
+                "[meerkat-retired-instruction-v1]\nkey={key}\nstatus=superseded\nbody_bytes={}",
+                body.len()
+            );
+            *retired_instruction_body = Some(
+                meerkat_core::RetiredInstructionBody {
+                    render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+                    body_bytes: body.len() as u64,
+                }
+                .into(),
+            );
+        }
+        WireHistoryRow(row)
     }
 
     fn user_row(text: &str, transcript_role: TranscriptUserRole) -> WireHistoryRow {
@@ -858,6 +919,42 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// Under `reactivate_inherited` a fork whose rows end a key on a row
+    /// whose body a compaction retired (the source session unknown, so each
+    /// key's newest row counts as its effective head) is refused with
+    /// `head_body_retired` before anything is planned, instead of carrying
+    /// the retired header as the key's instruction. The other policies name
+    /// the key and carry no body, as for a live head.
+    #[test]
+    fn a_retired_head_refuses_a_reactivate_inherited_fork() {
+        let rows = || {
+            vec![
+                system("ROLE-PROMPT"),
+                retired_activation("member", "a1", "BODY-1"),
+                user("hi"),
+            ]
+        };
+        let Err(MobError::ForkInstructionRefused { refusal, .. }) =
+            plan(rows(), ForkInstructionPolicy::ReactivateInherited)
+        else {
+            panic!("a retired carried head refuses the fork");
+        };
+        assert_eq!(refusal.cause, ForkInstructionRefusalCause::HeadBodyRetired);
+        assert_eq!(
+            refusal.keys,
+            vec![(
+                InstructionNamespace::new("host.standing").unwrap(),
+                InstructionKey::new("member").unwrap()
+            )]
+        );
+        let text = rendered(rows(), ForkInstructionPolicy::RequireExplicitActivation);
+        assert!(
+            text.contains("Activated instructions not carried: host.standing/member."),
+            "{text}"
+        );
+        assert!(!text.contains("meerkat-retired-instruction"), "{text}");
     }
 
     #[test]

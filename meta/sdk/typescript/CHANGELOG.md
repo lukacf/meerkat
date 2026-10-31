@@ -9,6 +9,16 @@
   `parseWorkGraphEvidenceRef` always sets it (`[]` when the gateway sends
   none), and the field is optional, so a ref a caller builds still
   type-checks.
+- `MetaRuntime.pruneMemberSystemRows(identity, remove, {
+  retireSupersededActivationBodies, expectedParentRevision, note })` calls
+  `meta/prune_member_system_rows`: it removes the ordinary System rows the
+  host names from a member's current session, each by its index and
+  content digest as a member history read showed it, without waking the
+  member. A refused row rejects with `SystemRowPruneRefusedError` (`index`,
+  `cause`; the constants `SYSTEM_ROW_PRUNE_REFUSED_KIND` and the closed
+  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES`), and a stale `expectedParentRevision`
+  with `TranscriptRevisionConflictError` (`expected`, `actual`;
+  `TRANSCRIPT_REVISION_CONFLICT_KIND`).
 - `ErrorCategory.LIFECYCLE_EFFECT_FAILED` and
   `ErrorCategory.LIFECYCLE_PROJECTION_OFF`, with their messages: a lifecycle
   side effect of an identity (`after_create`, an exit interview, a

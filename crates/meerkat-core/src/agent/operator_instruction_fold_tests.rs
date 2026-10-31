@@ -711,6 +711,106 @@ async fn fold_keeps_dia_activation_rows_verbatim() {
     assert_eq!(entry_index(&messages), Some(1));
 }
 
+/// One compaction folds the operator-instruction entries into one snapshot
+/// and retires a superseded instruction activation body in the same
+/// rewrite: the superseded activation row holds its retired header and
+/// marker, the superseding row keeps its body, both keep their places after
+/// the summary, and every retained record of the reloaded graph validates.
+#[tokio::test]
+async fn a_compaction_folds_entries_and_retires_bodies_in_one_pass() {
+    const POLICY_ONE: &str = "POLICY-ONE: never share credentials.";
+    const POLICY_TWO: &str = "POLICY-TWO: never share keys.";
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        fresh_session(),
+        &client,
+        &compactor,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    apply_and_run(&mut agent, "first").await;
+    agent
+        .session_mut()
+        .activate_instruction(dia_activation(POLICY_ONE))
+        .unwrap();
+    apply_and_run(&mut agent, "second").await;
+    let mut superseding = dia_activation(POLICY_TWO);
+    superseding.revision.revision_id = InstructionRevisionId::new("rev-2").unwrap();
+    superseding.activation_id = InstructionActivationId::new("act-policy-2").unwrap();
+    superseding.expectation = meerkat_core::InstructionActivationExpectation::Effective(
+        InstructionActivationId::new("act-policy").unwrap(),
+    );
+    superseding.supersedes = Some(InstructionActivationId::new("act-policy").unwrap());
+    agent
+        .session_mut()
+        .activate_instruction(superseding)
+        .unwrap();
+    let activation_rows = |messages: &[Message]| {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) if system.instruction_activation.is_some() => {
+                    Some(system.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = activation_rows(agent.session().messages());
+    assert_eq!(before.len(), 2);
+
+    compactor.arm(1);
+    apply_and_run(&mut agent, "third").await;
+    assert_eq!(compactor.rebuilds(), 1);
+
+    let messages = agent.session().messages().to_vec();
+    let entries = entry_identities(&messages);
+    assert_eq!(entries.len(), 1, "the entries fold into one snapshot");
+    assert_eq!(entries[0].kind(), InstructionEntryKind::Snapshot);
+    let after = activation_rows(&messages);
+    assert_eq!(after.len(), 2, "both activation rows stay");
+    assert!(
+        after[0]
+            .content
+            .starts_with("[meerkat-retired-instruction-v1]")
+            && !after[0].content.contains(POLICY_ONE),
+        "the superseded row holds its retired header: {}",
+        after[0].content
+    );
+    assert_eq!(
+        after[0]
+            .retired_instruction_body
+            .map(|marker| marker.body_bytes),
+        Some(POLICY_ONE.len() as u64)
+    );
+    assert_eq!(
+        after[0].instruction_activation, before[0].instruction_activation,
+        "the retired row keeps its identity"
+    );
+    assert_eq!(after[1], before[1], "the superseding row keeps its body");
+    let summary_index = messages.iter().position(is_summary).unwrap();
+    for row in &after {
+        let index = messages
+            .iter()
+            .position(|message| matches!(message, Message::System(system) if system == row))
+            .unwrap();
+        assert!(
+            index > summary_index,
+            "each activation row keeps its place after the folded turns"
+        );
+    }
+    assert!(
+        !transcript_text(&client.requests().last().cloned().unwrap()).contains(POLICY_ONE),
+        "the request carries no superseded body"
+    );
+    assert!(assert_reload_validates(agent.session()) >= 1);
+}
+
 /// A compaction inside a run, after its first response, folds what is in
 /// effect: a change the run start left pending stays pending.
 #[tokio::test]

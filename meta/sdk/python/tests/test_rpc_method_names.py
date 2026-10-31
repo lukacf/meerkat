@@ -2588,6 +2588,93 @@ def test_a_refused_binding_is_a_typed_error():
     assert type(plain) is RpcError
 
 
+def test_a_stale_prune_revision_is_a_typed_error():
+    from meerkat_meta import TRANSCRIPT_REVISION_CONFLICT_KIND as exported_kind
+    from meerkat_meta import TranscriptRevisionConflictError as exported_error
+    from meerkat_meta.errors import (
+        TRANSCRIPT_REVISION_CONFLICT_KIND,
+        SystemRowPruneRefusedError,
+        TranscriptRevisionConflictError,
+    )
+    from meerkat_meta.runtime import _rpc_error_from_payload
+
+    assert TRANSCRIPT_REVISION_CONFLICT_KIND == "transcript_revision_conflict"
+    assert exported_kind == TRANSCRIPT_REVISION_CONFLICT_KIND
+    assert exported_error is TranscriptRevisionConflictError
+    error = _rpc_error_from_payload(
+        {
+            "code": -32602,
+            "message": "transcript revision conflict: expected rev-a, actual rev-b",
+            "data": {
+                "kind": "transcript_revision_conflict",
+                "expected": "rev-a",
+                "actual": "rev-b",
+            },
+        },
+        request_id="r-1",
+        method="meta/prune_member_system_rows",
+    )
+    assert isinstance(error, TranscriptRevisionConflictError)
+    assert not isinstance(error, SystemRowPruneRefusedError)
+    assert error.code == -32602
+    assert error.expected == "rev-a"
+    assert error.actual == "rev-b"
+
+
+def test_a_refused_prune_row_is_a_typed_error():
+    from meerkat_meta.errors import (
+        SYSTEM_ROW_PRUNE_REFUSAL_CAUSES,
+        AnnouncementRefusedError,
+        SystemRowPruneRefusedError,
+    )
+    from meerkat_meta.runtime import _rpc_error_from_payload
+
+    error = _rpc_error_from_payload(
+        {
+            "code": -32602,
+            "message": "system row prune refused the row at message index 3: digest_mismatch",
+            "data": {"kind": "system_row_prune_refused", "index": 3, "cause": "digest_mismatch"},
+        },
+        request_id="r-1",
+        method="meta/prune_member_system_rows",
+    )
+    assert isinstance(error, SystemRowPruneRefusedError)
+    assert error.code == -32602
+    assert error.index == 3
+    assert error.cause == "digest_mismatch"
+    # Meerkat's typed causes, one for one: a closed vocabulary.
+    assert SYSTEM_ROW_PRUNE_REFUSAL_CAUSES == {
+        "out_of_bounds",
+        "duplicate_index",
+        "not_a_system_row",
+        "prompt_version_row",
+        "instruction_activation_row",
+        "operator_instruction_entry_row",
+        "digest_mismatch",
+        "before_operator_instruction_entry",
+    }
+
+    plain = _rpc_error_from_payload(
+        {"code": -32602, "message": "remove must be a list"},
+        request_id="r-2",
+        method="meta/prune_member_system_rows",
+    )
+    assert type(plain) is RpcError
+
+    # A candidate launch refuses the verb with the typed candidate refusal.
+    candidate = _rpc_error_from_payload(
+        {
+            "code": -32047,
+            "message": "meta/prune_member_system_rows is refused: this gateway is a candidate launch",
+            "data": {"kind": "candidate_launch"},
+        },
+        request_id="r-3",
+        method="meta/prune_member_system_rows",
+    )
+    assert isinstance(candidate, AnnouncementRefusedError)
+    assert candidate.kind == "candidate_launch"
+
+
 def test_run_records_carry_their_role_targets():
     from meerkat_meta.types import MobRun, MobRunSnapshot
 

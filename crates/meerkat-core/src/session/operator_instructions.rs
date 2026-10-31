@@ -1349,6 +1349,7 @@ fn entry_row(
         prompt_version: None,
         instruction_activation: None,
         instruction_entry: Some(identity),
+        retired_instruction_body: None,
     }
 }
 
@@ -1460,7 +1461,7 @@ impl Session {
             .or_default()
             .apply(identity)?;
         if !self.carries_operator_instruction_facts() {
-            self.record_inherited_instruction_state()
+            self.record_unowned_instruction_state()
                 .map_err(|error| error.to_string())?;
         }
         self.messages.push(Message::System(entry));
@@ -1544,25 +1545,35 @@ impl Session {
         }))
     }
 
-    /// A fork child that copied operator-instruction entry rows records the
-    /// instruction state of a session without a target of its own (unowned,
-    /// nothing pending), so the state key alone keeps answering whether its
-    /// document carries instruction facts. `source_records_state` is whether
-    /// the source records the key: only such a source holds entry rows, so
-    /// any other fork is not scanned.
-    pub(super) fn record_copied_operator_instruction_rows(&mut self, source_records_state: bool) {
-        if !source_records_state || !self.messages().iter().any(is_operator_instruction_entry) {
+    /// A fork child that copied operator-instruction entry rows, or an
+    /// instruction activation row whose body a compaction of the source
+    /// retired, records the instruction state of a session without a target
+    /// of its own (unowned, nothing pending), so the state key alone keeps
+    /// answering whether its document carries a fact only envelope 5 reads.
+    /// `source_records_state` is whether the source records the key: only
+    /// such a source holds either kind of row, so any other fork is not
+    /// scanned.
+    pub(super) fn record_instruction_state_of_copied_rows(&mut self, source_records_state: bool) {
+        if !source_records_state
+            || !self.messages().iter().any(|message| {
+                is_operator_instruction_entry(message)
+                    || matches!(
+                        message,
+                        Message::System(system) if system.retired_instruction_body.is_some()
+                    )
+            })
+        {
             return;
         }
         // A fork child records no state before this (the source's is
         // session authority, which a fork does not copy), so recording the
         // unowned state has nothing to refuse.
-        if let Err(error) = self.record_inherited_instruction_state() {
+        if let Err(error) = self.record_unowned_instruction_state() {
             tracing::error!(
                 session_id = %self.id(),
                 %error,
                 "a fork child could not record the instruction state of the operator-instruction \
-                 entry rows it copied"
+                 entry rows or retired instruction activation rows it copied"
             );
         }
     }

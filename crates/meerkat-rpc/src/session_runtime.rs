@@ -28301,6 +28301,159 @@ mod tests {
         );
     }
 
+    /// The same stop, and then three inputs sent to the idle session from
+    /// another runtime of the process: a turn, a second turn and an external
+    /// event.
+    ///
+    /// The first turn waits for the next start, as above: it is admitted and
+    /// left queued, and the runtime's lost host runtime check degrades the
+    /// session's registration to wait for its reload. A later input meets
+    /// that registration. It cannot be admitted there, and a reload in this
+    /// process would only meet the stopped runtime again, so it is refused
+    /// before its admission with the typed `host_runtime_stopped` (`-32032`)
+    /// and nothing is kept for it. The session runtime must not ask the lost
+    /// actor for it either: that read fails, and the input would be refused
+    /// with that error instead. The restarted session runtime runs the first
+    /// turn once, and neither later input.
+    #[test]
+    fn a_later_input_after_its_hosts_runtime_stopped_is_refused_as_host_runtime_stopped() {
+        const FIRST: &str = "the first turn sent after the host's runtime stopped";
+        const SECOND: &str = "a second turn sent after the host's runtime stopped";
+        const EVENT_BODY: &str = "an external event sent after the second turn";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id) = a_session_whose_hosts_runtime_stopped(&realm, &recorder);
+        let requests_carrying = |needle: &str| {
+            recorder
+                .requests()
+                .iter()
+                .filter(|request| {
+                    let dump = format!("{request:?}");
+                    dump.contains(needle) && !dump.contains(AFTER_RESTART)
+                })
+                .count()
+        };
+        let refused_as = |error: &RpcError| {
+            (
+                error.code,
+                error.data.as_ref().map(|data| data["kind"].clone()),
+            )
+        };
+        let process = process_runtime_outliving_the_host();
+        let (refusals, observed) = process.block_on(async {
+            let (first_event_tx, _first_event_rx) = mpsc::channel(100);
+            let first = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    FIRST.into(),
+                    Vec::new(),
+                    first_event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            let first_failed = matches!(first, Ok(Err(_)));
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let (second_event_tx, _second_event_rx) = mpsc::channel(100);
+            let second = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    SECOND.into(),
+                    Vec::new(),
+                    second_event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("the second turn is answered within its bound");
+            let event = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.accept_external_event_via_runtime(
+                    &session_id,
+                    "host.runtime.stopped".to_string(),
+                    serde_json::json!({ "body": EVENT_BODY }),
+                    None,
+                ),
+            )
+            .await
+            .expect("the event is answered within its bound");
+            let refusals = (
+                second.as_ref().err().map(|error| error.message.clone()),
+                event.as_ref().err().map(|error| error.message.clone()),
+            );
+            let refused = (
+                second.as_ref().err().map(refused_as),
+                event.as_ref().err().map(refused_as),
+            );
+            let left_open = (
+                open_inputs_carrying(&realm.runtime_store, &session_id, FIRST).await,
+                open_inputs_carrying(&realm.runtime_store, &session_id, SECOND).await,
+                open_inputs_carrying(&realm.runtime_store, &session_id, EVENT_BODY).await,
+            );
+            let before_restart = (
+                requests_carrying(FIRST),
+                requests_carrying(SECOND),
+                requests_carrying(EVENT_BODY),
+            );
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(recorder.clone()));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = (
+                requests_carrying(FIRST),
+                requests_carrying(SECOND),
+                requests_carrying(EVENT_BODY),
+            );
+            restarted.shutdown().await;
+            (
+                refusals,
+                (
+                    (first_failed, reload_required),
+                    refused,
+                    left_open,
+                    before_restart,
+                    after_restart,
+                ),
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        let host_runtime_stopped = Some((
+            meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            Some(serde_json::json!("host_runtime_stopped")),
+        ));
+        assert_eq!(
+            observed,
+            (
+                (true, true),
+                (host_runtime_stopped.clone(), host_runtime_stopped),
+                (
+                    vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                    Vec::new(),
+                    Vec::new()
+                ),
+                (0, 0, 0),
+                (1, 0, 0)
+            ),
+            "once the first input after the host's runtime stopped degraded the session's \
+             registration, a later turn and a later event are refused as host_runtime_stopped \
+             before their admission, nothing is kept for them, and the restarted session \
+             runtime runs only the first turn: {refusals:?}"
+        );
+    }
+
     /// The live open consumes the staged prompt and persists that with its
     /// row, so the persisted pending flag is clear after the first turn, and
     /// a restart does not deliver the prompt again: the transcript keeps

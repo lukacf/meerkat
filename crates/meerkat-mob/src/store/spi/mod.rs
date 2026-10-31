@@ -460,8 +460,26 @@ fn import_intent_entries(
         }
         let row = keyed.d.get().as_bytes();
         match crate::identity::classify_created_identity_row(row) {
-            Some(crate::identity::CreatedIdentityObservation::Created(record)) => {
+            // A created entry's row that seals the mob and identity its key
+            // names is kept as one.
+            Some(crate::identity::CreatedIdentityObservation::Created(record))
+                if record.mob_id == keyed.k.0 && record.agent_identity == keyed.k.1 =>
+            {
                 identity.created.insert(keyed.k, record);
+            }
+            // One that seals another mob or identity is unreadable for the
+            // key it sits under, as the created identity scan and SQLite's
+            // readers answer it, and is kept as stored.
+            Some(crate::identity::CreatedIdentityObservation::Created(_)) => {
+                identity.unreadable_intents.insert(
+                    keyed.k,
+                    super::in_memory::RawIntentRow {
+                        stored: bytes.to_vec(),
+                        created_domain: true,
+                        detail: "created identity row does not match its physical mob/identity key"
+                            .to_string(),
+                    },
+                );
             }
             Some(crate::identity::CreatedIdentityObservation::Unreadable { detail, .. }) => {
                 identity.unreadable_intents.insert(

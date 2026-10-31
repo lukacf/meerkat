@@ -725,8 +725,24 @@ impl InMemoryMobIdentityStore {
         state.created.remove(&key);
         state.unreadable_intents.remove(&key);
         match crate::identity::classify_created_identity_row(&stored) {
-            Some(crate::identity::CreatedIdentityObservation::Created(record)) => {
+            Some(crate::identity::CreatedIdentityObservation::Created(record))
+                if record.mob_id == key.0 && record.agent_identity == key.1 =>
+            {
                 state.created.insert(key, record);
+            }
+            // A created entry's row that seals another mob or identity than
+            // its key names is unreadable for that key, as a host store's
+            // import keeps it.
+            Some(crate::identity::CreatedIdentityObservation::Created(_)) => {
+                state.unreadable_intents.insert(
+                    key,
+                    RawIntentRow {
+                        stored,
+                        created_domain: true,
+                        detail: "created identity row does not match its physical mob/identity key"
+                            .to_string(),
+                    },
+                );
             }
             Some(crate::identity::CreatedIdentityObservation::Unreadable { detail, .. }) => {
                 state.unreadable_intents.insert(

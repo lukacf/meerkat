@@ -112,6 +112,17 @@ change.
 host wakes or seats its identities; consume exactly the first-boot requests
 the answer names; unlist an identity to remove it.
 
+### WorkGraph evidence refs (Rust)
+
+`WorkEvidenceRef` is `#[non_exhaustive]` and gains the field `withdraws` (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)),
+so a struct literal outside `meerkat-workgraph` no longer compiles. Build a ref
+with `WorkEvidenceRef::new(kind, id)` and the builders `with_label`,
+`with_summary` and `with_withdraws`, or assign the public fields after `new`.
+The constructor sets no confirmation or execution provenance. A ref without
+withdrawals keeps its wire form, so stored items, keyed-create digests and
+attention continuation keys do not change.
+
 ### Downgrading to 0.9.8
 
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
@@ -135,6 +146,12 @@ apply's seal started and a crash interrupted finishes under 0.9.8 as a plain
 retirement. Entries the apply holds unseated, role holds (with the run-start
 holds they place) and held creations live in memory only, so 0.9.8 sees none
 of them.
+
+0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
+ignores `withdraws` and drops the field when it rewrites such an item (any
+mutation of the item, including a host sweep such as a lease-expiry
+observation). The withdrawing refs stay as ordinary evidence, and the refs
+they withdrew read as current again.
 
 ## Upgrading to 0.9.8
 

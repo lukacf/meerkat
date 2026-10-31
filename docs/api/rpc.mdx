@@ -2265,12 +2265,15 @@ The response is abridged; the full `WorkItem` shape is in the
 Every evidence entry, here and everywhere a `WorkEvidenceRef` appears (the
 `workgraph_add_evidence` tool argument, host mutation surfaces such as Meta's
 `meta/workgraph/evidence/add`), has the shape
-`{"kind": string, "id": string, "label"?: string, "summary"?: string}`. `kind`
-is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
+`{"kind": string, "id": string, "label"?: string, "summary"?: string, "withdraws"?: string[]}`.
+`kind` is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
 `notification`, ...); the reserved confirmation kinds (`host_confirmation`,
 `principal_confirmation`, `supervisor_confirmation`, `reviewer_confirmation`)
 are refused from generic callers and stamped only by trusted goal-confirm
-authority.
+authority. `withdraws` lists the ids of earlier evidence on the same item that
+the entry withdraws; nothing is removed, and an entry is withdrawn when a later
+entry lists its id (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)).
 
 ### workgraph/list
 

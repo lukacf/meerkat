@@ -69,11 +69,14 @@ export function formatAbsoluteTime(value: TimeInput): string {
   });
 }
 
-/** Local clock time for dense timelines: "14:52". */
+/** Local clock time for dense timelines: "14:52". A 24-hour clock whatever
+ * the locale, as the chat's message times and the logs read. */
 export function formatClockTime(value: TimeInput): string {
   const ms = toEpochMs(value);
   if (ms === null) return "";
-  return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const date = new Date(ms);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /** A short duration: "4 min", "45 s", "2 h 5 min". */

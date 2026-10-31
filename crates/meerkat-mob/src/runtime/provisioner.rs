@@ -3418,14 +3418,18 @@ impl MemberSessionDisposalArc {
                 ..
             }) => Ok(MemberSessionDisposalVerdict::RuntimeReleasedOnlyHostOwned),
             // The archive walk never reports the non-persistent-backend
-            // disposal (that is `release_runtime_only`'s arm); reaching it
-            // here is an invariant fault, surfaced typed.
+            // disposal (that is `release_runtime_only`'s arm) nor a
+            // same-session rotation's kept session (that is
+            // `retirement_release_kept_session`'s); reaching either here is
+            // an invariant fault, surfaced typed with the reported disposal.
             Ok(ArchiveDisposalOutcome {
-                disposal: crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyNoDurableSessions,
+                disposal:
+                    disposal @ (crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyNoDurableSessions
+                    | crate::machines::mob_machine::MemberSessionDisposal::KeptForSuccessor),
                 ..
             }) => Err(Self::runtime_archive_error(format!(
-                "member session disposal for {session_id} reported a non-persistent-backend \
-                 verdict from the durable archive walk"
+                "member session disposal for {session_id} reported {disposal:?} \
+                 from the durable archive walk"
             ))),
             Err(SessionError::NotFound { .. }) => Ok(MemberSessionDisposalVerdict::AlreadyArchived),
             Err(error) => Err(error),

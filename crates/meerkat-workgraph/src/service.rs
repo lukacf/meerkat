@@ -1574,6 +1574,7 @@ impl WorkGraphService {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
 
         for attempt in 0..EXECUTION_PROJECTION_CAS_ATTEMPTS {
@@ -2984,6 +2985,7 @@ mod tests {
             execution_binding_id: Some(
                 crate::WorkExecutionBindingId::new("caller-supplied").expect("binding id"),
             ),
+            withdraws: BTreeSet::new(),
         });
 
         let error = service
@@ -3518,6 +3520,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: None,
+            withdraws: BTreeSet::new(),
         }
     }
 
@@ -3831,6 +3834,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(completed.binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
         let reserved_error = service
             .add_evidence(AddEvidenceRequest {

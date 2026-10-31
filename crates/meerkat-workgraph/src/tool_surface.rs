@@ -1659,6 +1659,7 @@ mod tests {
                     confirmation_kind: None,
                     confirming_owner_key: None,
                     execution_binding_id: None,
+                    withdraws: BTreeSet::new(),
                 },
                 principal: None,
                 trusted_principal: None,

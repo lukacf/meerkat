@@ -2642,6 +2642,7 @@ mod tests {
                     confirmation_kind: Some(WorkEvidenceKind::HostConfirmation),
                     confirming_owner_key: None,
                     execution_binding_id: None,
+                    withdraws: BTreeSet::new(),
                 },
             },
             now,
@@ -2682,6 +2683,7 @@ mod tests {
                 WorkOwnerKey::principal(reviewer).expect("reviewer principal"),
             ),
             execution_binding_id: None,
+            withdraws: BTreeSet::new(),
         };
 
         // One distinct reviewer is short of the quorum: machine refuses close.

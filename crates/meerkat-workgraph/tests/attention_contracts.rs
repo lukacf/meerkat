@@ -838,15 +838,9 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
-                kind: "host_confirmation".to_string(),
-                id: "acceptance-1".to_string(),
-                label: Some("accepted".to_string()),
-                summary: Some("Host accepted the result".to_string()),
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("host_confirmation", "acceptance-1")
+                .with_label("accepted")
+                .with_summary("Host accepted the result"),
             principal: None,
             trusted_principal: None,
         })
@@ -929,15 +923,7 @@ async fn goal_confirm_and_request_close_reject_stale_item_revision() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
-                kind: "host_confirmation".to_string(),
-                id: "acceptance-1".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("host_confirmation", "acceptance-1"),
             principal: None,
             trusted_principal: None,
         })
@@ -1102,15 +1088,7 @@ async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
-                kind: "host_confirmation".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("host_confirmation", "spoofed"),
         })
         .await
         .expect_err("reserved confirmation evidence is only accepted through goal_confirm");
@@ -1160,15 +1138,7 @@ async fn public_self_attest_confirm_rejects_reserved_completion_evidence() {
             expected_revision: goal.item.revision,
             principal: None,
             trusted_principal: None,
-            evidence: WorkEvidenceRef {
-                kind: "host_confirmation".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("host_confirmation", "spoofed"),
         })
         .await
         .expect_err("public self-attest cannot mint reserved trusted evidence");
@@ -1190,15 +1160,7 @@ async fn create_rejects_reserved_completion_evidence() {
             completion_policy: WorkCompletionPolicy::HostConfirmed,
             failed_child_join_policy: Default::default(),
             cancelled_child_join_policy: Default::default(),
-            evidence_refs: vec![WorkEvidenceRef {
-                kind: "host_confirmation".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            }],
+            evidence_refs: vec![WorkEvidenceRef::new("host_confirmation", "spoofed")],
             ..CreateWorkItemRequest::default()
         })
         .await
@@ -1251,16 +1213,13 @@ async fn add_evidence_rejects_forged_typed_confirmation_kind() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
+            evidence: {
                 // Benign display string that a string-only guard would admit.
-                kind: "review-note".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
+                let mut forged = WorkEvidenceRef::new("review-note", "spoofed");
                 // Forged typed confirmation the machine would otherwise honor.
-                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
-                confirming_owner_key: None,
-                execution_binding_id: None,
+                forged.confirmation_kind =
+                    Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation);
+                forged
             },
         })
         .await
@@ -1283,14 +1242,11 @@ async fn create_rejects_forged_typed_confirmation_kind() {
             completion_policy: WorkCompletionPolicy::HostConfirmed,
             failed_child_join_policy: Default::default(),
             cancelled_child_join_policy: Default::default(),
-            evidence_refs: vec![WorkEvidenceRef {
-                kind: "review-note".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
-                confirming_owner_key: None,
-                execution_binding_id: None,
+            evidence_refs: vec![{
+                let mut forged = WorkEvidenceRef::new("review-note", "spoofed");
+                forged.confirmation_kind =
+                    Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation);
+                forged
             }],
             ..CreateWorkItemRequest::default()
         })
@@ -1342,14 +1298,11 @@ async fn public_self_attest_confirm_rejects_forged_typed_confirmation_kind() {
             expected_revision: goal.item.revision,
             principal: None,
             trusted_principal: None,
-            evidence: WorkEvidenceRef {
-                kind: "review-note".to_string(),
-                id: "spoofed".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
-                confirming_owner_key: None,
-                execution_binding_id: None,
+            evidence: {
+                let mut forged = WorkEvidenceRef::new("review-note", "spoofed");
+                forged.confirmation_kind =
+                    Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation);
+                forged
             },
         })
         .await
@@ -1686,15 +1639,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
-                kind: "supervisor_confirmation".to_string(),
-                id: "approval".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("supervisor_confirmation", "approval"),
             principal: Some(WorkOwnerKey::principal("other").expect("principal")),
             trusted_principal: Some(WorkOwnerKey::principal("other").expect("principal")),
         })
@@ -1711,15 +1656,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            evidence: WorkEvidenceRef {
-                kind: "supervisor_confirmation".to_string(),
-                id: "approval".to_string(),
-                label: None,
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            evidence: WorkEvidenceRef::new("supervisor_confirmation", "approval"),
             principal: Some(supervisor.clone()),
             trusted_principal: Some(supervisor.clone()),
         })
@@ -2804,15 +2741,8 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
         expected_revision: 7,
-        evidence: WorkEvidenceRef {
-            kind: "host_confirmation".to_string(),
-            id: "confirmation-1".to_string(),
-            label: Some("accepted".to_string()),
-            summary: None,
-            confirmation_kind: None,
-            confirming_owner_key: None,
-            execution_binding_id: None,
-        },
+        evidence: WorkEvidenceRef::new("host_confirmation", "confirmation-1")
+            .with_label("accepted"),
         principal: Some(WorkOwnerKey::principal("user").expect("principal")),
         trusted_principal: Some(WorkOwnerKey::principal("user").expect("principal")),
     };

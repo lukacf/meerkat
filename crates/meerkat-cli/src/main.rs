@@ -10730,14 +10730,11 @@ async fn handle_workgraph_command(
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     expected_revision,
-                    evidence: meerkat::WorkEvidenceRef {
-                        kind,
-                        id,
-                        label,
-                        summary,
-                        confirmation_kind: None,
-                        confirming_owner_key: None,
-                        execution_binding_id: None,
+                    evidence: {
+                        let mut evidence = meerkat::WorkEvidenceRef::new(kind, id);
+                        evidence.label = label;
+                        evidence.summary = summary;
+                        evidence
                     },
                     principal: None,
                     trusted_principal: None,

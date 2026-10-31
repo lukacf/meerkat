@@ -2683,7 +2683,7 @@ mod tests {
         }
         let mut altered_header = retired_first.clone();
         altered_header.content.push('x');
-        let mut over_the_limit = retired_first.clone();
+        let mut over_the_limit = retired_first;
         if let Some(marker) = over_the_limit.retired_instruction_body.as_mut() {
             marker.body_bytes = MAX_INSTRUCTION_BODY_BYTES as u64 + 1;
         }
@@ -2696,7 +2696,7 @@ mod tests {
             ),
             (
                 "a retired row after a live row of its key",
-                vec![first.clone(), retired_second],
+                vec![first, retired_second],
                 "carries a retired body after a live row of its key",
             ),
             (
@@ -2711,7 +2711,7 @@ mod tests {
             ),
             (
                 "a body over the body limit",
-                vec![over_the_limit, second.clone()],
+                vec![over_the_limit, second],
                 "exceeds",
             ),
         ] {

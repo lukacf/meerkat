@@ -3098,7 +3098,7 @@ mod tests {
                 "origin_session_id": origin.to_string(),
                 "render_version": 1,
             },
-            "retired_instruction_body": marker.clone(),
+            "retired_instruction_body": marker,
         }))
         .expect("a retired activation row decodes");
         let page = SessionHistoryPage {

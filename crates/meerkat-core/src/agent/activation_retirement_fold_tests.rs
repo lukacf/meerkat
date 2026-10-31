@@ -787,7 +787,7 @@ async fn no_generic_rewrite_or_restore_retires_or_revives_a_body() {
         .expect("the compaction left a rewrite graph");
     let before_compaction = history
         .commits()
-        .last()
+        .next_back()
         .expect("the compaction's commit")
         .parent_revision
         .clone();

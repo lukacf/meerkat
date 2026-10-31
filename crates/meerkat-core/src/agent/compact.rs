@@ -3731,7 +3731,7 @@ mod tests {
             "{error}"
         );
 
-        let mut unauthorized = result.clone();
+        let mut unauthorized = result;
         unauthorized.messages[1] = Message::System(retire(1));
         let nothing =
             crate::session::ActivationRetirement::from_rows(std::collections::BTreeMap::new());

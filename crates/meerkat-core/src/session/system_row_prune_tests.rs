@@ -683,7 +683,7 @@ fn a_prune_span_with_conversation_rows_keeps_them() {
         .validated_transcript_history_state()
         .unwrap()
         .expect("a rewrite graph");
-    let commit = history.commits().last().expect("the prune's commit");
+    let commit = history.commits().next_back().expect("the prune's commit");
     assert_eq!(
         history.materialize_rewrite_parent(commit).unwrap().messages,
         before,

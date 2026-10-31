@@ -33,6 +33,7 @@ export function DrawerLayout({
   minWidth = 300,
   maxWidth = 440,
   backLabel = "Back",
+  backTestId,
   className,
   testId,
 }: {
@@ -49,6 +50,7 @@ export function DrawerLayout({
   maxWidth?: number;
   /** The Back row's words under 600 px ("All agents"). */
   backLabel?: string;
+  backTestId?: string;
   className?: string;
   testId?: string;
 }) {
@@ -116,7 +118,7 @@ export function DrawerLayout({
             />
             <div className="cc-drawer-layout__drawer">
               {onClose ? (
-                <button type="button" className="cc-drawer-layout__back" onClick={onClose}>
+                <button type="button" className="cc-drawer-layout__back" onClick={onClose} data-testid={backTestId}>
                   <span className="cc-split__back-mark" aria-hidden="true" />
                   {backLabel}
                 </button>
@@ -145,6 +147,7 @@ export function DetailDrawer({
   subtitle,
   onClose,
   closeLabel = "Close details",
+  closeTestId,
   onOpenInPane,
   openInPaneLabel = "Open in pane",
   actions,
@@ -164,6 +167,7 @@ export function DetailDrawer({
   subtitle?: ReactNode;
   onClose?: () => void;
   closeLabel?: string;
+  closeTestId?: string;
   onOpenInPane?: () => void;
   openInPaneLabel?: string;
   /** The action row after the sections (Open chat, Details, Connect to...). */
@@ -223,7 +227,7 @@ export function DetailDrawer({
         {status ? <span className="cc-drawer__status">{status}</span> : null}
         <span className="cc-drawer__tools">
           {onOpenInPane ? <IconButton glyph="open" label={openInPaneLabel} size="sm" onClick={onOpenInPane} /> : null}
-          {onClose ? <IconButton glyph="close" label={closeLabel} size="sm" onClick={close} /> : null}
+          {onClose ? <IconButton glyph="close" label={closeLabel} size="sm" onClick={close} data-testid={closeTestId} /> : null}
         </span>
       </header>
       <div className="cc-drawer__body">

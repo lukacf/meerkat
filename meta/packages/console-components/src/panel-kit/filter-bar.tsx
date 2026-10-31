@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { IconButton } from "./button";
 import { cx } from "./cx";
+import { KitGlyph, type KitGlyphName } from "./glyphs";
 import { StatusMark } from "./status-mark";
 import { SearchField } from "./toolbar";
 import type { Tone } from "./tone";
@@ -13,6 +14,8 @@ export interface FilterChipProps {
   onToggle: (pressed: boolean) => void;
   /** A status filter carries its tone's mark ("Blocked" warn). */
   tone?: Tone;
+  /** A kind filter carries its glyph (memory kinds). */
+  glyph?: KitGlyphName;
   /** The accessible name when the label is not plain text. */
   ariaLabel?: string;
   testId?: string;
@@ -20,7 +23,7 @@ export interface FilterChipProps {
 }
 
 /** A toggle pill with a count (spec A3.11): "Blocked 2", "Mine". */
-export function FilterChip({ label, count, pressed, onToggle, tone, ariaLabel, testId, className }: FilterChipProps) {
+export function FilterChip({ label, count, pressed, onToggle, tone, glyph, ariaLabel, testId, className }: FilterChipProps) {
   return (
     <button
       type="button"
@@ -31,7 +34,7 @@ export function FilterChip({ label, count, pressed, onToggle, tone, ariaLabel, t
       data-testid={testId}
       onClick={() => onToggle(!pressed)}
     >
-      {tone ? <StatusMark tone={tone} /> : null}
+      {tone ? <StatusMark tone={tone} /> : glyph ? <KitGlyph name={glyph} className="cc-filter-chip__glyph" /> : null}
       <span className="cc-filter-chip__label">{label}</span>
       {count !== null && count !== undefined && count !== "" ? <span className="cc-count">{count}</span> : null}
     </button>

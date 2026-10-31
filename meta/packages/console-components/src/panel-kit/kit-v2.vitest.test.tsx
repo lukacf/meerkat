@@ -517,6 +517,20 @@ describe("detail drawer", () => {
     expect(document.activeElement === node).toBe(true);
   });
 
+  it("names its close button and Back row for tests", () => {
+    const view = render(
+      <DrawerLayout
+        open
+        onClose={() => {}}
+        backTestId="memory-detail-back-row"
+        main={<span />}
+        drawer={<DetailDrawer title="Record" onClose={() => {}} closeTestId="memory-detail-back" autoFocus={false} />}
+      />,
+    );
+    expect(view.getByTestId("memory-detail-back").getAttribute("aria-label")).toBe("Close details");
+    expect(view.getByTestId("memory-detail-back-row").textContent).toBe("Back");
+  });
+
   it("closes from its close button and resizes from the keyboard, persisting the width", () => {
     window.localStorage.clear();
     const view = render(<DrawerFixture />);

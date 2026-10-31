@@ -1386,6 +1386,9 @@ impl GeneratedMachineKernel {
             "session_document_instruction_active_slots" => {
                 self.eval_session_document_instruction_active_slots(args, transition_name)
             }
+            "session_document_activation_retired_after" => {
+                self.eval_session_document_activation_retired_after(args, transition_name)
+            }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
     }
@@ -1483,6 +1486,42 @@ impl GeneratedMachineKernel {
             }
         }
         Ok(KernelValue::Map(active_slots))
+    }
+
+    /// Per activation key of `rows`, the rows a retirement leaves retired:
+    /// every row but the newest, or the recovered `retired` count when that
+    /// is more. A key `retired` does not name counts none retired.
+    fn eval_session_document_activation_retired_after(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [rows, retired]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_activation_retired_after expects two args",
+            )
+        })?;
+        let rows = rows
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let retired = retired
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut retired_after = BTreeMap::new();
+        for (key, count) in rows {
+            let count = count
+                .as_u64()
+                .map_err(|error| self.eval_error(transition_name, error))?;
+            let already = match retired.get(&key) {
+                Some(value) => value
+                    .as_u64()
+                    .map_err(|error| self.eval_error(transition_name, error))?,
+                None => 0,
+            };
+            retired_after.insert(key, KernelValue::U64(already.max(count.saturating_sub(1))));
+        }
+        Ok(KernelValue::Map(retired_after))
     }
 
     fn eval_meerkat_machine_session_id_matches_string(

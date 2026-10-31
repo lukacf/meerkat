@@ -2691,6 +2691,20 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "instruction_mob_owner_names_its_mob",
                         ]),
                 ),
+                scenario(
+                    "session_activation_body_retirement_region",
+                    "RecoverSessionActivationBodies recovers, per instruction activation key, how many activation rows the session's transcript holds, how many of them (oldest first) carry a retired body and whether the newest row is the session's own, and refuses a torn projection (maps naming different keys, a key without rows, more retired rows than rows, a retired own newest row); AuthorizeActivationBodyRetirement decides, under ActivationBodyRetirementAuthorized, that a compaction retires every row a later row of its key follows, never lowers a recovered count and never retires an own newest row. The shell maps the retired count of each key onto that key's oldest rows and decides nothing",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecoverSessionActivationBodies",
+                            "AuthorizeActivationBodyRetirement",
+                        ])
+                        .effects(&["ActivationBodyRetirementAuthorized"])
+                        .invariants(&[
+                            "activation_body_maps_lockstep",
+                            "activation_effective_body_live",
+                        ]),
+                ),
             ],
         ),
         machine_manifest_from_schema(

@@ -1115,6 +1115,9 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &["LeadingPrefixOnly", "LoweringUnavailable"],
             ),
             NamedTypeBinding::string_enum("InstructionFoldSource", &["Effective", "Target"]),
+            // Activation-body retirement region typed vocabulary: whether an
+            // activation key's newest row is the session's own.
+            NamedTypeBinding::string_enum("ActivationHeadOrigin", &["Own", "Copied"]),
         ],
         Vec::new(),
     )

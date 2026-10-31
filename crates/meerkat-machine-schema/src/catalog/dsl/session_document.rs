@@ -729,6 +729,31 @@ pub enum InstructionFoldSource {
     Target,
 }
 
+// ---------------------------------------------------------------------------
+// Activation-body retirement region typed vocabulary.
+//
+// The machine holds, per session and per instruction activation key (the
+// key's canonical string), how many activation rows of the key the
+// transcript holds (every origin), how many of them, oldest first, carry a
+// retired body, and whether the key's newest row is the session's own. The
+// shell recovers these counts from the session's transcript before a
+// compaction, which asks the machine which bodies to retire, and maps "the
+// first `retired` rows of a key" onto rows; a key's retired rows always
+// precede its live ones, so the mapping is exact. Bodies, digests and
+// offsets stay in the shell.
+// ---------------------------------------------------------------------------
+
+/// Whether an instruction activation key's newest row is the session's own
+/// activation or a row a fork copied from its source. `Own` is the Rust
+/// `Default`, the stricter case: it is the session's effective activation
+/// of the key, whose body is never retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ActivationHeadOrigin {
+    #[default]
+    Own,
+    Copied,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -775,6 +800,14 @@ machine! {
             session_instruction_effective_bytes: Map<SessionId, Map<String, u64>>,
             session_instruction_effective_generation: Map<SessionId, u64>,
             session_instruction_entry_sequence: Map<SessionId, u64>,
+            // Activation-body retirement region. One entry per session the
+            // shell recovered, keyed by activation key: how many activation
+            // rows of the key the transcript holds, how many of them, oldest
+            // first, carry a retired body, and whether the key's newest row
+            // is the session's own.
+            session_activation_rows: Map<SessionId, Map<String, u64>>,
+            session_activation_retired: Map<SessionId, Map<String, u64>>,
+            session_activation_head_origin: Map<SessionId, Map<String, Enum<ActivationHeadOrigin>>>,
         }
 
         init(Ready) {
@@ -807,6 +840,9 @@ machine! {
             session_instruction_effective_bytes = EmptyMap,
             session_instruction_effective_generation = EmptyMap,
             session_instruction_entry_sequence = EmptyMap,
+            session_activation_rows = EmptyMap,
+            session_activation_retired = EmptyMap,
+            session_activation_head_origin = EmptyMap,
         }
 
         terminal []
@@ -1355,6 +1391,23 @@ machine! {
                 at_run_start: bool,
                 lowering: Enum<InstructionLowering>,
             },
+
+            // -----------------------------------------------------------
+            // Activation-body retirement region. The shell recovers a
+            // session's instruction activation rows per key from its
+            // transcript (how many rows, how many of them carry a retired
+            // body, whether the newest row is the session's own) and then
+            // asks which bodies to retire. Neither input carries a verdict.
+            // -----------------------------------------------------------
+            RecoverSessionActivationBodies {
+                session_id: SessionId,
+                rows: Map<String, u64>,
+                retired: Map<String, u64>,
+                head_origin: Map<String, Enum<ActivationHeadOrigin>>,
+            },
+            AuthorizeActivationBodyRetirement {
+                session_id: SessionId,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -1659,6 +1712,12 @@ machine! {
                 source: Enum<InstructionFoldSource>,
                 generation: u64,
             },
+
+            // Activation-body retirement region effect. The recovery arm
+            // emits `SessionInstructionStateRecovered`; this verdict names
+            // nothing, and the shell reads how many rows of each key are
+            // retired from the machine's state.
+            ActivationBodyRetirementAuthorized,
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -1894,6 +1953,28 @@ machine! {
                     && transcript_is_system_prefix)
         }
 
+        // Activation-body retirement region helper. One session's recovered
+        // projection is consistent when its three maps name the same keys,
+        // every key has a row, a key never has more retired rows than rows,
+        // and a key whose newest row is the session's own keeps that row's
+        // body.
+        helper activation_body_maps_consistent(
+            rows: Map<String, u64>,
+            retired: Map<String, u64>,
+            head_origin: Map<String, Enum<ActivationHeadOrigin>>
+        ) -> bool {
+            rows.keys() == retired.keys()
+                && rows.keys() == head_origin.keys()
+                && for_all(activation_key in rows.keys(),
+                    rows.get_cloned(activation_key).get("value") >= 1
+                    && retired.get_cloned(activation_key).get("value")
+                        <= rows.get_cloned(activation_key).get("value")
+                    && (head_origin.get_cloned(activation_key).get("value")
+                            != ActivationHeadOrigin::Own
+                        || retired.get_cloned(activation_key).get("value")
+                            < rows.get_cloned(activation_key).get("value")))
+        }
+
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnOverridesResolved => local seam NoOwnerRealization,
         disposition SessionInitialPromptStageResolved => local seam NoOwnerRealization,
@@ -1946,6 +2027,7 @@ machine! {
         disposition InstructionEntryNotNeeded => local seam NoOwnerRealization,
         disposition InstructionApplicationDeferred => local seam NoOwnerRealization,
         disposition InstructionFoldAuthorized => local seam NoOwnerRealization,
+        disposition ActivationBodyRetirementAuthorized => local seam NoOwnerRealization,
 
         invariant live_interaction_transcript_binding_is_complete {
             self.session_live_channel_id.keys() == self.session_live_interaction_id.keys()
@@ -2075,6 +2157,49 @@ machine! {
                 || (self.session_instruction_owner.get_cloned(session_id).get("value")
                         != InstructionTargetOwner::Mob
                     && self.session_instruction_owner_mob.get_cloned(session_id).get("value") == ""))
+        }
+
+        // Activation-body retirement region invariants, each written out
+        // here rather than through the recovery guard's helper, so a defect
+        // in the helper cannot hide behind it. A session's three activation
+        // maps are recovered together and name the same keys, each with at
+        // least one row.
+        invariant activation_body_maps_lockstep {
+            self.session_activation_rows.keys() == self.session_activation_retired.keys()
+            && self.session_activation_rows.keys() == self.session_activation_head_origin.keys()
+            && for_all(session_id in self.session_activation_rows.keys(),
+                self.session_activation_rows.get_cloned(session_id).get("value").keys()
+                    == self.session_activation_retired.get_cloned(session_id).get("value").keys()
+                && self.session_activation_rows.get_cloned(session_id).get("value").keys()
+                    == self.session_activation_head_origin.get_cloned(session_id).get("value").keys()
+                && for_all(activation_key in self.session_activation_rows.get_cloned(session_id).get("value").keys(),
+                    self.session_activation_rows.get_cloned(session_id).get("value")
+                        .get_cloned(activation_key).get("value") >= 1))
+        }
+
+        // A key's retired rows are never more than its rows, and never its
+        // newest row while that row is the session's own: the session's
+        // effective activation of a key keeps its body.
+        invariant activation_effective_body_live {
+            for_all(session_id in self.session_activation_rows.keys(),
+                self.session_activation_retired.contains_key(session_id)
+                && self.session_activation_head_origin.contains_key(session_id)
+                && for_all(activation_key in self.session_activation_rows.get_cloned(session_id).get("value").keys(),
+                    self.session_activation_retired.get_cloned(session_id).get("value")
+                        .contains_key(activation_key)
+                    && self.session_activation_head_origin.get_cloned(session_id).get("value")
+                        .contains_key(activation_key)
+                    && self.session_activation_retired.get_cloned(session_id).get("value")
+                            .get_cloned(activation_key).get("value")
+                        <= self.session_activation_rows.get_cloned(session_id).get("value")
+                            .get_cloned(activation_key).get("value")
+                    && (self.session_activation_head_origin.get_cloned(session_id).get("value")
+                            .get_cloned(activation_key).get("value")
+                            != ActivationHeadOrigin::Own
+                        || self.session_activation_retired.get_cloned(session_id).get("value")
+                                .get_cloned(activation_key).get("value")
+                            < self.session_activation_rows.get_cloned(session_id).get("value")
+                                .get_cloned(activation_key).get("value"))))
         }
 
         // ---------------------------------------------------------------
@@ -6324,6 +6449,65 @@ machine! {
                 generation: self.session_instruction_effective_generation.get_cloned(session_id).get("value")
             }
         }
+
+        // ===============================================================
+        // Activation-body retirement region. Before a compaction the shell
+        // recovers a session's instruction activation rows per key from its
+        // transcript (how many rows of every origin, how many of them, oldest
+        // first, carry a retired body, and whether the newest row is the
+        // session's own), then asks which bodies to retire: every row a later
+        // row of its key follows. The shell maps "the first `retired` rows of
+        // a key" onto rows; a key's retired rows always precede its live
+        // ones, so the mapping is exact. An activation appends nothing here:
+        // the shell recovers the session afresh before every decision.
+        // ===============================================================
+
+        // A consistent projection replaces the session's activation maps. A
+        // torn one (a retired own newest row, more retired rows than rows, a
+        // key without rows, maps that name different keys) is taken by no
+        // arm, so the compaction that recovered it fails closed and keeps its
+        // history.
+        transition RecoverSessionActivationBodies {
+            on input RecoverSessionActivationBodies {
+                session_id,
+                rows,
+                retired,
+                head_origin
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && activation_body_maps_consistent(rows, retired, head_origin)
+            }
+            update {
+                self.session_activation_rows.insert(session_id, rows);
+                self.session_activation_retired.insert(session_id, retired);
+                self.session_activation_head_origin.insert(session_id, head_origin);
+            }
+            to Ready
+            emit SessionInstructionStateRecovered
+        }
+
+        // Every superseded row of a key is retired: all of its rows but the
+        // newest, or as many as were already retired when that is more (a
+        // fork may copy a newest row retired). The decision never lowers a
+        // recovered count, and an own newest row, the session's effective
+        // activation of its key, keeps its body.
+        transition AuthorizeActivationBodyRetirement {
+            on input AuthorizeActivationBodyRetirement { session_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_activation_rows.contains_key(session_id)
+            }
+            update {
+                self.session_activation_retired.insert(
+                    session_id,
+                    session_document_activation_retired_after(
+                        self.session_activation_rows.get_cloned(session_id).get("value"),
+                        self.session_activation_retired.get_cloned(session_id).get("value")));
+            }
+            to Ready
+            emit ActivationBodyRetirementAuthorized
+        }
     }
 }
 
@@ -6365,6 +6549,22 @@ impl SessionDocumentMachineAuthority {
             .iter()
             .filter(|(slot, _)| effect.get(slot.as_str()) == Some(&InstructionEffect::Active))
             .map(|(slot, value)| (slot.clone(), value.clone()))
+            .collect()
+    }
+
+    // Per activation key of `rows`, the rows a retirement leaves retired:
+    // every row but the newest, or the recovered `retired` count when that
+    // is more. A key `retired` does not name counts none retired. Every
+    // admission decision stays in the canonical transition.
+    fn session_document_activation_retired_after(
+        rows: &std::collections::BTreeMap<String, u64>,
+        retired: &std::collections::BTreeMap<String, u64>,
+    ) -> std::collections::BTreeMap<String, u64> {
+        rows.iter()
+            .map(|(key, count)| {
+                let already = retired.get(key).copied().unwrap_or(0);
+                (key.clone(), already.max(count.saturating_sub(1)))
+            })
             .collect()
     }
 }

@@ -4446,6 +4446,11 @@ fn infer_expr_type(
                 infer_expr_type(values, field_types, helper_returns, binding_types)
             })
         }
+        // The retired count per activation key: the type of the row counts.
+        Expr::Call { helper, args } if helper == "session_document_activation_retired_after" => {
+            args.first()
+                .and_then(|rows| infer_expr_type(rows, field_types, helper_returns, binding_types))
+        }
         Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
             Some(TypeRef::Map(
                 Box::new(TypeRef::String),
@@ -10912,6 +10917,29 @@ impl<'a> MachineTlaCompiler<'a> {
             "            candidate_slot \\in DOMAIN slot_effect /\\ slot_effect[candidate_slot] = \"Active\"}}"
         );
         pushln!(out, "        |-> slot_values[instruction_slot]]");
+        // Per activation key, the rows a retirement leaves retired: every
+        // row but the newest, or the recovered count when that is more; a
+        // key the retired map does not name counts none (the Rust
+        // authorities agree).
+        writeln!(
+            out,
+            "{}(activation_rows, activation_retired) ==",
+            self.scoped_helper_name("session_document_activation_retired_after")
+        )
+        .expect("write to string");
+        pushln!(out, "    [activation_key \\in DOMAIN activation_rows |->");
+        pushln!(
+            out,
+            "        LET retired_count == IF activation_key \\in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0"
+        );
+        pushln!(
+            out,
+            "            superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0"
+        );
+        pushln!(
+            out,
+            "        IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]"
+        );
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {

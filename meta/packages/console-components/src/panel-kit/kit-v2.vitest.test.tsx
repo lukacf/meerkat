@@ -3,15 +3,24 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  Button,
   Chip,
   IconButton,
   OverflowMenu,
+  PanelHeader,
+  PanelPreferencesProvider,
+  PanelShell,
   SearchField,
   SelectField,
   StatusDot,
   StatusMark,
   StatusPill,
+  StatusRow,
   ViewOptionsMenu,
+  standardPanelMenu,
+  usePanelDensity,
+  usePanelOptions,
+  useShowTechnicalIds,
   type MenuEntry,
 } from "./index";
 
@@ -241,5 +250,195 @@ describe("fields", () => {
     expect(view.container.querySelector(".cc-search__key")?.textContent).toBe("/");
     view.rerender(<SearchField label="Search agents" value="bil" onChange={() => {}} shortcut="/" />);
     expect(view.container.querySelector(".cc-search__key") === null).toBe(true);
+  });
+});
+
+const NOW_MS = Date.UTC(2026, 9, 30, 12, 0, 0);
+
+describe("panel header v2", () => {
+  it("renders every older header byte for byte", () => {
+    const html = render(<PanelHeader title="Memory" subtitle="12 records" actions={<Button>Refresh</Button>} className="memory-head" />).container.innerHTML;
+    expect(html).toBe(
+      '<header class="cc-panel-head memory-head"><div class="cc-panel-head__text"><h2 class="cc-panel-head__title">Memory</h2>'
+        + '<div class="cc-panel-head__sub">12 records</div></div><div class="cc-panel-head__actions"><button type="button" class="cc-btn">Refresh</button></div></header>',
+    );
+  });
+
+  it("shows the live summary with toned facts and the freshness last", () => {
+    const view = render(
+      <PanelHeader
+        title="Topology"
+        summary={[
+          { key: "agents", text: "8 agents" },
+          { key: "live", text: "1 working now", tone: "live" },
+          { key: "warn", text: "1 degraded", tone: "warn", testId: "summary-warn" },
+        ]}
+        freshness={{ at: NOW_MS - 12_000, title: "Snapshot" }}
+        summaryTestId="summary"
+      />,
+    );
+    const summary = view.getByTestId("summary");
+    expect(summary.className).toBe("cc-panel-head__sub cc-panel-head__summary");
+    expect(summary.textContent?.startsWith("8 agents · 1 working now · 1 degraded · Updated")).toBe(true);
+    const warn = view.getByTestId("summary-warn");
+    expect(warn.getAttribute("data-tone")).toBe("warn");
+    expect(warn.querySelector('.cc-mark[data-tone="warn"]') !== null).toBe(true);
+    expect(view.container.querySelector("time")?.getAttribute("title")).toBe("Snapshot");
+    view.rerender(<PanelHeader title="Topology" summary={[{ text: "8 agents" }]} freshness={{ updating: true }} refreshing summaryTestId="summary" />);
+    expect(view.getByTestId("summary").textContent).toBe("8 agents · Updating");
+    expect(view.container.querySelector(".cc-panel-head__progress") !== null).toBe(true);
+  });
+
+  it("announces count changes politely, never the first render", () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<PanelHeader title="Roster" summary={[{ text: "8 agents" }]} />);
+      const live = view.container.querySelector('[aria-live="polite"]');
+      expect(live?.textContent).toBe("");
+      view.rerender(<PanelHeader title="Roster" summary={[{ text: "9 agents" }]} />);
+      expect(live?.textContent).toBe("9 agents");
+      view.rerender(<PanelHeader title="Roster" summary={[{ text: "10 agents" }]} />);
+      expect(live?.textContent).toBe("9 agents");
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(live?.textContent).toBe("10 agents");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("puts the view switch, tools and the overflow menu on the right", () => {
+    const onChange = vi.fn();
+    const view = render(
+      <PanelHeader
+        title="WorkGraph"
+        scope={<SelectField label="Work Graph team" showLabel={false} variant="chip" value="ops" options={[{ value: "ops", label: "Operations team" }]} onChange={() => {}} />}
+        view={{
+          ariaLabel: "WorkGraph view",
+          value: "graph",
+          onChange,
+          options: [
+            { id: "graph", label: "Graph", glyph: "graph", testId: "workgraph-view-toggle:graph" },
+            { id: "tree", label: "Outline", glyph: "tree", testId: "workgraph-view-toggle:tree" },
+          ],
+        }}
+        tools={<IconButton label="Refresh work items" glyph="refresh" />}
+        menu={{ label: "More actions for WorkGraph", items: [{ kind: "item", id: "refresh", label: "Refresh now", onSelect: () => {} }], triggerTestId: "workgraph-menu" }}
+      />,
+    );
+    expect(view.getByRole("heading", { level: 2 }).outerHTML).toBe('<h2 class="cc-panel-head__title">WorkGraph</h2>');
+    expect(view.getByRole("combobox", { name: "Work Graph team" }) !== null).toBe(true);
+    const graph = view.getByTestId("workgraph-view-toggle:graph");
+    expect(graph.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(view.getByTestId("workgraph-view-toggle:tree"));
+    expect(onChange).toHaveBeenCalledWith("tree");
+    expect(view.getByRole("button", { name: "Refresh work items" }).closest(".cc-reveal") !== null).toBe(true);
+    fireEvent.click(view.getByTestId("workgraph-menu"));
+    // The folded copy of the view switch never repeats the switch's ids.
+    expect(view.getByTestId("workgraph-view-toggle:graph:menu").getAttribute("aria-checked")).toBe("true");
+    expect(view.getAllByTestId("workgraph-view-toggle:graph").length).toBe(1);
+  });
+});
+
+describe("status toast", () => {
+  it("keeps the reserved row by default", () => {
+    const html = render(<StatusRow error="Memory is unavailable" errorTestId="memory-error" />).container.innerHTML;
+    expect(html).toBe('<div class="cc-status-row"><span class="cc-status-row__error" role="alert" title="Memory is unavailable" data-testid="memory-error">Memory is unavailable</span></div>');
+  });
+
+  it("overlays the error without reserving space, with the data age and Retry", () => {
+    const onRetry = vi.fn();
+    const view = render(<StatusRow mode="toast" updatedAt={NOW_MS - 180_000} onRetry={onRetry} />);
+    expect(view.container.innerHTML).toBe("");
+    view.rerender(<StatusRow mode="toast" error="Couldn't refresh." errorTestId="gating-audit-error" updatedAt={NOW_MS - 180_000} onRetry={onRetry} />);
+    const alert = view.getByRole("alert");
+    expect(alert.getAttribute("data-testid")).toBe("gating-audit-error");
+    expect(alert.textContent).toBe("Couldn't refresh.");
+    expect(view.container.querySelector(".cc-status-toast__stale")?.textContent?.startsWith(" Showing data from ")).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+function DensityProbe({ kind, testId }: { kind: string; testId: string }) {
+  const [density, setDensity] = usePanelDensity(kind);
+  const [ids, setIds] = useShowTechnicalIds(kind);
+  return (
+    <button type="button" data-testid={testId} data-ids={String(ids)} onClick={() => { setDensity(density === "compact" ? "comfortable" : "compact"); setIds(!ids); }}>
+      {density}
+    </button>
+  );
+}
+
+function OptionsProbe() {
+  const options = usePanelOptions();
+  return <span data-testid="options">{`${options.density} ${options.showTechnicalIds}`}</span>;
+}
+
+describe("panel preferences", () => {
+  it("persists density and technical ids per kind under the preference scope and keeps panels in step", () => {
+    window.localStorage.clear();
+    const view = render(
+      <PanelPreferencesProvider scope="principal-1">
+        <DensityProbe kind="topology" testId="a" />
+        <DensityProbe kind="topology" testId="b" />
+        <DensityProbe kind="memory" testId="c" />
+      </PanelPreferencesProvider>,
+    );
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    act(() => {
+      fireEvent.click(view.getByTestId("a"));
+    });
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1")).toBe("compact");
+    expect(window.localStorage.getItem("meta-console-tech-ids:topology:principal-1")).toBe("on");
+    expect(view.getByTestId("b").textContent).toBe("compact");
+    expect(view.getByTestId("b").getAttribute("data-ids")).toBe("true");
+    expect(view.getByTestId("c").textContent).toBe("comfortable");
+    act(() => {
+      fireEvent.click(view.getByTestId("b"));
+    });
+    // The default is not stored.
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+  });
+
+  it("gives the shell's density and id option to every part inside", () => {
+    const view = render(
+      <PanelShell density="compact" showTechnicalIds testId="shell">
+        <OptionsProbe />
+      </PanelShell>,
+    );
+    expect(view.getByTestId("shell").getAttribute("data-density")).toBe("compact");
+    expect(view.getByTestId("options").textContent).toBe("compact true");
+    const plain = render(<PanelShell testId="plain" />).container.innerHTML;
+    expect(plain).toBe('<section class="cc-panel" data-testid="plain"></section>');
+  });
+
+  it("builds the standard overflow menu in the spec's order", () => {
+    const entries = standardPanelMenu({
+      viewOptions: [{ kind: "checkbox", id: "helpers", label: "Show helpers", checked: true, onChange: () => {} }],
+      density: "comfortable",
+      onDensityChange: () => {},
+      showTechnicalIds: false,
+      onShowTechnicalIdsChange: () => {},
+      onOpenInSplit: () => {},
+      getCopyData: () => ({ agents: 8 }),
+      onRefresh: () => {},
+      testIdPrefix: "topology",
+    });
+    expect(entries.map((entry) => `${entry.kind}:${entry.id ?? ""}`)).toEqual([
+      "checkbox:helpers",
+      "radio:density",
+      "checkbox:technical-ids",
+      "separator:commands",
+      "item:split",
+      "item:copy-json",
+      "item:refresh",
+    ]);
+    const density = entries[1];
+    expect(density.kind === "radio" ? density.options.map((option) => option.testId) : []).toEqual([
+      "topology-menu:density:comfortable",
+      "topology-menu:density:compact",
+    ]);
   });
 });

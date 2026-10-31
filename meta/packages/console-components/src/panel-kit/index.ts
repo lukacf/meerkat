@@ -51,9 +51,27 @@ export {
   PanelTabs,
   SectionHeader,
   StatusRow,
+  StatusToast,
   panelTabIds,
+  usePanelOptions,
 } from "./panel";
-export type { PanelTab } from "./panel";
+export type {
+  PanelDensity,
+  PanelFreshness,
+  PanelHeaderMenu,
+  PanelOptions,
+  PanelTab,
+  PanelViewSwitch,
+  SummaryFact,
+} from "./panel";
+export {
+  PanelPreferencesProvider,
+  panelPreferenceKey,
+  standardPanelMenu,
+  usePanelDensity,
+  usePanelPreference,
+  useShowTechnicalIds,
+} from "./preferences";
 export { RelativeTime, useNow } from "./relative-time";
 export { SplitDetail } from "./split-detail";
 export { EmptyState, LoadingState, Notice } from "./states";

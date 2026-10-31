@@ -187,6 +187,82 @@
   min-width: 0;
 }
 
+/* Header v2 (spec A3.1): the title with its scope chip, the live summary
+   line (facts with their marks, ending with the freshness), and on the
+   right the one view switch, hover-revealed tools and the quiet overflow
+   trigger. A refresh runs a 1 px accent hairline along the bottom rule. */
+.cc-panel-head--v2 {
+  position: relative;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 auto; }
+.cc-panel-head__title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.cc-panel-head__title-row > .cc-panel-head__title { flex: 0 1 auto; min-width: 0; }
+.cc-panel-head__scope {
+  display: inline-flex;
+  flex: none;
+  min-width: 0;
+  max-width: 50%;
+}
+.cc-panel-head__scope .cc-field { max-width: 100%; }
+.cc-panel-head--v2 .cc-panel-head__sub { margin-top: 3px; }
+.cc-panel-head__fact {
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-panel-head__fact[data-tone] { color: var(--_cc-tone-ink); }
+.cc-panel-head__fact[data-tone="neutral"],
+.cc-panel-head__fact[data-tone="locked"] { color: var(--_cc-foreground-muted); }
+.cc-panel-head__fact > .cc-mark {
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.cc-panel-head__fact > .cc-mark[data-tone="warn"] { vertical-align: 0.5px; }
+.cc-panel-head__sep { color: var(--_cc-foreground-meta); }
+.cc-panel-head--v2 .cc-panel-head__actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: -1px;
+}
+.cc-panel-head__view { margin-right: 6px; }
+.cc-panel-head__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cc-panel-head__menu--fold { display: none; }
+.cc-panel-head__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.cc-panel-head--flush .cc-panel-head__progress { bottom: 0; }
+.cc-panel-head__progress::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: var(--_cc-member-accent);
+  animation: cc-hairline 1.2s var(--_cc-ease-travel) infinite;
+}
+@keyframes cc-hairline {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(250%); }
+}
+
 /* ── Tabs ──────────────────────────────────────────────────────── */
 
 .cc-tabs {
@@ -247,6 +323,45 @@
   white-space: nowrap;
 }
 .cc-status-row__error { color: var(--_cc-negative-ink); }
+
+/* The status toast (spec A3.1): a refresh error over the top of the body.
+   The anchor takes no space, so nothing moves when it comes or goes. */
+.cc-status-toast-anchor {
+  position: relative;
+  z-index: 30;
+  flex: none;
+  height: 0;
+}
+.cc-status-toast {
+  position: absolute;
+  top: 8px;
+  left: var(--_cc-panel-pad-x);
+  right: var(--_cc-panel-pad-x);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid color-mix(in oklch, var(--_cc-negative) 34%, transparent);
+  border-radius: var(--_cc-radius-md);
+  background: color-mix(in srgb, var(--_cc-negative) 7%, var(--_cc-surface-card));
+  box-shadow: var(--_cc-shadow-md);
+  color: var(--_cc-foreground);
+  font-size: 12.5px;
+  line-height: 1.4;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-status-toast__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-status-toast__error { color: var(--_cc-foreground); }
+.cc-status-toast__stale { color: var(--_cc-foreground-muted); }
+.cc-status-toast__retry { flex: none; }
 
 /* ── Toolbar and fields ────────────────────────────────────────── */
 
@@ -1614,6 +1729,18 @@ button.cc-tile:focus-visible,
 @container cc-panel (max-width: 479px) {
   .cc-reveal { opacity: 1; }
   .cc-menu__fold { display: block; }
+  .cc-panel-head--v2 .cc-panel-head__actions {
+    flex-basis: auto;
+    margin-left: auto;
+  }
+  .cc-panel-head__view { display: none; }
+  .cc-panel-head__menu--fold { display: inline-flex; }
+  .cc-panel-head--v2 .cc-panel-head__summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+  }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
     --_cc-card-pad: 8px 10px;
@@ -1643,7 +1770,9 @@ button.cc-tile:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .cc-dot.is-live,
   .cc-skeleton__row { animation: none; }
-  .cc-popover { animation: cc-fade-in 120ms linear; }
+  .cc-popover,
+  .cc-status-toast { animation: cc-fade-in 120ms linear; }
+  .cc-panel-head__progress::before { animation: none; width: 50%; }
   .cc-mark[data-tone="live"]:not(.cc-chip__mark),
   .cc-dot.is-live {
     animation: none;
@@ -1652,7 +1781,9 @@ button.cc-tile:focus-visible,
 }
 .reduced-motion .cc-dot.is-live,
 .reduced-motion .cc-skeleton__row { animation: none; }
-.reduced-motion .cc-popover { animation: cc-fade-in 120ms linear; }
+.reduced-motion .cc-popover,
+.reduced-motion .cc-status-toast { animation: cc-fade-in 120ms linear; }
+.reduced-motion .cc-panel-head__progress::before { animation: none; width: 50%; }
 .reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
 .reduced-motion .cc-dot.is-live {
   animation: none;

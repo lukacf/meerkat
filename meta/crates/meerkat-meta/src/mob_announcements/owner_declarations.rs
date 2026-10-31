@@ -91,6 +91,23 @@ fn step_operation(
 /// The keys of a mark: its kind and id.
 type MarkKey = (DeclarationRecordKind, String);
 
+/// The keys of the records `declarations` name: each source and each
+/// subscription (a role template among them) by its id, as their marks
+/// carry them.
+fn declared_keys(declarations: &Declarations) -> BTreeSet<MarkKey> {
+    declarations
+        .sources
+        .iter()
+        .map(|source| (DeclarationRecordKind::Source, source.source_id.to_string()))
+        .chain(declarations.subscriptions.iter().map(|subscription| {
+            (
+                DeclarationRecordKind::Subscription,
+                subscription.subscription_id.to_string(),
+            )
+        }))
+        .collect()
+}
+
 /// Whether the reconciler made the record of `before` and applied, or held,
 /// the declaration of `digest`: only then does an operator's cancel or end
 /// hold. A pending mark of the digest is a refused attempt, tried again.
@@ -161,6 +178,12 @@ impl AnnouncementService {
     /// and every role template's children.
     pub(super) async fn reconcile_declared(&self) -> Result<(), AnnouncementError> {
         let _gate = self.inner.declarations_gate.lock().await;
+        self.reconcile_declared_held().await
+    }
+
+    /// [`Self::reconcile_declared`] for a caller that holds the declarations
+    /// gate.
+    async fn reconcile_declared_held(&self) -> Result<(), AnnouncementError> {
         if let Some(own) = self.inner.native.own_mob() {
             if let Some(source) = self.inner.config.declarations.as_deref() {
                 let declarations = source.declarations();
@@ -246,24 +269,7 @@ impl AnnouncementService {
             .into_iter()
             .map(|mark| ((mark.kind, mark.id.clone()), mark))
             .collect();
-        let declared: BTreeSet<MarkKey> = applied
-            .declarations
-            .sources
-            .iter()
-            .map(|source| (DeclarationRecordKind::Source, source.source_id.to_string()))
-            .chain(
-                applied
-                    .declarations
-                    .subscriptions
-                    .iter()
-                    .map(|subscription| {
-                        (
-                            DeclarationRecordKind::Subscription,
-                            subscription.subscription_id.to_string(),
-                        )
-                    }),
-            )
-            .collect();
+        let declared = declared_keys(&applied.declarations);
         let dropped = marks
             .keys()
             .filter(|key| !declared.contains(*key))
@@ -1118,26 +1124,99 @@ impl AnnouncementService {
         })
     }
 
-    /// Retry the pending declared records at a health pass: a member that
-    /// registered since may be admitted now. Nothing is reconciled while
-    /// nothing is pending, and a failure waits for the next pass.
-    pub(super) async fn retry_pending_declared(&self) {
-        let pending = match self.inner.store.declaration_marks().await {
-            Ok(marks) => marks
-                .iter()
-                .any(|mark| mark.status == DeclarationStatus::Pending),
+    /// Retry the declarations at a health pass when they owe a reconcile: a
+    /// record is pending (a member that registered since may be admitted
+    /// now), or a reconcile a failure stopped left records it had not
+    /// reached (see [`Self::declarations_owe_a_reconcile`]).
+    ///
+    /// It runs under the declarations gate and never waits for it: while a
+    /// reconcile, an apply or a read holds the gate, this pass leaves the
+    /// declarations to it and the next pass looks again, so a round never
+    /// waits on a declaration. After a failed retry the next one waits out
+    /// the slowest settle pause, so a failure that persists is retried at
+    /// that pace, never once per round the retry's own puts wake.
+    pub(super) async fn retry_declarations(&self) {
+        let now = self.now();
+        let wait = self
+            .inner
+            .declarations_retry_after
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_sub(now);
+        // A wait longer than the pause was set before the clock stepped back.
+        if wait > 0 && wait <= self.inner.config.settle_check_max_ms {
+            return;
+        }
+        let Ok(_gate) = self.inner.declarations_gate.try_lock() else {
+            return;
+        };
+        let owed = match self.declarations_owe_a_reconcile().await {
+            Ok(owed) => owed,
             Err(error) => {
-                tracing::warn!(%error, "declaration marks not read at the health pass");
+                tracing::warn!(%error, "declarations not read at the health pass");
                 return;
             }
         };
-        if pending && let Err(error) = self.reconcile_declared().await {
-            tracing::warn!(
-                kind = %crate::mob_announcements::rpc::refusal_kind(&error),
-                %error,
-                "pending declarations not retried at the health pass"
-            );
+        if !owed {
+            return;
         }
+        let retry_after = match self.reconcile_declared_held().await {
+            Ok(()) => 0,
+            Err(error) => {
+                tracing::warn!(
+                    kind = %crate::mob_announcements::rpc::refusal_kind(&error),
+                    %error,
+                    "declarations not reconciled at the health pass; retried after the slowest \
+                     settle pause"
+                );
+                now.saturating_add(self.inner.config.settle_check_max_ms)
+            }
+        };
+        self.inner
+            .declarations_retry_after
+            .store(retry_after, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the declarations owe a reconcile: a record is pending, the
+    /// options declare a newer revision than the applied one, or the marks
+    /// do not name exactly the records the applied declarations name. A
+    /// reconcile that ends leaves neither of the last two (it records the
+    /// options' revision first, marks every declared record, and removes
+    /// the mark of every record it drops), but for a drop refused for now,
+    /// whose mark it keeps for a later trigger; one a failure stopped can
+    /// leave both.
+    async fn declarations_owe_a_reconcile(&self) -> Result<bool, AnnouncementError> {
+        let marks = self.inner.store.declaration_marks().await?;
+        if marks
+            .iter()
+            .any(|mark| mark.status == DeclarationStatus::Pending)
+        {
+            return Ok(true);
+        }
+        // Without its own mob a reconcile makes no declared record.
+        if self.inner.native.own_mob().is_none() {
+            return Ok(false);
+        }
+        let applied = self.inner.store.applied_declarations().await?;
+        let newer_options = self
+            .inner
+            .config
+            .declarations
+            .as_deref()
+            .is_some_and(|source| {
+                applied
+                    .as_ref()
+                    .is_none_or(|applied| source.declarations().revision > applied.revision)
+            });
+        if newer_options {
+            return Ok(true);
+        }
+        Ok(applied.is_some_and(|applied| {
+            let marked = marks
+                .into_iter()
+                .map(|mark| (mark.kind, mark.id))
+                .collect::<BTreeSet<MarkKey>>();
+            marked != declared_keys(&applied.declarations)
+        }))
     }
 
     /// An applied source's collection, as its health stands at the read.

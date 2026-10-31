@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `ErrorCategory.LIFECYCLE_EFFECT_FAILED` and
+  `ErrorCategory.LIFECYCLE_PROJECTION_OFF`, with their messages: a lifecycle
+  side effect of an identity (`after_create`, an exit interview, a
+  distillation) that failed every attempt it was allowed, and an identity
+  runtime whose session bridge cannot read what its lifecycle projection
+  reads, so no lifecycle side effect runs. Neither is a resolution.
+
 ## 0.9.6
 
 - `MetaBuilder.providerCredentialsRoot(path)` sends

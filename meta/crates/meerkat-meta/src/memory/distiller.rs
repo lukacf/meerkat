@@ -1867,9 +1867,22 @@ impl DistillerEngine {
         session_key: &str,
         cause: DistillCause,
     ) {
+        let _ = self
+            .distill_before_rotation_within_bound(identity, session_key, cause)
+            .await;
+    }
+
+    /// [`Self::distill_before_rotation`], answering whether the run ended
+    /// within the pre-rotation bound, or the bound it did not end within.
+    pub(crate) async fn distill_before_rotation_within_bound(
+        self: &Arc<Self>,
+        identity: &str,
+        session_key: &str,
+        cause: DistillCause,
+    ) -> Result<(), Duration> {
         let timeout = self.pre_rotation_timeout;
         match tokio::time::timeout(timeout, self.distill_now(identity, session_key, cause)).await {
-            Ok(_) => {}
+            Ok(_) => Ok(()),
             Err(_) => {
                 tracing::warn!(
                     identity,
@@ -1893,6 +1906,7 @@ impl DistillerEngine {
                         },
                     );
                 }
+                Err(timeout)
             }
         }
     }

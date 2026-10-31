@@ -17,17 +17,23 @@
 //! [`CoreReadsBridge::fail_history_reads`] places a fault on chosen reads of
 //! Core's member history, and [`CoreReadsBridge::refuse_release_of`] has
 //! Core refuse a member's release, retryably, as Core does while the member
-//! is being woken or has work in flight.
+//! is being woken or has work in flight. Its member lifecycle journal reads
+//! answer once its members keep the journal
+//! ([`CoreTestMembers::keep_journal`]);
+//! [`CoreReadsBridge::refuse_journal_pages`] and
+//! [`CoreReadsBridge::refuse_binding_reads`] have reads answer
+//! `Unsupported` as a bridge without them does.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use meerkat_core::types::SessionId;
 
 use super::IdentityRuntime;
 use super::bridge::{
-    BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError, MemberRuntimeBinding,
+    BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError,
+    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding,
     ResumeSessionOutcome, SessionBridge,
 };
 use super::core_test_members::CoreTestMembers;
@@ -106,6 +112,10 @@ pub(crate) struct CoreReadsBridge {
     release_refusals: Mutex<BTreeSet<AgentIdentity>>,
     /// Each release this bridge carried out, in order.
     releases: Mutex<Vec<AgentIdentity>>,
+    /// Set by [`Self::refuse_journal_pages`].
+    journal_pages_refused: AtomicBool,
+    /// Set by [`Self::refuse_binding_reads`].
+    binding_reads_refused: AtomicBool,
 }
 
 /// The reads of Core's member history that still answer, then the reads
@@ -199,6 +209,19 @@ impl CoreReadsBridge {
             .clone()
     }
 
+    /// From now on the pages of Core's member lifecycle journal answer
+    /// `Unsupported`, while its head still reads: a bridge that implements
+    /// one of the two journal reads only.
+    pub(crate) fn refuse_journal_pages(&self) {
+        self.journal_pages_refused.store(true, Ordering::SeqCst);
+    }
+
+    /// From now on Core's member history and an identity's last binding
+    /// answer `Unsupported`: a bridge without those reads.
+    pub(crate) fn refuse_binding_reads(&self) {
+        self.binding_reads_refused.store(true, Ordering::SeqCst);
+    }
+
     /// One read of Core's member history against the fault, if any.
     fn take_history_read(&self) -> Result<(), BridgeError> {
         let mut guard = self
@@ -272,6 +295,11 @@ impl SessionBridge for CoreReadsBridge {
     async fn member_binding_history(
         &self,
     ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
+        if self.binding_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_binding_history",
+            });
+        }
         self.take_history_read()?;
         self.core.history()
     }
@@ -280,7 +308,31 @@ impl SessionBridge for CoreReadsBridge {
         &self,
         identity: &AgentIdentity,
     ) -> Result<Option<meerkat_mob::MemberBinding>, BridgeError> {
+        if self.binding_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "last_member_binding",
+            });
+        }
         self.core.last_member_binding(identity)
+    }
+
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        self.core.journal_head()
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        if self.journal_pages_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_lifecycle_journal_page",
+            });
+        }
+        self.core.journal_page(after, limit)
     }
 
     async fn identity_management(

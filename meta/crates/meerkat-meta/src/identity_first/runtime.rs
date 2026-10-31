@@ -59,6 +59,7 @@ use crate::memory::records::{
 };
 
 mod build_preparation;
+mod lifecycle_projection;
 mod records;
 mod seat;
 pub(crate) use records::host_pending_members_before_build;
@@ -738,14 +739,57 @@ enum LifecycleRetireIntent {
     Release,
     /// The incarnation ends in Core (the roster no longer lists the
     /// identity): Core retires it and keeps its history. The memory harvest
-    /// hooks run once Core retired it (session tail distillation, exit
-    /// interview).
+    /// hooks (session tail distillation, exit interview) and the retirement
+    /// hook run in the lifecycle projection once Core journaled the
+    /// retirement.
     Retire,
     /// Non-destructive reload: Core retires the incarnation and the same
     /// durable session is seated again right after, under the same lifecycle
-    /// lock, so nothing rotates and the memory hooks must NOT run (an exit
+    /// lock, so nothing rotates and no side effect is owed (an exit
     /// interview for a member that stays would be a lie).
     Reload,
+}
+
+/// Which fresh life [`IdentityRuntime::start_fresh_life_locked`] starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshLife {
+    /// `reset`: the identity's next life starts on a fresh session.
+    Reset,
+    /// `delete_identity`: the identity's continuity ends with the session it
+    /// leaves, and its next life starts on a fresh one.
+    Delete,
+}
+
+impl FreshLife {
+    /// The verb, as its answers and its rotation record name it.
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Reset => "reset",
+            Self::Delete => "delete_identity",
+        }
+    }
+
+    /// What the retirement of the incarnation it ends owes.
+    fn effect_verb(self) -> crate::runtime::LifecycleEffectVerb {
+        match self {
+            Self::Reset => crate::runtime::LifecycleEffectVerb::Reset,
+            Self::Delete => crate::runtime::LifecycleEffectVerb::Delete,
+        }
+    }
+}
+
+/// Whether Core's rotation answered `error` before any of it started: Core's
+/// typed refusal, a spec the bridge could not lower before Core was asked,
+/// or a fresh life the launch's member auth binding refused at its build.
+/// Any other failure may come after the rotation started.
+fn nothing_of_the_rotation_started(error: &BridgeError) -> bool {
+    matches!(
+        error,
+        BridgeError::RotationRefused { .. }
+            | BridgeError::MemberRouteRefused { .. }
+            | BridgeError::InvalidInput(_)
+            | BridgeError::Unsupported { .. }
+    )
 }
 
 /// Map the terminal edge of an admitted turn. Pre-admission outcomes are
@@ -1032,9 +1076,11 @@ pub enum IdentityRuntimeError {
         detail: String,
     },
     /// The identity's history could not be read from Core, or its resume
-    /// failed on a transient fault. Nothing was spawned, and a
-    /// read fault is never taken as "no history": the next wake retries.
-    /// JSON-RPC `IDENTITY_HISTORY_UNAVAILABLE_CODE`.
+    /// failed on a transient fault, or the records Meta keeps of its
+    /// lifecycle steps (what a step owes, the lifecycle projection's cursor)
+    /// could not be read or written. Nothing was spawned or asked of Core,
+    /// and a read fault is never taken as "no history": the next wake or
+    /// step retries. JSON-RPC `IDENTITY_HISTORY_UNAVAILABLE_CODE`.
     IdentityHistoryUnavailable {
         identity: AgentIdentity,
         detail: String,
@@ -2312,6 +2358,9 @@ impl IdentityFirstRuntimeContext {
         runtime.set_identity_edge_ownership(IdentityEdgeOwnership::for_topology_provider(
             topology_provider.is_some(),
         ));
+        // The context serves the runtime: its lifecycle projection runs for
+        // it, and tells `after_create` to the customizer it builds with.
+        runtime.bind_lifecycle_projection(customizer.clone());
         Self {
             runtime,
             roster_provider,
@@ -2333,7 +2382,6 @@ impl IdentityFirstRuntimeContext {
         &self,
         roster: &[DurableAgentSpec],
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
-        let mut retired = Vec::new();
         let result = async {
             let _controller = self.runtime.bootstrap_controller.lock().await;
             let generation = self
@@ -2343,13 +2391,13 @@ impl IdentityFirstRuntimeContext {
                 self.runtime.fail_identity_bootstrap(generation, &error);
                 return Err(error);
             }
-            self.apply_roster_controlled(generation, roster, &mut retired)
-                .await
+            self.apply_roster_controlled(generation, roster).await
         }
         .await;
-        // The pass's retirements reach the host's retirement hook after the
-        // bootstrap controller is released, whatever the pass returned.
-        self.runtime.release_retired_members(retired).await;
+        // The side effects of the pass's steps (a retirement's hook among
+        // them) run in the lifecycle projection, with the bootstrap
+        // controller released, whatever the pass returned.
+        self.runtime.start_lifecycle_projection();
         result
     }
 
@@ -2604,13 +2652,13 @@ impl IdentityFirstRuntimeContext {
         ) -> Fut,
         Fut: std::future::Future<Output = Result<(), String>>,
     {
-        let mut retired = Vec::new();
         let result = self
-            .bootstrap_roster_held_controlled(roster, terminal, complete, abandonment, &mut retired)
+            .bootstrap_roster_held_controlled(roster, terminal, complete, abandonment)
             .await;
-        // The pass's retirements reach the host's retirement hook after the
-        // bootstrap controller is released, whatever the pass returned.
-        self.runtime.release_retired_members(retired).await;
+        // The side effects of the pass's steps run in the lifecycle
+        // projection, with the bootstrap controller released, whatever the
+        // pass returned.
+        self.runtime.start_lifecycle_projection();
         result
     }
 
@@ -2620,7 +2668,6 @@ impl IdentityFirstRuntimeContext {
         terminal: Arc<super::held_bootstrap::HeldTerminal>,
         complete: F,
         abandonment: super::held_bootstrap::HeldAbandonment,
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError>
     where
         F: FnOnce(
@@ -2726,7 +2773,7 @@ impl IdentityFirstRuntimeContext {
             &pass,
             abandonment,
             complete,
-            self.apply_roster_controlled(generation, roster, retired),
+            self.apply_roster_controlled(generation, roster),
         )
         .await
     }
@@ -2992,17 +3039,28 @@ impl IdentityFirstRuntimeContext {
         &self,
         generation: u64,
         roster: &[DurableAgentSpec],
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
-        self.apply_roster_pass(generation, roster, retired).await
+        self.apply_roster_pass(generation, roster).await
     }
 
     async fn apply_roster_pass(
         &self,
         generation: u64,
         roster: &[DurableAgentSpec],
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
+        // The lifecycle projection's cursor is read before the pass asks Core
+        // for any step, so each step the pass journals is projected. A
+        // failed read is tried again before each later step.
+        if let Err(error) = self.runtime.prepare_lifecycle_projection().await {
+            tracing::warn!(
+                %error,
+                "the lifecycle projection could not be prepared before the roster pass; each of \
+                 the pass's steps prepares it again"
+            );
+        }
+        // An unlisting the roster undid before Core carried it out owes
+        // nothing.
+        self.runtime.take_back_relisted_unlistings(roster).await;
         if let Err(message) = self.bootstrap_mode.validate() {
             let error = IdentityRuntimeError::Internal(message);
             self.runtime
@@ -3025,7 +3083,7 @@ impl IdentityFirstRuntimeContext {
         // desired spec changes.
         if let Err(error) = self
             .runtime
-            .reconcile_roster_members(roster, generation, retired)
+            .reconcile_roster_members(roster, generation)
             .await
         {
             self.runtime.fail_identity_bootstrap(generation, &error);
@@ -3081,18 +3139,16 @@ impl IdentityFirstRuntimeContext {
     async fn refresh_desired_topology_from(
         &self,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
-        let mut retired = Vec::new();
-        let result = self.refresh_desired_topology_controlled(&mut retired).await;
-        // The pass's retirements reach the host's retirement hook after the
-        // bootstrap controller is released, whatever the pass returned, so
-        // a hook may itself refresh the roster.
-        self.runtime.release_retired_members(retired).await;
+        let result = self.refresh_desired_topology_controlled().await;
+        // The side effects of the pass's steps run in the lifecycle
+        // projection, with the bootstrap controller released, whatever the
+        // pass returned, so a retirement hook may itself refresh the roster.
+        self.runtime.start_lifecycle_projection();
         result
     }
 
     async fn refresh_desired_topology_controlled(
         &self,
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
         // One runtime owns one controller from roster discovery through task
         // installation. Provider calls are user code and can be slow; publish
@@ -3122,8 +3178,7 @@ impl IdentityFirstRuntimeContext {
             }
         };
 
-        self.apply_roster_controlled(generation, &roster, retired)
-            .await
+        self.apply_roster_controlled(generation, &roster).await
     }
 
     /// Cancellation-safe reconcile for RPC/host request boundaries.
@@ -3549,15 +3604,12 @@ pub struct IdentityRuntime {
     /// operations but leaves these waiting, so a drained turn's waiter
     /// reports the turn's outcome.
     foreground_waits_closed: watch::Sender<bool>,
-    /// Reset memory captures of outgoing sessions not yet run, keyed by the
-    /// session. A capture is recorded before its task spawns and leaves the
-    /// ledger only after it ran, so shutdown joins or reruns it.
-    pending_reset_memory_captures: Arc<RwLock<BTreeMap<String, PendingResetMemoryCapture>>>,
-    reset_memory_capture_tasks: Mutex<JoinSet<()>>,
-    /// The customizer `after_create` calls told outside any lifecycle lock
-    /// ([`Self::spawn_after_create`]). A graceful shutdown abandons and joins
-    /// them.
-    after_create_tasks: Mutex<JoinSet<()>>,
+    /// The lifecycle side effects of the steps Core journals for this
+    /// runtime's identities (the retirement hook, the distillation of a
+    /// retired session, the exit interview, `after_create`), projected from
+    /// Core's journal through a durable cursor: see
+    /// [`lifecycle_projection`].
+    lifecycle_projection: lifecycle_projection::LifecycleProjection,
     /// Per-identity completed-turn counters ([`CompletionCursor`]).
     ///
     /// RETAINED for the process lifetime — never pruned on retire, reset, or
@@ -3907,18 +3959,6 @@ pub(crate) struct EmbodimentOutcome {
     /// Core already held the member when the wake door ran (a revival or a
     /// converged re-validation, not a wake).
     pub(crate) already_active: bool,
-    /// The `after_create` owed to the customizer the embodiment's caller
-    /// passed ([`EmbodimentOverrides::customizer`]), which
-    /// [`IdentityRuntime::embody_identity`] tells once it has released the
-    /// identity's lifecycle lock.
-    pub(crate) override_after_create: Option<AfterCreateNotice>,
-}
-
-/// An `after_create` a build owes its customizer: the session the build
-/// created or resumed, and what the build made of it.
-pub(crate) struct AfterCreateNotice {
-    session_id: SessionId,
-    context: crate::mob_handle_runtime::SessionCreatedContext,
 }
 
 /// Eager-only inputs to the shared embodiment transaction. Lazy foreground
@@ -4025,6 +4065,22 @@ pub(crate) fn binding_carries_identity_marker(
     )
 }
 
+/// The error hook's report that the host's retirement hook failed for
+/// `member` with `error` (it answered an error, or never answered): the
+/// retirement stands.
+fn retired_member_release_failed(
+    member: &super::types::RetiredIdentityMember,
+    error: String,
+) -> crate::unified_runtime::types::ErrorEvent {
+    crate::unified_runtime::types::ErrorEvent::RetiredMemberReleaseFailed {
+        identity: member.identity.to_string(),
+        agent_runtime_id: member.agent_runtime_id.to_string(),
+        session_id: member.session_id.as_ref().map(ToString::to_string),
+        cause: member.cause.as_str().to_string(),
+        error,
+    }
+}
+
 /// Whether an identity-first spawn made `binding`'s member for `identity`:
 /// it carries the identity's durable-identity marker, or its spawn labels
 /// carry the `agent_identity` label naming the identity, which every
@@ -4038,32 +4094,6 @@ pub(crate) fn binding_spawned_for_identity(
     binding_carries_identity_marker(binding, identity)
         || crate::member_comms_id::durable_identity_label(binding.labels())
             == Some(identity.as_str())
-}
-
-#[derive(Clone)]
-struct PendingResetMemoryCapture {
-    injector: AgentMemoryRuntimeInjector,
-    identity: AgentIdentity,
-    session_key: String,
-    generation: u64,
-}
-
-impl PendingResetMemoryCapture {
-    async fn run(&self) {
-        // Repeat the synchronous marks in the owned task so a raw reset
-        // future dropped after debt publication cannot let the distiller read
-        // evidence before the reset quarantine boundary exists.
-        self.injector.note_reset_boundary(&self.session_key);
-        self.injector
-            .note_session_generation(&self.identity, &self.session_key, self.generation);
-        self.injector
-            .distill_before_rotation(
-                &self.identity,
-                &self.session_key,
-                crate::memory::distiller::DistillCause::Reset,
-            )
-            .await;
-    }
 }
 
 impl IdentityRuntime {
@@ -4372,9 +4402,7 @@ impl IdentityRuntime {
             foreground_cancel,
             foreground_shutdown: AtomicBool::new(false),
             foreground_waits_closed,
-            pending_reset_memory_captures: Arc::new(RwLock::new(BTreeMap::new())),
-            reset_memory_capture_tasks: Mutex::new(JoinSet::new()),
-            after_create_tasks: Mutex::new(JoinSet::new()),
+            lifecycle_projection: lifecycle_projection::LifecycleProjection::new(),
             completion_cursors: StdMutex::new(BTreeMap::new()),
             turn_outcomes: Arc::default(),
             turn_outcome_changes: Arc::new(watch::channel(()).0),
@@ -5756,14 +5784,27 @@ impl IdentityRuntime {
         let Some(binding) = self.core_last_binding(identity).await? else {
             return Ok(None);
         };
-        let Some(agent_runtime_id) = live_binding_runtime_id(&binding) else {
-            return Ok(None);
-        };
+        Ok(self.retiring_member(identity, &binding, cause).await)
+    }
+
+    /// [`Self::retiring_incarnation`] of `binding`, the identity's last
+    /// binding the caller read: `None` when no hook is installed or the
+    /// binding is not live.
+    async fn retiring_member(
+        &self,
+        identity: &AgentIdentity,
+        binding: &meerkat_mob::MemberBinding,
+        cause: super::types::RetiredIdentityCause,
+    ) -> Option<super::types::RetiredIdentityMember> {
+        if self.retired_member_observer().is_none() {
+            return None;
+        }
+        let agent_runtime_id = live_binding_runtime_id(binding)?;
         let registration = match (binding.session_id(), self.bridge.as_ref()) {
             (Some(session_id), Some(bridge)) => bridge.member_registration(session_id).await,
             _ => None,
         };
-        Ok(Some(super::types::RetiredIdentityMember {
+        Some(super::types::RetiredIdentityMember {
             identity: identity.clone(),
             member: binding.identity().as_str().to_string(),
             role: binding.role().clone(),
@@ -5772,7 +5813,7 @@ impl IdentityRuntime {
             session_id: binding.session_id().cloned(),
             registration,
             cause,
-        }))
+        })
     }
 
     /// Right after Core's retire answered, still under the identity's
@@ -5808,11 +5849,12 @@ impl IdentityRuntime {
         }
     }
 
-    /// Hand each retired incarnation to the host's retirement hook, in
-    /// order. Callers hold no Meta lock here (no identity lifecycle lock, no
-    /// bootstrap controller), so the hook may call back into this runtime.
-    /// A hook error leaves the retirement standing: it is reported once to
-    /// the error hook and not retried.
+    /// Hand each released incarnation to the host's retirement hook, in
+    /// order: a release's verb does (the lifecycle projection hands over an
+    /// incarnation Core's journal ended, bounded). Callers hold no Meta lock
+    /// here (no identity lifecycle lock, no bootstrap controller), so the
+    /// hook may call back into this runtime. A hook error leaves the release
+    /// standing: it is reported to the error hook and not retried.
     pub(crate) async fn release_retired_members(
         &self,
         retired: Vec<super::types::RetiredIdentityMember>,
@@ -5824,20 +5866,8 @@ impl IdentityRuntime {
             return;
         };
         for member in retired {
-            let identity = member.identity.to_string();
-            let agent_runtime_id = member.agent_runtime_id.to_string();
-            let session_id = member.session_id.as_ref().map(ToString::to_string);
-            let cause = member.cause.as_str().to_string();
-            if let Err(error) = observer(member).await {
-                self.emit_error(
-                    crate::unified_runtime::types::ErrorEvent::RetiredMemberReleaseFailed {
-                        identity,
-                        agent_runtime_id,
-                        session_id,
-                        cause,
-                        error,
-                    },
-                );
+            if let Err(error) = observer(member.clone()).await {
+                self.emit_error(retired_member_release_failed(&member, error));
             }
         }
     }
@@ -7863,6 +7893,9 @@ impl IdentityRuntime {
         topology_provider: Option<Arc<dyn TopologyProvider>>,
         customizer: Option<Arc<dyn AgentCustomizer>>,
     ) -> Result<super::orchestrator::RestoreFlowResult, IdentityRuntimeError> {
+        // No identity context serves the runtime: the restore binds its
+        // lifecycle projection, so the side effects of its steps run.
+        self.adopt_lifecycle_projection(customizer.clone());
         let runtime = Arc::clone(self);
         self.run_tracked_foreground(async move {
             super::orchestrator::restore_flow(
@@ -8193,28 +8226,20 @@ impl IdentityRuntime {
         bound_bootstrap_generation: &mut Option<u64>,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
-        let override_customizer = overrides.customizer;
-        let mut outcome = {
-            let lifecycle_lock = self.lifecycle_lock_for(identity).await;
-            let _lifecycle_guard = lifecycle_lock.lock().await;
-            self.embody_identity_locked(
-                identity,
-                expected_alias,
-                cancellation,
-                expected_bootstrap_generation,
-                bound_bootstrap_generation,
-                overrides,
-            )
-            .await?
-        };
-        // The caller's customizer is told with the lifecycle lock released,
-        // so its `after_create` may call back into this identity.
-        if let (Some(customizer), Some(notice)) =
-            (override_customizer, outcome.override_after_create.take())
-        {
-            Self::tell_after_create(customizer, identity, &notice).await;
-        }
-        Ok(outcome)
+        // A seat the embodiment asks Core for tells its customizer
+        // `after_create` from the lifecycle projection, with no lifecycle
+        // lock held, so it may call back into this identity.
+        let lifecycle_lock = self.lifecycle_lock_for(identity).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+        self.embody_identity_locked(
+            identity,
+            expected_alias,
+            cancellation,
+            expected_bootstrap_generation,
+            bound_bootstrap_generation,
+            overrides,
+        )
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -9354,7 +9379,6 @@ impl IdentityRuntime {
         self.publish_pending_customizer_tools(identity, binding.session_id.as_ref(), "wake")
             .await?;
         Ok(EmbodimentOutcome {
-            override_after_create: seat.override_after_create,
             already_active: seat.already_seated,
             resumed: !seat.minted,
             binding,
@@ -9411,39 +9435,40 @@ impl IdentityRuntime {
         }
         if customized {
             self.publish_customizer_tools(identity, &mut draft).await;
+            // The customizer that ran the build is told of its session once
+            // the lifecycle projection reaches the member's seat, which the
+            // pass's activation publishes.
+            self.note_lifecycle_build(identity, self.session_created_context(spec, &draft));
         }
-        let binding = bridge
+        let binding = match bridge
             .create_session_held(identity, spec, &draft, pass)
             .await
-            .map_err(|error| match deterministic_build_rejection_reason(&error) {
-                // Typed on every attempt, never recorded: the host's build
-                // gate answers each create again.
-                Some(reason) => IdentityRuntimeError::HostRejectedBuild {
-                    identity: identity.clone(),
-                    reason,
-                },
-                None => IdentityRuntimeError::Internal(format!("bridge create_session: {error}")),
-            })?;
-        // The customizer that ran the build is told of its session with the
-        // lifecycle lock released: the installed one in a runtime-owned
-        // task, the caller's own once the caller has released the lock.
-        let mut override_after_create = None;
-        if customized && let Some(session_id) = binding.session_id.as_ref() {
-            let notice = AfterCreateNotice {
-                session_id: session_id.clone(),
-                context: self.session_created_context(spec, &draft),
-            };
-            match (override_customizer, installed_customizer) {
-                (Some(_), _) => override_after_create = Some(notice),
-                (None, Some(installed)) => {
-                    self.spawn_after_create(installed, identity.clone(), notice)
-                        .await;
+        {
+            Ok(binding) => {
+                if let Some(session_id) = binding.session_id.as_ref() {
+                    self.bind_lifecycle_build(identity, session_id);
+                } else {
+                    self.forget_lifecycle_build(identity);
                 }
-                (None, None) => {}
+                binding
             }
-        }
+            Err(error) => {
+                self.forget_lifecycle_build(identity);
+                return Err(match deterministic_build_rejection_reason(&error) {
+                    // Typed on every attempt, never recorded: the host's
+                    // build gate answers each create again.
+                    Some(reason) => IdentityRuntimeError::HostRejectedBuild {
+                        identity: identity.clone(),
+                        reason,
+                    },
+                    None => {
+                        IdentityRuntimeError::Internal(format!("bridge create_session: {error}"))
+                    }
+                });
+            }
+        };
+        self.kick_lifecycle_projection();
         Ok(EmbodimentOutcome {
-            override_after_create,
             already_active: false,
             binding,
             resumed: false,
@@ -9479,83 +9504,24 @@ impl IdentityRuntime {
         }
     }
 
-    /// CONTRACT-04's `after_create`: the customizer that ran a build is told
-    /// of the session the build created or resumed. Best-effort: an error is
-    /// logged at WARN and never fails or rolls back the build. Callers tell
-    /// it with no lifecycle lock held, so it may call back into the identity.
-    async fn tell_after_create(
-        customizer: &dyn AgentCustomizer,
-        identity: &AgentIdentity,
-        notice: &AfterCreateNotice,
-    ) {
-        if let Err(error) = customizer
-            .after_create(identity, &notice.session_id, &notice.context)
-            .await
-        {
-            tracing::warn!(
-                %identity,
-                session_id = %notice.session_id,
-                %error,
-                "the agent customizer's after_create failed; the build stands"
-            );
-        }
-    }
-
-    /// Tell the installed `customizer` of a build's session in a
-    /// runtime-owned task, so no lifecycle lock is held while it answers. A
-    /// graceful shutdown abandons the call ([`Self::close_foreground_operations`])
-    /// and joins the task ([`Self::join_after_create_notices`]).
-    async fn spawn_after_create(
-        &self,
-        customizer: Arc<dyn AgentCustomizer>,
-        identity: AgentIdentity,
-        notice: AfterCreateNotice,
-    ) {
-        let mut shutdown = self.foreground_cancel.subscribe();
-        let mut tasks = self.after_create_tasks.lock().await;
-        while let Some(result) = tasks.try_join_next() {
-            if let Err(error) = result {
-                tracing::error!(%error, "an after_create task panicked");
-            }
-        }
-        tasks.spawn(async move {
-            tokio::select! {
-                () = Self::tell_after_create(customizer.as_ref(), &identity, &notice) => {}
-                _ = shutdown.wait_for(|shutting_down| *shutting_down) => {
-                    tracing::debug!(
-                        %identity,
-                        session_id = %notice.session_id,
-                        "the runtime shut down before the agent customizer's after_create \
-                         answered"
-                    );
-                }
-            }
-        });
-    }
-
-    /// Join every `after_create` task once foreground lifecycle admission is
-    /// closed, which abandons the calls still waiting for their customizer.
-    pub(crate) async fn join_after_create_notices(&self) {
-        let mut tasks = self.after_create_tasks.lock().await;
-        while let Some(result) = tasks.join_next().await {
-            if let Err(error) = result {
-                tracing::error!(%error, "an after_create task panicked during shutdown");
-            }
-        }
-    }
-
     /// The model a build of `spec` with `draft` runs: the draft's model, else
     /// the spec's inline profile model, else empty when neither is known.
     fn built_model(&self, spec: &DurableAgentSpec, draft: &AgentBuildDraft) -> String {
         if let Some(model) = draft.model.as_ref() {
             return model.clone();
         }
+        self.profile_model(&spec.profile)
+    }
+
+    /// The model of `profile` when the mob definition declares it inline,
+    /// else empty.
+    fn profile_model(&self, profile: &meerkat_mob::ProfileName) -> String {
         self.reset_roster_source
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .and_then(|source| source.mob_definition.as_ref())
-            .and_then(|definition| definition.profiles.get(&spec.profile))
+            .and_then(|definition| definition.profiles.get(profile))
             .and_then(|binding| binding.as_inline())
             .map(|profile| profile.model.clone())
             .unwrap_or_default()
@@ -9771,10 +9737,9 @@ impl IdentityRuntime {
     /// it onto a fresh session under the new profile instead, once it is
     /// idle.
     ///
-    /// Each member it retires because the roster no longer lists it is
-    /// pushed to `retired` as soon as Core retired it, so the caller hands
-    /// it to the host's retirement hook even when a later step of the pass
-    /// fails.
+    /// Each member it retires because the roster no longer lists it reaches
+    /// the host's retirement hook from Core's journal, through the lifecycle
+    /// projection, also when a later step of the pass fails.
     ///
     /// A candidate launch converges nothing: see
     /// [`Self::census_roster_changes_for_candidate`].
@@ -9782,12 +9747,11 @@ impl IdentityRuntime {
         &self,
         roster: &[DurableAgentSpec],
         generation: u64,
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
     ) -> Result<(), IdentityRuntimeError> {
         if self.is_candidate_launch() {
             return self.census_roster_changes_for_candidate(roster).await;
         }
-        self.reconcile_roster_members_after_lifecycle_lock(roster, generation, retired, |_| {
+        self.reconcile_roster_members_after_lifecycle_lock(roster, generation, |_| {
             std::future::ready(())
         })
         .await
@@ -9880,7 +9844,6 @@ impl IdentityRuntime {
         &self,
         roster: &[DurableAgentSpec],
         generation: u64,
-        retired: &mut Vec<super::types::RetiredIdentityMember>,
         mut after_lifecycle_lock: H,
     ) -> Result<(), IdentityRuntimeError>
     where
@@ -9904,7 +9867,7 @@ impl IdentityRuntime {
             if !self.entries.read().await.contains_key(identity) {
                 continue;
             }
-            retired.extend(self.retire_unlisted_locked(identity).await?);
+            self.retire_unlisted_locked(identity).await?;
             self.event_channels.write().await.remove(identity);
             self.entries.write().await.remove(identity);
         }
@@ -9922,7 +9885,7 @@ impl IdentityRuntime {
             if self.entries.read().await.contains_key(&identity) {
                 continue;
             }
-            retired.extend(self.retire_unlisted_locked(&identity).await?);
+            self.retire_unlisted_locked(&identity).await?;
         }
 
         // A live member Meta 0.9.3 spawned carries no marker, only the
@@ -9935,16 +9898,13 @@ impl IdentityRuntime {
             if self.entries.read().await.contains_key(&identity) {
                 continue;
             }
-            match self.retire_unlisted_locked(&identity).await {
-                Ok(retiring) => retired.extend(retiring),
-                Err(error) => {
-                    tracing::warn!(
-                        %identity,
-                        %error,
-                        "retiring a labelled member the roster no longer lists failed; the \
-                         next roster pass tries it again"
-                    );
-                }
+            if let Err(error) = self.retire_unlisted_locked(&identity).await {
+                tracing::warn!(
+                    %identity,
+                    %error,
+                    "retiring a labelled member the roster no longer lists failed; the next \
+                     roster pass tries it again"
+                );
             }
         }
 
@@ -10042,24 +10002,20 @@ impl IdentityRuntime {
     /// Retire an identity the roster no longer lists, under its lifecycle
     /// lock: Core's live member retires and Core keeps its history. Nothing
     /// to do when Core holds no live member or the identity is read-only to
-    /// the compile. Returns the incarnation it retired when the host's
-    /// retirement hook is installed.
+    /// the compile. The retirement's side effects (the distillation of the
+    /// retired session, the exit interview, the host's retirement hook) run
+    /// in the lifecycle projection once Core journaled it.
     async fn retire_unlisted_locked(
         &self,
         identity: &AgentIdentity,
-    ) -> Result<Option<super::types::RetiredIdentityMember>, IdentityRuntimeError> {
+    ) -> Result<(), IdentityRuntimeError> {
         if !self.compile_may_act_on(identity).await? {
-            return Ok(None);
+            return Ok(());
         }
         if self.core_live_member(identity).await?.is_none() {
-            return Ok(None);
+            return Ok(());
         }
-        let mut retiring = self
-            .retiring_incarnation(identity, super::types::RetiredIdentityCause::Unlisted)
-            .await?;
-        self.retire_locked(identity).await?;
-        self.settle_retired_registration(&mut retiring).await;
-        Ok(retiring)
+        self.retire_locked(identity).await
     }
 
     /// Identities of Core's live Meta-marked members that the roster
@@ -13665,48 +13621,17 @@ impl IdentityRuntime {
         }
     }
 
-    /// Section 8.4 trigger (b): once Core retired the member, distill the
-    /// retired session's tail, then queue the retired identity's store for
-    /// the next dream's harvest (section 8.5 exit interview). A release (the
-    /// member made dormant, still seated on its session) is no retirement
-    /// and does neither. Best-effort and bounded by the distiller's timeout.
-    async fn distill_retired_session(
-        &self,
-        identity: &AgentIdentity,
-        session_id: Option<&SessionId>,
-    ) {
-        let Some(injector) = self.agent_memory.read().await.clone() else {
-            return;
-        };
-        if let Some(session_id) = session_id {
-            injector
-                .distill_before_rotation(
-                    identity,
-                    &session_id.to_string(),
-                    crate::memory::distiller::DistillCause::Retire,
-                )
-                .await;
-        }
-        // Section 8.5 exit interview: queue the retired identity's store for
-        // the next dream's harvest sub-phase.
-        injector
-            .note_identity_retired(
-                identity,
-                session_id.map(std::string::ToString::to_string).as_deref(),
-                "retire",
-            )
-            .await;
-    }
-
     /// Release or retire the identity's Core member while the caller holds
     /// the lifecycle lock ([`LifecycleRetireIntent`]). A release keeps the
     /// member seated on its session at its generation, and runs no memory
     /// hook; a retire ends the incarnation, and Core keeps its history, so a
-    /// later seat resumes the same session at a new generation, and its
-    /// memory hooks run once Core retired it. `Reload` is the first half of
-    /// a non-destructive reload and skips the memory harvest hooks because
-    /// the same session is seated and woken right after (nothing rotates, no
-    /// exit). Nothing changes for a release or retire Core refuses.
+    /// later seat resumes the same session at a new generation. A retire
+    /// records what it owes before Core is asked, and its memory hooks and
+    /// retirement hook run in the lifecycle projection once Core journaled
+    /// the retirement. `Reload` is the first half of a non-destructive
+    /// reload and owes no side effect, because the same session is seated
+    /// and woken right after (nothing rotates, no exit). Nothing changes for
+    /// a release or retire Core refuses.
     async fn retire_locked_with_intent(
         &self,
         identity: &AgentIdentity,
@@ -13744,17 +13669,28 @@ impl IdentityRuntime {
             self.entries.notify_binding_changed();
             return Ok(());
         }
+        // The roster's unlisting owes the retired session's distillation,
+        // the exit interview and the retirement hook; a reload keeps the
+        // session and owes none of them. Recorded before Core is asked.
+        let prepared = if intent == LifecycleRetireIntent::Retire {
+            self.prepare_lifecycle_retirement(
+                identity,
+                crate::runtime::LifecycleEffectVerb::Unlisted,
+            )
+            .await?
+        } else {
+            self.prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
+                .await?
+        };
+        // A failed retire keeps what it recorded: the retirement may have
+        // started, and Core finishes it; one that did not is asked again by
+        // the next roster pass, which records the same.
         bridge
             .retire_member(&live.agent_runtime_id)
             .await
             .map_err(|err| IdentityRuntimeError::Internal(format!("bridge retire: {err}")))?;
         self.clear_wake_notes_of_live_member(identity).await;
-        // Section 8.4 trigger (b), and the exit interview, once Core retired
-        // the member. A reload keeps the session, so neither applies.
-        if intent == LifecycleRetireIntent::Retire {
-            self.distill_retired_session(identity, live.session_id.as_ref())
-                .await;
-        }
+        self.settle_lifecycle_retirement(prepared).await;
         self.entries.notify_binding_changed();
         self.mark_bootstrap_from_lifecycle(identity, IdentityLifecycleState::Dormant, None);
         self.emit_event(
@@ -14335,12 +14271,18 @@ impl IdentityRuntime {
                     )
                     .await;
             }
+            // A replacement on the same session owes no lifecycle side
+            // effect: recorded before Core is asked, as a reload's.
+            let prepared = self
+                .prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
+                .await?;
             self.core_bridge(identity)?
                 .retire_member(&live.agent_runtime_id)
                 .await
                 .map_err(|err| {
                     IdentityRuntimeError::Internal(format!("bridge retire before respawn: {err}"))
                 })?;
+            self.settle_lifecycle_retirement(prepared).await;
             self.entries.notify_binding_changed();
         }
         let mut generation = None;
@@ -14513,8 +14455,13 @@ impl IdentityRuntime {
             .core_last_binding(identity)
             .await?
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, "reset")
-            .await?;
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Reset,
+            previous.clone(),
+        )
+        .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14524,28 +14471,41 @@ impl IdentityRuntime {
         // Section 10.1: reset is the deliberate clean-slate boundary. Clear session
         // taint explicitly (rotation clears implicitly; this also drops
         // pending pre-attribution taint) and mark the outgoing boundary
-        // synchronously; a runtime-owned task distills the outgoing session,
-        // which Core keeps, so the reset stays latency-neutral. The fresh
-        // life always runs on a fresh session, so the old one is outgoing.
+        // synchronously. The fresh life always runs on a fresh session, so
+        // the old one is outgoing. Its distillation is the lifecycle
+        // projection's, once Core journaled the rotation's retirement of it
+        // (which repeats the marks first), so a restart in between still
+        // distills it, and the reset stays latency-neutral.
         let injector = self.agent_memory.read().await.clone();
         if let Some(injector) = injector.as_ref() {
             injector.clear_taint_for_identity(identity);
             if let Some(previous) = previous.as_ref()
                 && let Some(old_session_id) = previous.session_id()
             {
-                let capture = PendingResetMemoryCapture {
-                    injector: injector.clone(),
-                    identity: identity.clone(),
-                    session_key: old_session_id.to_string(),
-                    generation: previous.generation().get(),
-                };
-                injector.note_reset_boundary(&capture.session_key);
+                let session_key = old_session_id.to_string();
+                injector.note_reset_boundary(&session_key);
                 injector.note_session_generation(
                     identity,
-                    &capture.session_key,
-                    capture.generation,
+                    &session_key,
+                    previous.generation().get(),
                 );
-                self.spawn_reset_memory_capture(capture).await;
+                // An incarnation Core had already retired is not retired by
+                // the rotation, so no journal fact carries its distillation:
+                // it runs beside the projection, bounded by the distiller,
+                // and a graceful shutdown joins it with the projection.
+                if !previous.is_live() {
+                    let injector = injector.clone();
+                    let identity = identity.clone();
+                    self.spawn_lifecycle_side_task(async move {
+                        injector
+                            .distill_before_rotation(
+                                &identity,
+                                &session_key,
+                                crate::memory::distiller::DistillCause::Reset,
+                            )
+                            .await;
+                    });
+                }
             }
         }
         self.settle_fresh_life(identity).await;
@@ -14612,12 +14572,19 @@ impl IdentityRuntime {
     /// build (Core spawns the fresh life of an identity it does not hold
     /// that owes a kickoff live; answered final, `HostRejectedBuild`), so no
     /// later compile or restart carries it out. Returns the fresh session.
+    ///
+    /// What the retirement of the live incarnation owes (`life`'s side
+    /// effects, run by the lifecycle projection once Core journaled it) is
+    /// recorded before Core is asked too, with the incarnation as the
+    /// retirement hook reads it and the build the customizer is told of.
     async fn start_fresh_life_locked(
         &self,
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
-        operation: &'static str,
+        life: FreshLife,
+        previous: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
+        let operation = life.operation();
         // An identity a held pass did not publish owes its host a fresh held
         // completion. A fresh life outside a held pass that covers it would
         // have Core bind a member that completion never saw, and after a
@@ -14648,11 +14615,6 @@ impl IdentityRuntime {
         let (draft, customizer) = self
             .fresh_life_draft(identity, &spec, foreground_shutdown, operation)
             .await?;
-        let from_generation = self
-            .core_last_binding(identity)
-            .await?
-            .filter(meerkat_mob::MemberBinding::is_live)
-            .map(|binding| binding.generation().get());
         // A rotation an earlier call left recorded, which Core may have
         // started, stays recorded whatever this call's answer.
         let earlier_rotation = self
@@ -14667,17 +14629,38 @@ impl IdentityRuntime {
                 ),
             })?
             .remove(identity);
-        self.record_rotation_intent(identity, operation, from_generation)
+        // The live incarnation the rotation retires, as the verb read it;
+        // `None` when Core holds none the identity spawned, and its rotation
+        // seats the identity fresh.
+        let retiring = self
+            .prepare_lifecycle_retirement_of(identity, previous, life.effect_verb())
             .await?;
+        let from_generation = retiring
+            .as_ref()
+            .map(lifecycle_projection::PreparedRetirement::generation);
+        if let Err(error) = self
+            .record_rotation_intent(identity, operation, from_generation)
+            .await
+        {
+            self.abandon_lifecycle_retirement(retiring).await;
+            return Err(error);
+        }
+        // The customizer that built the fresh life is told of its session
+        // once the lifecycle projection reaches its seat.
+        if customizer.is_some() {
+            self.note_lifecycle_build(identity, self.session_created_context(&spec, &draft));
+        }
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,
             Err(error) => {
                 return Err(self
-                    .refused_rotation(identity, operation, earlier_rotation, error)
+                    .refused_rotation(identity, operation, earlier_rotation, retiring, error)
                     .await);
             }
         };
+        self.bind_lifecycle_build(identity, &session_id);
         self.clear_rotation_intent(identity).await;
+        self.settle_lifecycle_retirement(retiring).await;
         // Core's rotation ends the identity's wiring with its incarnation:
         // its managed and topology-controlled edges are wired again now,
         // bounded, as a seat wires a target before its first admission. A
@@ -14690,16 +14673,6 @@ impl IdentityRuntime {
                  reconcile retries them"
             );
         }
-        // The customizer that built the fresh life is told of its session
-        // with the lifecycle lock released, in a runtime-owned task.
-        if let Some(customizer) = customizer {
-            let notice = AfterCreateNotice {
-                session_id: session_id.clone(),
-                context: self.session_created_context(&spec, &draft),
-            };
-            self.spawn_after_create(customizer, identity.clone(), notice)
-                .await;
-        }
         self.entries.notify_binding_changed();
         Ok(session_id)
     }
@@ -14709,16 +14682,22 @@ impl IdentityRuntime {
     /// before Core was asked, or a fresh life the launch's member auth
     /// binding refuses), the record this call wrote is taken back, an
     /// earlier call's record put back as it was, and the refusal answered:
-    /// no later compile or restart carries the rotation out. Otherwise the
-    /// rotation may have started, so its record stays, and the identity's
-    /// next roster compile drives it to its end.
+    /// no later compile or restart carries the rotation out. So is what the
+    /// retirement it prepared would owe (`retiring`). Otherwise the rotation
+    /// may have started, so its records stay, and the identity's next
+    /// roster compile drives it to its end.
     async fn refused_rotation(
         &self,
         identity: &AgentIdentity,
         operation: &'static str,
         earlier: Option<crate::runtime::IdentityRotationIntent>,
+        retiring: Option<lifecycle_projection::PreparedRetirement>,
         error: BridgeError,
     ) -> IdentityRuntimeError {
+        if nothing_of_the_rotation_started(&error) {
+            self.forget_lifecycle_build(identity);
+            self.abandon_lifecycle_retirement(retiring).await;
+        }
         match error {
             BridgeError::RotationRefused { detail, .. } => {
                 self.restore_rotation_intent(identity, earlier).await;
@@ -14900,20 +14879,31 @@ impl IdentityRuntime {
         }
 
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, "delete_identity")
-            .await?;
+        // The rotation's record reads the liveness the delete read: what the
+        // projection owes and what runs here below agree.
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Delete,
+            Some(previous.clone()),
+        )
+        .await?;
 
-        // The fresh life is committed in Core from here: the bookkeeping runs
-        // before the fresh binding is read, so a failed read never leaves it
-        // undone or invites a second rotation.
-        if let Some(injector) = injector {
+        // The fresh life is committed in Core from here. The drop of the old
+        // session's semantic-memory scope (Ask 2 GC: the identity never
+        // resumes it, and its knowledge was just distilled into the
+        // identity-keyed Meta store the exit interview reads) and the exit
+        // interview (section 8.5: delete is the identity's LAST boundary) are
+        // the lifecycle projection's, once Core journaled the rotation's
+        // retirement of the live incarnation, so a restart in between still
+        // runs them. An incarnation Core had already retired is not retired
+        // by the rotation, so no journal fact carries them: they run here,
+        // best-effort, before the fresh binding is read, so a failed read
+        // never leaves them undone or invites a second rotation.
+        if !previous.is_live()
+            && let Some(injector) = injector
+        {
             if let Some(session_key) = previous_session_key.as_ref() {
-                // Ask 2 GC: the identity never resumes the old session again,
-                // and its knowledge was just distilled into the identity-keyed
-                // Meta store (which the exit-interview harvest below reads, a
-                // different store from the meerkat session-memory scope), so
-                // reclaiming that scope frees dead re-embed weight without
-                // starving any downstream read.
                 injector
                     .drop_orphaned_session_scope(
                         session_key,
@@ -14921,7 +14911,6 @@ impl IdentityRuntime {
                     )
                     .await;
             }
-            // Section 8.5 exit interview (delete is the identity's LAST boundary).
             injector
                 .note_identity_retired(identity, previous_session_key.as_deref(), "delete")
                 .await;
@@ -15794,58 +15783,6 @@ impl IdentityRuntime {
     /// The configured default timeout for wait operations.
     pub fn default_timeout(&self) -> Duration {
         self.default_timeout
-    }
-
-    /// Run a reset's memory capture of the outgoing session in a
-    /// runtime-owned task, so the reset stays latency-neutral. The capture
-    /// stays in the ledger until it ran: a graceful shutdown joins the task,
-    /// then reruns whatever a cancelled task left behind.
-    async fn spawn_reset_memory_capture(&self, capture: PendingResetMemoryCapture) {
-        let key = capture.session_key.clone();
-        self.pending_reset_memory_captures
-            .write()
-            .await
-            .insert(key.clone(), capture.clone());
-        let pending = Arc::clone(&self.pending_reset_memory_captures);
-        let mut tasks = self.reset_memory_capture_tasks.lock().await;
-        while let Some(result) = tasks.try_join_next() {
-            if let Err(error) = result {
-                tracing::error!(
-                    runtime_instance_id = %self.runtime_instance_id,
-                    %error,
-                    "reset memory capture task panicked"
-                );
-            }
-        }
-        tasks.spawn(async move {
-            capture.run().await;
-            pending.write().await.remove(&key);
-        });
-    }
-
-    /// Join every reset memory capture task after foreground lifecycle
-    /// admission is closed.
-    pub(crate) async fn join_reset_memory_captures(&self) {
-        let mut tasks = self.reset_memory_capture_tasks.lock().await;
-        while let Some(result) = tasks.join_next().await {
-            if let Err(error) = result {
-                tracing::error!(
-                    runtime_instance_id = %self.runtime_instance_id,
-                    %error,
-                    "reset memory capture task panicked"
-                );
-            }
-        }
-    }
-
-    /// Run every reset memory capture a cancelled task left in the ledger.
-    /// Returns how many ran.
-    pub(crate) async fn drain_pending_reset_memory_captures(&self) -> usize {
-        let pending = std::mem::take(&mut *self.pending_reset_memory_captures.write().await);
-        for capture in pending.values() {
-            capture.run().await;
-        }
-        pending.len()
     }
 
     /// Wait until the identity produces an output_preview, or timeout.
@@ -17812,7 +17749,6 @@ mod reset_reprofile_tests {
                     .reconcile_roster_members_after_lifecycle_lock(
                         std::slice::from_ref(&spec),
                         next_generation,
-                        &mut Vec::new(),
                         move |_| {
                             let should_pause = !paused.swap(true, Ordering::SeqCst);
                             let reconcile_holds_lock = reconcile_holds_lock.clone();

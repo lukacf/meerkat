@@ -3070,3 +3070,244 @@ rust_bundles = ["parked"]
          its frames (kind, source): {interaction_frames:?}"
     );
 }
+
+/// A customizer whose `after_create` never answers: the lifecycle side
+/// effect the identity runtime's projection is in when the shutdown begins.
+struct AfterCreateNeverAnswers;
+
+#[async_trait::async_trait]
+impl meerkat_meta::identity_first::AgentCustomizer for AfterCreateNeverAnswers {
+    async fn customize_build(
+        &self,
+        _context: &meerkat_meta::identity_first::AgentBuildContext,
+        _spec: &meerkat_meta::identity_first::DurableAgentSpec,
+        _draft: &mut meerkat_meta::identity_first::AgentBuildDraft,
+    ) -> Result<(), meerkat_meta::identity_first::CustomizerError> {
+        Ok(())
+    }
+
+    async fn after_create(
+        &self,
+        _identity: &meerkat_meta::identity_first::AgentIdentity,
+        _session_id: &meerkat_core::types::SessionId,
+        _context: &meerkat_meta::mob_handle_runtime::SessionCreatedContext,
+    ) -> Result<(), meerkat_meta::identity_first::CustomizerError> {
+        std::future::pending().await
+    }
+}
+
+/// A graceful shutdown that begins while a lifecycle side effect never
+/// answers still leaves the post-stop drain its share of the drain window:
+/// the identity runtime's lifecycle projection is inside an `after_create`
+/// that never answers, and a turn parked in a tool call still ends with a
+/// terminal frame in the durable console log. The projection's stop takes
+/// only its own share of the window; the side effect it did not finish
+/// stays owed for the next start.
+///
+/// RED before the projection's stop had a share of its own: it took the
+/// whole window, so the post-stop drain had no time left, and the parked
+/// turn's terminal frame was dropped with the event router.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lifecycle_effect_that_never_answers_at_shutdown_leaves_the_parked_turn_its_terminal() {
+    use meerkat_meta::ConsoleLogStore as _;
+    use meerkat_meta::identity_first::{
+        AgentAddressability, AgentIdentity, DurabilityPolicy, DurableAgentSpec,
+        IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
+        LocalLeaseProvider, MobSessionBridge, MutableRosterProvider, RosterProvider,
+    };
+
+    let mob_id = format!(
+        "parked-turn-slow-effect-{}",
+        NEXT_TEST_MOB_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let definition = MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.lead]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.lead.tools]
+comms = true
+rust_bundles = ["parked"]
+"#
+    ))
+    .expect("parse parked-turn mob definition");
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let session_path = temp_dir.path().join("sessions");
+    std::fs::create_dir_all(&session_path).expect("session path");
+    let console_db = temp_dir.path().join("console.sqlite3");
+    let factory = AgentFactory::new(&session_path).comms(true);
+    let session_service = Arc::new(build_ephemeral_service(factory, Config::default(), 16));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mob_slot = Arc::new(std::sync::OnceLock::new());
+    let mob_spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
+        .with_options(MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(ParkedTurnClient)),
+        })
+        .register_tool_bundle(
+            "parked",
+            Arc::new(ParkedToolBundle {
+                entered: Arc::clone(&entered),
+                mob: Arc::clone(&mob_slot),
+            }),
+        );
+    // A short drain window, so the projection's share of it ends soon.
+    let mut runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .mob_spec(mob_spec)
+            .module_config(MetaConfig {
+                modules: vec![],
+                discovery: DiscoverySpec {
+                    namespace: mob_id.clone(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            })
+            .timeout(Duration::from_secs(2))
+            .drain_timeout(Duration::from_secs(4))
+            .build(),
+    )
+    .await
+    .expect("build parked-turn runtime");
+    runtime.set_console_log_store(Arc::new(
+        meerkat_meta::SqliteConsoleLogStore::open(&console_db).expect("open console store"),
+    ));
+    let _ = mob_slot.set(runtime.mob_handle());
+
+    // An identity runtime whose customizer never answers `after_create`.
+    let identities = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+        continuity_store: Arc::new(LocalContinuityStore::in_memory().expect("continuity store")),
+        lease_provider: Arc::new(LocalLeaseProvider::new()),
+        runtime_instance_id: mob_id.clone(),
+        has_runtime_store: true,
+        durability_policy: DurabilityPolicy::SyncWriteThrough,
+        bridge: Some(Arc::new(MobSessionBridge::new(runtime.mob_handle()))),
+        default_timeout: None,
+    }));
+    let roster = Arc::new(MutableRosterProvider::new(Vec::new()));
+    let context = Arc::new(IdentityFirstRuntimeContext::new(
+        identities,
+        Arc::clone(&roster) as Arc<dyn RosterProvider>,
+        None,
+        Some(Arc::new(AfterCreateNeverAnswers)),
+        Some(runtime.mob_handle().definition().clone()),
+    ));
+    runtime
+        .install_and_bootstrap_identity_first_context(Arc::clone(&context), &[])
+        .await
+        .expect("bootstrap the empty identity roster");
+    // A seat whose after_create the projection enters and never leaves.
+    roster.upsert(DurableAgentSpec {
+        identity: AgentIdentity::parse("slow-effect-member").expect("identity"),
+        profile: meerkat_mob::ProfileName::from("lead"),
+        addressability: AgentAddressability::Addressable,
+        display_name: None,
+        labels: std::collections::BTreeMap::new(),
+        context: None,
+        additional_instructions: Vec::new(),
+        initial_message: None,
+        runtime_mode_override: None,
+        backend: None,
+        binding: None,
+        placement: None,
+    });
+    context
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass seats the member");
+
+    let runtime = Arc::new(runtime);
+    let event_drain = Arc::clone(&runtime).spawn_event_drain_task();
+    let mut spec = SpawnMemberSpec::from_wire(
+        "lead".to_string(),
+        MobMemberId::from(PARKED_TOOL_MEMBER).to_string(),
+        None,
+        None,
+        None,
+    );
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    runtime.spawn(spec).await.expect("spawn turn_driven member");
+
+    let app = runtime.build_reference_app_router(decision_state(false));
+    let send_json = post_console_rpc(
+        &app,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "send-parked",
+            "method": "meta/console/send",
+            "params": {
+                "identity": PARKED_TOOL_MEMBER,
+                "origin": "test",
+                "idempotency_key": "parked-turn-slow-effect",
+                "content": "parked-turn"
+            }
+        }),
+    )
+    .await;
+    assert!(
+        send_json.get("error").is_none() || send_json["error"].is_null(),
+        "console send failed: {send_json}"
+    );
+    let interaction_id = send_json["result"]["interaction_id"]
+        .as_str()
+        .expect("an accepted send names its interaction")
+        .to_string();
+    let accepted_cursor = send_json["result"]["cursor"]
+        .as_str()
+        .expect("an accepted send names its cursor")
+        .to_string();
+    tokio::time::timeout(PARKED_TURN_FAILURE_BOUND, entered.notified())
+        .await
+        .expect("the turn entered the parked tool call");
+
+    event_drain.abort();
+    let _ = event_drain.await;
+    let shutdown = runtime.shutdown().await;
+    assert_mob_stop_allows_boundary_cancel(shutdown.mob_stop);
+    drop(app);
+    drop(runtime);
+
+    let store =
+        meerkat_meta::SqliteConsoleLogStore::open(&console_db).expect("reopen console store");
+    let mut frames = Vec::new();
+    let mut after = Some(meerkat_meta::ConsoleCursor::from(accepted_cursor.as_str()));
+    loop {
+        let page = store
+            .query_frames(meerkat_meta::ConsoleTimelineQuery {
+                identity: None,
+                conversation_id: None,
+                after: after.clone(),
+                limit: 500,
+            })
+            .await
+            .expect("query the durable console log");
+        let Some(last) = page.frames.last() else {
+            break;
+        };
+        after = Some(last.cursor.clone());
+        frames.extend(page.frames);
+    }
+    let live_terminals: Vec<&str> = frames
+        .iter()
+        .filter(|frame| {
+            frame.interaction_id.as_deref() == Some(interaction_id.as_str())
+                && frame.source.kind != meerkat_meta::ConsoleFrameSourceKind::SessionHistory
+                && matches!(
+                    frame.kind.as_str(),
+                    "interaction_complete" | "interaction_failed"
+                )
+        })
+        .map(|frame| frame.kind.as_str())
+        .collect();
+    assert!(
+        !live_terminals.is_empty(),
+        "the parked turn has no terminal frame after the accepted cursor {accepted_cursor}: \
+         the lifecycle projection's stop took the post-stop drain's share of the window"
+    );
+}

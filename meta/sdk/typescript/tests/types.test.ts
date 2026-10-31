@@ -1737,6 +1737,36 @@ describe("parseErrorEvent", () => {
     assert.equal(isResolutionErrorEvent(result), false);
   });
 
+  it("parses lifecycle_effect_failed naming the side effect and its attempts", () => {
+    const result = parseErrorEvent({
+      category: "lifecycle_effect_failed",
+      identity: "keeper",
+      agent_runtime_id: "rt:keeper:2",
+      session_id: "s-1",
+      effect: "exit_interview",
+      attempts: 3,
+      error: "the queue refused the write",
+    });
+    assert.equal(result.category, ErrorCategory.LIFECYCLE_EFFECT_FAILED);
+    assert.equal(
+      result.message,
+      "the exit_interview of keeper (rt:keeper:2) failed after 3 attempts, " +
+        "and is not run again: the queue refused the write",
+    );
+    assert.equal(result.context.effect, "exit_interview");
+    assert.equal(isResolutionErrorEvent(result), false);
+  });
+
+  it("parses lifecycle_projection_off with its detail", () => {
+    const result = parseErrorEvent({
+      category: "lifecycle_projection_off",
+      detail: "the session bridge cannot read the journal",
+    });
+    assert.equal(result.category, ErrorCategory.LIFECYCLE_PROJECTION_OFF);
+    assert.equal(result.message, "the session bridge cannot read the journal");
+    assert.equal(isResolutionErrorEvent(result), false);
+  });
+
   it("only recoveries and resolved escalations are resolutions", () => {
     const resolutions: string[] = [
       ErrorCategory.ACTOR_LOOP_RECOVERED,
@@ -1814,6 +1844,8 @@ describe("parseErrorEvent", () => {
       IDENTITY_MATERIALIZATION_FAILURE: "identity_materialization_failure",
       MOB_STOP_PROCEEDED_WITHOUT_INTERRUPT: "mob_stop_proceeded_without_interrupt",
       RETIRED_MEMBER_RELEASE_FAILED: "retired_member_release_failed",
+      LIFECYCLE_EFFECT_FAILED: "lifecycle_effect_failed",
+      LIFECYCLE_PROJECTION_OFF: "lifecycle_projection_off",
       MOB_ANNOUNCEMENT_ESCALATED: "mob_announcement_escalated",
       MOB_ANNOUNCEMENT_ESCALATION_RESOLVED: "mob_announcement_escalation_resolved",
     });

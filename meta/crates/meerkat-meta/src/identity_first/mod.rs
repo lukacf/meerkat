@@ -39,7 +39,8 @@ pub use bridge::{
     ControllerPinSource, GovernedAdmission, GovernedAdmissionRecord, GovernedBindContext,
     GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
     GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, MemberInspection, MemberRuntimeBinding, MobSessionBridge,
+    GovernedSettlement, MemberInspection, MemberLifecycleFact, MemberLifecycleFactRecord,
+    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MobSessionBridge,
     NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome,
     SessionBridge,
 };
@@ -98,6 +99,10 @@ impl PublicIdentityRuntime {
         runtime: std::sync::Arc<IdentityRuntime>,
         owner: crate::mob_handle_runtime::MobRuntime,
     ) -> Self {
+        // An embedder may hand this view to the RPC handler with no identity
+        // context serving the runtime: the view binds the runtime's
+        // lifecycle projection then, so the side effects of its steps run.
+        runtime.adopt_lifecycle_projection(None);
         Self { runtime, owner }
     }
 

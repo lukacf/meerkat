@@ -648,6 +648,25 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
+    /// [`Self::distill_before_rotation`], answering whether the run ended
+    /// within the distiller's pre-rotation bound, or the bound it did not
+    /// end within. Without a distiller there is nothing to wait for.
+    pub(crate) async fn distill_before_rotation_within_bound(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        cause: crate::memory::distiller::DistillCause,
+    ) -> Result<(), std::time::Duration> {
+        match self.distiller.as_ref() {
+            Some(distiller) => {
+                distiller
+                    .distill_before_rotation_within_bound(identity.as_str(), session_key, cause)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Ask 2 GC: after distilling a permanently-orphaned session, reclaim its
     /// meerkat semantic-memory rows (respawn/reset mint a fresh id; delete
     /// discards it — the old scope is dead weight that every future build in
@@ -679,6 +698,33 @@ impl AgentMemoryRuntimeInjector {
             steward
                 .note_identity_retired(identity.as_str(), session_key, cause)
                 .await;
+        }
+    }
+
+    /// §8.5 exit interviews, for a retirement whose step was asked at
+    /// `retired_at_ms`: the pending harvest is keyed by it, so a repeat of
+    /// the same retirement (its side effects run again after a restart)
+    /// queues nothing more. Answers the store's error, for a caller that
+    /// owes the harvest at least once. No-op without a wired Steward.
+    pub async fn record_identity_retired_at(
+        &self,
+        identity: &AgentIdentity,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        match self.steward.as_ref() {
+            Some(steward) => {
+                steward
+                    .record_identity_retired_at(
+                        identity.as_str(),
+                        session_key,
+                        cause,
+                        retired_at_ms,
+                    )
+                    .await
+            }
+            None => Ok(()),
         }
     }
 

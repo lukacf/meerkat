@@ -1150,6 +1150,67 @@ comms = true
             ) -> Result<(), MetadataStoreError> {
                 Ok(())
             }
+            async fn lifecycle_projection_cursor(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Option<crate::LifecycleProjectionCursor>, MetadataStoreError> {
+                Ok(None)
+            }
+            async fn set_lifecycle_projection_cursor(
+                &self,
+                _cursor: &crate::LifecycleProjectionCursor,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn lifecycle_effect_intent(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+                _generation: u64,
+            ) -> Result<Option<crate::LifecycleEffectIntent>, MetadataStoreError> {
+                Ok(None)
+            }
+            async fn set_lifecycle_effect_intent(
+                &self,
+                _intent: &crate::LifecycleEffectIntent,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn clear_lifecycle_effect_intent(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+                _generation: u64,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn lifecycle_effect_intents(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Vec<crate::LifecycleEffectIntent>, MetadataStoreError> {
+                Ok(Vec::new())
+            }
+            async fn record_lifecycle_effect_failure(
+                &self,
+                _failure: &crate::LifecycleEffectFailure,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn lifecycle_effect_failures(
+                &self,
+                _mob_id: &str,
+                _skip: usize,
+                _limit: usize,
+            ) -> Result<Vec<crate::LifecycleEffectFailure>, MetadataStoreError> {
+                Ok(Vec::new())
+            }
+            async fn prune_lifecycle_effect_failures(
+                &self,
+                _mob_id: &str,
+                _keep: usize,
+            ) -> Result<usize, MetadataStoreError> {
+                Ok(0)
+            }
         }
 
         let early = SessionId::new();

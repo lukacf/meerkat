@@ -730,8 +730,9 @@ meta_gateway identity-reset --state-dir <dir> --identity <identity> --apply
   [The first boot](#the-first-boot) describes: a live member is replaced by
   its successor on a fresh session and stays live; a retired identity gets
   a fresh session and stays dormant. The old session stays in Core's store,
-  bound to nothing. Unlike the online reset, nothing of the old session is
-  distilled into agent memory.
+  bound to nothing. As for the online reset, a live member's old session is
+  distilled into agent memory once the row is carried out (with agent memory
+  configured); nothing of a retired one's is.
 - It refuses, and writes nothing (`refusal.kind` in `--json`):
   - a directory a runtime holds (`directory`, whose nested refusal is
     `runtime_in_use`: stop the process first);

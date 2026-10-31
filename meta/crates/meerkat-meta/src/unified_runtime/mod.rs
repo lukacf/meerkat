@@ -66,6 +66,10 @@ pub mod in_flight_drain;
 #[cfg(test)]
 pub(crate) mod in_flight_drain_tests;
 pub mod lifecycle;
+#[cfg(test)]
+mod lifecycle_effect_restart_tests;
+#[cfg(test)]
+mod lifecycle_projection_off_tests;
 pub mod live_compose;
 pub mod mob_events;
 pub mod mob_ops;
@@ -1688,6 +1692,9 @@ impl UnifiedRuntime {
                 if reconcile_after_roster {
                     self.reconcile_bootstrap_edges_if_configured().await;
                 }
+                // As on the unheld path: the bootstrap's lifecycle side
+                // effects run before it answers.
+                context.runtime.settle_lifecycle_projection().await;
                 self.mint_bootstrap_completion();
                 Ok(HeldBootstrapStart::Activated(result))
             }
@@ -1768,6 +1775,10 @@ impl UnifiedRuntime {
                 if reconcile_after_roster {
                     self.reconcile_bootstrap_edges_if_configured().await;
                 }
+                // The side effects of the bootstrap's own lifecycle steps,
+                // and those a stopped process still owed, run before the
+                // bootstrap answers.
+                context.runtime.settle_lifecycle_projection().await;
                 self.mint_bootstrap_completion();
                 Ok(result)
             }

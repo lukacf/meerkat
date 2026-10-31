@@ -2776,6 +2776,122 @@ async fn identity_tool_records_and_rotations_round_trip_through_the_realm_docume
     );
 }
 
+/// The lifecycle projection's cursor, a lifecycle effect intent and a
+/// lifecycle effect failure, as Meta keeps them in a host store realm's
+/// documents, round trip: another host reads them from the realm, lists the
+/// mob's intents and failures, intents are per generation, and a cleared
+/// intent is gone there.
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
+    use crate::runtime::{
+        LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
+        LifecycleProjectionBacklog, LifecycleProjectionCursor,
+    };
+    let fixture = Fixture::new();
+    let mob_id = unique_mob_id("lifecycle-records");
+    let mut cursor =
+        LifecycleProjectionCursor::new(mob_id.clone(), "incarnation-1", 41, 1_700_000_000_000);
+    cursor.backlog = vec![LifecycleProjectionBacklog::new(30, 38)];
+    let intent = LifecycleEffectIntent::new(
+        mob_id.clone(),
+        "incarnation-1",
+        ALICE,
+        3,
+        LifecycleEffectVerb::Delete,
+        Some(SessionId::new()),
+        1_700_000_000_000,
+    );
+    let failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::ExitInterview,
+        3,
+        "the queue refused the write",
+        1_700_000_000_001,
+    );
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let store = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            store
+                .lifecycle_projection_cursor(&mob_id)
+                .await
+                .expect("read the cursor"),
+            None
+        );
+        store
+            .set_lifecycle_projection_cursor(&cursor)
+            .await
+            .expect("write the cursor");
+        store
+            .set_lifecycle_effect_intent(&intent)
+            .await
+            .expect("record the intent");
+        store
+            .record_lifecycle_effect_failure(&failure)
+            .await
+            .expect("record the failure");
+    }
+
+    fixture.lapse();
+    let provider = fixture
+        .open(&fixture.process())
+        .await
+        .expect("another host opens the realm");
+    let store = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        store
+            .lifecycle_projection_cursor(&mob_id)
+            .await
+            .expect("read the cursor"),
+        Some(cursor)
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .await
+            .expect("read the intent"),
+        Some(intent.clone())
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intents(&mob_id)
+            .await
+            .expect("list the intents"),
+        vec![intent]
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
+            .await
+            .expect("list the failures"),
+        vec![failure]
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 4)
+            .await
+            .expect("read another generation's intent"),
+        None,
+        "intents are per generation"
+    );
+    store
+        .clear_lifecycle_effect_intent(&mob_id, ALICE, 3)
+        .await
+        .expect("clear the intent");
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .await
+            .expect("read the intent"),
+        None,
+        "a cleared intent is gone"
+    );
+}
+
 /// A build on another host's empty cache reads the held-completion marks
 /// the realm keeps: an identity a held pass left owing its host a fresh held
 /// completion is refused a wake outside a held pass, typed, while an

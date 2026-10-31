@@ -19,6 +19,8 @@
 //! | `idle/<mob id length>:<mob id><member id>` | one member's idle-retirement opt-in |
 //! | `tools/<mob id length>:<mob id><identity>` | one identity's last-published tool record |
 //! | `rotation/<mob id length>:<mob id><identity>` | one identity's pending rotation intent |
+//! | `lifecycle/<mob id>` | the identity runtime's lifecycle projection cursor |
+//! | `effect/<mob id length>:<mob id><generation>/<identity>` | one pending lifecycle effect intent |
 //!
 //! Every document goes through the realm's one [`SpiRealm`] under its fence:
 //! a write is one single-scope batch, settled before it answers. A batch
@@ -41,8 +43,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
-    IdentityRotationIntent, IdentityToolRecord, MemberIdleRetireOverrideRecord, MetadataStoreError,
+    IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
+    LifecycleProjectionCursor, MemberIdleRetireOverrideRecord, MetadataStoreError,
     PersistentMetadataStore, decode_identity_record, encode_identity_record,
+    lifecycle_effect_failure_order,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -69,6 +73,9 @@ const CURSOR_PREFIX: &str = "cursor/";
 const IDLE_PREFIX: &str = "idle/";
 const TOOLS_PREFIX: &str = "tools/";
 const ROTATION_PREFIX: &str = "rotation/";
+const LIFECYCLE_PREFIX: &str = "lifecycle/";
+const EFFECT_PREFIX: &str = "effect/";
+const FAILURE_PREFIX: &str = "failure/";
 
 /// The format version of the cursor and idle opt-in documents.
 const ENTRY_VERSION: u32 = 1;
@@ -103,6 +110,44 @@ fn identity_tools_key(mob_id: &str, identity: &str) -> String {
 /// every rotation intent of the mob.
 fn identity_rotation_key(mob_id: &str, identity: &str) -> String {
     format!("{ROTATION_PREFIX}{}:{mob_id}{identity}", mob_id.len())
+}
+
+/// A mob's lifecycle projection cursor.
+fn lifecycle_cursor_key(mob_id: &str) -> String {
+    format!("{LIFECYCLE_PREFIX}{mob_id}")
+}
+
+/// The lifecycle effect intent of `identity`'s `generation`, injective over
+/// (mob id, generation, identity): the mob id's length comes first, and the
+/// generation, a number, ends at its `/`.
+fn lifecycle_effect_key(mob_id: &str, identity: &str, generation: u64) -> String {
+    format!(
+        "{EFFECT_PREFIX}{}:{mob_id}{generation}/{identity}",
+        mob_id.len()
+    )
+}
+
+/// The prefix of every lifecycle effect intent of `mob_id`.
+fn lifecycle_effect_prefix(mob_id: &str) -> String {
+    format!("{EFFECT_PREFIX}{}:{mob_id}", mob_id.len())
+}
+
+/// A lifecycle effect failure, injective over (mob id, generation, effect,
+/// identity) as [`lifecycle_effect_key`] is: the generation, a number, and
+/// the effect's wire name each end at a `/`.
+fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
+    format!(
+        "{}{}/{}/{}",
+        lifecycle_failure_prefix(&failure.mob_id),
+        failure.generation,
+        failure.effect.as_str(),
+        failure.identity
+    )
+}
+
+/// The prefix of every lifecycle effect failure of `mob_id`.
+fn lifecycle_failure_prefix(mob_id: &str) -> String {
+    format!("{FAILURE_PREFIX}{}:{mob_id}", mob_id.len())
 }
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -837,5 +882,155 @@ impl PersistentMetadataStore for SpiMetadataStore {
             .write(&identity_rotation_key(mob_id, identity), None)
             .await
             .map_err(io_error)
+    }
+
+    /// Written through, never coalesced: the cursor says which lifecycle
+    /// side effects ran, so it lands before this answers.
+    async fn lifecycle_projection_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<LifecycleProjectionCursor>, MetadataStoreError> {
+        let key = lifecycle_cursor_key(mob_id);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        decode_identity_record(&bytes).map(Some)
+    }
+
+    async fn set_lifecycle_projection_cursor(
+        &self,
+        cursor: &LifecycleProjectionCursor,
+    ) -> Result<(), MetadataStoreError> {
+        let document = encode_identity_record(cursor)?.into_bytes();
+        self.documents
+            .write(&lifecycle_cursor_key(&cursor.mob_id), Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        generation: u64,
+    ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError> {
+        let key = lifecycle_effect_key(mob_id, identity, generation);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        decode_identity_record(&bytes).map(Some)
+    }
+
+    async fn set_lifecycle_effect_intent(
+        &self,
+        intent: &LifecycleEffectIntent,
+    ) -> Result<(), MetadataStoreError> {
+        let key = lifecycle_effect_key(&intent.mob_id, &intent.identity, intent.generation);
+        let document = encode_identity_record(intent)?.into_bytes();
+        self.documents
+            .write(&key, Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn clear_lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        generation: u64,
+    ) -> Result<(), MetadataStoreError> {
+        self.documents
+            .write(&lifecycle_effect_key(mob_id, identity, generation), None)
+            .await
+            .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<LifecycleEffectIntent>, MetadataStoreError> {
+        let mut intents = Vec::new();
+        for key in self
+            .documents
+            .keys_with_prefix(&lifecycle_effect_prefix(mob_id))
+        {
+            let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+                continue;
+            };
+            let intent: LifecycleEffectIntent = decode_identity_record(&bytes)?;
+            // The prefix carries the mob id's length, so it names exactly
+            // this mob's records.
+            if intent.mob_id == mob_id {
+                intents.push(intent);
+            }
+        }
+        Ok(intents)
+    }
+
+    /// Written through: a failure is recorded before the projection's cursor
+    /// moves past the event that owed it.
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &LifecycleEffectFailure,
+    ) -> Result<(), MetadataStoreError> {
+        let document = encode_identity_record(failure)?.into_bytes();
+        self.documents
+            .write(&lifecycle_failure_key(failure), Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id).await?;
+        Ok(failures
+            .into_iter()
+            .skip(skip)
+            .take(limit)
+            .map(|(_, failure)| failure)
+            .collect())
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, MetadataStoreError> {
+        let failures = self.lifecycle_effect_failures_of(mob_id).await?;
+        let older = failures.len().saturating_sub(keep);
+        for (key, _) in &failures[..older] {
+            self.documents.write(key, None).await.map_err(io_error)?;
+        }
+        Ok(older)
+    }
+}
+
+impl SpiMetadataStore {
+    /// Every lifecycle effect failure of `mob_id`, each with its document
+    /// key, in the order
+    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them.
+    async fn lifecycle_effect_failures_of(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<(String, LifecycleEffectFailure)>, MetadataStoreError> {
+        let mut failures = Vec::new();
+        for key in self
+            .documents
+            .keys_with_prefix(&lifecycle_failure_prefix(mob_id))
+        {
+            let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+                continue;
+            };
+            let failure: LifecycleEffectFailure = decode_identity_record(&bytes)?;
+            if failure.mob_id == mob_id {
+                failures.push((key, failure));
+            }
+        }
+        failures.sort_by(|(_, a), (_, b)| lifecycle_effect_failure_order(a, b));
+        Ok(failures)
     }
 }

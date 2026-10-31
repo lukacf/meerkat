@@ -31,6 +31,14 @@ pub const CHILD_MOB_STAND_DOWN_BUDGET: Duration = Duration::from_secs(10);
 /// removes the phase from the report.
 pub const RETIRED_SUPERVISOR_JOIN_BUDGET: Duration = Duration::from_secs(2);
 
+/// The identity runtime's lifecycle projection's share of the shutdown's
+/// event drain window: half of it. The post-stop drain, which gives a turn
+/// the shutdown interrupted its terminal console frame, and the metadata
+/// settle keep the rest, however slow a lifecycle side effect is.
+fn lifecycle_projection_share(drain_window: Duration) -> Duration {
+    drain_window / 2
+}
+
 use meerkat_mob::SpawnMemberSpec;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -350,22 +358,6 @@ impl UnifiedRuntime {
             let _ = task.await;
         }
 
-        // A reset hands the outgoing session's memory capture to a
-        // runtime-owned task, so the reset stays latency-neutral. Join those
-        // tasks once foreground lifecycle admission is closed, then run any
-        // capture a cancelled task left behind, before the mob stops.
-        if let Some(identity_runtime) = identity_runtime.as_ref() {
-            // The customizer `after_create` calls run outside any lifecycle
-            // lock; closing foreground admission abandoned those still
-            // waiting for their customizer.
-            identity_runtime.join_after_create_notices().await;
-            identity_runtime.join_reset_memory_captures().await;
-            let ran = identity_runtime.drain_pending_reset_memory_captures().await;
-            if ran > 0 {
-                tracing::debug!(ran, "ran reset memory captures left by cancelled tasks");
-            }
-        }
-
         // Phase 1: Drain in-flight events
         let drain_start = std::time::Instant::now();
         // Phase 1 and the post-stop drain before Phase 3 share this window:
@@ -375,7 +367,24 @@ impl UnifiedRuntime {
         // position; the post-stop drain makes each of them durable.
         let console_drain_position = self.console_events.latest_event_id().await;
         let mut drained_count = 0_usize;
-        let drain_result = tokio::time::timeout(self.drain_timeout, async {
+        // The identity runtime's lifecycle projection drains in the same
+        // window, before the mob stops: it runs the side effects of the
+        // lifecycle steps Core journaled (the retirement hook, the
+        // distillation of a retired session, the exit interview,
+        // `after_create`), then stops. It takes its share of the window
+        // only: the post-stop drain and the metadata settle below keep the
+        // rest, however slow a side effect is. What it does not reach in its
+        // share runs at the next start, from its durable cursor.
+        let lifecycle_projection_deadline = tokio::time::Instant::from_std(drain_start)
+            + lifecycle_projection_share(self.drain_timeout);
+        let lifecycle_projection_stop = async {
+            if let Some(identity_runtime) = identity_runtime.as_ref() {
+                identity_runtime
+                    .stop_lifecycle_projection(lifecycle_projection_deadline)
+                    .await;
+            }
+        };
+        let event_drain = tokio::time::timeout(self.drain_timeout, async {
             loop {
                 if self.drain_mob_agent_events().await.is_err() {
                     break;
@@ -391,8 +400,8 @@ impl UnifiedRuntime {
                     break;
                 }
             }
-        })
-        .await;
+        });
+        let (drain_result, ()) = tokio::join!(event_drain, lifecycle_projection_stop);
         let drain = ShutdownDrainReport {
             drained_count,
             timed_out: drain_result.is_err(),

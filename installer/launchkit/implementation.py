@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
@@ -24,6 +24,7 @@ from .architect import ArchitectUnavailable
 from .projects import DraftConflict, fingerprint
 from .templates.storage_setup import write_private
 from .owned_worker import spawn_owned_worker, stop_owned_worker
+from .protected_worker import is_protected_worker, selected_worker
 from .deployment_deadlines import WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT
 from .service_requirements import required_service_operations
 
@@ -1122,9 +1123,13 @@ def _package_archive(files):
 class ImplementationService:
     """Background build admission, snapshots, native timelines and checked packages."""
 
-    def __init__(self, root, guide, operations=None, *, require_service_checks=False):
+    def __init__(self, root, guide, operations=None, *, require_service_checks=False,
+                 worker_preparer=None):
         if type(require_service_checks) is not bool:
             raise TypeError("Select required service checks through the trusted host policy.")
+        if worker_preparer is not None and not callable(worker_preparer):
+            raise TypeError("The trusted host must supply its worker preparer.")
+        self._worker_preparer = worker_preparer
         self.root = Path(root) / "implementations"
         self.guide = guide
         self.operations = operations
@@ -2014,7 +2019,10 @@ class ImplementationService:
             self.tasks.pop(directory.name, None)
 
     async def _stop_process(self, process):
-        await stop_owned_worker(process)
+        if is_protected_worker(process):
+            await process.stop()
+        else:
+            await stop_owned_worker(process)
 
     async def _confirm_stop(self, directory, process):
         update_receipt(directory, cleanup_pending=True, cleanup_in_progress=True,
@@ -2099,20 +2107,27 @@ class ImplementationService:
         try:
             # A separate process gives this native tool registry and gateway their
             # own lifetime. Generated tests receive a different, scrubbed environment.
-            environment = dict(os.environ)
-            source_root = str(Path(__file__).resolve().parents[1])
-            environment["PYTHONPATH"] = source_root
-            from .guide_runtime import capture_worker_runtime
-            runtime_control_sha256 = capture_worker_runtime(directory)
-            with (directory / "worker.log").open("w") as log:
-                os.chmod(directory / "worker.log", 0o600)
-                process, cancelled = await spawn_owned_worker(sys.executable, "-m",
-                    "launchkit.implementation_worker", str(directory), "--owned-stdin",
-                    "--agent-runtime-sha256", runtime_control_sha256, cwd=source_root,
-                    env=environment, stdin=asyncio.subprocess.PIPE, stdout=log, stderr=log)
-                self.processes[identity] = process
-                if cancelled:
-                    raise asyncio.CancelledError
+            with ExitStack() as resources:
+                if self._worker_preparer is not None:
+                    preparation = self._worker_preparer(kind="implementation", directory=directory)
+                    process = selected_worker(preparation, "implementation", directory)
+                    self.processes[identity] = process  # Retain before any spawn await.
+                    await process.start()
+                else:
+                    environment = dict(os.environ)
+                    source_root = str(Path(__file__).resolve().parents[1])
+                    environment["PYTHONPATH"] = source_root
+                    from .guide_runtime import capture_worker_runtime
+                    runtime_control_sha256 = capture_worker_runtime(directory)
+                    log = resources.enter_context((directory / "worker.log").open("w"))
+                    os.chmod(directory / "worker.log", 0o600)
+                    process, cancelled = await spawn_owned_worker(sys.executable, "-m",
+                        "launchkit.implementation_worker", str(directory), "--owned-stdin",
+                        "--agent-runtime-sha256", runtime_control_sha256, cwd=source_root,
+                        env=environment, stdin=asyncio.subprocess.PIPE, stdout=log, stderr=log)
+                    self.processes[identity] = process
+                    if cancelled:
+                        raise asyncio.CancelledError
                 code = await asyncio.wait_for(process.wait(),
                     IMPLEMENTATION_SECONDS + WORKER_STOP_TIMEOUT + PROCESS_FORCE_REAP_TIMEOUT)
                 if await confirm_stop():

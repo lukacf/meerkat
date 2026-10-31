@@ -113,8 +113,8 @@ LOG = logging.getLogger(__name__)
 
 def setup_home():
     """Reuse saved setup state with Forge settings or their existing aliases."""
-    home = os.environ.get("META_FORGE_HOME") or os.environ.get("MOBKIT_LAUNCH_HOME", str(APP_ROOT / ".studio"))
-    return Path(home).expanduser().resolve()
+    from .startup_state import saved_state_root
+    return saved_state_root(APP_ROOT / ".studio")
 
 
 STUDIO_ROOT = setup_home()
@@ -346,8 +346,26 @@ rehearsal = RehearsalService(STUDIO_ROOT, guide, guide_operations, implementatio
 guide.trial_evidence_provider = lambda state: rehearsal.status(state["id"], state=state)
 
 
+def select_worker_preparer(preparer):
+    """Trusted launcher only, before serving Build or Trial requests.
+
+    Supply a fresh original receiver preparation for each admitted worker.
+    HTTP, saved selections and environment variables cannot install this hook.
+    """
+    from .protected_worker import select_worker_preparer as select
+    select(preparer, implementation, rehearsal)
+
+
+def select_runtime_preparer(preparer):
+    """Trusted launcher role admission, installed before HTTP startup."""
+    from .role_runtime import select_runtime_preparer as select
+    return select(preparer)
+
+
 @asynccontextmanager
 async def lifespan(app):
+    from .role_runtime import seal_runtime_preparer
+    runtime_preparations = seal_runtime_preparer()
     with runtime_diagnostics():
         try:
             provider_settings.restore()
@@ -361,6 +379,8 @@ async def lifespan(app):
             # The deployment, implementation and rehearsal workers stop themselves
             # on owner loss; stop_owners never signals them, and no owner names
             # its groups.
+            if runtime_preparations is not None:
+                runtime_preparations.begin_shutdown()
             def workers(service):
                 return lambda: list((getattr(service, "processes", None) or {}).values())
             failures = await stop_owners((
@@ -382,6 +402,11 @@ async def lifespan(app):
                 Owner("saved Toolkit requests", toolkit_saved_requests),
                 Owner("architect", architect),
             ))
+            if runtime_preparations is not None:
+                try:
+                    await runtime_preparations.join()
+                except BaseException as error:
+                    failures.append(("runtime admission", error))
             if failures:
                 raise BaseExceptionGroup(
                     "Meta Forge cleanup failed for: " + ", ".join(name for name, _ in failures),

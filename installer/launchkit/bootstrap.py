@@ -139,8 +139,10 @@ _selected_guide_runtime = None
 
 def configure_selected_guide_runtime(selected):
     """Select once from the original trusted launcher before server import."""
+    from .guide_transport import SelectedGuideTransport
+    from .protected_startup import SelectedProtectedRuntime
     global _selected_guide_runtime
-    if type(selected) is not SelectedGuideRuntime:
+    if type(selected) not in (SelectedGuideRuntime, SelectedGuideTransport, SelectedProtectedRuntime):
         raise GatewayInstallError("Select the original trusted Meta guide runtime.")
     if _selected_guide_runtime is not None and selected is not _selected_guide_runtime:
         raise GatewayInstallError("The original guide runtime cannot be replaced during this process.")
@@ -158,7 +160,7 @@ def selected_guide_runtime():
 
 def selected_guide_gateway():
     selected = selected_guide_runtime()
-    return selected.gateway.path if selected is not None else None
+    return selected.gateway.path if type(selected) is SelectedGuideRuntime else None
 
 
 def export_selected_guide_context():
@@ -166,6 +168,9 @@ def export_selected_guide_context():
     selected = selected_guide_runtime()
     if selected is None:
         return None
+    if type(selected) is not SelectedGuideRuntime:
+        raise GatewayInstallError("The worker needs its own trusted original gateway channel; "
+                                  "a process-local transport cannot be exported.")
     return {"gateway": selected.gateway.pin(), "version": selected.version,
         "core_version": selected.core_version, "meta_source": selected.meta_source,
         "core_source": selected.core_source,
@@ -181,6 +186,9 @@ def restore_selected_guide_context(value):
     browser request, model-visible input or an environment-selected route.
     """
     from .connect_installer_caller import ExactFile
+
+    if _selected_guide_runtime is not None and type(_selected_guide_runtime) is not SelectedGuideRuntime:
+        raise GatewayInstallError("A saved worker record cannot replace the original guide transport.")
 
     names = {"gateway", "version", "core_version", "meta_source", "core_source",
         "model_configuration", "model_custody"}

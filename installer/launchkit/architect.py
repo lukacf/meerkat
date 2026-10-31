@@ -1411,15 +1411,21 @@ class ArchitectService:
                 bootstrap_target = _setup_bootstrap_target(mob_definition)
                 self.startup_phase = "native_bootstrap"
                 selected.recheck()
+                from .role_runtime import prepare_runtime
+                prepared = await prepare_runtime("architect", selected,
+                    runtime_root / ".mobkit/state", self.startup_cleanup)
+                state_path = (prepared.persistent_state if prepared is not None
+                              else str(runtime_root / ".mobkit/state"))
                 builder = (Meta.builder().mob_inline(mob_definition)
                            .gateway_init_timeout(300)
-                           .persistent_state(str(runtime_root / ".mobkit/state")).roster(Roster())
+                           .persistent_state(state_path).roster(Roster())
                            .topology_provider(Topology()).session_service(SessionBuilder()).agent_memory(True)
                            .identity_bootstrap_mode(IdentityBootstrapMode.lazy_with_background_warm(concurrency=1))
                            .console_config(console_path).console_auth_required(False).http_listen("127.0.0.1:0"))
                 if expected_revision is not None:
                     builder.declare_spec_update(expected_revision)
-                self.runtime = await build_with_cleanup(configure_builder(builder, selected), self.startup_cleanup)
+                self.runtime = (await prepared.build(builder) if prepared is not None else
+                    await build_with_cleanup(configure_builder(builder, selected), self.startup_cleanup))
                 self.console_generation = str(uuid.uuid4())
                 self.setup_runtime_selection = selected
                 self.startup_phase = "identity_warmup"
@@ -1621,7 +1627,8 @@ class ArchitectService:
         runtime = self.runtime
         try:
             if runtime is not None:
-                await runtime.shutdown()
+                from .role_runtime import shutdown_runtime
+                await shutdown_runtime(runtime, self.startup_cleanup)
             for cleanup in tuple(self.startup_cleanup):
                 await cleanup.shutdown()
                 self.startup_cleanup.remove(cleanup)
@@ -1649,7 +1656,8 @@ class ArchitectService:
         errors = []
         if runtime is not None:
             try:
-                await runtime.shutdown()
+                from .role_runtime import shutdown_runtime
+                await shutdown_runtime(runtime, self.startup_cleanup)
                 self.runtime = None
                 if self.consultation_runtime is runtime:
                     self.consultation_pending, self.consultation_runtime = None, None

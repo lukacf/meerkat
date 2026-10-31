@@ -46,8 +46,17 @@ class VisualReviewRuntime:
         self.state = 'stopped'
 
     def capability(self):
+        from .bootstrap import selected_guide_runtime
+        from .guide_transport import SelectedGuideTransport
+        from .protected_startup import SelectedProtectedRuntime
         configured = planner_capability()
-        available = bool(configured['available'] and self.state in {'stopped', 'starting', 'ready'})
+        # Protected startup has no native owner, and a restricted transport
+        # has no local Popen. Its original root must
+        # supply generation-bound termination evidence before this owner can
+        # retire visual reviews. Do not consume its one factory first.
+        restricted = type(selected_guide_runtime()) in (SelectedGuideTransport, SelectedProtectedRuntime)
+        available = bool(not restricted and configured['available']
+                         and self.state in {'stopped', 'starting', 'ready'})
         return {'available': available, 'status': self.state,
                 'detail': None if available else 'The configured visual critic runtime is unavailable.'}
 

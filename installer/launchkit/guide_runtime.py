@@ -37,12 +37,31 @@ def model_profile_lines(provider, model, configuration=None):
 
 def configure_builder(builder, selected):
     """Bind a fresh native mob to this exact RPC gateway and model host config."""
+    from .guide_transport import SelectedGuideTransport
+    from .protected_startup import SelectedProtectedRuntime
+    if type(selected) is SelectedProtectedRuntime:
+        selected.recheck(verify_gateway=True)
+    if type(selected) is SelectedGuideTransport:
+        return selected.configure_builder(builder)
     selected.recheck(verify_gateway=True)
     builder.gateway(str(selected.gateway.path))
     configuration = selected.model_configuration
     if configuration is not None and configuration.get("meerkat_config_path") is not None:
         builder.meerkat_config(configuration["meerkat_config_path"])
     return builder
+
+
+def worker_persistent_state(selected, legacy_path):
+    """Explicit worker SDK selection; transport configuration never rewrites it."""
+    from .guide_transport import SelectedGuideTransport
+    from .protected_startup import SelectedProtectedRuntime
+
+    selected.recheck()
+    if type(selected) is SelectedProtectedRuntime:
+        selected.recheck(verify_gateway=True)
+    if type(selected) is SelectedGuideTransport:
+        return selected.worker_state_path(legacy_path)
+    return str(legacy_path)
 
 
 def capture_worker_runtime(directory):

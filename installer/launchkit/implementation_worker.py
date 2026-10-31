@@ -1005,7 +1005,7 @@ async def execute(directory, stop, *, timing=None):
     import httpx
     from meerkat_meta import Meta
     from meerkat_meta.identity_first_models import DurableAgentSpec
-    from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup
+    from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup, worker_persistent_state
     tools = BuildTools(directory)
     preserve_design = runtime_refresh_source(tools) is not None
     acceptance = SemanticAcceptance(directory / "acceptance", tools.workspace, tools.input)
@@ -1021,6 +1021,7 @@ async def execute(directory, stop, *, timing=None):
     from .schema import check_model_provider
     check_model_provider(provider, model)
     runtime_root = directory / "native"
+    state_path = worker_persistent_state(selected, runtime_root / ".mobkit/state")
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     mob_definition = implementation_mob_toml(provider, model,
         model_configuration=model_configuration, guide_runtime=selected)
@@ -1044,7 +1045,7 @@ async def execute(directory, stop, *, timing=None):
     owned_runtimes = []
     async def build():
         builder = (Meta.builder().mob_inline(mob_definition)
-                   .persistent_state(str(runtime_root / ".mobkit/state")).roster(Roster())
+                   .persistent_state(state_path).roster(Roster())
                    .session_service(SessionBuilder()).http_listen("127.0.0.1:0").console_auth_required(False))
         built = await build_with_cleanup(configure_builder(builder, selected), owned_runtimes)
         owned_runtimes.append(built)

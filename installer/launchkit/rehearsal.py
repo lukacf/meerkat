@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import AsyncExitStack, ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -18,6 +18,7 @@ import uuid
 from .blueprint import Blueprint
 from .deployment_deadlines import WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT
 from .owned_worker import spawn_owned_worker, stop_owned_worker
+from .protected_worker import is_protected_worker, selected_worker
 from .architect import ArchitectUnavailable
 from .compiler import resolved_blueprint
 from .implementation import now, read_receipt, update_receipt
@@ -302,7 +303,10 @@ def application_preview_projection(receipt, frozen, state):
 
 
 class RehearsalService:
-    def __init__(self, root, guide, operations=None, *, implementation=None):
+    def __init__(self, root, guide, operations=None, *, implementation=None, worker_preparer=None):
+        if worker_preparer is not None and not callable(worker_preparer):
+            raise TypeError("The trusted host must supply its worker preparer.")
+        self._worker_preparer = worker_preparer
         self.root = Path(root) / "rehearsals"
         self.guide, self.operations = guide, operations
         self.implementation = implementation
@@ -718,7 +722,8 @@ class RehearsalService:
 
     async def _command(self, directory, command):
         process = self._owned_process(directory)
-        if process is None or process.stdin is None or process.stdin.is_closing():
+        protected = is_protected_worker(process)
+        if process is None or (not protected and (process.stdin is None or process.stdin.is_closing())):
             raise DraftConflict("This trial's owned worker is no longer available. Start another trial.")
         encoded = (json.dumps(command, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode()
         if len(encoded) > MAX_COMMAND_BYTES:
@@ -727,9 +732,18 @@ class RehearsalService:
         # never authorize another paid turn under a different key.
         write_private(directory / "control.json", {"command": command, "status": "sent"})
         try:
-            process.stdin.write(encoded)
-            await asyncio.wait_for(process.stdin.drain(), 5)
-        except (OSError, ConnectionError, asyncio.TimeoutError) as error:
+            if protected:
+                await asyncio.wait_for(process.send(command), 5)
+            else:
+                process.stdin.write(encoded)
+                await asyncio.wait_for(process.stdin.drain(), 5)
+        except asyncio.CancelledError:
+            write_private(directory / "control.json", {"command": command, "status": "uncertain"})
+            raise
+        except Exception as error:
+            if not (protected or isinstance(error, (OSError, ConnectionError,
+                                                    asyncio.TimeoutError))):
+                raise
             write_private(directory / "control.json", {"command": command, "status": "uncertain"})
             raise DraftConflict("The trial command's delivery is uncertain. Check its activity or End it; do not resend.") from error
 
@@ -800,7 +814,10 @@ class RehearsalService:
             return await self.status(guide_id, rehearsal_id)
 
     async def _stop_process(self, process):
-        await stop_owned_worker(process)
+        if is_protected_worker(process):
+            await process.stop()
+        else:
+            await stop_owned_worker(process)
 
     def _stop_failed(self, directory, error):
         update_receipt(directory, status="failed", trace_complete=False, worker_stop_confirmed=False,
@@ -909,19 +926,26 @@ class RehearsalService:
         try:
             frozen = json.loads((directory / "input.json").read_text())
             spec = Blueprint.model_validate(frozen["blueprint"])
-            source = str(Path(__file__).resolve().parents[1])
-            from .guide_runtime import capture_worker_runtime
-            runtime_digest = capture_worker_runtime(directory)
-            with (directory / "worker.log").open("w") as log:
-                os.chmod(directory / "worker.log", 0o600)
-                process, cancelled = await spawn_owned_worker(sys.executable, "-m",
-                    "launchkit.rehearsal_worker", str(directory), "--owned-stdin",
-                    "--agent-runtime-sha256", runtime_digest, cwd=source,
-                    env=worker_environment(directory, spec), stdin=asyncio.subprocess.PIPE,
-                    stdout=log, stderr=log)
-                self.processes[identity] = process
-                if cancelled:
-                    raise asyncio.CancelledError
+            with ExitStack() as resources:
+                if self._worker_preparer is not None:
+                    preparation = self._worker_preparer(kind="rehearsal", directory=directory)
+                    process = selected_worker(preparation, "rehearsal", directory)
+                    self.processes[identity] = process  # Retain before any spawn await.
+                    await process.start()
+                else:
+                    source = str(Path(__file__).resolve().parents[1])
+                    from .guide_runtime import capture_worker_runtime
+                    runtime_digest = capture_worker_runtime(directory)
+                    log = resources.enter_context((directory / "worker.log").open("w"))
+                    os.chmod(directory / "worker.log", 0o600)
+                    process, cancelled = await spawn_owned_worker(sys.executable, "-m",
+                        "launchkit.rehearsal_worker", str(directory), "--owned-stdin",
+                        "--agent-runtime-sha256", runtime_digest, cwd=source,
+                        env=worker_environment(directory, spec), stdin=asyncio.subprocess.PIPE,
+                        stdout=log, stderr=log)
+                    self.processes[identity] = process
+                    if cancelled:
+                        raise asyncio.CancelledError
                 if frozen.get("trial_replay") and frozen.get("keep_open"):
                     feeder = asyncio.create_task(self._drive_replay(directory, process, frozen["replay_continuations"]))
                 async def wait_worker():

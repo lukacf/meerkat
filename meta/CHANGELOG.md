@@ -554,20 +554,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a roster pass that lists an identity again takes back an unlisting whose
     retirement Core never started (Core's standing shows that incarnation
     seated, not retiring), under the identity's lifecycle lock and only while
-    the stored record is still that unlisting's. A reset, a delete, a role
-    move and a first-boot `Fresh` row's reset read the head of Core's journal
-    before they ask Core, and are refused, retryable, with nothing asked of
-    Core (`IdentityHistoryUnavailable`), when that head does not read. When
-    the step fails, the fact it journals first past that head says whether it
+    the stored record is still that unlisting's. It waits for that lock no
+    longer than a side effect's deadline (30 seconds): a step that holds it
+    longer (a reset whose customizer build is stuck) is not waited for, and a
+    later pass takes the unlisting back. A reset, a delete, a role move and a
+    first-boot `Fresh` row's reset read the head of Core's journal before they
+    ask Core, and are refused, retryable, with nothing asked of Core
+    (`IdentityHistoryUnavailable`), when that head does not read. When the
+    step fails, the fact it journals first past that head says whether it
     reached Core: its retirement's start, naming its rotation, for the
-    incarnation it read live; else the fresh life's seat. Another fact of the
-    member (the end of a host's rotation that started before the head, say) is
-    no reach. Without it nothing reached Core, so the step takes back what it
-    recorded and puts back what an earlier step recorded in the same slot, and
-    the bridge's error picks the answer. Otherwise (or when the journal does
-    not read) it keeps its records and answers that the rotation may have
-    started and that the identity's next roster compile drives it to its end,
-    whatever the error;
+    incarnation it read live, or the fresh life Core seated after that
+    incarnation when a host's retirement of it ended first; else the fresh
+    life's seat. Another fact of the member (the end of a host's rotation that
+    started before the head, say) is no reach. Without it nothing reached
+    Core, so the step takes back what it recorded and puts back what an
+    earlier step recorded in the same slot, and the bridge's error picks the
+    answer. Otherwise (or when the journal does not read) it keeps its records
+    and answers that the rotation may have started and that the identity's
+    next roster compile drives it to its end, whatever the error;
   - a reset or a delete of an identity whose last incarnation Core had
     already retired owes the session that incarnation left the verb's
     memory side effects (the reset's distillation behind its boundary; the

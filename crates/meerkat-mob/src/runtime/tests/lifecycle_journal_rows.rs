@@ -854,7 +854,8 @@ async fn lifecycle_facts_read_the_same_after_a_restart_on_sqlite() {
     )
     .await;
     let before = write_every_fact(&mob).await;
-    mob.restart_into(MobStorage::persistent(&path).expect("reopen the store"))
+    mob.crash().await;
+    mob.resume(MobStorage::persistent(&path).expect("reopen the store"))
         .await;
     assert_read_the_same(&mob, &before).await;
 }

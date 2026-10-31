@@ -2404,6 +2404,10 @@ pub(super) struct ScriptedNative {
     pub(super) input_default: Mutex<Option<serde_json::Value>>,
     /// How many times the members of a role were read.
     role_reads: AtomicU64,
+    /// Members whose check answers nothing until the test clears them, as a
+    /// native read that never answers (a wedged child mob actor or identity
+    /// registry).
+    wedged: tokio::sync::watch::Sender<BTreeSet<String>>,
 }
 
 /// A member's role and labels, as a scripted roster records them.
@@ -2438,12 +2442,29 @@ impl ScriptedNative {
             inputs: Mutex::new(BTreeMap::new()),
             input_default: Mutex::new(None),
             role_reads: AtomicU64::new(0),
+            wedged: tokio::sync::watch::Sender::new(BTreeSet::new()),
         }
     }
 
     /// How many times the members of a role were read.
     fn role_reads(&self) -> u64 {
         self.role_reads.load(Ordering::SeqCst)
+    }
+
+    /// Wedge the check of `identity`: it answers nothing until
+    /// [`Self::unwedge`].
+    fn wedge(&self, identity: &str) {
+        self.wedged.send_modify(|wedged| {
+            wedged.insert(identity.to_string());
+        });
+    }
+
+    /// Let the check of `identity` answer again, a check that waits
+    /// included.
+    fn unwedge(&self, identity: &str) {
+        self.wedged.send_modify(|wedged| {
+            wedged.remove(identity);
+        });
     }
 
     /// Record `identity`'s role and labels on this mob's roster.
@@ -2678,6 +2699,14 @@ impl NativeDelivery for ScriptedNative {
     ) -> std::result::Result<(), MemberProblem> {
         let identity = member.identity.as_str();
         let mob_id = member.mob_id.as_str();
+        let wedged = self.wedged.borrow().contains(identity);
+        if wedged {
+            let _ = self
+                .wedged
+                .subscribe()
+                .wait_for(|identities| !identities.contains(identity))
+                .await;
+        }
         match route {
             MemberRoute::Local if self.unusable.contains(identity) => Err(MemberProblem::Unusable(
                 format!("{identity} is placed on a host"),
@@ -4137,8 +4166,11 @@ impl HeldPut {
 }
 
 /// How long a held put waits for its release before it goes on anyway: a
-/// test that fails before it releases never leaves the put waiting.
-const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+/// test that fails before it releases never leaves the put waiting. Longer
+/// than the bound a row allows the reconcile it holds (the declarations
+/// rows' `STOPS_WITHIN`), so a put a row holds as a store call that never
+/// answers stays held for that row.
+const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl FaultyStore {
     fn new(inner: SqliteAnnouncementStore, failing: Option<&str>) -> Self {

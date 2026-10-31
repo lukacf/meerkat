@@ -376,8 +376,11 @@ def _product_build_association(assembly, build, candidate, directory, related, *
     _require(candidate["target"] == "linux-x86_64" and candidate["binary_kind"] == "toolkit_gateway"
         and type(derived) is dict
         and set(derived) == {"record_sha256", "kind", "derivation", "original", "derived",
-            "transformation", "validation"}
+            "records", "transformation", "validation"}
         and derived["kind"] == kind and derived["derivation"] == "strip_debug"
+        and derived["records"] == {"derived_binary": record_name,
+            "transformation_start": "transformation-start.json",
+            "transformation_result": "transformation-result.json"}
         and _hex(derived["record_sha256"]) and type(derived["validation"]) is dict
         and (staging is None or staging.get("derived_binary") == derived),
         "The selected native derivation differs from its staging or supported kind.")
@@ -401,7 +404,7 @@ def _product_build_association(assembly, build, candidate, directory, related, *
     original, shipped, tool = record["original"], record["derived"], record["tool"]
     _require({key: build["binary"][key] for key in original} == original
         and original["path"] != shipped["path"] and shipped["size"] <= original["size"]
-        and derived["original"] == {key: original[key] for key in ("sha256", "size")}
+        and derived["original"] == original
         and derived["derived"] == {key: shipped[key] for key in ("sha256", "size")} == candidate["binary"]
         and type(tool) is dict and set(tool) == {"path", "sha256", "version"}
         and absolute(tool["path"]) and _hex(tool["sha256"])

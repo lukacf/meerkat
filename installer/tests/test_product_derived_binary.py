@@ -55,12 +55,23 @@ def derivation(f, defect=None):
     if defect == "relative-producer": record["original"] = {**original, "path": "original/toolkit_gateway"}
     record_pin = put(f.final / "derived-binary-record.json", json_bytes(record))
     summary = {"record_sha256": record_pin.sha256, "kind": record["kind"], "derivation": "strip_debug",
-        "original": {key: original[key] for key in ("sha256", "size")},
+        "original": deepcopy(original),
         "derived": {key: shipped[key] for key in ("sha256", "size")},
+        "records": {"derived_binary": "derived-binary-record.json",
+            "transformation_start": "transformation-start.json",
+            "transformation_result": "transformation-result.json"},
         "transformation": {"start_sha256": start_pin.sha256, "result_sha256": result_pin.sha256,
             "argv": record["argv"], "tool": tool, "exit_code": 0},
         "validation": {"fixture": "INERT - no ELF comparison or native qualification"}}
     if defect == "summary-original": summary["original"]["sha256"] = "f" * 64
+    if defect == "summary-original-path": summary["original"]["path"] = "/another/original/toolkit_gateway"
+    if defect == "summary-original-path-missing": summary["original"].pop("path")
+    if defect == "summary-records-missing": summary.pop("records")
+    if defect == "summary-records-null": summary["records"] = None
+    if defect == "summary-records-extra": summary["records"]["other"] = "other.json"
+    if defect == "summary-records-path": summary["records"]["derived_binary"] = "../derived-binary-record.json"
+    if defect == "summary-records-swapped":
+        summary["records"]["transformation_start"] = "transformation-result.json"
     if defect == "summary-derived": summary["derived"]["sha256"] = "f" * 64
     if defect == "summary-result": summary["transformation"]["result_sha256"] = "f" * 64
     f.build["binary"] = deepcopy(original)
@@ -99,7 +110,9 @@ def test_reader_joins_original_and_shipped_without_opening_producer_paths(produc
 
 @pytest.mark.parametrize("defect", ["start-input", "start-tool", "failed-transform", "boolean-exit",
     "wrong-start", "changed-original", "wrong-result", "timeout", "strip-all", "provider-kind", "same-path",
-    "relative-producer", "summary-original", "summary-derived", "summary-result", "relabelled-build",
+    "relative-producer", "summary-original", "summary-original-path", "summary-original-path-missing",
+    "summary-records-missing", "summary-records-null", "summary-records-extra", "summary-records-path",
+    "summary-records-swapped", "summary-derived", "summary-result", "relabelled-build",
     "verifier-missing", "verifier-wrong", "verifier-size", "verifier-path", "dropped-derivation", "null-derivation"])
 def test_reader_refuses_inconsistent_original_derived_and_verifier_joins(product, defect):
     target = derivation(product, defect)

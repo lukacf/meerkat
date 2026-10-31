@@ -15,9 +15,11 @@
 \* name, a member where the row says none, a placed member, the name's
 \* tombstone, a spawn ladder open for it), reserves the name as unreadable.
 \* Reserved names take no spawn, no worker reconcile, no declaration,
-\* adoption or agent-lane command, and created custody seats a Created entry
-\* owed its seat again on its revival record. The generated ci profile has
-\* no identities, so these arms hold there only vacuously.
+\* adoption or agent-lane command, no ladder close seats a member under one
+\* (a ladder opened before the reservation is aborted), and created custody
+\* seats a Created entry owed its seat again on its revival record. The
+\* generated ci profile has no identities, so these arms hold there only
+\* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
 \* checks four runs over fixed domains (the recovery part of the audit):
@@ -40,7 +42,8 @@
 \*     authority, in a running and a stopped mob.
 \*   placed (PlacedScanSpec): one member host bound and member 2 seated
 \*     there by the placed spawn ladder, its activation committed; the scan
-\*     of its row.
+\*     of its row at any point of the ladder (a row under the open ladder
+\*     reserves the name, and the remote commit then refuses it).
 \*
 \* Each run explores its whole reachable space under the VIEW of
 \* member_residency_audit, with TLC coverage. Properties: every generated
@@ -51,6 +54,8 @@
 \*   scan and placed: AuditRecoverExactlyOne (invariant, ENABLED form:
 \*     exactly one arm answers every row while the replay runs, and none
 \*     once the boot plan is sealed).
+\*   reseat and placed: AuditNoSeatUnderReservedName (action property: no
+\*     ladder close seats a member under a reserved name).
 \*   reseat: AuditReseatRecoverExactlyOne (the same, for rows without a
 \*     revival record, ladders and reseated members included);
 \*     AuditNoLadderForReservedName (no spawn ladder opens for a
@@ -281,6 +286,13 @@ AuditCreatedSeatTakesRecord ==
            => BindingNext(id) = Record(id)
       ]_vars
 
+\* No ladder close seats a member under a reserved name: a ladder opened
+\* before its name was reserved ends without one.
+AuditNoSeatUnderReservedName ==
+    [][\A id \in CreatedIds :
+         (Reserved(id) /\ id \notin DOMAIN identity_to_runtime) => id \notin DOMAIN identity_to_runtime'
+      ]_vars
+
 AuditReseatRecoverExactlyOne == RecoverExactlyOneOver({None})
 AuditReseatProbeExactlyOne == ProbeExactlyOne
 
@@ -304,6 +316,17 @@ AuditWitnessScanContradictedLadder ==
     /\ Id2 \in spawn_exec_created_custody
     /\ RecoverCreatedIdentityEntryUnreadableRunning(Id2, "Present", Some(Sess2))
     /\ OriginNext(Id2) = Some("Created")
+\* A ladder without custody opened before its name was reserved (a Present
+\* row under it answered Unreadable): its seat is refused, and its abort
+\* ends it with the name still reserved and no member.
+AuditWitnessReservedLadderAborted ==
+    /\ Id1 \in identity_entry_unreadable
+    /\ Id1 \notin spawn_exec_entry_custody \cup spawn_exec_created_custody
+    /\ ~ENABLED CRSeatAs(Id1, Sess1, FALSE)
+    /\ CRAbort(Id1)
+    /\ Id1 \notin DOMAIN spawn_exec_phase'
+    /\ Id1 \in identity_entry_unreadable'
+    /\ Id1 \notin DOMAIN identity_to_runtime'
 \* The worker reconcile spares a reserved name it was asked for.
 AuditWitnessReconcileSparesReserved ==
     /\ Id1 \in identity_entry_tombstones
@@ -320,6 +343,7 @@ AuditWitnessDestroyClearsReserved ==
 NotAuditWitnessReseatOnRecord == [][~AuditWitnessReseatOnRecord]_vars
 NotAuditWitnessCreatedCustodyAborted == [][~AuditWitnessCreatedCustodyAborted]_vars
 NotAuditWitnessScanContradictedLadder == [][~AuditWitnessScanContradictedLadder]_vars
+NotAuditWitnessReservedLadderAborted == [][~AuditWitnessReservedLadderAborted]_vars
 NotAuditWitnessReconcileSparesReserved == [][~AuditWitnessReconcileSparesReserved]_vars
 NotAuditWitnessDestroyClearsReserved == [][~AuditWitnessDestroyClearsReserved]_vars
 

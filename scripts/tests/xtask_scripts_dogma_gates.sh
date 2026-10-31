@@ -392,7 +392,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # destroy mutants' generated invariants violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
 # count at or above each of its four runs' floors, a coverage block in which
-# each covered action of every run generated a state, its seventeen step
+# each covered action of every run generated a state, its eighteen step
 # witnesses violated, and with --mutants each seeded defect's generated
 # invariant, totality invariant or action property violated.
 printf '%s\n' \
@@ -812,6 +812,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessSealSkipsUnreadable is violated."' \
   'echo "Error: Action property NotAuditWitnessProbeOtherOrigin is violated."' \
   'echo "Error: Action property NotAuditWitnessScanContradictedPlaced is violated."' \
+  'echo "Error: Action property NotAuditWitnessReservedLadderAborted is violated."' \
   'echo "Error: Invariant AuditRecoverExactlyOne is violated."' \
   'echo "Error: Invariant unseated_created_entry_is_preparing_or_owed is violated."' \
   'echo "Error: Invariant tombstone_is_never_an_entry is violated."' \
@@ -824,6 +825,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditSealNeverTouchesCreated is violated."' \
   'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
+  'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

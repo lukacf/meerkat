@@ -27,7 +27,9 @@
 #   opens for a reserved name (AuditNoLadderForReservedName), a ladder's
 #   custody matches its name's origin (AuditLadderCustodyMatchesOrigin), a
 #   seat under created custody binds the revival record
-#   (AuditCreatedSeatTakesRecord), and exactly one arm answers every row
+#   (AuditCreatedSeatTakesRecord), no ladder close seats a member under a
+#   reserved name, so a ladder opened before the reservation is aborted
+#   (AuditNoSeatUnderReservedName), and exactly one arm answers every row
 #   and every admission probe, ladders and reseated members included.
 # - names: the scan of both identities' rows (without a revival record),
 #   then the declarations, the seal over every desired set, the legacy
@@ -36,8 +38,10 @@
 #   answers each, and the seal never touches a Created entry or an
 #   unreadable name's (AuditSealNeverTouchesCreated).
 # - placed: member 2 seated on a bound member host by the placed spawn
-#   ladder and its activation, then its row scanned: a Present row of a
-#   placed member reserves the name.
+#   ladder and its activation, its row scanned at any point of the ladder:
+#   a Present row of a placed member reserves the name, and the remote
+#   commit seats no member under a name reserved while its ladder was open
+#   (AuditNoSeatUnderReservedName).
 #
 # Every run checks every generated invariant (the created entries' among
 # them: unseated_created_entry_is_preparing_or_owed,
@@ -286,7 +290,8 @@ write_cfg() {
       run_properties="
   AuditNoLadderForReservedName
   AuditLadderCustodyMatchesOrigin
-  AuditCreatedSeatTakesRecord"
+  AuditCreatedSeatTakesRecord
+  AuditNoSeatUnderReservedName"
       run_invariants="
   AuditReseatRecoverExactlyOne
   AuditReseatProbeExactlyOne"
@@ -304,7 +309,8 @@ write_cfg() {
       ;;
     placed)
       spec="PlacedScanSpec"
-      run_properties=""
+      run_properties="
+  AuditNoSeatUnderReservedName"
       run_invariants="
   AuditRecoverExactlyOne"
       ;;
@@ -456,8 +462,8 @@ for witness in \
   "scan:Action property:ScanUnreadable" "scan:Action property:ScanContradictedDeclared" \
   "scan:Action property:ScanContradictedMember" "scan:Action property:ScanEntryTombstoned" \
   "reseat:Action property:ReseatOnRecord" "reseat:Action property:CreatedCustodyAborted" \
-  "reseat:Action property:ScanContradictedLadder" "reseat:Action property:ReconcileSparesReserved" \
-  "reseat:Action property:DestroyClearsReserved" \
+  "reseat:Action property:ScanContradictedLadder" "reseat:Action property:ReservedLadderAborted" \
+  "reseat:Action property:ReconcileSparesReserved" "reseat:Action property:DestroyClearsReserved" \
   "names:Action property:SealKeepsCreated" "names:Action property:SealSkipsUnreadable" \
   "names:Action property:ProbeOtherOrigin" \
   "placed:Action property:ScanContradictedPlaced"; do
@@ -669,6 +675,12 @@ PY
 drop_guard("CommitDormantSeatRunning", "spawn_exec_created_custody) = FALSE)")
 PY
 
+  # The dormant seat seats a member under a name reserved while its ladder
+  # was open (its name_not_reserved guard dropped).
+  mutate reseat close_takes_reserved "Action property AuditNoSeatUnderReservedName" <<'PY'
+drop_guard("CommitDormantSeatRunning", "identity_entry_unreadable) = FALSE))")
+PY
+
   # The worker reconcile spawns a tombstoned name.
   mutate reseat reconcile_spawns_tombstone "Invariant worker_reconcile_spares_entries" <<'PY'
 replace_text(" /\\ member \\notin arg_identity_entry_tombstones", "")
@@ -754,6 +766,12 @@ PY
   mutate placed seated_takes_placed "Invariant AuditRecoverExactlyOne" <<'PY'
 replace_in_arm("RecoverCreatedIdentityEntrySeatedRunning",
                " /\\ ((agent_identity \\in DOMAIN member_placement) = FALSE)", "")
+PY
+
+  # The remote commit seats a placed member under a name reserved while its
+  # ladder was open (its name_not_reserved guard dropped).
+  mutate placed remote_commit_takes_reserved "Action property AuditNoSeatUnderReservedName" <<'PY'
+drop_guard("CommitSpawnMembershipRemote", "identity_entry_unreadable) = FALSE))")
 PY
 fi
 echo "created identity audit passed"

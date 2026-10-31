@@ -584,6 +584,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pass never waits for a reconcile in progress, and after a retry fails, it
   is tried again at the first health pass after the dispatcher's
   failed-round pause (30 seconds by default).
+- A declarations reconcile waits on any one call for at most 30 seconds,
+  the time the dispatcher waits for the startup reconcile: a store call, a
+  read of this gateway's runtime (a member check, a mob's roster or event
+  log, the hosted mobs) or the schedule service's reconcile of a source's
+  runner. Before, one call that never answered, such as one to a wedged
+  child mob or a host store commit that never settled, held the reconcile
+  as long as it lasted, and with it `declarations/apply`,
+  `declarations/get` and, when the health pass retried the declarations (a
+  pending record, say), the dispatcher's round and every delivery after it.
+  The reconcile now stops at the first call past the bound, as a storage
+  failure stops it: a warning names the call, the records it had not
+  reached stay as they were, and an apply that meets it is refused
+  `native_unavailable` (a storage failure, for a store call). The call
+  itself still runs to its end, and the health pass finishes the reconcile
+  once it answers. After any failed retry the next one now waits the
+  failed-round pause from the end of the failed one, so a call that stays
+  wedged holds a round at most once per pause.
 
 ### Known limitations
 

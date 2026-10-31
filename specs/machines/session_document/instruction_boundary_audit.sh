@@ -20,11 +20,11 @@
 # the audit's invariants. It first checks that the generated model defines
 # every instruction arm with the parameters the audit passes, so a renamed
 # arm or field fails the run instead of a vacuous pass. It then checks the
-# invariants (safety), and reruns with the reachability witnesses' negations
-# as extra invariants under -continue, requiring TLC to report each of them
-# violated. With --mutants it seeds ten defects into a copy of the
+# invariants (safety), and reruns once per reachability witness, with that
+# witness's negation as an extra invariant, requiring TLC to report exactly
+# that violation. With --mutants it seeds ten defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
-# targets:
+# targets, checked as the run's only invariant:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
 #   - keep a revoked slot in effect at an application (the slots in effect
 #     take the target's whole effect map);
@@ -39,6 +39,19 @@
 #   - keep a released mob's instructions at a run start (the no-change arm
 #     taken whatever is pending);
 #   - keep the target on a release (its revision map left as it was).
+# No run uses -continue. TLC checks the invariants of every new state and of
+# every successor past the step constraint, each time it generates one, and
+# under -continue prints a whole trace for each violation but names only the
+# first invariant a state violates: one run of the five witnesses had about
+# 200,000 violations to print and did not end within the per-run cap, and
+# could never name MobOwnedEffective, which implies Applied. Without
+# -continue a run stops at its first violation: a witness run at the first
+# state it finds that reaches the witness, and a mutant run, whose only
+# invariant is its target, exactly when some reachable state of the mutant
+# breaks the target, whatever else that state breaks.
+# Each TLC run is held to the canonical lane's per-run cap
+# (`TLC_RUN_CAP_SECS`, default 900 s, see tlc_run_cap.sh); a run that hits
+# it fails closed as TLC INCOMPLETE (exit 3).
 # An anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
@@ -141,7 +154,7 @@ audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
   AuditRebindStartsFromTheRightTarget
   AuditTargetWithinBudget"
 
-witnesses="NotAuditWitnessApplied NotAuditWitnessRevokeApplied NotAuditWitnessMobOwnedEffective NotAuditWitnessReboundAfterRelease NotAuditWitnessReleasedInstructionsRevoked"
+witnesses="Applied RevokeApplied MobOwnedEffective ReboundAfterRelease ReleasedInstructionsRevoked"
 
 # usage: write_cfg <file> <extra invariant lines>
 write_cfg() {
@@ -151,6 +164,25 @@ write_cfg() {
   replace_exact_line "INVARIANTS" "INVARIANTS
 ${audit_invariants}${extra}" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
+}
+
+# usage: write_target_cfg <file> <invariant>; the generated constants and
+# step constraint, unchanged, with <invariant> as the only invariant.
+write_target_cfg() {
+  local cfg="$1" target="$2"
+  write_cfg "${cfg}" ""
+  CFG="${cfg}" TARGET="${target}" python3 - <<'PY'
+import os, re
+path, target = os.environ["CFG"], os.environ["TARGET"]
+lines = open(path).read().split("\n")
+start = lines.index("INVARIANTS") + 1
+end = start
+while end < len(lines) and lines[end].startswith("  "):
+    end += 1
+assert end < len(lines) and re.fullmatch(r"[A-Z_]+", lines[end]), f"no section follows the invariants in {path}"
+lines[start:end] = ["  " + target]
+open(path, "w").write("\n".join(lines))
+PY
 }
 
 # The generated model's initial predicate needs a deep JVM stack on both the
@@ -193,28 +225,29 @@ if [[ "${tlc_status}" != "0" ]] \
   exit 1
 fi
 
-witness_lines=""
+# One run per witness: the safety run showed that every other invariant
+# holds, so the run stops at the first state it finds that reaches the
+# witness.
 for witness in ${witnesses}; do
-  witness_lines+="
-  ${witness}"
-done
-witness_cfg="${work_dir}/witnesses.cfg"
-write_cfg "${witness_cfg}" "${witness_lines}"
-run_tlc witnesses "${witness_cfg}" "${spec_dir}" -continue
-for witness in ${witnesses}; do
-  if ! grep -q "Error: Invariant ${witness} is violated" "${work_dir}/witnesses.log"; then
-    cat "${work_dir}/witnesses.log"
-    echo "error: witness ${witness#Not} is not reached (tlc exit ${tlc_status})" >&2
+  witness_cfg="${work_dir}/witness-${witness}.cfg"
+  write_cfg "${witness_cfg}" "
+  NotAuditWitness${witness}"
+  run_tlc "witness-${witness}" "${witness_cfg}" "${spec_dir}"
+  witness_log="${work_dir}/witness-${witness}.log"
+  if ! grep -q "Error: Invariant NotAuditWitness${witness} is violated" "${witness_log}"; then
+    cat "${witness_log}"
+    echo "error: witness ${witness} is not reached (tlc exit ${tlc_status})" >&2
     exit 1
   fi
-  echo "witness ${witness#Not} reached"
+  depth="$(grep -cE '^State [0-9]+:' "${witness_log}" || true)"
+  echo "witness ${witness} reached in ${depth} states"
 done
 
 if [[ "${run_mutants}" == "true" ]]; then
   # usage: mutate <name> <target invariant> <arm> <anchor> <new line>
   # Copies the specs, replaces the one line of <arm> that contains <anchor>
-  # with <new line>, runs every invariant with -continue, and requires the
-  # target among the invariants TLC reports violated.
+  # with <new line>, runs the target as the only invariant, and requires TLC
+  # to report it violated.
   mutate() {
     local name="$1" target="$2" arm="$3" anchor="$4" line="$5"
     local dir="${work_dir}/mutant-${name}"
@@ -235,18 +268,17 @@ text = text[:start] + "\n".join(lines) + text[end:]
 open(path, "w").write(text)
 PY
     local cfg="${work_dir}/mutant-${name}.cfg"
-    write_cfg "${cfg}" ""
-    run_tlc "mutant-${name}" "${cfg}" "${dir}" -continue
+    write_target_cfg "${cfg}" "${target}"
+    run_tlc "mutant-${name}" "${cfg}" "${dir}"
     local log="${work_dir}/mutant-${name}.log"
     if ! grep -q "Error: Invariant ${target} is violated" "${log}"; then
       cat "${log}"
       echo "error: mutant ${name} was not refused by ${target} (tlc exit ${tlc_status})" >&2
       exit 1
     fi
-    local broken
-    broken="$(grep -oE 'Error: Invariant [A-Za-z_]+ is violated' "${log}" \
-      | sed -E 's/Error: Invariant ([A-Za-z_]+) is violated/\1/' | sort -u | tr '\n' ' ')"
-    echo "mutant ${name} refused by ${target}; breaks: ${broken}"
+    local depth
+    depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+    echo "mutant ${name} refused by ${target} in ${depth} states"
   }
 
   mutate apply_on_resume_run AuditEffectiveChangesOnlyAtRunStart \

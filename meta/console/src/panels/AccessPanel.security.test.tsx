@@ -14,6 +14,23 @@ function props() {
   };
 }
 
+describe("Console access tabs", () => {
+  it("ties each tab to the panel it shows", () => {
+    render(<AccessPanel {...props()} />);
+    for (const tab of ["overview", "groups", "rules", "preview"]) {
+      const control = screen.getByTestId(`access-tab:${tab}`);
+      fireEvent.click(control);
+      expect(control.getAttribute("aria-selected")).toBe("true");
+      const panel = document.getElementById(control.getAttribute("aria-controls") ?? "");
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(control.getAttribute("id"));
+      expect(screen.getAllByRole("tabpanel").length).toBe(1);
+    }
+    const preview = screen.getByTestId("access-tab:preview");
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(preview.getAttribute("id"));
+  });
+});
+
 describe("backend-owned access affordances", () => {
   it("does not infer administration permission from a loaded configuration", () => {
     const input = props();
@@ -30,7 +47,7 @@ describe("backend-owned access affordances", () => {
     const input = props();
     render(<AccessPanel {...input} status={{ ...input.status, actions: [] }} />);
     fireEvent.click(screen.getByTestId("access-tab:preview"));
-    expect(screen.queryByRole("option", { name: "agent.view", exact: true })).toBeNull();
+    expect(document.querySelector('option[value="agent.view"]') === null).toBe(true);
     fireEvent.change(screen.getByTestId("access-preview-subject"), { target: { value: "operator@example.test" } });
     expect(screen.getByTestId("access-preview-run")).toBeDisabled();
     expect(input.onPreview).not.toHaveBeenCalled();
@@ -56,7 +73,7 @@ describe("backend-owned access affordances", () => {
     render(<AccessPanel {...input} status={{ ...input.status, actions: ["custom.current.action"] }} />);
     fireEvent.click(screen.getByTestId("access-tab:preview"));
     expect(screen.getByRole("option", { name: "custom.current.action" })).toBeVisible();
-    expect(screen.queryByRole("option", { name: "access.admin", exact: true })).toBeNull();
+    expect(document.querySelector('option[value="access.admin"]') === null).toBe(true);
     expect(screen.getByTestId("access-preview-action")).toHaveValue("custom.current.action");
   });
   it("invalidates completed and pending previews on owner revision refresh", async () => {
@@ -446,5 +463,141 @@ describe("checked access edits", () => {
     expect(input.onSaveGroup).toHaveBeenLastCalledWith("ops", { description: "Newer description", members: ["carol@example.test"] },
       { owner_instance: "panel-owner", revision: 2, config: newer });
     expect(screen.queryByTestId("access-group-members")).toHaveValue("");
+  });
+});
+
+describe("rule editor identity", () => {
+  const rule = { id: "ops-view-all", description: "Ops can see every agent", effect: "allow" as const, actions: ["agent.view"] };
+
+  it("locks the rule ID while an existing rule is edited, so saving cannot add a second rule", async () => {
+    const input = props();
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-edit:ops-view-all"));
+    const idField = screen.getByTestId("access-rule-id") as HTMLInputElement;
+    expect(idField.readOnly).toBe(true);
+    fireEvent.change(idField, { target: { value: "ops-view-specialists" } });
+    expect(idField.value).toBe("ops-view-all");
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    expect(input.onUpsertRule.mock.calls.length).toBe(1);
+    expect(input.onUpsertRule.mock.calls[0]?.[0]?.id).toBe("ops-view-all");
+  });
+
+  it("keeps the rule ID editable for a new rule", () => {
+    const input = props();
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    const idField = screen.getByTestId("access-rule-id") as HTMLInputElement;
+    expect(idField.readOnly).toBe(false);
+    fireEvent.change(idField, { target: { value: "ops-view-specialists" } });
+    expect(idField.value).toBe("ops-view-specialists");
+  });
+});
+
+describe("permission words", () => {
+  it("names known permissions in words and keeps the key in the tooltip and the option value", () => {
+    const input = props();
+    const rule = { id: "ops-view", description: "Ops can see and message agents", effect: "allow" as const, actions: ["agent.view", "agent.send"] };
+    render(
+      <AccessPanel
+        {...input}
+        status={{ ...input.status, actions: ["agent.view", "agent.send", "custom.current.action"] }}
+        config={{ ...input.config, rules: [rule] }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:ops-view");
+    const chips = Array.from(card.querySelectorAll(".cc-chip")).map((chip) => [chip.textContent, chip.getAttribute("title")]);
+    expect(chips).toContainEqual(["View agents", "agent.view"]);
+    expect(chips).toContainEqual(["Message agents", "agent.send"]);
+    expect(chips.some(([text]) => text === "agent.view" || text === "agent.send")).toBe(false);
+
+    fireEvent.click(screen.getByTestId("access-rule-edit:ops-view"));
+    expect(screen.getByTestId("access-rule-action:agent.view").textContent).toBe("View agents");
+    expect(screen.getByTestId("access-rule-action:custom.current.action").textContent).toBe("custom.current.action");
+
+    fireEvent.click(screen.getByTestId("access-tab:preview"));
+    const option = screen.getByRole("option", { name: "View agents" }) as HTMLOptionElement;
+    expect(option.value).toBe("agent.view");
+    expect((screen.getByRole("option", { name: "custom.current.action" }) as HTMLOptionElement).value).toBe("custom.current.action");
+  });
+});
+
+describe("plain words", () => {
+  it("titles a rule without a description as an unnamed rule, with its ID as muted detail", () => {
+    const input = props();
+    const unnamed = {
+      id: "deny-lifecycle-outside-ops",
+      effect: "deny" as const,
+      actions: ["agent.view"],
+      match_labels: { org: "payments" },
+    };
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [unnamed] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:deny-lifecycle-outside-ops");
+    expect(card.querySelector("h3")?.textContent).toBe("Unnamed rule");
+    expect(card.querySelector(".access-panel__rule-id")?.textContent?.includes("deny-lifecycle-outside-ops")).toBe(true);
+    // The operator's own selector text stays as written.
+    expect(Array.from(card.querySelectorAll(".cc-chip"), (chip) => chip.textContent).includes("org=payments")).toBe(true);
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByTestId("access-rule-delete:deny-lifecycle-outside-ops"));
+    expect(confirm.mock.calls[0]?.[0]).toBe(
+      "Delete this unnamed rule (ID deny-lifecycle-outside-ops)? Access it grants (or denies) stops immediately.",
+    );
+    expect(input.onDeleteRule).not.toHaveBeenCalled();
+  });
+
+  it("shows a described rule's ID as muted detail too, and confirms its delete by description", () => {
+    const input = props();
+    const rule = { id: "ops-view-all", description: "Ops can see every agent", effect: "allow" as const, actions: ["agent.view"] };
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:ops-view-all");
+    expect(card.querySelector("h3")?.textContent).toBe("Ops can see every agent");
+    expect(card.querySelector(".access-panel__rule-id")?.textContent?.includes("ops-view-all")).toBe(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByTestId("access-rule-delete:ops-view-all"));
+    expect(confirm.mock.calls[0]?.[0]).toBe(
+      'Delete the rule "Ops can see every agent" (ID ops-view-all)? Access it grants (or denies) stops immediately.',
+    );
+  });
+
+  it("explains enforcement and admins in plain words", () => {
+    const input = props();
+    const view = render(<AccessPanel {...input} />);
+    const text = view.getByTestId("access-panel").textContent ?? "";
+    expect(text.includes("Manage who can see and do what in this console and the runtime behind it.")).toBe(true);
+    expect(text.includes("everyone using this console sees and does only what a rule allows")).toBe(true);
+    expect(text.includes("Admins can do everything, whatever the rules say, and manage these settings.")).toBe(true);
+    expect(/console caller|admin standing|Admin subjects|runtime surfaces/.test(text)).toBe(false);
+    view.rerender(<AccessPanel {...input} config={{ ...input.config, enabled: false }} />);
+    const off = view.getByTestId("access-panel").textContent ?? "";
+    expect(off.includes("Access control is set up but not enforced. Turning it on needs at least one admin.")).toBe(true);
+    expect(/admin subject/i.test(off)).toBe(false);
+    fireEvent.click(view.getByTestId("access-edit-admins"));
+    expect(view.getByLabelText("Admins").getAttribute("data-testid")).toBe("access-admins-input");
+  });
+});
+
+describe("Console access words", () => {
+  it("names people and services, never subjects, and says plainly what the rules leave out", () => {
+    const view = render(<AccessPanel {...props()} />);
+    const intro = view.container.querySelector(".access-panel__intro")?.textContent ?? "";
+    expect(intro.includes("do not give anyone access to agents' tools, data sources or connected accounts")).toBe(true);
+    expect(/native tool|connected-account permissions/.test(intro)).toBe(false);
+    const words = () => view.container.textContent ?? "";
+
+    fireEvent.click(screen.getByTestId("access-tab:groups"));
+    expect(words().includes("Email addresses or service names, separated by commas.")).toBe(true);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    expect(words().includes("People and services")).toBe(true);
+    expect(words().includes("With no groups and no people or services, the rule covers everyone.")).toBe(true);
+    expect(/\bsubjects?\b/i.test(words())).toBe(false);
+    fireEvent.click(screen.getByTestId("access-tab:preview"));
+    expect(screen.getByLabelText("Person or service").getAttribute("data-testid")).toBe("access-preview-subject");
+    expect(/\bsubjects?\b/i.test(words())).toBe(false);
   });
 });

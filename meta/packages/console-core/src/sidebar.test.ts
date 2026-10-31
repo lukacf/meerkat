@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 
+import { buildActivityRailViewState, buildDockTarget, buildSidebarViewState } from "./adapters";
+import { agentDisplayTitle } from "./agent-title";
 import { normalizeSidebarWatchFields } from "./control-plane";
 import { normalizeConsoleSidebarViewState } from "./sidebar";
 
@@ -114,4 +116,21 @@ test("normalizeConsoleSidebarViewState preserves watch fields and warning tones 
   assert.equal(item?.degraded, true);
   assert.equal(item?.degradedReason, "peer_unreachable");
   assert.equal(item?.meta?.[0]?.tone, "warning");
+});
+
+test("the shared-host builders name a nameless agent the way every surface does", () => {
+  const nameless = { agent_id: "router:main", member_id: "router:main", identity: "router:main", label: "router:main", kind: "identity", role: "router" } as Parameters<typeof buildDockTarget>[0];
+  assert.equal(agentDisplayTitle(nameless), "Router main");
+  const sidebar = buildSidebarViewState({ agents: [nameless], selectedMemberId: "" });
+  const list = sidebar.blocks.find((block) => block.kind === "list") as { sections?: Array<{ items: Array<{ title: string }> }> } | undefined;
+  assert.equal(list?.sections?.[0]?.items[0]?.title, "Router main");
+  const rail = buildActivityRailViewState({
+    agents: [nameless],
+    eventFrames: [
+      { id: "known", event: "interaction_complete", identity: "router:main", data: { text: "done" } },
+      { id: "unknown", event: "interaction_complete", identity: "identity:queue-agent", data: { text: "done" } },
+    ] as unknown as Parameters<typeof buildActivityRailViewState>[0]["eventFrames"],
+  });
+  assert.deepEqual(rail.panels[0]?.items.map((item) => item.title), ["Router main", "Queue agent"]);
+  assert.equal(buildDockTarget(nameless).title, "Router main");
 });

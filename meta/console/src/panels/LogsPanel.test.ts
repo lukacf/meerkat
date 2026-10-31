@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLogFrameVisible, sanitizeLogFrameData, summarizeLogFrame } from "./LogsPanel";
+import { isLogFrameVisible, logIdentityLabel, sanitizeLogFrameData, summarizeLogFrame } from "./LogsPanel";
+import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 
 test("log summaries omit raw session-history message envelopes", () => {
@@ -91,4 +92,18 @@ test("user input log summaries render prompt text instead of raw content JSON", 
   const summary = summarizeLogFrame(frame);
   assert.equal(summary, "input=You have been spawned as incident-commander.");
   assert.equal(summary.includes("[{\"text\""), false);
+});
+
+test("the identity column names agents by display name and console events as System", () => {
+  const directory = createAgentDirectory([
+    { id: "identity:support-triage", label: "Support Triage", aliases: ["member-support"] },
+  ]);
+  assert.equal(logIdentityLabel("identity:support-triage", directory), "Support Triage");
+  assert.equal(logIdentityLabel("member-support", directory), "Support Triage");
+  // Unknown keys read as the one naming function names them.
+  assert.equal(logIdentityLabel("identity:incident-commander", directory), "Incident commander");
+  assert.equal(logIdentityLabel("scribe"), "Scribe");
+  assert.equal(logIdentityLabel("_system", directory), "System");
+  assert.equal(logIdentityLabel(undefined), "System");
+  assert.equal(logIdentityLabel("  "), "System");
 });

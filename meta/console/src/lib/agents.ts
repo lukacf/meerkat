@@ -5,6 +5,7 @@ import {
   normalizeUnobservedFacts,
 } from "@console-core";
 import type { ConsoleAgent, ConsoleExperience, ConsoleExperienceAgentSnapshotRow } from "../types";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 
 /// Alias to canonical identity for one roster. Built once per roster change
 /// and consulted per frame; the per-frame path used to rebuild a four-entry
@@ -69,6 +70,56 @@ function normalizeModelCapabilities(entry: unknown): { image_input: boolean } {
     ? record.model_capabilities as Record<string, unknown>
     : {};
   return { image_input: caps.image_input === true };
+}
+
+/** A roster row's advisory last activity time; anything but a non-negative finite number reads as unknown. */
+export function normalizeLastActivityMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+// The one naming function lives in console-core (no runtime imports), so
+// every surface and every test bundle shares it.
+export { agentDisplayTitle, agentKindLabel } from "../../../packages/console-core/src/agent-title";
+
+/// What an agent is doing while it answers, in words: "writing a reply",
+/// "running a tool", "starting a reply". The roster and the composer footer
+/// say the same. Empty for no phase.
+export function responsePhaseWords(phase: string | null | undefined): string {
+  switch (phase) {
+    case "generating":
+      return "writing a reply";
+    case "tool-executing":
+      return "running a tool";
+    case "waiting":
+      return "starting a reply";
+    default:
+      return "";
+  }
+}
+
+/**
+ * An agent's entry in the panels' name directory, named the way the sidebar
+ * names it ({@link agentDisplayTitle}), so a panel and the sidebar never
+ * call the same agent two different things.
+ */
+export function agentDirectoryEntry(
+  agent: Pick<ConsoleAgent, "label" | "identity" | "member_id" | "agent_id" | "session_id" | "labels" | "role" | "group">,
+): { id: string; label: string; role?: string; aliases: (string | undefined)[] } {
+  return {
+    id: agent.identity || agent.agent_id,
+    label: agentDisplayTitle(agent),
+    role: agent.role,
+    aliases: [agent.member_id, agent.agent_id, agent.session_id],
+  };
+}
+
+/** The first well-formed last activity time among a row's sources, as an agent field. */
+function lastActivityField(...values: unknown[]): Pick<ConsoleAgent, "last_activity_ms"> {
+  for (const value of values) {
+    const at = normalizeLastActivityMs(value);
+    if (at !== undefined) return { last_activity_ms: at };
+  }
+  return {};
 }
 
 export function normalizeAgents(
@@ -156,6 +207,7 @@ export function normalizeAgents(
         ...(typeof entry.side_chat_of === "string" && entry.side_chat_of.trim()
           ? { side_chat_of: entry.side_chat_of.trim() }
           : {}),
+        ...lastActivityField(entry.last_activity_ms, statusRow?.last_activity_ms),
         model_capabilities: modelCapabilities,
         ...watchFields,
         ...((): Pick<ConsoleAgent, "unobserved"> => {
@@ -193,6 +245,7 @@ export function normalizeAgents(
         addressable,
         affordances: { can_send_message: addressable },
         model_capabilities: { image_input: false },
+        ...lastActivityField(statusRow.last_activity_ms),
         ...(statusRow.unobserved ? { unobserved: statusRow.unobserved } : {}),
       });
       seen.add(statusRow.identity.toLowerCase());
@@ -222,6 +275,7 @@ export function normalizeAgents(
         addressable: false,
         affordances: { can_send_message: false },
         model_capabilities: modelCapabilities,
+        ...lastActivityField(statusRow?.last_activity_ms),
         ...(statusRow?.unobserved ? { unobserved: statusRow.unobserved } : {}),
       };
     });

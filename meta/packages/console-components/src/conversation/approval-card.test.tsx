@@ -4,7 +4,7 @@ import { ApprovalAttention, ApprovalCard } from "./approval-card";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 
 afterEach(cleanup);
-const request = normalizePendingApproval({ pending_id: "request:1", action_id: "action:1", action: "Publish release artifacts", rationale: "Make the tested release available", actor_id: "actor", deadline_at_ms: 1, payload: { destination: "production", full: "complete request contents" } })!;
+const request = normalizePendingApproval({ pending_id: "request:1", action_id: "action:1", action: "Publish release artifacts", rationale: "Make the tested release available", actor_id: "release-bot", deadline_at_ms: 1, payload: { destination: "production", full: "complete request contents" } })!;
 const snapshot = (status: PendingApprovalSnapshot["status"] = "ready"): PendingApprovalSnapshot => ({ scopeKey: "authority", status, requests: [request], decisions: {}, readOnly: false });
 describe("ApprovalCard", () => {
   it("shows the requested approver separately from actor and describes notification IDs as references", () => {
@@ -12,7 +12,7 @@ describe("ApprovalCard", () => {
       approval_recipient: "review-queue", approval_channel: "notification",
       approval_route_id: "route:1", approval_delivery_id: "delivery:1" })!;
     const view = render(<ApprovalCard request={routed} resourceStatus="ready" onDecide={() => {}} />);
-    expect(view.getByText("Actor").nextElementSibling?.textContent).toBe("actor");
+    expect(view.getByText("Actor").nextElementSibling?.textContent).toBe("Release bot");
     expect(view.getByText("Requested approver").nextElementSibling?.textContent).toBe("human:reviewer");
     expect(view.getByText("Notification recipient").nextElementSibling?.textContent).toBe("review-queue");
     expect(view.getByText("Notification channel").nextElementSibling?.textContent).toBe("notification");
@@ -80,12 +80,40 @@ describe("ApprovalCard", () => {
     expect(view.getByText("Request").closest("details")).toBe(details);
     expect(view.getByText("Action scope").closest("details")).toBe(details);
     expect(details.querySelector("pre")?.textContent).toBe(JSON.stringify(request.raw, null, 2));
-    expect(view.getByText("router:main").closest("details")).toBeNull();
-    expect(view.getByText("r3").closest("details")).toBeNull();
+    expect(view.getByText("Router main").closest("details") === null).toBe(true);
+    // The risk tier reads in words in its tone, with the tier code in the tooltip.
+    const risk = view.getByText("High risk");
+    expect(risk.closest("details") === null).toBe(true);
+    expect(risk.getAttribute("data-tone")).toBe("crit");
+    expect(risk.getAttribute("title")).toBe("Risk tier R3");
+    expect(view.queryByText("R3", { exact: true }) === null).toBe(true);
     expect(view.container.querySelector("time")?.closest("details")).toBeNull();
     for (const action of ["approve", "reject", "escalate"]) {
       expect(view.getByTestId(`gating-action:request:1:${action}`).dataset.action).toBe(action);
     }
+    // Approve affirms in the positive tone; the accent fill stays off it.
+    const approve = view.getByTestId("gating-action:request:1:approve");
+    expect(approve.classList.contains("cc-btn--positive")).toBe(true);
+    expect(approve.classList.contains("cc-btn--primary")).toBe(false);
+  });
+  it("says how long a request has waited and uses the console buttons for decisions", () => {
+    const waiting = { ...request, createdAtMs: Date.now() - 18 * 60 * 1000 };
+    const view = render(<ApprovalCard request={waiting} resourceStatus="ready" onDecide={() => {}} />);
+    expect(view.getByText("Waiting 18 min")).toBeTruthy();
+    expect(view.getByText("Approval needed").getAttribute("data-tone")).toBe("warn");
+    expect(view.getByRole("button", { name: "Approve" }).classList.contains("cc-btn--positive")).toBe(true);
+    expect(view.getByRole("button", { name: "Reject" }).classList.contains("cc-btn--danger")).toBe(true);
+    expect(view.getByRole("button", { name: "Escalate" }).classList.contains("cc-btn")).toBe(true);
+    view.rerender(<ApprovalCard request={{ ...waiting, status: "expired" }} resourceStatus="ready" onDecide={() => {}} />);
+    expect(view.queryByText("Waiting 18 min")).toBeNull();
+  });
+  it("reads an unlabelled request's action ID as words and keeps the exact ID in the tooltip", () => {
+    const unlabelled = normalizePendingApproval({ pending_id: "request:2", action_id: "read-calendar" })!;
+    const view = render(<ApprovalCard request={unlabelled} resourceStatus="ready" onDecide={() => {}} />);
+    const title = view.getByText("Read calendar");
+    expect(title.getAttribute("title")).toBe("read-calendar");
+    // The raw ID shows only inside the collapsed request details.
+    expect(view.getByText("read-calendar", { exact: true }).closest("details") !== null).toBe(true);
   });
   it("cannot treat a local deadline as expired and shows authoritative expiry only", () => {
     const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={() => {}} />);

@@ -16,8 +16,10 @@ import {
   ConsoleSidebar,
   ConversationRichContent,
   ConversationTranscript,
+  AgentDirectoryProvider,
   WorkGraphCard,
   __workGraphCardUiState,
+  createAgentDirectory,
 } from "@console-components";
 import { groupCopyText } from "../../../packages/console-components/src/conversation/conversation-message-group";
 import { buildSidebarViewState, buildWorkGraphOperatorResultFrame, mapFramesToTimelineEntries } from "./adapters";
@@ -278,6 +280,50 @@ test("stock Sidebar keyboard reorder preserves virtual scroll and restores focus
   }
 });
 
+test("MemoryLiveStrip rows lead with names and record titles; the raw line is the tooltip", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>");
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  const rootElement = dom.window.document.getElementById("root");
+  assert.ok(rootElement);
+  const root = createRoot(rootElement);
+  const directory = createAgentDirectory([{ id: "identity:research-analyst", label: "Research Analyst" }]);
+  const frames = [
+    {
+      id: "blocked",
+      event: "memory.quarantine.release_blocked",
+      timestampMs: Date.now(),
+      data: { realm: "default", record_id: "mem-42", verdict: "release", class: "api_key" },
+    },
+    {
+      id: "promoted",
+      event: "memory.record.promoted",
+      timestampMs: Date.now() - 1_000,
+      data: { realm: "default", scope_kind: "identity", scope_key: "identity:research-analyst" },
+    },
+  ] as ConsoleFrame[];
+  try {
+    flushSync(() => {
+      root.render(
+        <AgentDirectoryProvider directory={directory}>
+          <MemoryLiveStrip frames={frames} onPivot={() => undefined} recordTitles={new Map([["mem-42", "Upstream API token"]])} />
+        </AgentDirectoryProvider>,
+      );
+    });
+    const title = (id: string) => dom.window.document.querySelector(`[data-testid='memory-live-row:${id}'] .cc-row__title`);
+    assert.equal(title("blocked")?.textContent, "Release of \u201cUpstream API token\u201d blocked · it looks like a secret");
+    assert.equal(title("blocked")?.getAttribute("title"), "Quarantine release blocked for mem-42 · matches secret pattern api_key");
+    assert.equal(title("promoted")?.textContent, "A record moved to Research Analyst's memory");
+  } finally {
+    root.unmount();
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
 test("MemoryLiveStrip pause-on-scroll freezes, jump-to-live resumes, top auto-unfreezes", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>");
   const previousWindow = globalThis.window;
@@ -346,6 +392,277 @@ test("MemoryLiveStrip pause-on-scroll freezes, jump-to-live resumes, top auto-un
     assert.equal(query("[data-testid='memory-live-jump']"), null);
   } finally {
     root.unmount();
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryPanel reads in names and words; IDs live in tooltips and technical details", async () => {
+  // The kit's directory provider, imported here so this test leaves the
+  // shared import block alone.
+  const { AgentDirectoryProvider, createAgentDirectory } = await import("@console-components");
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const warnings: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  const hour = 60 * 60 * 1000;
+  const now = Date.now();
+  const record: MemoryPanelRecord = {
+    id: "mem_01JBX6Q5B1D7F3H9K2M8P4R6T0",
+    title: "Release train cutoff is Thursday",
+    kind: "fact",
+    trust: "agent_verified",
+    status: { status: "active" },
+    scope: { scope: "identity", realm: "default", identity: "coordinator" },
+    updated_at_ms: now - hour,
+    provenance: {
+      author: { author: "agent", identity: "coordinator" },
+      evidence: [{ session_id: "sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D", generation: 4, range: [12, 18] }],
+    },
+  };
+  const directory = createAgentDirectory([{ id: "identity:coordinator", label: "Coordinator" }]);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  const panel = (detail: React.ComponentProps<typeof MemoryPanel>["detail"]) => (
+    <AgentDirectoryProvider directory={directory}>
+      <MemoryPanel
+        records={[record]}
+        realms={["default"]}
+        quarantineRecords={[]}
+        pendingPromotions={[]}
+        dreams={[]}
+        detail={detail}
+        onRefresh={() => undefined}
+        onSelectRecord={() => undefined}
+        onClearDetail={() => undefined}
+        onLoadEvidence={async () => null}
+      />
+    </AgentDirectoryProvider>
+  );
+  const render = async (element: React.ReactElement) => {
+    await React.act(async () => {
+      root.render(element);
+    });
+  };
+  const click = async (selector: string) => {
+    const target = host.querySelector(selector) as HTMLElement | null;
+    assert.equal(target === null, false, `missing ${selector}`);
+    await React.act(async () => {
+      target?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+  };
+  const text = (selector: string) => host.querySelector(selector)?.textContent || "";
+
+  try {
+    await render(panel(null));
+    // Holdings: the agent scope reads as the agent's name, its key in the tooltip.
+    const scope = "[data-testid='memory-holdings-scope:identity:default:coordinator']";
+    assert.equal(text(scope).includes("Coordinator"), true, text(scope));
+    assert.equal(text(scope).includes("Agent memory"), true, text(scope));
+    assert.equal(host.querySelector(`${scope} [title='coordinator']`) === null, false);
+    // Refresh is a header button, not a tab.
+    assert.equal(host.querySelector("[role='tablist'] [data-testid='memory-refresh']") === null, true);
+    assert.equal(host.querySelector("[data-testid='memory-tab:records']")?.getAttribute("role"), "tab");
+
+    // Records: grouped under the agent's name; the row headline is the title.
+    await click("[data-testid='memory-tab:records']");
+    const group = "[data-testid='memory-group:identity:default:coordinator']";
+    assert.equal(text(group).includes("Coordinator"), true, text(group));
+    assert.equal(text(group).includes(record.id), false, "no record ID on the list row");
+
+    // Biography: the evidence reads as a conversation; the session ID and
+    // generation are not on it but in the collapsed technical details, with
+    // the record ID.
+    await render(panel({
+      realm: "default",
+      record: { ...record, body: "Release train cutoff is Thursday 17:00 UTC.", content_hash: "sha256:9f2c" },
+      chain: [],
+      injections: [{ record_id: record.id, identity: "coordinator", surface: "build", at_ms: now - hour }],
+    }));
+    const evidence = text("[data-testid='memory-evidence:0']");
+    assert.equal(evidence, "Conversation with Coordinator, messages 12-18");
+    assert.equal(evidence.includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), false, evidence);
+    assert.equal(evidence.includes("generation 4"), false, evidence);
+    assert.equal(text("[data-testid='memory-detail-born']").includes("Coordinator (agent)"), true);
+    assert.equal(text("[data-testid='memory-detail-life']").includes("Given to Coordinator at startup"), true);
+    const technical = host.querySelector("[data-testid='memory-detail'] details.cc-tech");
+    assert.equal(technical === null, false);
+    assert.equal(technical?.hasAttribute("open"), false, "technical details start collapsed");
+    assert.equal((technical?.textContent || "").includes(record.id), true);
+    assert.equal((technical?.textContent || "").includes("sha256:9f2c"), true);
+    assert.equal((technical?.textContent || "").includes("sess-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"), true);
+    assert.equal((technical?.textContent || "").includes("generation 4"), true);
+    const headline = text("[data-testid='memory-detail'] header");
+    assert.equal(headline.includes(record.id), false, "the ID is not part of the headline");
+    assert.deepEqual(warnings, []);
+  } finally {
+    console.error = originalError;
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryPanel pending promotions keep their decision beside the row's button, never inside it", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  const quarantined: MemoryPanelRecord = {
+    id: "mem-quarantined-1",
+    title: "Router upstream credential",
+    kind: "fact",
+    trust: "agent_verified",
+    status: { status: "quarantined" },
+    scope: { scope: "identity", realm: "default", identity: "coordinator" },
+    updated_at_ms: 1792368000000,
+  };
+  const opened: string[] = [];
+  let gatingOpened = 0;
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  // A control inside another control: a button or link in a button, or in
+  // an element that claims the button role.
+  const nested = [
+    "button button", "button a", "button [role='button']",
+    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+  ].join(", ");
+
+  try {
+    await React.act(async () => {
+      root.render(
+        <MemoryPanel
+          records={[]}
+          realms={["default"]}
+          quarantineRecords={[quarantined]}
+          pendingPromotions={[{
+            realm: "default",
+            pending_id: "gate-promotion-1",
+            record_id: quarantined.id,
+            scope_kind: "mob",
+            scope_key: "ops-team",
+            rationale: "Shared by every team member",
+            status: "pending",
+            created_at_ms: 1792368000000,
+          }]}
+          dreams={[]}
+          detail={null}
+          canReviewQuarantine
+          onRefresh={() => undefined}
+          onSelectRecord={(_realm, memoryId) => { opened.push(memoryId); }}
+          onClearDetail={() => undefined}
+          onOpenGating={() => { gatingOpened += 1; }}
+        />,
+      );
+    });
+    const pipelineTab = host.querySelector("[data-testid='memory-tab:pipeline']") as HTMLElement | null;
+    assert.equal(pipelineTab === null, false);
+    await React.act(async () => {
+      pipelineTab?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    const row = host.querySelector("[data-testid='memory-pending:gate-promotion-1']") as HTMLElement | null;
+    assert.equal(row === null, false, "the pending promotion row renders");
+    assert.equal(host.querySelectorAll(nested).length, 0, "no control sits inside another control");
+    assert.equal(row?.getAttribute("role"), null);
+    const open = row?.querySelector(".cc-row__hit") as HTMLButtonElement | null;
+    assert.equal(open?.tagName, "BUTTON");
+    assert.equal(open?.textContent, "Router upstream credential");
+    const decide = host.querySelector("[data-testid='memory-pipeline-decide:gate-promotion-1']") as HTMLElement | null;
+    assert.equal(decide?.tagName, "BUTTON");
+    assert.equal(open?.contains(decide) ?? true, false, "the decision is not inside the row's button");
+    assert.equal(row?.contains(decide) ?? false, true, "the decision stays on its row");
+
+    await React.act(async () => {
+      decide?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(gatingOpened, 1);
+    assert.deepEqual(opened, [], "deciding does not open the record");
+    await React.act(async () => {
+      open?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    assert.deepEqual(opened, [quarantined.id]);
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryPanel tabs each control the panel they show", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(
+        <MemoryPanel
+          records={[]}
+          realms={["default"]}
+          quarantineRecords={[]}
+          pendingPromotions={[]}
+          dreams={[]}
+          detail={null}
+          onRefresh={() => undefined}
+          onSelectRecord={() => undefined}
+          onClearDetail={() => undefined}
+        />,
+      );
+    });
+    for (const tab of ["holdings", "records", "knowledge", "pipeline", "dreams"]) {
+      const control = host.querySelector(`[data-testid='memory-tab:${tab}']`) as HTMLElement | null;
+      assert.equal(control === null, false, `missing the ${tab} tab`);
+      await React.act(async () => {
+        control?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      });
+      assert.equal(control?.getAttribute("aria-selected"), "true");
+      const panel = dom.window.document.getElementById(control?.getAttribute("aria-controls") ?? "");
+      assert.equal(panel?.getAttribute("role"), "tabpanel", `${tab} controls a tab panel`);
+      assert.equal(panel?.getAttribute("aria-labelledby"), control?.getAttribute("id"), `${tab} labels its panel`);
+      assert.equal(host.querySelectorAll("[role='tabpanel']").length, 1);
+    }
+    const pipeline = host.querySelector("[data-testid='memory-tab:pipeline']");
+    await React.act(async () => {
+      pipeline?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    const shown = host.querySelector("[role='tabpanel'] [data-testid='memory-pipeline']");
+    assert.equal(shown === null, false, "the Pipeline content sits in the tab panel");
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
     globalThis.window = previousWindow;
     globalThis.document = previousDocument;
     dom.window.close();
@@ -986,6 +1303,12 @@ test("WorkGraphPanel attention actions split CAS tokens the same way and gate re
     };
 
     const coordRow = bindingRow("b-coord");
+    // Attention renders inside the card of the goal it is bound to.
+    assert.equal(
+      coordRow.closest("[data-testid='workgraph-panel-item:goal-1']") !== null,
+      true,
+      "the binding sits in its goal's card",
+    );
     clickByLabel(coordRow, "Confirm");
     clickByLabel(coordRow, "Request close");
     clickByLabel(coordRow, "Pause");

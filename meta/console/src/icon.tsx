@@ -43,9 +43,27 @@ export function SpriteSheet() {
   );
 }
 
-export function Icon({ name, className }: { name: string; className?: string }): React.JSX.Element {
+/// A sprite icon. Decorative by default (hidden from assistive tech): the
+/// owning button or text carries the meaning. Pass `label` only for an icon
+/// that stands alone and means something by itself.
+export function Icon({
+  name,
+  className,
+  label,
+}: {
+  name: string;
+  className?: string;
+  label?: string;
+}): React.JSX.Element {
+  if (label) {
+    return (
+      <svg className={className} role="img" aria-label={label}>
+        <use href={`#${name}`} />
+      </svg>
+    );
+  }
   return (
-    <svg className={className} aria-label={name}>
+    <svg className={className} aria-hidden="true" focusable="false">
       <use href={`#${name}`} />
     </svg>
   );

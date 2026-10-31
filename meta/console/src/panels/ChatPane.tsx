@@ -40,8 +40,10 @@ import {
   type WorkGraphCardActions,
 } from "@console-components";
 import type { ConsoleAgent } from "../types";
+import { responsePhaseWords } from "../lib/agents";
 import type { LiveSpeechItem } from "../lib/voice-session";
 import { VoiceButton } from "./VoiceBar";
+import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import {
   composerImageFileKey,
   consoleBlobReferencesFromText,
@@ -212,8 +214,8 @@ interface ChatTurnPreview {
 
 function phaseLabel(_phase: "waiting" | "tool-executing" | "generating"): string {
   // Single label across all phases. The phase distinction is still
-  // surfaced in the composer footer chip; the inline typing indicator
-  // just signals "this agent is currently working".
+  // surfaced in the composer footer; the inline typing indicator just
+  // signals "this agent is currently working".
   return "working";
 }
 
@@ -1760,7 +1762,7 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
       />
       </div>
       <div className="composer__row">
-        <span className="composer__chip mono">{agentRole || "agent"}</span>
+        <span className="composer__chip" title={agentRole || undefined}>{humanizeEnum(agentRole || "agent")}</span>
         <span className="composer__spacer" />
         {onVoiceToggle && !readOnly && !sendWithheld && (
           <VoiceButton
@@ -2681,13 +2683,12 @@ export function ChatPane({
           />
         </div>
         <div className="composer__footer">
-          <span>To: <b style={{ color: "var(--ink-muted)" }}>{agentLabel}</b></span>
+          <span>To: <b style={{ color: "var(--ink-muted)" }} title={identity}>{agentLabel}</b></span>
           {voiceActive && <span>· text to background agent</span>}
-          <span>·</span>
-          <span className="mono">{identity}</span>
-          {agent?.role && (<>
+          {/* The role, unless it only repeats the name ("To: Coordinator"). */}
+          {agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && (<>
             <span>·</span>
-            <span>{agent.role}</span>
+            <span>{humanizeEnum(agent.role)}</span>
           </>)}
           <span>·</span>
           <span className="dot" style={{
@@ -2696,11 +2697,13 @@ export function ChatPane({
                         state === "retired" ? "var(--ink-faint)" : "var(--ink-dim)",
           }} />
           <span>{state}</span>
-          {phase && <><span>·</span><span style={{ color: "var(--accent)" }}>{phase}</span></>}
+          {/* What the agent is doing, in the footer's own ink: the accent is
+              for things that act. */}
+          {phase && <><span>·</span><span>{responsePhaseWords(phase)}</span></>}
           {readOnly && <><span>·</span><span>view only</span></>}
           {!readOnly && sendWithheld && <><span>·</span><span>send not permitted</span></>}
           {!readOnly && !canAttachImages && <><span>·</span><span>model cannot see images</span></>}
-          {attachmentError && <><span>·</span><span style={{ color: "var(--bad)" }}>{attachmentError}</span></>}
+          {attachmentError && <><span>·</span><span style={{ color: "var(--crit-ink)" }}>{attachmentError}</span></>}
         </div>
       </div>
     </div>

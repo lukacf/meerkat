@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyConsoleDockAction,
+  collectConsoleDockPanelIds,
+  createConsoleDockState,
+} from "@console-core";
+import type { ConsoleDockAction, ConsoleDockState, ConsoleDockTarget } from "@console-core";
+
+import {
   consoleTopologyEndpointKey,
   createConsoleTopologyMutationRequest,
   executeConsoleTopologyMutation,
@@ -12,6 +19,8 @@ import {
   pendingTopologyReceipt,
   resolveAmbiguousConsoleTopologyMutation,
   topologyApplyParams,
+  topologyAgentChatActions,
+  topologyNodeAgent,
   topologyPlanParams,
 } from "./topology";
 
@@ -90,6 +99,22 @@ function query(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+test("topology nodes name a nameless agent the way every surface does", () => {
+  const base = query();
+  const nodes = [
+    ...(base.nodes as Array<Record<string, unknown>>),
+    { endpoint: { identity: "router:main" }, role: "router", labels: {}, affordances: { can_connect: false, can_disconnect: false, can_reconnect: false, can_bulk: false, can_cross_authority: false } },
+  ];
+  const normalized = normalizeConsoleTopologyQuery(query({ nodes }), {
+    capabilities: editableCapabilities,
+    agents: [{ agent_id: "incident-commander", member_id: "member-commander", label: "Incident Commander", kind: "agent" }],
+  });
+  assert.ok(normalized);
+  const label = (identity: string) => normalized.nodes.find((node) => node.ref?.identity === identity)?.label;
+  assert.equal(label("router:main"), "Router main");
+  assert.equal(label("incident-commander"), "Incident Commander");
+});
 
 test("topology query maps authoritative edges and intersects both endpoint grants", () => {
   const normalized = normalizeConsoleTopologyQuery(query(), {
@@ -588,4 +613,102 @@ test("a definitive stale revision conflict is never silently retried or rebased"
   const notRecovered = await resolveAmbiguousConsoleTopologyMutation(conflict.receipt, execute);
   assert.match(notRecovered.error || "", /no ambiguous outcome/i);
   assert.equal(applyCalls, 1, "generic Retry must not mint or apply a rebased request");
+});
+
+test("a topology node selects its roster agent from an endpoint key or a plain id", () => {
+  const agents = [
+    { identity: "incident-commander", member_id: "member-commander", agent_id: "agent-commander", label: "Incident Commander" },
+    { identity: "payments-sre", member_id: "member-sre", agent_id: "agent-sre", label: "Payments SRE" },
+  ];
+  const commanderKey = consoleTopologyEndpointKey({ identity: "incident-commander" }, "incident-command-center");
+  assert.equal(commanderKey, "mk1|incident-command-center|incident-commander");
+  assert.equal(topologyNodeAgent(agents, commanderKey)?.label, "Incident Commander");
+  assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|payments-sre")?.label, "Payments SRE");
+  assert.equal(topologyNodeAgent(agents, "member-sre")?.label, "Payments SRE");
+  assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|unknown") === undefined, true);
+});
+
+type DockTarget = ConsoleDockTarget & { memberId?: string; identity?: string };
+
+const topologyTarget: DockTarget = { id: "topology", kind: "topology", title: "Topology" };
+const memoryTarget: DockTarget = { id: "memory", kind: "memory", title: "Memory" };
+const chatTarget = (identity: string): DockTarget => ({
+  id: `member-${identity}`,
+  kind: "agent-chat",
+  memberId: `member-${identity}`,
+  identity,
+  title: identity,
+});
+
+/** A dock driven by the same reducer the console's dock controller runs. */
+function topologyDock() {
+  let next = 1;
+  const options = {
+    createPanelState: ({ target }: { target?: DockTarget | null }) => ({
+      id: `pane-${next++}`,
+      target: target || null,
+      mode: "console" as const,
+    }),
+    createSplitId: () => `split-${next++}`,
+    createTabId: () => `tab-${next++}`,
+  };
+  let state: ConsoleDockState<DockTarget> = createConsoleDockState<DockTarget>({ initialTarget: topologyTarget, ...options });
+  const topologyPaneId = state.focusedPanelId || "";
+  const apply = (actions: ConsoleDockAction<DockTarget>[]) => {
+    for (const action of actions) state = applyConsoleDockAction(state, action, options);
+  };
+  return {
+    topologyPaneId,
+    apply,
+    state: () => state,
+    clickChip: (identity: string) => apply(topologyAgentChatActions(state, topologyPaneId, chatTarget(identity))),
+    panes: () => {
+      const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+      return collectConsoleDockPanelIds(tab?.layout).map((id) => {
+        const pane = state.panels.find((panel) => panel.id === id);
+        return { id, kind: pane?.target?.kind || "empty", identity: pane?.target?.identity || null };
+      });
+    },
+  };
+}
+
+test("three topology role chip clicks keep one Topology pane and one chat pane", () => {
+  const dock = topologyDock();
+  for (const identity of ["commander", "investigator", "scribe"]) {
+    dock.clickChip(identity);
+    const panes = dock.panes();
+    assert.deepEqual(panes.map((pane) => pane.kind), ["topology", "agent-chat"], `after opening ${identity}`);
+    assert.equal(panes[0].id, dock.topologyPaneId);
+    assert.equal(panes[1].identity, identity);
+    assert.equal(dock.state().focusedPanelId, panes[1].id, "the chat pane takes focus");
+  }
+});
+
+test("a topology role chip focuses a pane that already shows the agent", () => {
+  const dock = topologyDock();
+  dock.clickChip("commander");
+  const chatPaneId = dock.panes()[1].id;
+  dock.apply([{ type: "focus_panel", panelId: dock.topologyPaneId }]);
+
+  assert.deepEqual(
+    topologyAgentChatActions(dock.state(), dock.topologyPaneId, chatTarget("commander")),
+    [{ type: "focus_panel", panelId: chatPaneId }],
+  );
+  dock.clickChip("commander");
+  assert.equal(dock.panes().length, 2);
+  assert.equal(dock.state().focusedPanelId, chatPaneId);
+});
+
+test("a topology role chip never replaces another panel beside the map", () => {
+  const dock = topologyDock();
+  dock.apply([{ type: "open_target", target: memoryTarget, intent: "split_right" }]);
+  assert.deepEqual(dock.panes().map((pane) => pane.kind), ["topology", "memory"]);
+
+  dock.clickChip("commander");
+  assert.deepEqual(dock.panes().map((pane) => pane.kind), ["topology", "agent-chat", "memory"]);
+  dock.clickChip("investigator");
+  dock.clickChip("scribe");
+  const panes = dock.panes();
+  assert.deepEqual(panes.map((pane) => pane.kind), ["topology", "agent-chat", "memory"]);
+  assert.equal(panes[1].identity, "scribe");
 });

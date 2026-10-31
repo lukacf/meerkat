@@ -978,6 +978,40 @@ test("compact stock header retains target actions and destination", () => {
   assert.doesNotMatch(html, /class="conv__identity"/);
 });
 
+test("the composer footer names the agent and keeps its identity in the name's tooltip", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: null, agentLabel: "Router main", identity: "router:main", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+  assert.match(footer, /To: <b[^>]*title="router:main"[^>]*>Router main<\/b>/);
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("router:main"), false, "the footer text names the agent, not its identity");
+});
+
+test("the composer reads the agent's role in words, in the UI font", () => {
+  const agent = { agent_id: "steward", member_id: "steward", label: "Data Steward", kind: "identity", role: "memory-steward", state: "active" };
+  const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: agent as never, agentLabel: "Data Steward", identity: "steward", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  assert.match(html, /<span class="composer__chip" title="memory-steward">Memory steward<\/span>/);
+  assert.doesNotMatch(html, /composer__chip mono/);
+  const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("Memory steward"), true);
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("memory-steward"), false);
+  // A role that only repeats the name is left out of the footer.
+  const same = renderToStaticMarkup(React.createElement(ChatPane, { agent: { ...agent, label: "Coordinator", role: "coordinator" } as never, agentLabel: "Coordinator", identity: "steward", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  const sameFooter = (/<div class="composer__footer">([\s\S]*?)<\/div>/.exec(same)?.[1] ?? "").replace(/<[^>]*>/g, "");
+  assert.equal(sameFooter.split("Coordinator").length - 1, 1);
+});
+
+test("the composer footer says what the agent is doing in words, in the footer's ink", () => {
+  const agent = { agent_id: "steward", member_id: "steward", label: "Data Steward", kind: "identity", role: "memory-steward", state: "active" };
+  const words = new Map([["waiting", "starting a reply"], ["tool-executing", "running a tool"], ["generating", "writing a reply"]]);
+  for (const [phase, said] of words) {
+    const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: agent as never, agentLabel: "Data Steward", identity: "steward", entries: [], phase: phase as never, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+    const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+    const text = footer.replace(/<[^>]*>/g, "");
+    assert.equal(text.includes(said), true, `${phase} reads ${said}: ${text}`);
+    assert.equal(text.includes(phase), false, `the footer never shows the raw phase ${phase}`);
+    assert.equal(footer.includes("var(--accent)"), false, "the phase is not painted in the accent");
+  }
+});
+
 test("stock folds consecutive proven generic completion but keeps unknown visible", () => {
   const makeTool = (id: string, name: string, known: boolean): ConversationTimelineEntry => ({ id, kind: "message", variant: "rich", identity: AGENT, blocks: [{ type: "tool-call", toolCallId: id, name, arguments: "{}", status: known ? "success" : "pending", completionEvidence: { outcome: known ? "success" : "unknown", source: known ? "session-history" : "unknown", toolCallId: id } }] });
   const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: null, agentLabel: "Agent", identity: "agent", entries: [makeTool("one", "read_file", true), makeTool("two", "list_files", true), makeTool("three", "read_file", false)], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true }));

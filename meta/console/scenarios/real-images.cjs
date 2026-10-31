@@ -45,7 +45,7 @@ function authorityCancellation(request) {
 async function openStock(page, fixture, monitor, reload = false) {
   return monitor.during(reload ? "explicit image scenario reload" : "initial host authority initialization", async () => {
     if (reload) await page.reload(); else await page.goto(fixture.baseUrl + "/console");
-    if (!await pane(page).count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ has: page.getByText(identity, { exact: true }) }).first().click();
+    if (!await pane(page).count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
     await pane(page).getByTestId(`chat-composer:${identity}`).waitFor();
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
   }, authorityCancellation);

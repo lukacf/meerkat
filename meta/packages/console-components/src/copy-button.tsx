@@ -1,4 +1,3 @@
-import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
 
 import { CopyGlyph } from "./copy-glyph";
@@ -51,7 +50,7 @@ export function CopyButton({
 
   return (
     <button
-      className={clsx("cc-copy-btn", className)}
+      className={className ? `cc-copy-btn ${className}` : "cc-copy-btn"}
       type="button"
       aria-label={copied ? copiedLabel : label}
       title={copied ? copiedLabel : label}

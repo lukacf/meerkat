@@ -2,7 +2,7 @@ import { ConsoleMcpAppsProvider, type ConsoleMcpAppsHost } from "@console-compon
 import { createNativeMcpAppsHost } from "./mcp-apps/native-host";
 import { useConsolePanels, createConsolePanelService, bindConsolePanelService } from "./lib/custom-panels";
 import { ConsolePanelsProvider, ConsoleCustomPanel } from "@console-components";
-import { consoleCustomPanelTarget, type ConsolePanelDefinition, type ConsolePanelContext, type ConsolePanelService } from "@console-core";
+import { SIDEBAR_AGENT_PINS_STORAGE_PREFIX, consoleCustomPanelTarget, type ConsolePanelDefinition, type ConsolePanelContext, type ConsolePanelService } from "@console-core";
 import { withConsoleSendStorageLock } from "./lib/send-storage-lock";
 import {
   framesAfterIdleWatermark,
@@ -30,6 +30,8 @@ import {
   useConsoleDockController,
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
+import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
+import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -55,6 +57,8 @@ import {
 } from "@console-core";
 
 import {
+  agentDirectoryEntry,
+  agentDisplayTitle,
   buildConsoleIdentityAliasMap,
   canonicalConsoleIdentityFromMap,
   normalizeAgents,
@@ -116,6 +120,8 @@ import {
   resolveAmbiguousConsoleTopologyMutation,
   type ConsoleTopologyControlCapabilities,
   type ConsoleTopologyRpcOperation,
+  topologyAgentChatActions,
+  topologyNodeAgent,
 } from "./lib/topology";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
@@ -199,6 +205,8 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
+import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
+import { HealthPanel } from "./panels/HealthPanel";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import {
   WorkGraphPanel,
@@ -215,7 +223,7 @@ import {
   Sidebar as DesignSidebar,
   normalizeNavKind,
   pruneStaleSidebarStorage,
-  readSidebarStringSet,
+  readSidebarPins,
   sidebarAgentPinId,
   sidebarPinnedFamilyPinIds,
   sidebarStorageKey,
@@ -259,7 +267,7 @@ export interface ConsoleAppProps {
 }
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
-type GatingPanelData = { pending: unknown[]; audit: unknown[] };
+type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
 type AccessPanelData = {
   scope: string;
   loading: boolean;
@@ -282,7 +290,7 @@ type MemoryPanelData = {
   loaded: boolean;
   /// Keyset cursor from the base records page (single-realm only).
   nextCursor: string | null;
-  /// Per-section -32030 outcomes so the panel can render "no grant"
+  /// Per-section -32030 outcomes so the panel can render "no access"
   /// (never green) instead of an indistinguishable empty section.
   recordsDenied: boolean;
   dreamsDenied: boolean;
@@ -810,7 +818,9 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
     observedScope.current = { value };
     if (previous && previous.value !== value) {
       // A same-URL account switch ends all old subscriptions, locks, drafts
-      // and transcript state before the replacement authority loads.
+      // and transcript state before the replacement authority loads. The
+      // previous account's sends no longer read "You asked".
+      forgetOwnSends();
       setGeneration(current => current + 1);
       return false;
     }
@@ -923,12 +933,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids): panels show names, with the key in a tooltip.
+  // Panels name agents the way the sidebar does.
+  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
     const labels = new Map<string, string>();
     for (const agent of agents) {
-      const label = agent.label?.trim();
+      const label = agentDisplayTitle(agent);
       if (!label) continue;
       const identity = agent.identity?.trim();
       if (identity) labels.set(identity, label);
@@ -1038,6 +1052,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => sidebarStorageKey(SIDEBAR_PINS_STORAGE_PREFIX, sidebarStorageNamespace),
     [sidebarStorageNamespace],
   );
+  // Per-user sidebar preferences (pins, the manual agent order, the roster
+  // view) take the principal-aware scope the dock layout uses, so an
+  // agent-list configuration edit leaves them as they are.
+  const sidebarPreferenceScope = React.useMemo(
+    () => encodeURIComponent(persistentSendScope || sidebarStorageScope),
+    [persistentSendScope, sidebarStorageScope],
+  );
+  const sidebarAgentPinsStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
+    [sidebarPreferenceScope],
+  );
   React.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
   }, [sidebarStorageScope, sidebarStorageNamespace]);
@@ -1090,13 +1115,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [experience?.console_config?.agent_list?.default_pinned_agent_ids],
   );
   React.useEffect(() => {
-    const defaults = new Set(experience?.console_config?.agent_list?.default_pinned_agent_ids || []);
-    const stored = readSidebarStringSet(
+    // Pins moved from the agent-list configuration namespace to the
+    // per-user scope; the earlier key is read once, while the new one is
+    // absent, so current pins carry over.
+    setPinnedAgentIds(readSidebarPins(
       browserLocalStorage(),
+      sidebarAgentPinsStorageKey,
       sidebarPinsStorageKey,
-    );
-    setPinnedAgentIds(stored ?? defaults);
-  }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarPinsStorageKey]);
+      experience?.console_config?.agent_list?.default_pinned_agent_ids || [],
+    ));
+  }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
 
   const togglePinnedAgent = React.useCallback((agent: ConsoleAgent, renderedFamilyPinIds?: Set<string>) => {
     const pinId = sidebarAgentPinId(agent);
@@ -1116,12 +1144,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       writeSidebarStringSet(
         browserLocalStorage(),
-        sidebarPinsStorageKey,
+        sidebarAgentPinsStorageKey,
         next,
       );
       return next;
     });
-  }, [agents, sidebarPinsStorageKey]);
+  }, [agents, sidebarAgentPinsStorageKey]);
 
   // --- Render trigger ---
   const [, setRenderTick] = React.useState(0);
@@ -1282,24 +1310,44 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return requireWorkbenchTarget(buildControlTarget(kind));
   }
 
-  function runtimeScopedPanel(kind: "memory" | "workgraph", content: React.ReactNode) {
-    if (emptyPanelRegistry) return <div className="console-panel runtime-panel-empty">
-      <h2>{kind === "memory" ? "Memory" : "WorkGraph"}</h2>
-      <p role="status">No teams are running.</p>
-      <p>Finish setting up a team to inspect its memory and work graph.</p>
-    </div>;
+  // Memory and WorkGraph read one team's runtime at a time. The team picker
+  // is handed to the panel, which shows it among its header actions.
+  function runtimeScopedPanel(kind: "memory" | "workgraph", render: (runtimeControl: React.ReactNode) => React.ReactNode) {
+    const title = kind === "memory" ? "Memory" : "WorkGraph";
+    if (emptyPanelRegistry) return (
+      <PanelShell className="runtime-panel-empty">
+        <PanelHeader title={title} />
+        <EmptyState
+          kind="not-configured"
+          role="status"
+          title="No teams are running."
+          body="Finish setting up a team to inspect its memory and work graph."
+        />
+      </PanelShell>
+    );
     const runtimes = experience?.panel_runtimes;
-    if (!runtimes) return content;
+    if (!runtimes) return render(null);
     const loaded = (kind === "memory" ? memoryDataRuntimeKey : workGraphDataRuntimeKey) === panelRuntimeKey;
+    const runtimeControl = (
+      <SelectField
+        className="runtime-panel-control"
+        label="Team"
+        ariaLabel={`${kind === "memory" ? "Memory" : "Work Graph"} team`}
+        value={panelRuntimeKey}
+        options={[
+          ...(runtimes.some(runtime => runtime.key === panelRuntimeKey) ? [] : [{ value: panelRuntimeKey, label: "Runtime unavailable" }]),
+          ...runtimes.map(runtime => ({ value: runtime.key, label: runtime.label })),
+        ]}
+        onChange={key => setPanelRuntimeSelection({ scope: persistentSendScope, key })}
+      />
+    );
     return <div className="runtime-scoped-panel" key={`${kind}:${panelRuntimeKey}`}>
-      <label className="runtime-panel-selector">Mob
-        <select aria-label={`${kind === "memory" ? "Memory" : "Work Graph"} mob`} value={panelRuntimeKey}
-          onChange={event => setPanelRuntimeSelection({scope: persistentSendScope, key: event.target.value})}>
-          {!runtimes.some(runtime => runtime.key === panelRuntimeKey) && <option value={panelRuntimeKey}>Runtime unavailable</option>}
-          {runtimes.map(runtime => <option key={runtime.key} value={runtime.key}>{runtime.label}</option>)}
-        </select>
-      </label>
-      {loaded ? content : <div className="console-panel" role="status">Loading {kind === "memory" ? "memory" : "work graph"}...</div>}
+      {loaded ? render(runtimeControl) : (
+        <PanelShell>
+          <PanelHeader title={title} actions={runtimeControl} />
+          <LoadingState label={`Loading ${kind === "memory" ? "memory" : "work graph"}`} rows={5} />
+        </PanelShell>
+      )}
     </div>;
   }
 
@@ -3013,7 +3061,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor = recordsResult?.next_cursor ?? null;
       } catch (err) {
         // Access denied to records leaves the section empty but flagged, so
-        // the panel renders "no grant" instead of an empty store.
+        // the panel renders "no access" instead of an empty store.
         if (memorySectionOutcome(err) !== "denied") throw err;
         recordsDenied = true;
       }
@@ -3086,7 +3134,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
 
       // Phase-2 read surfaces, fetched in parallel with the same per-section
-      // -32030 tolerance: a denied surface renders "no grant", never an
+      // -32030 tolerance: a denied surface renders "no access", never an
       // indistinguishable empty section, and never aborts the panel load.
       const section = async <T,>(
         command: (typeof CONSOLE_COMMAND_NAMES)[keyof typeof CONSOLE_COMMAND_NAMES],
@@ -3201,7 +3249,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           { include_terminal: true },
         )) as WorkGraphSnapshotResult | null;
       } catch (err) {
-        // Access denied renders as "no grant", never an empty graph.
+        // Access denied renders as "no access", never an empty graph.
         if (jsonRpcErrorCode(err) !== -32030) throw err;
         denied = true;
       }
@@ -3254,7 +3302,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   /// Filtered/paged panel/records query for the Records filter bar, the
   /// keyset load-more, and the lattice page-walk. Resolves null STRICTLY on
-  /// -32030 (denied — consumers render "no grant", never an empty store);
+  /// -32030 (denied: consumers render "no access", never an empty store);
   /// other failures surface via the panel error banner and rethrow so the
   /// pager keeps the prior page instead of clobbering it.
   const queryMemoryRecords = React.useCallback(
@@ -3444,6 +3492,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Access is read when its panel opens or its scope changes, on Refresh and
   // after a save, and when the owner signals a newer access revision
   // (access_changed); a refresh caused by activity leaves it out.
+  // The recorded approvals behind the Approvals panel's Audit and Auto tabs.
+  const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
+  const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
+    try {
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
+      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      setGatingAuditError(null);
+    } catch (error) {
+      // The panel keeps the loaded records and shows why the refresh failed.
+      setGatingAuditError(errorMessage(error));
+      throw error;
+    }
+  }), [baseUrl, panelRefreshFlight]);
+
   const refreshPanelData = React.useCallback(async ({ access = true }: { access?: boolean } = {}) => {
     const openPanels = visiblePanelTargets;
     const inspects = openPanels.filter(
@@ -3480,13 +3542,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       hasMobControlSurface &&
       openPanels.some((t) => t.kind === "gating" || t.kind === "gates")
     ) {
-      refreshes.push(panelRefreshFlight("gating-audit", async () => {
-        const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
-        setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [] });
-      }));
+      refreshes.push(refreshGatingAudit());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -3878,6 +3937,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     dock.openTarget(target, intent);
   }
 
+  /**
+   * A Topology role chip opens the agent beside the map: it focuses a pane
+   * that already shows the agent, or reuses the chat pane next to Topology,
+   * and splits the Topology pane only when neither exists.
+   */
+  function openAgentBesideTopology(agent: ConsoleAgent, topologyPanelId: string) {
+    const target = buildDockTarget(agent);
+    void refreshIdentityTimelineNow(target.identity || target.memberId).catch(
+      () => {},
+    );
+    for (const action of topologyAgentChatActions<MetaDockTarget>(dock.state, topologyPanelId, target)) {
+      dock.dispatch(action);
+    }
+  }
+
   function openDockTarget(
     target: MetaDockTarget,
     intent:
@@ -3958,6 +4032,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // The saved attempt lives in this namespace even if the scope or the
     // console lifetime ends before the request settles.
     const attemptNamespace = persistentSendScopeRef.current;
+    // Panels say "You asked" only for sends this console made.
+    const idempotencyKey = envelope?.idempotency_key ?? createIdempotencyKey();
+    rememberOwnSend(idempotencyKey);
     const optimisticTopologyFrameId = `optimistic-topology:${identity}:${Date.now()}`;
     commitLiveFrames([{
       id: optimisticTopologyFrameId,
@@ -3967,6 +4044,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       timestampMs: Date.now(),
       data: {
         origin: `console:${panelId}`,
+        idempotency_key: idempotencyKey,
         handling_mode: handlingMode,
       },
     }, ...liveFramesRef.current].slice(0, 300));
@@ -3982,7 +4060,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         {
           content: envelope?.content ?? text,
           origin: envelope?.origin ?? `console:${panelId}`,
-          idempotencyKey: envelope?.idempotency_key ?? createIdempotencyKey(),
+          idempotencyKey,
           handlingMode: envelope?.handling_mode ?? handlingMode,
           attachments,
         },
@@ -4222,7 +4300,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(destination))
       ?? agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(identity));
     const host = experience?.console_config?.brand?.label?.trim();
-    return { agent: agent?.label || destination, host: host || undefined };
+    return { agent: agent ? agentDisplayTitle(agent) : destination, host: host || undefined };
   }
   function setPendingCheck(identity: string, id: string, view: PendingCheckView | null) {
     setPendingChecks((current) => {
@@ -5019,7 +5097,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }, [sidebarButtons]);
   const loadMemoryRecordDetailRef = React.useRef(loadMemoryRecordDetail);
   loadMemoryRecordDetailRef.current = loadMemoryRecordDetail;
-  // "State here" pivot: a live memory signal opens the Memory panel, and
+  // "Open in Memory" pivot: a live memory signal opens the Memory panel, and
   // lands on the record's Biography when the frame names one. Offered only
   // when the server-projected experience grants memory.can_read; the
   // affordance must never outrun the nav gate.
@@ -5229,7 +5307,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       {stackItems.length > 0 || (deliveredNotices[identity]?.length ?? 0) > 0 ? (
         <PendingStack
           items={stackItems}
-          agentLabel={target.title || agent?.label || identity}
+          agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
           hostLabel={experience?.console_config?.brand?.label?.trim() || undefined}
           resendUncertain={resendUncertain}
           checks={pendingChecks[identity]}
@@ -5267,7 +5345,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           // The renderer ID names a stable message assembled from potentially many
           // frames. Without canonical frame provenance, no frame-relative range is claimed.
           sourceIdentity: identity, messageId: quote.messageId,
-          quote: quote.text, label: target.title || agent?.label || identity });
+          quote: quote.text, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
         const next = [...quotedContexts, context];
         validateConsoleContexts(next);
         setContextDrafts((current) => ({ ...current, [draftKey]: next }));
@@ -5285,13 +5363,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         approvalSnapshot={activeApprovals}
         onApprovalDecision={onGatingDecision}
         peerLabels={peerLabels}
-        agentLabel={target.title || agent?.label || identity}
+        agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
         identity={identity}
         key={`${sendScope}:${panel.id}:${identity}`}
         viewportKey={{ authority: sendScope, identity, conversation: identity, pane: panel.id }}
         submittedRowId={submittedRowId}
         onQuoteSelection={addQuote}
-        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={target.title || agent?.label || identity} onEdit={(id, quote) => {
+        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)} onEdit={(id, quote) => {
           if (sendScope !== sendScopeRef.current || !lifetimeRef.current.active) throw new Error("This draft is no longer active.");
           const latest = storedComposerDraft(identity, panelKey);
           const next = editConsoleContextQuote(latest.contexts, id, quote);
@@ -5356,7 +5434,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         forkSideChatDisabledReason={canForkSideChat ? forkSideChatBlocked : null}
-        sideChatOfLabel={sideChatOf ? sideChatSourceAgent?.label || sideChatOf : null}
+        sideChatOfLabel={sideChatOf ? (sideChatSourceAgent ? agentDisplayTitle(sideChatSourceAgent) : sideChatOf) : null}
         onCloseSideChat={
           canCloseSideChat
             ? () => void onCloseSideChat(panel.id, identity)
@@ -5378,7 +5456,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 if (voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error") {
                   void voice.close();
                 } else {
-                  void voice.start({ identity, label: target.title || agent?.label || identity });
+                  void voice.start({ identity, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
                 }
               }
             : undefined
@@ -5431,90 +5509,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.runtime_capabilities?.can_retire_members === true &&
       restartOffered(agent);
     return (
-      <div
-        className="console-panel"
-        data-testid={`inspect-panel:${target.identity}`}
+      <AgentDetailsPanel
+        identity={target.identity}
+        inspect={inspect}
+        agent={agent}
+        stateLabel={inspect ? identityStateLabel(inspect) : null}
+        actions={{
+          respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
+          reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
+          retire: canRetire ? { label: configuredActionLabels.retire, onClick: () => void onLifecycleAction(target.identity, "meta/retire") } : undefined,
+        }}
       >
-        <div className="console-panel__header">
-          <h3>{target.identity}</h3>
-          <div className="console-panel__actions">
-            {canRespawn ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:respawn`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/respawn")
-                }
-              >
-                {configuredActionLabels.respawn}
-              </button>
-            ) : null}
-            {canReset ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:reset`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/reset")
-                }
-              >
-                {configuredActionLabels.reset}
-              </button>
-            ) : null}
-            {canRetire ? (
-              <button
-                data-testid={`inspect-action:${target.identity}:retire`}
-                type="button"
-                onClick={() =>
-                  void onLifecycleAction(target.identity, "meta/retire")
-                }
-              >
-                {configuredActionLabels.retire}
-              </button>
-            ) : null}
-          </div>
-        </div>
-        {!inspect ? (
-          <p>Loading identity details…</p>
-        ) : (
-          <dl className="console-panel__grid">
-            <dt>State</dt>
-            <dd data-testid={`inspect-state:${target.identity}`}>
-              {identityStateLabel(inspect)}
-            </dd>
-            {inspect.session_repair ? (
-              <>
-                <dt>Repair</dt>
-                <dd data-testid={`inspect-session-repair:${target.identity}`}>
-                  <p>
-                    The durable session is intact but refused until it is
-                    repaired. Run the diagnose command, then the repair
-                    command, then reload the member (meta/reload_member).
-                  </p>
-                  <code data-testid="inspect-session-repair-diagnose">
-                    {inspect.session_repair.diagnose_command}
-                  </code>
-                  <code data-testid="inspect-session-repair-apply">
-                    {inspect.session_repair.apply_command}
-                  </code>
-                </dd>
-              </>
-            ) : null}
-            <dt>Role</dt>
-            <dd>{inspect.role || "n/a"}</dd>
-            <dt>Addressability</dt>
-            <dd>{inspect.addressability}</dd>
-            <dt>Generation</dt>
-            <dd>{inspect.continuity?.generation ?? "n/a"}</dd>
-            <dt>Session</dt>
-            <dd>{inspect.continuity?.session_id || "n/a"}</dd>
-            <dt>Runtime</dt>
-            <dd>{inspect.continuity?.agent_runtime_id || "n/a"}</dd>
-            <dt>Peers</dt>
-            <dd>{inspect.topology_peers?.join(", ") || "none"}</dd>
-            <dt>Output Preview</dt>
-            <dd>{inspect.output_preview || "n/a"}</dd>
-          </dl>
-        )}
         {scheduleOffer.list ? (
           <SchedulesSection
             key={target.identity}
@@ -5529,22 +5534,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             run={(command, params) => runScheduleCommand(target.identity, command, params)}
           />
         ) : null}
-      </div>
+      </AgentDetailsPanel>
     );
   }
 
   function renderHealthPanel(identities: IdentityStatusRow[]) {
     return (
-      <div className="console-panel" data-testid="health-panel">
-        <ul className="console-panel__list">
-          {identities.map((r) => (
-            <li data-testid={`health-identity:${r.identity}`} key={r.identity}>
-              <strong>{r.display_name || r.identity}</strong> · {identityStateLabel(r)} ·{" "}
-              {r.addressability}
-            </li>
-          ))}
-        </ul>
-      </div>
+      <HealthPanel
+        identities={identities}
+        stateLabel={identityStateLabel}
+        canOpen={(identity) => agents.some((candidate) => candidate.identity === identity || candidate.member_id === identity)}
+        onOpen={(identity) => {
+          const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
+          if (agent) handleShowRosterDetails(agent);
+        }}
+      />
     );
   }
 
@@ -5593,7 +5597,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     target?: MetaDockTarget | null;
   }) {
     const target = panel.target as MetaDockTarget | null;
-    if (!target) return <div className="console-panel">No panel target</div>;
+    if (!target) return (
+      <PanelShell>
+        <EmptyState kind="unavailable" title="Nothing to show here" body="This pane has no panel. Pick one from the sidebar." />
+      </PanelShell>
+    );
     if (target.kind === "custom/panel") return <ConsoleCustomPanel target={target} focused={dock.viewState.focusedPanelId === panel.id} />;
     if (target.kind === "agent-chat") return renderChatPanel(panel);
     if (target.kind === "operator-panel") {
@@ -5609,9 +5617,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       !hasMobControlSurface
     ) {
       return (
-        <div className="console-panel">
-          This view requires a mob runtime control surface.
-        </div>
+        <PanelShell>
+          <EmptyState
+            kind="unavailable"
+            title="Not available on this runtime"
+            body="This view needs a runtime that manages a team of agents."
+          />
+        </PanelShell>
       );
     }
     if (target.kind === "routing") return <RoutingPanel data={routingData} />;
@@ -5622,6 +5634,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
+          auditUpdatedAtMs={gatingData.updatedAtMs}
+          auditError={gatingAuditError}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5638,6 +5653,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onConnectionSourceChange={setTopologyConnectionSourceId}
           onRequestMutation={(intent) => onTopologyMutation(intent)}
           onRetryOperation={(receipt) => onRetryTopologyOperation(receipt)}
+          onSelectAgent={(id) => {
+            const agent = topologyNodeAgent(agents, id);
+            if (agent) openAgentBesideTopology(agent, panel.id);
+          }}
+          // No console or sidebar title here: those name the console, not the
+          // team. The experience carries no team display name, so the Roles
+          // root reads "Team".
         />
       );
     if (target.kind === "health")
@@ -5674,13 +5696,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
+          auditUpdatedAtMs={gatingData.updatedAtMs}
+          auditError={gatingAuditError}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
         />
       );
     if (target.kind === "logs")
-      return <LogsPanel frames={activityRef.current} />;
+      return <LogsPanel frames={activityRef.current} agentDirectory={agentDirectory} />;
     if (target.kind === "access")
       return (
         <AccessPanel
@@ -5692,7 +5717,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={frontendReadOnly || experience?.console_policy?.read_only === true}
           agents={agents.map((agent) => ({
             identity: agent.identity || agent.member_id,
-            label: agent.label,
+            label: agentDisplayTitle(agent),
           }))}
           onRefresh={() => void refreshAccessData()}
           onSetEnabled={(enabled, base) =>
@@ -5723,8 +5748,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "memory")
-      return runtimeScopedPanel("memory",
+      return runtimeScopedPanel("memory", (runtimeControl) =>
         <MemoryPanel
+          runtimeControl={runtimeControl}
           records={memoryData.records}
           realms={memoryData.realms}
           quarantineRecords={memoryData.quarantineRecords}
@@ -5787,8 +5813,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     if (target.kind === "workgraph") {
       const workGraphPanelHandlers = makeWorkGraphOperatorHandlers();
-      return runtimeScopedPanel("workgraph",
+      return runtimeScopedPanel("workgraph", (runtimeControl) =>
         <WorkGraphPanel
+          runtimeControl={runtimeControl}
           data={workGraphData}
           canManage={canManageWorkGraph}
           onRefresh={() => void refreshWorkGraphData()}
@@ -5802,12 +5829,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     }
-    return <div className="console-panel">Unsupported panel</div>;
+    return (
+      <PanelShell>
+        <EmptyState kind="unavailable" title="This panel isn't available in this console" />
+      </PanelShell>
+    );
   }
 
   return (
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
+    <AgentDirectoryProvider directory={agentDirectory}>
     <div
       className="cc-theme-scope meta-shell"
       data-cc-theme={theme}
@@ -5864,6 +5896,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenCustomPanel={openCustomPanel}
           grouping={experience?.console_config?.agent_list}
           storageNamespace={sidebarStorageNamespace}
+          preferenceScope={sidebarPreferenceScope}
           pinnedAgentIds={pinnedAgentIds}
           onSelect={selectSidebarAgent}
           onTogglePinnedAgent={togglePinnedAgent}
@@ -5921,6 +5954,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               }
               emptyText={railConfig?.empty_text}
               watchedIdentities={watchedIdentities}
+              agentDirectory={agentDirectory}
               onPresetChange={setActiveActivityPresetId}
               onSelect={experience?.memory?.can_read === true ? selectRailFrame : undefined}
             />
@@ -5928,6 +5962,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>
   );

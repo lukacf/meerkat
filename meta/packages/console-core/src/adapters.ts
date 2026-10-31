@@ -1,3 +1,4 @@
+import { agentDisplayTitle } from "./agent-title";
 import { operationFeedbackFromFrame } from "./operation-feedback";
 import { mcpAppEntryFromFrame } from "./mcp-app-projection";
 import { assistantPresentationEntries, conversationPresentationRows } from "./assistant-presentation";
@@ -176,7 +177,7 @@ export function buildDockTarget(agent: ConsoleAgent): AgentChatTarget {
     addressingMode: "identity",
     memberId: agent.member_id,
     identity,
-    title: agent.label,
+    title: agentDisplayTitle(agent),
     subtitle,
     iconName: "i-team",
   };
@@ -188,7 +189,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
     kind: "identity-inspect",
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
-    title: `${agent.label} Details`,
+    title: `${agentDisplayTitle(agent)} Details`,
     subtitle: agent.identity || agent.member_id,
     iconName: "i-terminal",
   };
@@ -305,7 +306,7 @@ export function buildSidebarViewState(args: {
       const watchFields = normalizeSidebarWatchFields(agent);
       return {
         id: agent.member_id,
-        title: agent.label,
+        title: agentDisplayTitle(agent),
         subtitle: agent.identity || agent.member_id,
         selected: agent.member_id === selectedMemberId,
         pinned: isPinned,
@@ -385,7 +386,7 @@ const USER_IDENTITY: ConversationIdentity = {
 function agentIdentity(agent: ConsoleAgent | null): ConversationIdentity {
   return {
     id: agent?.member_id || "agent",
-    label: agent?.label || "Agent",
+    label: agent ? agentDisplayTitle(agent) : "Agent",
     role: "assistant",
   };
 }
@@ -481,10 +482,10 @@ export function describeMemoryTimelineEvent(
       const ops = memoryNumber(data, "ops_committed");
       const detail = memoryString(data, "detail");
       const opsText = ops !== null ? `${ops} op${ops === 1 ? "" : "s"} committed` : "completed";
-      return `Dream ${opsText}${detail ? ` — ${detail}` : ""}`;
+      return `Dream ${opsText}${detail ? ` · ${detail}` : ""}`;
     }
     case "memory.dream.skipped":
-      return `Dream skipped${memoryString(data, "reason") ? ` — ${memoryString(data, "reason")}` : ""}`;
+      return `Dream skipped${memoryString(data, "reason") ? ` · ${memoryString(data, "reason")}` : ""}`;
     case "memory.record.promoted": {
       const scope = memoryScopeLabel(data);
       const gated = data.gated === true ? " (gated)" : "";
@@ -493,26 +494,26 @@ export function describeMemoryTimelineEvent(
     case "memory.quarantine.verdict": {
       const verdict = memoryString(data, "verdict") || "decided";
       const rationale = memoryString(data, "rationale");
-      return `Quarantine verdict: ${verdict}${rationale ? ` — ${rationale}` : ""}`;
+      return `Quarantine verdict: ${verdict}${rationale ? ` · ${rationale}` : ""}`;
     }
     case "memory.quarantine.release_blocked": {
       const verdict = memoryString(data, "verdict");
       const action = verdict === "promote_pending_gate" ? "promotion" : verdict || "release";
       const record = memoryString(data, "record_id");
       const cls = memoryString(data, "class");
-      return `Quarantine ${action} blocked${record ? ` for ${record}` : ""}${cls ? ` — matches secret pattern ${cls}` : ""}`;
+      return `Quarantine ${action} blocked${record ? ` for ${record}` : ""}${cls ? ` · matches secret pattern ${cls}` : ""}`;
     }
     case "memory.conflict.signal": {
       const entity = memoryString(data, "entity");
       const topic = memoryString(data, "topic");
       const subject = [entity, topic].filter(Boolean).join(" / ");
       const reason = memoryString(data, "reason");
-      return `Conflict signal${subject ? ` on ${subject}` : ""}${reason ? ` — ${reason}` : ""}`;
+      return `Conflict signal${subject ? ` on ${subject}` : ""}${reason ? ` · ${reason}` : ""}`;
     }
     case "memory.write.quarantined": {
       const author = memoryString(data, "author");
       const reason = memoryString(data, "reason");
-      return `Write quarantined${author ? ` from ${author}` : ""}${reason ? ` — ${reason}` : ""}`;
+      return `Write quarantined${author ? ` from ${author}` : ""}${reason ? ` · ${reason}` : ""}`;
     }
     case "memory.taint.transition": {
       const kind = memoryString(data, "kind") || "changed";
@@ -532,7 +533,7 @@ export function describeMemoryTimelineEvent(
     case "memory.budget.denied": {
       const stage = memoryString(data, "stage");
       const reason = memoryString(data, "reason");
-      return `Budget denied${stage ? ` at ${stage}` : ""}${reason ? ` — ${reason}` : ""}`;
+      return `Budget denied${stage ? ` at ${stage}` : ""}${reason ? ` · ${reason}` : ""}`;
     }
     case "memory.promotion.pending_gate": {
       const scope = memoryScopeLabel(data);
@@ -545,12 +546,12 @@ export function describeMemoryTimelineEvent(
       if (promoted !== null) parts.push(`${promoted} promoted`);
       if (tombstoned !== null) parts.push(`${tombstoned} tombstoned`);
       const identity = memoryString(data, "identity");
-      return `Harvest completed${parts.length ? ` — ${parts.join(", ")}` : ""}${identity ? ` (${identity})` : ""}`;
+      return `Harvest completed${parts.length ? ` · ${parts.join(", ")}` : ""}${identity ? ` (${identity})` : ""}`;
     }
     case "memory.distill.timed_out": {
       const cause = memoryString(data, "cause");
       const session = memoryString(data, "session_key");
-      return `Distill timed out${cause ? ` — ${cause}` : ""}${session ? ` (${session})` : ""}`;
+      return `Distill timed out${cause ? ` · ${cause}` : ""}${session ? ` (${session})` : ""}`;
     }
     case "memory.hygiene.proposed":
     case "memory.hygiene.applied":
@@ -564,7 +565,7 @@ export function describeMemoryTimelineEvent(
         reason ||
         (ops !== null ? `${ops} op${ops === 1 ? "" : "s"}` : "") ||
         cause;
-      return `Hygiene ${phase}${detail ? ` — ${detail}` : ""}`;
+      return `Hygiene ${phase}${detail ? ` · ${detail}` : ""}`;
     }
     default: {
       // Unknown memory.* subtype: humanized name + best-effort short reason.
@@ -573,7 +574,7 @@ export function describeMemoryTimelineEvent(
         memoryString(data, "detail") ||
         memoryString(data, "cause") ||
         memoryString(data, "verdict");
-      return `${humanizeMemoryEvent(event)}${reason ? ` — ${reason}` : ""}`;
+      return `${humanizeMemoryEvent(event)}${reason ? ` · ${reason}` : ""}`;
     }
   }
 }
@@ -4756,7 +4757,7 @@ export function buildActivityRailViewState(args: {
         : "";
       return {
         id: `event:${frame.id || index}`,
-        title: agent?.label || frameIdentity || frame.event || "event",
+        title: agent ? agentDisplayTitle(agent) : frameIdentity ? agentDisplayTitle({ label: frameIdentity, identity: frameIdentity }) : frame.event || "event",
         line: summarizeFrameData(frame.data).slice(0, 120) || frame.event,
         meta: `${frame.event}${ts ? ` · ${ts}` : ""}`,
         ...(agent ? { focusId: agent.member_id } : {}),

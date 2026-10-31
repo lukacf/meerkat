@@ -1,6 +1,32 @@
 import React from "react";
 import type { ConsoleAgent } from "../types";
+import { agentDisplayTitle, responsePhaseWords } from "../lib/agents";
 import { restartOffered } from "../lib/side-chat";
+import { bucketOf } from "./Sidebar";
+import {
+  AgentAvatar,
+  AgentName,
+  Button,
+  Chip,
+  EmptyState,
+  KeyValueList,
+  ListRow,
+  PanelHeader,
+  PanelSection,
+  PanelShell,
+  RelativeTime,
+  RowList,
+  SearchField,
+  SegmentedControl,
+  SplitDetail,
+  StatusDot,
+  TechnicalDetails,
+  humanizeEnum,
+  joinMeta,
+  plural,
+  type SegmentOption,
+  type Tone,
+} from "../../../packages/console-components/src/panel-kit";
 
 interface RosterPanelProps {
   agents: ConsoleAgent[];
@@ -26,30 +52,98 @@ interface RosterPanelProps {
   };
 }
 
-const ROLE_BUCKETS = ["all", "personal", "coordinator", "domain", "internal"] as const;
-type Role = typeof ROLE_BUCKETS[number];
+type Bucket = ReturnType<typeof bucketOf>;
+type Filter = "all" | Bucket;
+const BUCKET_ORDER: Bucket[] = ["Personal", "Coordinators", "Domains", "Internal", "Other"];
 
-function roleOf(a: ConsoleAgent): Role {
-  const p = (a.role || a.kind || "").toLowerCase();
-  const g = (a.group || "").toLowerCase();
-  if (p.includes("personal") || g.includes("personal")) return "personal";
-  if (p.includes("coord") || p.includes("triage") || p.includes("router")) return "coordinator";
-  if (p.includes("monitor") || p.includes("scribe") || p.includes("gate")) return "internal";
-  return "domain";
+const RETIRED_STATES = new Set(["retired", "retiring", "stopped", "completed"]);
+
+function stateWord(agent: ConsoleAgent): string {
+  return (agent.state || "").trim().toLowerCase();
 }
 
-function stateLabel(state?: string): string {
-  return (state || "unknown").toLowerCase();
+function isRetired(agent: ConsoleAgent): boolean {
+  return RETIRED_STATES.has(stateWord(agent));
 }
 
-function displayPeer(peer: unknown): string {
-  if (typeof peer === "string") return peer.split("/").pop() || peer;
+function isWorking(agent: ConsoleAgent): boolean {
+  if (isRetired(agent)) return false;
+  return Boolean(agent.response_phase) || agent.progress?.run_state === "run_open";
+}
+
+/** A health problem worth a chip: degraded or stalled (wedged), or broken. */
+export function rosterHealthChip(agent: ConsoleAgent): { label: string; tone: Tone } | null {
+  if (isRetired(agent)) return null;
+  if (stateWord(agent) === "broken") return { label: "Broken", tone: "crit" };
+  const health = agent.progress?.health;
+  if (health === "wedged") return { label: "Stalled", tone: "crit" };
+  if (health === "degraded") return { label: "Degraded", tone: "warn" };
+  return null;
+}
+
+export function rosterDotTone(agent: ConsoleAgent): Tone {
+  if (isRetired(agent)) return "neutral";
+  const chip = rosterHealthChip(agent);
+  if (chip) return chip.tone;
+  const state = stateWord(agent);
+  if (state === "active" || isWorking(agent)) return "ok";
+  return "neutral";
+}
+
+/** What the agent is doing, in words: "writing a reply", "idle", "retired". */
+export function rosterActivity(agent: ConsoleAgent): string {
+  const state = stateWord(agent);
+  if (state === "retiring") return "retiring";
+  if (isRetired(agent)) return "retired";
+  if (state === "broken") return "needs attention";
+  // A wedged agent still has its run open; it is stuck, not working.
+  if (agent.progress?.health === "wedged") return "stalled";
+  const phase = responsePhaseWords(agent.response_phase);
+  if (phase) return phase;
+  const progress = agent.progress;
+  if (progress?.run_state === "run_open") {
+    return progress.in_flight_work > 1 ? `working on ${progress.in_flight_work} tasks` : "working";
+  }
+  if (progress?.run_state === "idle") return "idle";
+  return state === "active" ? "ready" : "";
+}
+
+function roleWords(agent: ConsoleAgent): string {
+  return humanizeEnum(agent.role || agent.kind || "");
+}
+
+function lastChange(agent: ConsoleAgent): { words: string; at: number | null } {
+  const progress = agent.progress;
+  const at = progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
+  // A stalled agent is stuck, not working: name only when it last moved.
+  if (progress?.health === "wedged") return { words: at ? "Last progress" : "", at };
+  switch (progress?.last_progress_event) {
+    case "execution_advanced":
+      return { words: "Made progress", at };
+    case "became_idle":
+      return { words: "Finished and went idle", at };
+    case "became_busy":
+      return { words: "Started working", at };
+    default:
+      return { words: at ? "Last seen" : "", at };
+  }
+}
+
+function peerKey(peer: unknown): string {
+  if (typeof peer === "string") return peer.trim();
   if (peer && typeof peer === "object") {
     const record = peer as Record<string, unknown>;
-    const value = record.label ?? record.display_name ?? record.name ?? record.identity ?? record.member_id ?? record.id;
-    if (typeof value === "string") return value.split("/").pop() || value;
+    const value = record.identity ?? record.member_id ?? record.id ?? record.label ?? record.display_name ?? record.name;
+    if (typeof value === "string") return value.trim();
   }
   return "";
+}
+
+function findAgent(agents: ConsoleAgent[], key: string): ConsoleAgent | undefined {
+  const bare = key.split("/").pop() || key;
+  return agents.find((agent) =>
+    agent.identity === key || agent.member_id === key || agent.agent_id === key
+    || agent.identity === bare || agent.member_id === bare);
 }
 
 export function RosterPanel({
@@ -63,147 +157,253 @@ export function RosterPanel({
   actionLabels,
   actionVisibility,
 }: RosterPanelProps): React.JSX.Element {
-  const [q, setQ] = React.useState("");
-  const [role, setRole] = React.useState<Role>("all");
+  const [query, setQuery] = React.useState("");
+  const [filter, setFilter] = React.useState<Filter>("all");
   const [sel, setSel] = React.useState<string>(agents[0]?.member_id || "");
+  // In a narrow pane the detail replaces the list only once someone opens it.
+  const [detailOpen, setDetailOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (selectedMemberId) setSel(selectedMemberId);
   }, [selectedMemberId]);
 
-  const rows = React.useMemo(() => {
-    return agents.filter((a) => {
-      if (role !== "all" && roleOf(a) !== role) return false;
-      if (!q) return true;
-      const hay = `${a.label} ${a.member_id} ${a.identity || ""} ${a.role || ""} ${a.kind || ""}`.toLowerCase();
-      return hay.includes(q.toLowerCase());
-    });
-  }, [agents, q, role]);
+  const buckets = React.useMemo(() => {
+    const counts = new Map<Bucket, number>();
+    for (const agent of agents) counts.set(bucketOf(agent), (counts.get(bucketOf(agent)) || 0) + 1);
+    return BUCKET_ORDER.filter((bucket) => counts.has(bucket)).map((bucket) => ({ bucket, count: counts.get(bucket) || 0 }));
+  }, [agents]);
 
-  const active = rows.find((r) => r.member_id === sel) || rows[0];
+  const rows = React.useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return agents.filter((agent) => {
+      if (filter !== "all" && bucketOf(agent) !== filter) return false;
+      if (!needle) return true;
+      const hay = `${agentDisplayTitle(agent)} ${agent.label} ${agent.role || ""} ${agent.kind || ""} ${agent.member_id} ${agent.identity || ""}`.toLowerCase();
+      return hay.includes(needle);
+    });
+  }, [agents, query, filter]);
+
+  const active = rows.find((row) => row.member_id === sel) || rows[0];
   const activeIdentity = active?.identity || active?.member_id || "";
-  const activePeers = (active?.wired_to || []).map(displayPeer).filter(Boolean);
+  const attention = agents.filter((agent) => rosterHealthChip(agent) !== null).length;
+  const activeCount = agents.filter((agent) => !isRetired(agent) && stateWord(agent) !== "broken").length;
+
+  const select = (agent: ConsoleAgent) => {
+    setSel(agent.member_id);
+    setDetailOpen(true);
+    onSelect(agent);
+  };
+
+  const filters: SegmentOption<Filter>[] = [
+    { id: "all", label: "All" },
+    ...buckets.map(({ bucket }) => ({ id: bucket, label: bucket })),
+  ];
+
+  const list = rows.length === 0 ? (
+    agents.length === 0 ? (
+      <EmptyState title="No agents yet" body="Agents appear here once a team is running." />
+    ) : (
+      <EmptyState
+        kind="filtered"
+        title={query.trim() ? `No agents match "${query.trim()}"` : "No agents in this group"}
+        action={<Button size="sm" onClick={() => { setQuery(""); setFilter("all"); }}>Clear</Button>}
+      />
+    )
+  ) : (
+    <RowList className="roster__rows">
+      {rows.map((agent) => {
+        const chip = rosterHealthChip(agent);
+        const at = agent.progress && agent.progress.last_progress_at_ms > 0 ? agent.progress.last_progress_at_ms : null;
+        return (
+          <ListRow
+            key={agent.member_id}
+            testId={`roster-row:${agent.member_id}`}
+            className="roster__row"
+            dataAttributes={{ "data-state": stateWord(agent) || "unknown", "data-health": agent.progress?.health || undefined }}
+            selected={Boolean(active && agent.member_id === active.member_id)}
+            onActivate={() => select(agent)}
+            lead={<StatusDot tone={rosterDotTone(agent)} live={isWorking(agent) && !chip} />}
+            title={agentDisplayTitle(agent)}
+            titleAttr={agent.identity || agent.member_id}
+            subtitle={joinMeta(roleWords(agent), rosterActivity(agent)) || undefined}
+            meta={
+              <>
+                {chip ? <Chip tone={chip.tone}>{chip.label}</Chip> : null}
+                {at ? <RelativeTime value={at} /> : null}
+              </>
+            }
+          />
+        );
+      })}
+    </RowList>
+  );
+
+  const detail = active ? (
+    <RosterDetail
+      agent={active}
+      agents={agents}
+      identity={activeIdentity}
+      canResetLifecycle={canResetLifecycle}
+      actionLabels={actionLabels}
+      actionVisibility={actionVisibility}
+      onChat={onChat}
+      onDetails={onDetails}
+      onLifecycle={onLifecycle}
+      onSelectPeer={select}
+    />
+  ) : null;
 
   return (
-    <div className="view roster" data-testid="roster-panel">
-      <div className="view__head">
-        <h2>Roster</h2>
-        <span className="view__sub">{rows.length} of {agents.length} agents</span>
-        <span className="view__spacer" />
-        <input
-          className="view__search"
-          placeholder="Filter agents, profiles, ids…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        <div className="view__segs">
-          {ROLE_BUCKETS.map((r) => (
-            <button key={r} className={role === r ? "is-active" : ""} onClick={() => setRole(r)}>{r}</button>
-          ))}
+    <PanelShell className="roster" testId="roster-panel">
+      <PanelHeader
+        title="Roster"
+        subtitle={joinMeta(
+          plural(agents.length, "agent"),
+          `${activeCount} active`,
+          attention ? `${attention} need${attention === 1 ? "s" : ""} attention` : "",
+        )}
+        actions={
+          <>
+            <SearchField label="Search agents" placeholder="Search agents" value={query} onChange={setQuery} />
+            {filters.length > 2 ? (
+              <SegmentedControl ariaLabel="Agent groups" value={filter} onChange={setFilter} options={filters} />
+            ) : null}
+          </>
+        }
+      />
+      <SplitDetail
+        className="roster__split"
+        list={list}
+        detail={detail}
+        detailOpen={detailOpen && Boolean(active)}
+        onBack={() => setDetailOpen(false)}
+        backLabel="All agents"
+        emptyDetail={<EmptyState inline title="Select an agent to see its details." />}
+      />
+    </PanelShell>
+  );
+}
+
+function RosterDetail({
+  agent,
+  agents,
+  identity,
+  canResetLifecycle,
+  actionLabels,
+  actionVisibility,
+  onChat,
+  onDetails,
+  onLifecycle,
+  onSelectPeer,
+}: {
+  agent: ConsoleAgent;
+  agents: ConsoleAgent[];
+  identity: string;
+  canResetLifecycle: boolean;
+  actionLabels: RosterPanelProps["actionLabels"];
+  actionVisibility: RosterPanelProps["actionVisibility"];
+  onChat: (agent: ConsoleAgent) => void;
+  onDetails: (agent: ConsoleAgent) => void;
+  onLifecycle: RosterPanelProps["onLifecycle"];
+  onSelectPeer: (agent: ConsoleAgent) => void;
+}) {
+  const title = agentDisplayTitle(agent);
+  const chip = rosterHealthChip(agent);
+  const activity = rosterActivity(agent);
+  const change = lastChange(agent);
+  const inFlight = agent.progress?.in_flight_work ?? 0;
+  const peers = (agent.wired_to || []).map(peerKey).filter(Boolean);
+  const showRespawn = actionVisibility?.respawn !== false && agent.affordances?.can_respawn && restartOffered(agent);
+  const showReset = actionVisibility?.reset !== false && canResetLifecycle && restartOffered(agent);
+  const showRetire = actionVisibility?.retire !== false && agent.affordances?.can_retire;
+  return (
+    <div className="roster__detail" data-testid={`roster-detail:${agent.member_id}`}>
+      <div className="roster__detail-head">
+        <AgentAvatar name={title} size={28} />
+        <div className="roster__detail-name">
+          <h3 title={identity}>{title}</h3>
+          <div className="roster__detail-role">{joinMeta(humanizeEnum(agent.role || agent.kind || ""), agent.group ? humanizeEnum(agent.group) : "")}</div>
         </div>
+        {chip ? <Chip tone={chip.tone}>{chip.label}</Chip> : null}
       </div>
-      <div className="roster__body">
-        <div className="roster__table">
-          <div className="roster__row roster__row--head">
-            <span>Name</span><span>Role</span><span>State</span><span>Profile</span><span>Gen</span>
-          </div>
-          {rows.map((r) => {
-            const isSel = active && r.member_id === active.member_id;
-            return (
-              <div
-                key={r.member_id}
-                className={`roster__row ${isSel ? "is-selected" : ""}`}
-                data-state={stateLabel(r.state)}
-                data-health={r.progress?.health || undefined}
-                onClick={() => { setSel(r.member_id); onSelect(r); }}
-                data-testid={`roster-row:${r.member_id}`}
-              >
-                <span className="roster__name">
-                  <span className="roster__dot" />
-                  <span>
-                    <div>{r.label}</div>
-                    <div className="roster__id">{r.identity || r.member_id}</div>
-                  </span>
-                </span>
-                <span>{roleOf(r)}</span>
-                <span className="roster__state">{stateLabel(r.state)}</span>
-                <span className="mono dim">{r.role || "—"}</span>
-                <span className="mono">{r.generation ?? "—"}</span>
-              </div>
-            );
-          })}
+      <div className="roster__actions">
+        <div className="cc-btn-row">
+          {actionVisibility?.chat !== false ? (
+            <Button variant="primary" onClick={() => onChat(agent)}>{actionLabels?.chat || "Open chat"}</Button>
+          ) : null}
+          {actionVisibility?.inspect !== false ? (
+            <Button onClick={() => onDetails(agent)}>{actionLabels?.inspect || "Details"}</Button>
+          ) : null}
         </div>
-        <aside className="roster__detail">
-          {active && (
-            <>
-              <div className="rd__head">
-                <div className="rd__title">{active.label}</div>
-                <div className="rd__id">{active.identity || active.member_id}</div>
-                <div className="rd__tags">
-                  {[active.role, active.kind, roleOf(active)].filter(Boolean).map((t) => (
-                    <span key={String(t)} className="chip">{String(t)}</span>
-                  ))}
-                </div>
-              </div>
-              <dl className="rd__grid">
-                <dt>Profile</dt><dd>{active.role || "—"}</dd>
-                <dt>Kind</dt><dd>{active.kind || "—"}</dd>
-                <dt>Role</dt><dd>{roleOf(active)}</dd>
-                <dt>State</dt><dd><span className="roster__state">{stateLabel(active.state)}</span></dd>
-                <dt>Member</dt><dd className="mono">{active.member_id}</dd>
-                <dt>Identity</dt><dd className="mono">{active.identity || "—"}</dd>
-                <dt>Session</dt><dd className="mono">{active.session_id || "—"}</dd>
-                <dt>Generation</dt><dd className="mono">{active.generation ?? "—"}</dd>
-                {active.progress && (
-                  <>
-                    <dt>Health</dt>
-                    <dd>
-                      <span
-                        className="roster__state"
-                        data-health={active.progress.health}
-                      >
-                        {active.progress.health}
-                      </span>
-                    </dd>
-                    <dt>Run state</dt><dd className="mono">{active.progress.run_state}</dd>
-                    <dt>In flight</dt><dd className="mono">{active.progress.in_flight_work}</dd>
-                    <dt>Last progress</dt>
-                    <dd className="mono dim">
-                      {active.progress.last_progress_at_ms > 0
-                        ? `${new Date(active.progress.last_progress_at_ms).toLocaleTimeString()} (${active.progress.last_progress_event})`
-                        : active.progress.last_progress_event}
-                    </dd>
-                  </>
-                )}
-                <dt>Wired</dt>
-                <dd>
-                  {activePeers.length > 0 ? (
-                    <span className="rd__peers">
-                      {activePeers.map((peer) => (
-                        <span className="chip" key={peer}>{peer}</span>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="mono dim">none</span>
-                  )}
-                </dd>
-              </dl>
-              <div className="rd__actions">
-                {actionVisibility?.inspect !== false ? <button onClick={() => onDetails(active)}>{actionLabels?.inspect || "Details"}</button> : null}
-                {actionVisibility?.chat !== false ? <button onClick={() => onChat(active)}>{actionLabels?.chat || "Open chat"}</button> : null}
-                {actionVisibility?.respawn !== false && active.affordances?.can_respawn && restartOffered(active) ? (
-                  <button onClick={() => onLifecycle(activeIdentity, "meta/respawn")}>{actionLabels?.respawn || "Respawn"}</button>
-                ) : null}
-                {actionVisibility?.reset !== false && canResetLifecycle && restartOffered(active) ? (
-                  <button onClick={() => onLifecycle(activeIdentity, "meta/reset")}>{actionLabels?.reset || "Reset"}</button>
-                ) : null}
-                {actionVisibility?.retire !== false && active.affordances?.can_retire ? (
-                  <button className="danger" onClick={() => onLifecycle(activeIdentity, "meta/retire")}>{actionLabels?.retire || "Retire"}</button>
-                ) : null}
-              </div>
-            </>
-          )}
-        </aside>
+        {showRespawn || showReset || showRetire ? (
+          <div className="cc-btn-row" role="group" aria-label="Lifecycle">
+            {showRespawn ? (
+              <Button size="sm" onClick={() => onLifecycle(identity, "meta/respawn")}>{actionLabels?.respawn || "Respawn"}</Button>
+            ) : null}
+            {showReset ? (
+              <Button size="sm" onClick={() => onLifecycle(identity, "meta/reset")}>{actionLabels?.reset || "Reset"}</Button>
+            ) : null}
+            {showRetire ? (
+              <Button size="sm" variant="danger" onClick={() => onLifecycle(identity, "meta/retire")}>{actionLabels?.retire || "Retire"}</Button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <PanelSection label="Now" headerAs="div" padded>
+        <KeyValueList
+          items={[
+            { label: "Status", value: activity ? activity.charAt(0).toUpperCase() + activity.slice(1) : humanizeEnum(agent.state || "unknown") },
+            agent.progress ? { label: "In flight", value: inFlight === 0 ? "Nothing" : plural(inFlight, "task") } : null,
+            change.words
+              ? {
+                  label: "Last change",
+                  value: (
+                    <>
+                      {change.words}
+                      {change.at ? <>{", "}<RelativeTime value={change.at} /></> : null}
+                    </>
+                  ),
+                }
+              : null,
+            agent.addressable === false ? { label: "Reachability", value: "Internal only" } : null,
+          ]}
+        />
+      </PanelSection>
+      {peers.length ? (
+        <PanelSection label="Connected to" count={peers.length} headerAs="div" padded>
+          <div className="cc-chips roster__peers">
+            {peers.map((peer) => {
+              const target = findAgent(agents, peer);
+              return target ? (
+                <button
+                  key={peer}
+                  type="button"
+                  className="roster__peer"
+                  onClick={() => onSelectPeer(target)}
+                  title={peer}
+                >
+                  <AgentName id={target.identity || target.member_id} avatar={18} />
+                </button>
+              ) : (
+                <span key={peer} className="roster__peer is-static">
+                  <AgentName id={peer} />
+                </span>
+              );
+            })}
+          </div>
+        </PanelSection>
+      ) : null}
+      <div className="roster__tech">
+        <TechnicalDetails
+          items={[
+            { label: "Identity", value: agent.identity },
+            agent.member_id !== agent.identity ? { label: "Member", value: agent.member_id } : null,
+            { label: "Session", value: agent.session_id },
+            typeof agent.generation === "number" ? { label: "Generation", value: agent.generation } : null,
+            { label: "Kind", value: agent.kind, plain: true },
+            { label: "Profile", value: agent.role, plain: true },
+          ]}
+        />
       </div>
     </div>
   );

@@ -8,6 +8,7 @@ import {
   layoutWorkGraph,
   workGraphEdgeMidpoint,
   workGraphEdgePath,
+  workGraphEdgeWord,
 } from "./workgraph-layout";
 import type { WorkGraphWireItem } from "../types";
 
@@ -152,7 +153,7 @@ test("workgraph layout carries status, owner, priority, and blocked onto nodes",
   const stuck = layout.nodes.find((node) => node.itemId === "stuck");
   assert.equal(busy?.status, "in_progress");
   assert.equal(busy?.priority, "high");
-  assert.equal(busy?.ownerLabel, "helper");
+  assert.equal(busy?.ownerLabel, "Helper");
   assert.equal(busy?.blocked, false);
   assert.equal(stuck?.blocked, true);
 });
@@ -224,4 +225,12 @@ test("dependency edges preserve structural parent placement and cycles remain de
   assert.equal(cyclic.edges.length, 2);
   assert.deepEqual(layoutWorkGraph(items.slice().reverse(), cycle.slice().reverse()).nodes, cyclic.nodes);
   assert.ok(cyclic.width < WORKGRAPH_GRAPH_COL_WIDTH * items.length && Number.isFinite(cyclic.height));
+});
+
+test("workgraph links read in words, never as raw kinds", () => {
+  assert.equal(workGraphEdgeWord("blocks"), "blocks");
+  assert.equal(workGraphEdgeWord("related"), "related");
+  assert.equal(workGraphEdgeWord("supersedes"), "replaces");
+  assert.equal(workGraphEdgeWord("derived_from"), "derived from");
+  assert.equal(workGraphEdgeWord("duplicate_of"), "duplicate of");
 });

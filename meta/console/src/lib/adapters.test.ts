@@ -5,6 +5,8 @@ import { normalizePendingApproval as normalizePendingApprovalForInputTest, appro
 import {
   appendOptimisticConversationEntry,
   buildActivityRailViewState,
+  buildDockTarget,
+  buildInspectTarget,
   buildQuickPromptSuggestions,
   buildRoutingSectionView,
   buildSidebarViewState,
@@ -7277,17 +7279,17 @@ test("memory timeline events render as clean meta entries, never raw JSON", () =
 test("describeMemoryTimelineEvent produces clean lines for every documented subtype", () => {
   const cases: Array<[string, Record<string, unknown>, RegExp]> = [
     ["memory.dream.started", { run_id: "run-1" }, /Dream started/],
-    ["memory.dream.skipped", { reason: "no changes" }, /Dream skipped — no changes/],
+    ["memory.dream.skipped", { reason: "no changes" }, /Dream skipped · no changes/],
     ["memory.record.promoted", { scope_kind: "identity", scope_key: "luka", gated: true }, /promoted to identity:luka \(gated\)/],
-    ["memory.quarantine.verdict", { verdict: "reject", rationale: "duplicate" }, /Quarantine verdict: reject — duplicate/],
-    ["memory.quarantine.release_blocked", { record_id: "rec-9", verdict: "release", class: "private-key" }, /Quarantine release blocked for rec-9 — matches secret pattern private-key/],
-    ["memory.conflict.signal", { entity: "user", topic: "tz", reason: "mismatch" }, /Conflict signal on user \/ tz — mismatch/],
-    ["memory.budget.denied", { stage: "harvest", reason: "over cap" }, /Budget denied at harvest — over cap/],
+    ["memory.quarantine.verdict", { verdict: "reject", rationale: "duplicate" }, /Quarantine verdict: reject · duplicate/],
+    ["memory.quarantine.release_blocked", { record_id: "rec-9", verdict: "release", class: "private-key" }, /Quarantine release blocked for rec-9 · matches secret pattern private-key/],
+    ["memory.conflict.signal", { entity: "user", topic: "tz", reason: "mismatch" }, /Conflict signal on user \/ tz · mismatch/],
+    ["memory.budget.denied", { stage: "harvest", reason: "over cap" }, /Budget denied at harvest · over cap/],
     ["memory.promotion.pending_gate", { scope_kind: "mob", scope_key: "main" }, /awaiting gate for mob:main/],
-    ["memory.harvest.completed", { promoted: 2, tombstoned: 1 }, /Harvest completed — 2 promoted, 1 tombstoned/],
-    ["memory.distill.timed_out", { cause: "slow" }, /Distill timed out — slow/],
-    ["memory.hygiene.applied", { cause: "reset", ops: 4 }, /Hygiene applied — 4 ops/],
-    ["memory.hygiene.blocked", { reason: "revision drift" }, /Hygiene blocked — revision drift/],
+    ["memory.harvest.completed", { promoted: 2, tombstoned: 1 }, /Harvest completed · 2 promoted, 1 tombstoned/],
+    ["memory.distill.timed_out", { cause: "slow" }, /Distill timed out · slow/],
+    ["memory.hygiene.applied", { cause: "reset", ops: 4 }, /Hygiene applied · 4 ops/],
+    ["memory.hygiene.blocked", { reason: "revision drift" }, /Hygiene blocked · revision drift/],
   ];
   for (const [event, data, expected] of cases) {
     const line = describeMemoryTimelineEvent(event, data);
@@ -7304,7 +7306,7 @@ test("describeMemoryTimelineEvent renders exact copy for quarantine release_bloc
       verdict: "release",
       class: "private-key",
     }),
-    "Quarantine release blocked for rec-9 — matches secret pattern private-key",
+    "Quarantine release blocked for rec-9 · matches secret pattern private-key",
   );
   assert.equal(
     describeMemoryTimelineEvent("memory.quarantine.release_blocked", {
@@ -7313,7 +7315,7 @@ test("describeMemoryTimelineEvent renders exact copy for quarantine release_bloc
       verdict: "promote_pending_gate",
       class: "credential-assignment",
     }),
-    "Quarantine promotion blocked for rec-12 — matches secret pattern credential-assignment",
+    "Quarantine promotion blocked for rec-12 · matches secret pattern credential-assignment",
   );
   // Degraded payload still yields a clean line, never the humanized fallback.
   assert.equal(
@@ -10251,3 +10253,14 @@ test(`${surface}: tool results without images keep their existing result text`, 
   assert.match(block.result as string, /"resource"/, "mixed non-image content keeps its complete payload");
 });
 }
+
+test("agent pane titles and transcript names read as the sidebar names the agent", () => {
+  const unnamed = { agent_id: "router:main", member_id: "router:main", identity: "router:main", label: "router:main", kind: "identity", role: "router" };
+  const chat = buildDockTarget(unnamed);
+  assert.equal(chat.title, "Router main");
+  assert.equal(chat.identity, "router:main", "the identity stays on the target for tooltips and copy actions");
+  assert.equal(buildInspectTarget(unnamed).title, "Router main Details");
+  const [entry] = mapFramesToTimelineEntries(unnamed, [{ id: "reply", event: "interaction_complete", data: { text: "done" } }]);
+  assert.equal(entry?.identity.label, "Router main");
+  assert.equal(buildDockTarget({ ...unnamed, label: "Front Desk" }).title, "Front Desk");
+});

@@ -1,15 +1,26 @@
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_CONSOLE_SIDEBAR_VIEW,
   SECTION_COLLAPSE_STORAGE_PREFIX,
+  SIDEBAR_AGENT_ORDER_MIN_CAPACITY,
+  SIDEBAR_AGENT_ORDER_STORAGE_PREFIX,
+  SIDEBAR_AGENT_PINS_STORAGE_PREFIX,
   SIDEBAR_PINS_STORAGE_PREFIX,
+  SIDEBAR_STORAGE_PREFIXES,
+  SIDEBAR_VIEW_STORAGE_PREFIX,
   SUBGROUP_COLLAPSE_STORAGE_PREFIX,
   applyConsoleSidebarOrder,
+  capConsoleSidebarAgentOrder,
+  listConsoleSidebarAgentOrder,
+  moveConsoleSidebarOrderKey,
   pruneStaleSidebarStorage,
+  readConsoleSidebarView,
   readSidebarStringList,
   readSidebarStringSet,
   reorderConsoleSidebarOrder,
   sidebarStorageKey,
+  writeConsoleSidebarView,
   writeSidebarStringList,
   writeSidebarStringSet,
 } from "./sidebar-preferences";
@@ -60,6 +71,73 @@ test("sidebar order helpers preserve unknown categories and reorder by drop posi
   assert.deepEqual(current, ["gamma", "alpha", "beta"]);
   assert.deepEqual(reorderConsoleSidebarOrder(current, "beta", "gamma", "before"), ["beta", "gamma", "alpha"]);
   assert.deepEqual(reorderConsoleSidebarOrder(current, "beta", "gamma", "after"), ["gamma", "beta", "alpha"]);
+});
+
+test("manual agent order lists present agents after the stored ones and keeps absent keys", () => {
+  assert.deepEqual(
+    listConsoleSidebarAgentOrder(["agent:c", "agent:gone", "agent:a"], ["agent:a", "agent:b", "agent:c", "agent:d"]),
+    ["agent:c", "agent:gone", "agent:a", "agent:b", "agent:d"],
+  );
+  assert.deepEqual(listConsoleSidebarAgentOrder([], ["agent:a", "agent:a", ""]), ["agent:a"]);
+});
+
+test("a move takes one key to its new place among its siblings and leaves every other key in place", () => {
+  const listed = ["x", "b", "y", "a", "z", "c"];
+  // Siblings b, a, c become c, b, a: c goes right before b, its new successor.
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "c", ["c", "b", "a"]), ["x", "c", "b", "y", "a", "z"]);
+  // Siblings b, a, c become b, c, a: a goes right after c, its new predecessor.
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "a", ["b", "c", "a"]), ["x", "b", "y", "z", "c", "a"]);
+  assert.deepEqual(moveConsoleSidebarOrderKey(["x", "y"], "b", ["b"]), ["x", "y", "b"], "an unlisted lone key goes last");
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "q", ["b", "a"]), listed);
+});
+
+test("manual agent order cap drops the oldest absent keys first and never a present agent", () => {
+  const present = new Set(["keep:1", "keep:2"]);
+  const absent = Array.from({ length: SIDEBAR_AGENT_ORDER_MIN_CAPACITY + 3 }, (_, index) => `gone:${index}`);
+  const capped = capConsoleSidebarAgentOrder(["keep:1", ...absent, "keep:2"], present);
+  assert.equal(capped.length, SIDEBAR_AGENT_ORDER_MIN_CAPACITY);
+  assert.equal(capped[0], "keep:1");
+  assert.equal(capped[capped.length - 1], "keep:2");
+  assert.equal(capped.includes("gone:0"), false);
+  assert.equal(capped.includes("gone:4"), false);
+  assert.equal(capped.includes("gone:5"), true);
+
+  const roster = new Set(Array.from({ length: SIDEBAR_AGENT_ORDER_MIN_CAPACITY }, (_, index) => `agent:${index}`));
+  const large = [...roster, "gone:a"];
+  assert.deepEqual(capConsoleSidebarAgentOrder(large, roster), large);
+});
+
+test("roster view preferences round-trip and fall back per choice", () => {
+  const storage = new MemoryStorage();
+  const key = sidebarStorageKey(SIDEBAR_VIEW_STORAGE_PREFIX, "principal-a");
+
+  assert.equal(readConsoleSidebarView(storage, key), null);
+  writeConsoleSidebarView(storage, key, { groupBy: "none", sortBy: "activity" });
+  assert.deepEqual(readConsoleSidebarView(storage, key), { groupBy: "none", sortBy: "activity" });
+  assert.deepEqual(JSON.parse(storage.getItem(key) || "{}"), { v: 1, group_by: "none", sort_by: "activity" });
+
+  storage.setItem(key, JSON.stringify({ group_by: "teams", sort_by: "name" }));
+  assert.deepEqual(readConsoleSidebarView(storage, key), { groupBy: "category", sortBy: "name" });
+  storage.setItem(key, "not json");
+  assert.deepEqual(readConsoleSidebarView(storage, key), DEFAULT_CONSOLE_SIDEBAR_VIEW);
+});
+
+test("per-user sidebar keys are outside the configuration prefixes that pruning removes", () => {
+  const storage = new MemoryStorage();
+  const scope = encodeURIComponent("runtime-a");
+  const orderKey = `${SIDEBAR_AGENT_ORDER_STORAGE_PREFIX}:${scope}:hash-old`;
+  const viewKey = `${SIDEBAR_VIEW_STORAGE_PREFIX}:${scope}:hash-old`;
+  const pinsKey = `${SIDEBAR_AGENT_PINS_STORAGE_PREFIX}:${scope}:hash-old`;
+  for (const key of [orderKey, viewKey, pinsKey]) storage.setItem(key, "[]");
+
+  pruneStaleSidebarStorage(storage, "runtime-a", `${scope}:hash-new`);
+
+  assert.notEqual(storage.getItem(orderKey), null);
+  assert.notEqual(storage.getItem(viewKey), null);
+  assert.notEqual(storage.getItem(pinsKey), null);
+  for (const prefix of [SIDEBAR_AGENT_ORDER_STORAGE_PREFIX, SIDEBAR_VIEW_STORAGE_PREFIX, SIDEBAR_AGENT_PINS_STORAGE_PREFIX]) {
+    assert.equal((SIDEBAR_STORAGE_PREFIXES as readonly string[]).includes(prefix), false);
+  }
 });
 
 class MemoryStorage {

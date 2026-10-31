@@ -454,4 +454,19 @@ describe("dock helpers", () => {
       title: "Tab alpha",
     });
   });
+
+  it("titles a tab with nothing open \"New tab\", never its layout's name", () => {
+    let next = 0;
+    for (const presetId of ["single", "two_columns", "grid"] as const) {
+      const state = createConsoleDockState<ConsoleDockTarget>({
+        initialTarget: null,
+        initialPresetId: presetId,
+        createPanelState: ({ target }) => ({ id: `panel-${next++}`, target, mode: "console" }),
+        createTabId: () => "tab-1",
+        createSplitId: () => `split-${next++}`,
+      });
+      const tab = buildConsoleDockViewState(state).tabs[0];
+      expect(tab?.title).toBe("New tab");
+    }
+  });
 });

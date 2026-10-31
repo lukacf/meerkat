@@ -238,7 +238,14 @@ function startMockConsoleServer(options = {}) {
   const includeBusyWorker = options.includeBusyWorker === true;
   const includeToolOnlyWorker = options.includeToolOnlyWorker === true;
   const includeLifecycleActions = options.includeLifecycleActions === true;
+  // Fails meta/gating/audit after this many successful calls (null: never).
+  const failGatingAuditAfter = Number.isInteger(options.failGatingAuditAfter) ? options.failGatingAuditAfter : null;
+  let gatingAuditCalls = 0;
   const collapseWorkersSection = options.collapseWorkersSection === true;
+  const extraSidebarAgents = Array.isArray(options.extraSidebarAgents) ? options.extraSidebarAgents : [];
+  const agentListConfig = options.agentListConfig && typeof options.agentListConfig === "object"
+    ? options.agentListConfig
+    : null;
   const topologyControl = options.topologyControl && typeof options.topologyControl === "object"
     ? options.topologyControl
     : null;
@@ -461,6 +468,7 @@ function startMockConsoleServer(options = {}) {
                   response_phase: "tool-executing",
                   affordances: { can_send_message: true },
                 }] : []),
+                ...extraSidebarAgents,
               ],
             },
           },
@@ -505,6 +513,7 @@ function startMockConsoleServer(options = {}) {
               }] : []),
             ],
           },
+          ...(agentListConfig ? { console_config: { agent_list: agentListConfig } } : {}),
           ...(collapseWorkersSection ? {
             console_config: {
               agent_list: {
@@ -716,6 +725,12 @@ function startMockConsoleServer(options = {}) {
           return;
         }
         if (payload.method === "meta/gating/audit") {
+          gatingAuditCalls += 1;
+          if (failGatingAuditAfter !== null && gatingAuditCalls > failGatingAuditAfter) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: rpcId, error: { code: -32000, message: "audit store unavailable" } }));
+            return;
+          }
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({
             jsonrpc: "2.0",
@@ -1799,6 +1814,255 @@ async function runSidebarSearchExpandsCollapsedWorkerSectionProof() {
     await page.waitForSelector('[data-testid="chat-pane:tool-only-worker"]', { timeout: 10_000 });
 
     process.stdout.write("browser sidebar search expands collapsed worker section ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
+// Manual agent order, the roster view and the category drag, in a real
+// browser: pointer drags through the grip, keyboard moves, persistence
+// across a reload, and the Group and Sort controls.
+async function runSidebarManualAgentOrderProof() {
+  const activityBase = Date.parse("2026-10-30T08:00:00.000Z");
+  const team = ["Ada", "Bea", "Cyd", "Dov"].map((name, index) => ({
+    agent_id: `team-${name.toLowerCase()}`,
+    member_id: `team-${name.toLowerCase()}`,
+    identity: `team-${name.toLowerCase()}`,
+    label: `${name} Reviewer`,
+    kind: "identity",
+    role: "reviewer",
+    group: "Team",
+    state: "active",
+    addressable: true,
+    response_phase: null,
+    affordances: { can_send_message: true },
+    last_activity_ms: activityBase + index * 60_000,
+  }));
+  const server = await startMockConsoleServer({
+    extraSidebarAgents: team,
+    agentListConfig: { group_by: ["group"], section_order: ["Team"] },
+  });
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const { eventually } = require("./acceptance-runtime.cjs");
+    const sidebar = page.getByTestId("sidebar-root");
+    const testIds = (selector, prefix) => sidebar.locator(selector).evaluateAll((nodes, cut) =>
+      nodes.map((node) => node.getAttribute("data-testid").slice(cut)), prefix.length);
+    const teamOrder = () => testIds('[data-testid^="sidebar-agent:team-"]', "sidebar-agent:");
+    const sectionOrder = () => testIds('[data-testid^="sidebar-section-toggle:"]', "sidebar-section-toggle:");
+    const expectOrder = async (read, expected, label) => {
+      await eventually(async () => JSON.stringify(await read()) === JSON.stringify(expected), label, 10_000);
+      assert.deepEqual(await read(), expected, label);
+    };
+    const announcement = () => page.getByTestId("sidebar-reorder-live").textContent();
+    const evidenceDir = process.env.META_BROWSER_EVIDENCE || path.join(repoRoot, "output/playwright/console-acceptance");
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    const drag = async (handle, target, edge) => {
+      const from = await handle.boundingBox();
+      const to = await target.boundingBox();
+      assert(from && to, "drag handle and target are on screen");
+      await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 - 12, { steps: 3 });
+      await page.mouse.move(to.x + to.width / 2, edge === "before" ? to.y + 6 : to.y + to.height - 6, { steps: 10 });
+    };
+
+    await page.waitForSelector('[data-testid="sidebar-agent:team-ada"]', { timeout: 30_000 });
+    await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "default order is by name");
+    assert.deepEqual((await sectionOrder()).slice(0, 2), ["Team", "Agents"], "configured category order");
+    assert.match(
+      await page.getByTestId("sidebar-agent-detail:team-ada").textContent(),
+      /^Reviewer · active (just now|\d+ (min|h|d) ago)$/,
+      "the row shows a human detail line",
+    );
+    assert.equal((await page.getByTestId("sidebar-agent:team-ada").textContent()).includes("team-ada"), false,
+      "the identity is not the row's text");
+    assert.equal(await page.getByTestId("sidebar-agent:team-ada").getAttribute("title"), "Identity: team-ada");
+
+    // The copy action shows when the pointer is on the row's actions or the
+    // row has keyboard focus, left of the pin and clear of the activity pulse
+    // and inbox count; hovering the row's name does not put it under the
+    // pointer.
+    const adaRow = page.getByTestId("sidebar-agent:team-ada");
+    const adaCopy = page.getByTestId("sidebar-agent-copy-identity:team-ada");
+    const copyClearOfActions = async (label) => {
+      const copyBox = await adaCopy.boundingBox();
+      const pinBox = await page.getByTestId("sidebar-agent-pin:team-ada").boundingBox();
+      const metaBox = await adaRow.locator(".agent__meta").boundingBox();
+      assert(copyBox && pinBox && metaBox, `${label}: the copy action, the pin and the pulse are on screen`);
+      assert(copyBox.x + copyBox.width <= pinBox.x && copyBox.x + copyBox.width <= metaBox.x,
+        `${label}: the copy action stays left of the pin and the pulse: ${JSON.stringify({ copyBox, pinBox, metaBox })}`);
+    };
+    await adaRow.locator(".agent__name").hover();
+    assert.equal(await adaCopy.isVisible(), false, "hovering the name does not show the copy action");
+    await page.getByTestId("sidebar-agent-pin:team-ada").hover();
+    await copyClearOfActions("on the pin");
+    await sidebar.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-copy.png") });
+    await page.mouse.move(0, 0);
+
+    // Drag Dov Reviewer above Ada Reviewer by its grip.
+    await page.getByTestId("sidebar-agent:team-dov").hover();
+    await drag(page.getByTestId("sidebar-agent-grip:team-dov"), page.getByTestId("sidebar-agent:team-ada"), "before");
+    await page.waitForSelector('[data-testid="sidebar-agent:team-ada"][data-drag-over="before"]', { timeout: 5_000 });
+    assert.equal(await page.getByTestId("sidebar-drag-preview").count(), 1, "the drag shows a preview");
+    // The dragged row fades with its pin and copy actions, which sit beside it.
+    const dragFade = await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="sidebar-agent:team-dov"]');
+      const actions = row?.parentElement?.querySelector(":scope > .agent__actions");
+      return {
+        dragging: row?.getAttribute("data-dragging") ?? "",
+        row: row ? getComputedStyle(row).opacity : "",
+        actions: actions ? getComputedStyle(actions).opacity : "",
+      };
+    });
+    assert.deepEqual(dragFade, { dragging: "true", row: "0.5", actions: "0.5" }, "the dragged row and its actions fade together");
+    await page.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-drag.png") });
+    await page.mouse.up();
+    await expectOrder(teamOrder, ["team-dov", "team-ada", "team-bea", "team-cyd"], "the pointer drag reorders agents");
+    assert.equal(await page.locator('[data-testid^="chat-composer:team-"]').count(), 0, "a drag does not open the agent");
+
+    // The order survives a reload.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="sidebar-agent:team-ada"]', { timeout: 30_000 });
+    await expectOrder(teamOrder, ["team-dov", "team-ada", "team-bea", "team-cyd"], "the manual order persists");
+
+    // Alt+ArrowUp moves the focused agent and names the move.
+    await page.getByTestId("sidebar-agent:team-ada").focus();
+    await page.keyboard.press("Alt+ArrowUp");
+    await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "Alt+ArrowUp moves the focused agent");
+    await eventually(async () => (await announcement()) === "Moved Ada Reviewer above Dov Reviewer.", "the move is announced", 5_000);
+    await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-agent:team-ada",
+      "focus stays on the moved agent", 5_000);
+    await copyClearOfActions("on keyboard focus");
+
+    // Sort by name and by last activity, then back to the manual order.
+    const sort = page.getByTestId("sidebar-view-sort");
+    await sort.selectOption("name");
+    await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "name sort");
+    assert.equal(await page.locator('[data-testid^="sidebar-agent-grip:"]').count(), 0, "no grips outside Manual");
+    await sort.selectOption("activity");
+    await expectOrder(teamOrder, ["team-dov", "team-cyd", "team-bea", "team-ada"], "last activity sort is newest first");
+    await sort.selectOption("manual");
+    await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "manual sort restores the stored order");
+
+    // Drag the Agents category above Team: the existing category drag.
+    await drag(page.getByTestId("sidebar-section-toggle:Agents"), page.getByTestId("sidebar-section-toggle:Team"), "before");
+    await page.mouse.up();
+    await expectOrder(async () => (await sectionOrder()).slice(0, 2), ["Agents", "Team"], "a category drag reorders categories");
+
+    // Group: None lists one flat list in the same order, without category headers.
+    await page.getByTestId("sidebar-view-group").selectOption("none");
+    await expectOrder(sectionOrder, [], "no category headers in a flat list");
+    await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "the flat list keeps the manual order");
+    await sidebar.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-flat.png") });
+
+    // A search hides the grips: moves need the whole list.
+    await page.getByTestId("sidebar-search").fill("Reviewer");
+    await page.getByTestId("sidebar-agent:team-ada").hover();
+    assert.equal(await page.locator('[data-testid^="sidebar-agent-grip:"]').count(), 0, "no grips while searching");
+    assert.deepEqual(pageErrors, [], "no page errors");
+
+    process.stdout.write("browser sidebar manual agent order ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
+// A long roster scrolls: a keyboard move that lands off screen scrolls the
+// moved row into view, and a drag held at the list's bottom edge scrolls the
+// list; a cancelled drag drops nothing.
+async function runSidebarLongRosterOrderProof() {
+  const member = (id, label, extra = {}) => ({
+    agent_id: id,
+    member_id: id,
+    identity: id,
+    label,
+    kind: "identity",
+    role: "reviewer",
+    group: "Team",
+    state: "active",
+    addressable: true,
+    response_phase: null,
+    affordances: { can_send_message: true },
+    ...extra,
+  });
+  const helpers = Array.from({ length: 24 }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    return member(`team-big-${number}`, `Big helper ${number}`, { labels: { spawned_by: "team-big" } });
+  });
+  const server = await startMockConsoleServer({
+    extraSidebarAgents: [member("team-big", "Big Planner"), ...helpers, member("team-small", "Small Planner")],
+    agentListConfig: { group_by: ["group"], section_order: ["Team"] },
+  });
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const { eventually } = require("./acceptance-runtime.cjs");
+    const list = page.getByTestId("sidebar-agent-list");
+    const announcement = () => page.getByTestId("sidebar-reorder-live").textContent();
+    const scrollTop = () => list.evaluate((node) => node.scrollTop);
+    const inView = (testId) => page.evaluate((id) => {
+      const listNode = document.querySelector('[data-testid="sidebar-agent-list"]');
+      const row = document.querySelector(`[data-testid="${id}"]`);
+      if (!listNode || !row) return false;
+      const outer = listNode.getBoundingClientRect();
+      const inner = row.getBoundingClientRect();
+      return inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    }, testId);
+
+    await page.waitForSelector('[data-testid="sidebar-agent:team-big"]', { timeout: 30_000 });
+    assert.equal(await list.evaluate((node) => node.scrollHeight > node.clientHeight + 200), true, "the roster scrolls");
+
+    // Small Planner sits below Big Planner's 24 helpers. Scrolled to it, it
+    // moves up past Big Planner with Alt+ArrowUp and lands where Big Planner
+    // stood, off screen: the list scrolls it into view and it keeps focus.
+    await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await eventually(() => inView("sidebar-agent:team-small"), "Small Planner is on screen", 5_000);
+    assert.equal(await inView("sidebar-agent:team-big"), false, "Big Planner is off screen above");
+    await page.getByTestId("sidebar-agent:team-small").focus();
+    await page.keyboard.press("Alt+ArrowUp");
+    await eventually(async () => (await announcement()) === "Moved Small Planner above Big Planner.", "the move is announced", 5_000);
+    await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-agent:team-small",
+      "focus stays on the moved agent", 5_000);
+    await eventually(() => inView("sidebar-agent:team-small"), "the moved agent is scrolled into view", 5_000);
+
+    // A drag held at the list's bottom edge scrolls the list. The browser
+    // then cancels the pointer: the drag ends and nothing moves.
+    await list.evaluate((node) => { node.scrollTop = 0; });
+    await eventually(async () => (await scrollTop()) === 0, "the list is at the top", 5_000);
+    await page.getByTestId("sidebar-agent:team-big-01").hover();
+    const grip = await page.getByTestId("sidebar-agent-grip:team-big-01").boundingBox();
+    const box = await list.boundingBox();
+    assert(grip && box, "the grip and the list are on screen");
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 8, { steps: 8 });
+    await eventually(async () => (await scrollTop()) > 100, "holding a drag at the bottom edge scrolls the list", 5_000);
+    await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel")));
+    await eventually(async () => (await page.getByTestId("sidebar-drag-preview").count()) === 0, "the cancelled drag ends", 5_000);
+    await page.mouse.up();
+    assert.equal(await announcement(), "Moved Small Planner above Big Planner.", "the cancelled drag moved nothing");
+    assert.deepEqual(pageErrors, [], "no page errors");
+
+    process.stdout.write("browser sidebar long roster order ok\n");
   } finally {
     if (browser) {
       await browser.close();
@@ -2993,6 +3257,30 @@ async function runHeadlessControlSurfaceBrowserProof() {
   }
 }
 
+async function runGatingAuditRefreshErrorProof() {
+  // The first audit load succeeds; every later one fails.
+  const server = await startMockConsoleServer({ failGatingAuditAfter: 1 });
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    await page.getByTestId("nav:gating").click();
+    await page.getByTestId("gating-panel").waitFor({ timeout: 10_000 });
+    await waitForRpcMethod(server, "meta/gating/audit");
+    await page.getByTestId("gating-tab:audit").click();
+    await page.getByRole("button", { name: "Refresh approvals" }).click();
+    const error = page.getByTestId("gating-audit-error");
+    await error.waitFor({ timeout: 10_000 });
+    assert.match(await error.innerText(), /Couldn't refresh the approval records/);
+    assert.equal(await error.getAttribute("role"), "alert");
+    process.stdout.write("browser gating audit refresh error ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
 async function runTopologyUnavailableBrowserProof() {
   const server = await startMockConsoleServer();
   let browser;
@@ -3014,6 +3302,38 @@ async function runTopologyUnavailableBrowserProof() {
       "the console must not probe an unadvertised topology RPC",
     );
     process.stdout.write("browser topology unavailable fail-closed ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
+async function runTopologyRoleChipPaneReuseBrowserProof() {
+  const server = await startMockConsoleServer({ includeToolOnlyWorker: true, includeImageAgent: true });
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    await page.getByTestId("topology-view:roles").click();
+    const panes = page.locator('[data-testid^="pane:"]');
+    for (const identity of ["legacy-router", "tool-only-worker", "image-agent"]) {
+      await page.getByTestId(`topology-node:${identity}`).click();
+      await page.getByTestId(`chat-pane:${identity}`).waitFor({ timeout: 10_000 });
+      assert.equal(await panes.count(), 2, `opening ${identity} from Topology must keep two panes`);
+      assert.equal(await page.locator('[data-testid^="pane:"] [data-testid="topology-panel"]').count(), 1);
+      assert.equal(await page.locator('[data-testid^="chat-pane:"]').count(), 1, "one chat pane beside Topology");
+      assert.equal(
+        await page.locator(".pane.is-focused").getByTestId(`chat-pane:${identity}`).count(),
+        1,
+        "the chat pane takes focus",
+      );
+    }
+    await page.getByTestId("topology-node:image-agent").click();
+    assert.equal(await panes.count(), 2, "a chip for the agent already shown focuses its pane");
+    process.stdout.write("browser topology role chips reuse one chat pane ok\n");
   } finally {
     if (browser) await browser.close();
     await server.close();
@@ -4061,8 +4381,7 @@ async function runMemoryBodyClickAcrossRefreshProof() {
     // releases once its error has appeared or cleared. Boxes are measured
     // while pressed, so press styling is the same in both.
     // The pressed control's top-left and the body's box must hold. A tile's
-    // height may follow a sibling tile in its grid row (the lattice tile adds
-    // a "re-checking" line while its page-walk runs), which leaves the
+    // height may follow a sibling tile in its grid row, which leaves the
     // pointer on the same tile.
     const placement = async target => {
       const box = await target.boundingBox();
@@ -4092,22 +4411,24 @@ async function runMemoryBodyClickAcrossRefreshProof() {
       const tile = document.querySelector('[data-testid="memory-verdict:lattice"]');
       return tile?.getAttribute("data-status") === "holding" && !/running|re-checking/.test(tile.textContent || "");
     });
-    const knowledgeOpened = () => page.waitForFunction(
-      () => document.querySelector('[data-testid="memory-tab:knowledge"]')?.classList.contains("is-active"),
+    // The pressed tile is the first check, the lattice: it opens the tab
+    // that holds its evidence, Records.
+    const tileOpened = () => page.waitForFunction(
+      () => document.querySelector('[data-testid="memory-tab:records"]')?.classList.contains("is-active"),
       null, { timeout: 3000 }).then(() => true, () => false);
     const recordRequested = () => page.waitForRequest(request => request.url().endsWith("/console/rpc")
       && request.method() === "POST" && request.postDataJSON()?.method === "meta/memory/panel/record", { timeout: 3000 })
       .then(() => true, () => false);
 
     await memoryError.waitFor({ state: "detached" });
-    const tile = page.locator('[data-testid^="memory-verdict:"]').first();
+    const tile = page.getByTestId("memory-verdict:lattice");
     await tile.waitFor();
     await latticeSettled();
-    await pressAcrossRefresh("verdict-tile-across-failed-refresh", tile, true, knowledgeOpened);
+    await pressAcrossRefresh("verdict-tile-across-failed-refresh", tile, true, tileOpened);
     await page.getByTestId("memory-tab:holdings").click();
     await memoryError.waitFor();
     await latticeSettled();
-    await pressAcrossRefresh("verdict-tile-across-recovery", tile, false, knowledgeOpened);
+    await pressAcrossRefresh("verdict-tile-across-recovery", tile, false, tileOpened);
 
     await page.getByTestId("memory-tab:records").click();
     const row = page.getByTestId("memory-record:memory-1");
@@ -4477,6 +4798,10 @@ const allScenarios = [
     // Appended last: sharding is by list position, so earlier scenarios keep their shards.
     ...require("./scenarios/history-replay-tool-order.cjs").scenarios,
     ...require("./scenarios/real-side-chats.cjs").scenarios,
+    { id: "sidebar-manual-agent-order", family: "console", backend: "mock", run: runSidebarManualAgentOrderProof },
+    { id: "sidebar-long-roster-order", family: "console", backend: "mock", run: runSidebarLongRosterOrderProof },
+    { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
+    { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
   ];
 
 module.exports = { scenarios: allScenarios };

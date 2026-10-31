@@ -1177,7 +1177,9 @@ export function buildConsoleDockViewState<TTarget extends ConsoleDockTarget>(
 
       return {
         id: tab.id,
-        title: resolved.title || firstTarget?.title || preset.label,
+        // A tab with nothing open yet is a new tab; its layout's name
+        // ("Single", "Grid") belongs to the layout picker, not the tab.
+        title: resolved.title || firstTarget?.title || "New tab",
         subtitle: resolved.subtitle ?? firstTarget?.subtitle ?? preset.description,
         iconName: resolved.iconName ?? firstTarget?.iconName ?? preset.iconName,
         badgeLabel: resolved.badgeLabel ?? (panelStates.length > 1 ? `x${panelStates.length}` : null),

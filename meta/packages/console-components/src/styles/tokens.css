@@ -13,6 +13,10 @@
   --_cc-radius-sm: var(--cc-radius-sm, 4px);
   --_cc-radius-md: var(--cc-radius-md, 6px);
   --_cc-radius-lg: var(--cc-radius-lg, 10px);
+  /* Pills and dots. The terminal variant squares both (themes.css), so no
+     element needs its own terminal radius override. */
+  --_cc-radius-pill:  var(--cc-radius-pill, 999px);
+  --_cc-radius-round: var(--cc-radius-round, 50%);
 
   --_cc-content-width-default: 768px;
   --_cc-bubble-max-width-default: 504px;
@@ -74,6 +78,18 @@
   --_cc-member-accent-soft:        var(--cc-member-accent-soft, var(--_cc-member-accent-soft-default));
   --_cc-member-surface-default:    oklch(0.24 0.06 30);
   --_cc-member-surface:            var(--cc-member-surface, var(--_cc-member-surface-default));
+
+  /* Text-safe derived inks. Small meta text and tone-coloured text mix
+     toward the foreground so they keep WCAG AA contrast on card and
+     sunken surfaces in every variant; fills and dots keep the raw tone.
+     Derived only: no new palette values. Mixed in srgb, because the
+     default foreground carries an explicit oklch hue that an oklch mix
+     would pull every tone toward. */
+  --_cc-foreground-meta: var(--cc-foreground-meta, color-mix(in srgb, var(--_cc-foreground-subtle) 75%, var(--_cc-foreground)));
+  --_cc-positive-ink:    var(--cc-positive-ink, color-mix(in srgb, var(--_cc-positive) 65%, var(--_cc-foreground)));
+  --_cc-warning-ink:     var(--cc-warning-ink, color-mix(in srgb, var(--_cc-warning) 60%, var(--_cc-foreground)));
+  --_cc-negative-ink:    var(--cc-negative-ink, color-mix(in srgb, var(--_cc-negative) 65%, var(--_cc-foreground)));
+  --_cc-link-ink:        var(--cc-link-ink, color-mix(in srgb, var(--_cc-link) 80%, var(--_cc-foreground)));
 
   --_cc-sheen-soft-default:        rgba(255, 255, 255, 0.08);
   --_cc-sheen-soft:                var(--_cc-sheen-soft-default);

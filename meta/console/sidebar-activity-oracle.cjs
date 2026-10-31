@@ -41,4 +41,35 @@ async function waitForSidebarCompletion({ readFrames, toolId, answer, onObservat
   }, "real model and WorkGraph readiness tool finish", timeoutMs);
 }
 
-module.exports = { assertExplicitIdleRoster, assertSidebarCompletion, waitForExplicitIdleRoster, waitForSidebarCompletion };
+const ACTIVITY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+// The roster order the owner's activity facts imply for Sort: Last activity:
+// newest last_activity_ms first, unknown last, ties by name, then identity.
+function expectedActivityOrder(agents) {
+  assert(Array.isArray(agents) && agents.length > 0, "experience contains the actual owner roster");
+  const rows = agents.map(agent => {
+    assert(typeof agent.identity === "string" && agent.identity, "every owner row names its identity");
+    const at = agent.last_activity_ms;
+    assert(at === undefined || (Number.isFinite(at) && at >= 0), `${agent.identity} reports last_activity_ms as a time or not at all`);
+    return { identity: agent.identity, label: agent.label || agent.identity, at };
+  });
+  return rows.sort((a, b) => {
+    if (a.at !== b.at) {
+      if (a.at === undefined) return 1;
+      if (b.at === undefined) return -1;
+      return b.at - a.at;
+    }
+    return ACTIVITY_NAME_COLLATOR.compare(a.label, b.label) || (a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0);
+  }).map(row => row.identity);
+}
+
+// The owner recorded `identity`'s activity: its row carries a last_activity_ms
+// and the roster's activity facts are well formed.
+function assertActivityRecorded(agents, identity) {
+  expectedActivityOrder(agents);
+  const row = agents.find(agent => agent.identity === identity);
+  assert(row && Number.isFinite(row.last_activity_ms) && row.last_activity_ms > 0, `owner records last_activity_ms for ${identity}`);
+  return agents;
+}
+
+module.exports = { assertActivityRecorded, assertExplicitIdleRoster, assertSidebarCompletion, expectedActivityOrder, waitForExplicitIdleRoster, waitForSidebarCompletion };

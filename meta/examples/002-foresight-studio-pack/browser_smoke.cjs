@@ -124,7 +124,8 @@ async function main() {
     await expectVisible(page.locator(".agent__badge").filter({ hasText: "Lane" }), "lane badge");
     await expectVisible(page.locator(".agent__badge").filter({ hasText: "Confidence" }), "confidence badge");
     await expectVisible(page.locator(".sidebar__subgroup").filter({ hasText: "Strategy Office" }), "org subgroup");
-    const riskRow = page.locator('[data-testid^="sidebar-agent:"]').filter({ hasText: "Risk Red Team" }).first();
+    // The pin sits beside the row's button, in the row's wrapper.
+    const riskRow = page.locator(".agent-row").filter({ hasText: "Risk Red Team" }).first();
     await expectVisible(riskRow, "default pinned risk row");
     await expectVisible(riskRow.locator(".agent__pin[aria-pressed=\"true\"]"), "default pinned risk button");
     shot = await screenshot(page, artifactDir, shot, "grouped-roster");
@@ -150,13 +151,13 @@ async function main() {
     await expectVisible(riskRow.locator(".agent__pin[aria-pressed=\"false\"]"), "risk unpinned button");
     await page.reload({ waitUntil: "domcontentloaded" });
     await expectVisible(page.getByTestId("meerkat-console"), "console root after pin reload");
-    const reloadedRiskRow = page.locator('[data-testid^="sidebar-agent:"]').filter({ hasText: "Risk Red Team" }).first();
+    const reloadedRiskRow = page.locator(".agent-row").filter({ hasText: "Risk Red Team" }).first();
     await expectVisible(reloadedRiskRow.locator(".agent__pin[aria-pressed=\"false\"]"), "risk unpin persisted");
     await reloadedRiskRow.locator(".agent__pin").click();
     await expectVisible(reloadedRiskRow.locator(".agent__pin[aria-pressed=\"true\"]"), "risk repinned button");
     await page.reload({ waitUntil: "domcontentloaded" });
     const repinnedRiskButton = page
-      .locator('[data-testid^="sidebar-agent:"]')
+      .locator(".agent-row")
       .filter({ hasText: "Risk Red Team" })
       .first()
       .locator(".agent__pin[aria-pressed=\"true\"]");

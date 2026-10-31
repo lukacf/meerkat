@@ -1,5 +1,6 @@
 import React from "react";
 import { consoleCustomPanelTarget, type ConsolePanelDefinition } from "@console-core";
+import { splitTechnicalId } from "@console-components";
 import type {
   ConsoleDockNode,
   ConsoleDockPanelSplitDirection,
@@ -10,6 +11,7 @@ import type {
 import type { ConsoleAgent } from "../types";
 import type { MetaDockTarget } from "../lib/adapters";
 import { buildControlTarget, buildDockTarget } from "../lib/adapters";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import type { NavKind } from "./Sidebar";
 
 interface MetaDockProps {
@@ -259,10 +261,9 @@ function PaneView({
           data-testid={`pane-title:${panelId}`}
           title="Retarget pane"
         >
-          <span className="pane__title-text">{title}</span>
+          <span className="pane__title-text" title={subId}>{title}</span>
           <span className="pane__caret">▾</span>
         </button>
-        {subId && <span className="pane__id">{subId}</span>}
         <span className="pane__spacer" />
         <button
           className="pane__btn"
@@ -317,6 +318,22 @@ interface PaneMenuProps {
   onPick: (target: MetaDockTarget) => void;
 }
 
+/**
+ * An agent's identity in the pane menu, as demoted detail: it tells apart
+ * agents that share a title. Muted small mono, middle-truncated so the
+ * distinguishing tail stays visible, the full value in the tooltip. The
+ * text content stays exactly the identity.
+ */
+function PaneMenuIdentity({ value }: { value: string }): React.JSX.Element {
+  const parts = splitTechnicalId(value);
+  return (
+    <span className="pane-menu__id" title={value}>
+      <span className="pane-menu__id-head">{parts.head}</span>
+      {parts.tail ? <span className="pane-menu__id-tail">{parts.tail}</span> : null}
+    </span>
+  );
+}
+
 function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick }: PaneMenuProps): React.JSX.Element {
   const controls = ([
     ["topology", "Topology"],
@@ -340,13 +357,13 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
             data-testid={`pane-menu-view:${kind}`}
           >
             <span />
-            <span>{label}</span>
+            <span className="pane-menu__name">{label}</span>
             <span className="pane-menu__id">view</span>
           </button>
         ))}
         {customPanels.map(panel => <button key={panel.id} className="pane-menu__item"
           onClick={() => onPick(consoleCustomPanelTarget(panel))} data-testid={`pane-menu-custom-panel:${panel.id}`}>
-          <span /><span>{panel.title}</span><span className="pane-menu__id">view</span>
+          <span /><span className="pane-menu__name">{panel.title}</span><span className="pane-menu__id">view</span>
         </button>)}
         <div className="pane-menu__sep" />
         <div className="pane-menu__label">Agents</div>
@@ -359,8 +376,8 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
             data-testid={`pane-menu-agent:${a.member_id}`}
           >
             <span className="agent__dot" />
-            <span>{a.label}</span>
-            <span className="pane-menu__id">{a.identity || a.member_id}</span>
+            <span className="pane-menu__name">{agentDisplayTitle(a)}</span>
+            <PaneMenuIdentity value={a.identity || a.member_id} />
           </button>
         ))}
       </div>

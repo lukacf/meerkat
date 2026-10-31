@@ -2145,11 +2145,11 @@ span.cc-conversation-turn-preview__file-icon::after {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: rgb(140, 225, 175);
+  background: var(--_cc-positive, rgb(140, 225, 175));
   transition: width 180ms ease;
 }
-.cc-work-graph.is-failed .cc-work-graph__progress-fill { background: rgb(255, 155, 155); }
-.cc-work-graph.is-blocked .cc-work-graph__progress-fill { background: rgb(240, 200, 120); }
+.cc-work-graph.is-failed .cc-work-graph__progress-fill { background: var(--_cc-negative, rgb(255, 155, 155)); }
+.cc-work-graph.is-blocked .cc-work-graph__progress-fill { background: var(--_cc-warning, rgb(240, 200, 120)); }
 .cc-work-graph__badge {
   display: inline-flex;
   align-items: center;
@@ -2164,20 +2164,20 @@ span.cc-conversation-turn-preview__file-icon::after {
   letter-spacing: 0.01em;
 }
 .cc-work-graph__badge.is-active {
-  background: rgba(120, 170, 255, 0.16);
-  color: rgb(150, 190, 255);
+  background: color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 14%, transparent);
+  color: var(--_cc-link-ink, rgb(150, 190, 255));
 }
 .cc-work-graph__badge.is-completed {
-  background: rgba(120, 220, 160, 0.16);
-  color: rgb(140, 225, 175);
+  background: color-mix(in oklch, var(--_cc-positive, rgb(140, 225, 175)) 14%, transparent);
+  color: var(--_cc-positive-ink, rgb(140, 225, 175));
 }
 .cc-work-graph__badge.is-failed {
-  background: rgba(255, 130, 130, 0.16);
-  color: rgb(255, 155, 155);
+  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 14%, transparent);
+  color: var(--_cc-negative-ink, rgb(255, 155, 155));
 }
 .cc-work-graph__badge.is-blocked {
-  background: rgba(240, 200, 120, 0.16);
-  color: rgb(240, 200, 120);
+  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 16%, transparent);
+  color: var(--_cc-warning-ink, rgb(240, 200, 120));
 }
 .cc-work-graph__last-failed {
   flex: none;
@@ -2185,8 +2185,8 @@ span.cc-conversation-turn-preview__file-icon::after {
   font-weight: 600;
   padding: 2px 7px;
   border-radius: 999px;
-  background: rgba(255, 130, 130, 0.16);
-  color: rgb(255, 155, 155);
+  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 14%, transparent);
+  color: var(--_cc-negative-ink, rgb(255, 155, 155));
 }
 .cc-work-graph__pulse {
   width: 6px;
@@ -2224,7 +2224,7 @@ span.cc-conversation-turn-preview__file-icon::after {
   border-left: 2px solid transparent;
 }
 .cc-work-graph__item.is-in_progress {
-  border-left-color: var(--cc-member-accent, rgb(150, 190, 255));
+  border-left-color: var(--_cc-link, rgb(150, 190, 255));
 }
 .cc-work-graph__item-line {
   display: flex;
@@ -2264,13 +2264,13 @@ span.cc-conversation-turn-preview__file-icon::after {
   background: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.4));
 }
 .cc-work-graph__dot.is-in_progress {
-  background: rgb(150, 190, 255);
-  box-shadow: 0 0 0 3px rgba(120, 170, 255, 0.18);
+  background: var(--_cc-link, rgb(150, 190, 255));
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 18%, transparent);
   animation: cc-work-graph-pulse 1.4s ease-in-out infinite;
 }
-.cc-work-graph__dot.is-completed { background: rgb(140, 225, 175); }
-.cc-work-graph__dot.is-failed { background: rgb(255, 155, 155); }
-.cc-work-graph__dot.is-blocked { background: rgb(240, 200, 120); }
+.cc-work-graph__dot.is-completed { background: var(--_cc-positive, rgb(140, 225, 175)); }
+.cc-work-graph__dot.is-failed { background: var(--_cc-negative, rgb(255, 155, 155)); }
+.cc-work-graph__dot.is-blocked { background: var(--_cc-warning, rgb(240, 200, 120)); }
 .cc-work-graph__dot.is-cancelled { background: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.3)); }
 .cc-work-graph__item.is-completed .cc-work-graph__item-title,
 .cc-work-graph__item.is-cancelled .cc-work-graph__item-title {
@@ -2303,15 +2303,15 @@ span.cc-conversation-turn-preview__file-icon::after {
   white-space: nowrap;
 }
 .cc-work-graph__chip.is-priority-high {
-  background: rgba(255, 130, 130, 0.14);
-  color: rgb(255, 165, 165);
+  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 12%, transparent);
+  color: var(--_cc-negative-ink, rgb(255, 155, 155));
 }
 .cc-work-graph__chip.is-priority-low {
   color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.5));
 }
 .cc-work-graph__chip.is-blocked {
-  background: rgba(240, 200, 120, 0.14);
-  color: rgb(240, 200, 120);
+  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 14%, transparent);
+  color: var(--_cc-warning-ink, rgb(240, 200, 120));
 }
 .cc-work-graph__item-status {
   font-size: var(--_cc-text-xs, 11px);
@@ -2416,25 +2416,26 @@ span.cc-conversation-turn-preview__file-icon::after {
   background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
   color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.75));
 }
+/* Modes are categories, named in words; tones come from the theme so they
+   read on light and dark surfaces alike. Coordinate stays neutral. */
 .cc-work-graph__mode.is-pursue {
-  background: rgba(120, 170, 255, 0.16);
-  color: rgb(150, 190, 255);
+  background: color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 14%, transparent);
+  color: var(--_cc-link-ink, rgb(150, 190, 255));
 }
 .cc-work-graph__mode.is-coordinate {
-  background: rgba(170, 140, 255, 0.16);
-  color: rgb(190, 170, 255);
+  color: var(--_cc-foreground, rgba(232, 234, 237, 0.92));
 }
 .cc-work-graph__mode.is-review {
-  background: rgba(120, 220, 160, 0.14);
-  color: rgb(140, 225, 175);
+  background: color-mix(in oklch, var(--_cc-positive, rgb(140, 225, 175)) 14%, transparent);
+  color: var(--_cc-positive-ink, rgb(140, 225, 175));
 }
 .cc-work-graph__mode.is-falsify {
-  background: rgba(255, 130, 130, 0.14);
-  color: rgb(255, 165, 165);
+  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 12%, transparent);
+  color: var(--_cc-negative-ink, rgb(255, 165, 165));
 }
 .cc-work-graph__mode.is-judge {
-  background: rgba(240, 200, 120, 0.14);
-  color: rgb(240, 200, 120);
+  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 16%, transparent);
+  color: var(--_cc-warning-ink, rgb(240, 200, 120));
 }
 .cc-work-graph__mode.is-observe {
   color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.55));
@@ -2479,53 +2480,6 @@ span.cc-conversation-turn-preview__file-icon::after {
 :is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__attention-target {
   color: var(--_cc-foreground);
 }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__badge.is-active {
-  background: rgba(60, 110, 220, 0.12);
-  color: rgb(50, 100, 205);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__badge.is-completed {
-  background: rgba(30, 150, 90, 0.12);
-  color: rgb(25, 135, 80);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__badge.is-failed {
-  background: rgba(205, 60, 60, 0.12);
-  color: rgb(190, 50, 50);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__badge.is-blocked {
-  background: rgba(185, 135, 30, 0.14);
-  color: rgb(160, 115, 20);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__dot.is-in_progress {
-  background: rgb(70, 125, 235);
-  box-shadow: 0 0 0 3px rgba(70, 125, 235, 0.16);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__dot.is-completed { background: rgb(35, 155, 90); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__dot.is-failed { background: rgb(200, 60, 60); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__dot.is-blocked { background: rgb(185, 135, 30); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__progress-fill { background: rgb(35, 155, 90); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph.is-failed .cc-work-graph__progress-fill { background: rgb(200, 60, 60); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph.is-blocked .cc-work-graph__progress-fill { background: rgb(185, 135, 30); }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__mode.is-pursue {
-  background: rgba(60, 110, 220, 0.12);
-  color: rgb(50, 100, 205);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__mode.is-coordinate {
-  background: rgba(120, 80, 220, 0.12);
-  color: rgb(105, 70, 195);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__mode.is-review {
-  background: rgba(30, 150, 90, 0.12);
-  color: rgb(25, 135, 80);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__mode.is-falsify {
-  background: rgba(205, 60, 60, 0.12);
-  color: rgb(190, 50, 50);
-}
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__mode.is-judge {
-  background: rgba(185, 135, 30, 0.14);
-  color: rgb(160, 115, 20);
-}
-
 
 .cc-markdown-document {
   min-width: 0;

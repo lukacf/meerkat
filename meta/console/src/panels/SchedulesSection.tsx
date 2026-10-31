@@ -3,6 +3,7 @@ import React from "react";
 import {
   CONSOLE_SCHEDULE_COMMANDS,
   describeSchedulePhase,
+  describeScheduleSender,
   describeScheduleTrigger,
   emptyScheduleDraft,
   formatScheduleTime,
@@ -20,6 +21,13 @@ import {
   type ConsoleScheduleIntervalUnit,
   type ConsoleScheduleTimingKind,
 } from "../lib/schedules";
+import {
+  Chip,
+  EmptyState,
+  LoadingState,
+  Notice,
+  useAgentDirectory,
+} from "../../../packages/console-components/src/panel-kit";
 
 /// The least time between two list reads the pane's refreshes cause: the
 /// list reads the whole schedule store, and the pane refreshes on activity.
@@ -79,6 +87,10 @@ export function SchedulesSection({
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
+  // A sender that is an agent reads by its display name, a console identity
+  // in words; other senders (the console's own principals) read as they are.
+  const directory = useAgentDirectory();
+  const senderLabel = (sender: string) => directory.lookup(sender)?.label;
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<ScheduleForm | null>(null);
   const runRef = React.useRef(run);
@@ -219,11 +231,12 @@ export function SchedulesSection({
       aria-labelledby={headingId}
       data-testid={`schedules:${identity}`}
     >
-      <div className="console-panel__header">
-        <h4 id={headingId}>Schedules</h4>
-        <div className="console-panel__actions">
+      <div className="cc-section-head console-schedules__head">
+        <h3 id={headingId} className="cc-section-head__label">Schedules</h3>
+        <div className="cc-section-head__action">
           <button
             type="button"
+            className="cc-btn cc-btn--sm cc-btn--ghost"
             data-testid={`schedules-refresh:${identity}`}
             onClick={() => void load()}
           >
@@ -232,6 +245,7 @@ export function SchedulesSection({
           {editing.canChange && !form ? (
             <button
               type="button"
+              className="cc-btn cc-btn--sm"
               data-testid={`schedules-new:${identity}`}
               onClick={openNew}
             >
@@ -246,24 +260,22 @@ export function SchedulesSection({
         </p>
       ) : null}
       {loadError ? (
-        <p className="console-schedules__error" role="alert" data-testid={`schedules-load-error:${identity}`}>
+        <Notice tone="crit" role="alert" className="console-schedules__error" testId={`schedules-load-error:${identity}`}>
           {loadError}
-        </p>
+        </Notice>
       ) : null}
       {actionError ? (
-        <p className="console-schedules__error" role="alert" data-testid={`schedules-error:${identity}`}>
+        <Notice tone="crit" role="alert" className="console-schedules__error" testId={`schedules-error:${identity}`}>
           {actionError}
-        </p>
+        </Notice>
       ) : null}
       {form && editing.canChange ? renderForm(form) : null}
-      {status === "loading" && schedules.length === 0 ? <p role="status">Loading schedules...</p> : null}
+      {status === "loading" && schedules.length === 0 ? <LoadingState label="Loading schedules" rows={2} /> : null}
       {status === "ready" && schedules.length === 0 ? (
-        <p className="console-schedules__empty" data-testid={`schedules-empty:${identity}`}>
-          No schedules for this agent.
-        </p>
+        <EmptyState inline title="No schedules for this agent." testId={`schedules-empty:${identity}`} />
       ) : null}
       {schedules.length > 0 ? (
-        <ul className="console-panel__list console-schedules__list">
+        <ul className="console-schedules__list">
           {schedules.map(renderSchedule)}
         </ul>
       ) : null}
@@ -278,9 +290,13 @@ export function SchedulesSection({
       <li key={id} className="console-schedules__item" data-testid={`schedule:${id}`} data-phase={schedule.phase}>
         <div className="console-schedules__row">
           <strong>{label}</strong>
-          <span className="console-schedules__phase" data-testid={`schedule-phase:${id}`}>
+          <Chip
+            className="console-schedules__phase"
+            tone={schedule.phase === "active" ? "ok" : schedule.phase === "paused" ? "warn" : "neutral"}
+            testId={`schedule-phase:${id}`}
+          >
             {describeSchedulePhase(schedule.phase)}
-          </span>
+          </Chip>
         </div>
         <p className="console-schedules__content">{schedule.content}</p>
         <p className="console-schedules__meta" data-testid={`schedule-when:${id}`}>
@@ -292,14 +308,19 @@ export function SchedulesSection({
           </p>
         ) : null}
         {schedule.senderHidden ? null : (
-          <p className="console-schedules__meta" data-testid={`schedule-sender:${id}`}>
-            {schedule.sender ? `Sends as ${schedule.sender}` : "Sends as this console"}
+          <p
+            className="console-schedules__meta"
+            data-testid={`schedule-sender:${id}`}
+            title={schedule.sender || undefined}
+          >
+            {`Sends as ${describeScheduleSender(schedule.sender, senderLabel)}`}
           </p>
         )}
         {editing.canChange ? (
-          <div className="console-panel__actions">
+          <div className="cc-btn-row console-schedules__actions">
             <button
               type="button"
+              className="cc-btn cc-btn--sm"
               aria-label={`Edit ${label}`}
               data-testid={`schedule-edit:${id}`}
               disabled={working}
@@ -310,6 +331,7 @@ export function SchedulesSection({
             {schedule.phase === "active" ? (
               <button
                 type="button"
+                className="cc-btn cc-btn--sm"
                 aria-label={`Pause ${label}`}
                 data-testid={`schedule-pause:${id}`}
                 disabled={working}
@@ -321,6 +343,7 @@ export function SchedulesSection({
             {schedule.phase === "paused" ? (
               <button
                 type="button"
+                className="cc-btn cc-btn--sm"
                 aria-label={`Resume ${label}`}
                 title="Resuming makes you its sender"
                 data-testid={`schedule-resume:${id}`}
@@ -334,6 +357,7 @@ export function SchedulesSection({
               <>
                 <button
                   type="button"
+                  className="cc-btn cc-btn--sm cc-btn--danger"
                   aria-label={`Confirm deleting ${label}`}
                   data-testid={`schedule-delete-confirm:${id}`}
                   disabled={working}
@@ -343,6 +367,7 @@ export function SchedulesSection({
                 </button>
                 <button
                   type="button"
+                  className="cc-btn cc-btn--sm cc-btn--ghost"
                   data-testid={`schedule-delete-cancel:${id}`}
                   onClick={() => setConfirmingDelete(null)}
                 >
@@ -352,6 +377,7 @@ export function SchedulesSection({
             ) : (
               <button
                 type="button"
+                className="cc-btn cc-btn--sm cc-btn--danger"
                 aria-label={`Delete ${label}`}
                 data-testid={`schedule-delete:${id}`}
                 disabled={working}
@@ -496,16 +522,17 @@ export function SchedulesSection({
           Each send goes to {identity} as you, through the same checks as a message you send now.
         </p>
         {current.error ? (
-          <p className="console-schedules__error" role="alert" data-testid="schedule-form-error">
+          <Notice tone="crit" role="alert" className="console-schedules__error" testId="schedule-form-error">
             {current.error}
-          </p>
+          </Notice>
         ) : null}
-        <div className="console-panel__actions">
-          <button type="submit" data-testid="schedule-form-save" disabled={busy !== null}>
+        <div className="cc-btn-row console-schedules__actions">
+          <button type="submit" className="cc-btn cc-btn--primary" data-testid="schedule-form-save" disabled={busy !== null}>
             {saving ? "Saving..." : schedule ? "Save" : "Create schedule"}
           </button>
           <button
             type="button"
+            className="cc-btn cc-btn--ghost"
             data-testid="schedule-form-cancel"
             onClick={() => setForm(null)}
           >

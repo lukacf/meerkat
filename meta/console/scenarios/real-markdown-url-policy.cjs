@@ -89,7 +89,7 @@ async function urlPolicy(host) {
         const options = new URLSearchParams(mode === "custom" ? { markdownPolicy: "custom", approvedImage: image.blobId } : {});
         const hostPath = host === "stock" ? "/scoped" : "/shared";
         await page.goto(`${fixture.baseUrl}${hostPath}?${options}`);
-        if (host === "stock") await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ has: page.getByText(identity, { exact: true }) }).first().click();
+        if (host === "stock") await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
         await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
         initializing = false;
         const viewport = page.locator(host === "stock" ? ".conv__body" : '[data-testid="shared-pane-0"] .cc-conversation-pane__scroll').first();

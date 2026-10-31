@@ -1,9 +1,19 @@
 import React from "react";
-import { describeMemoryTimelineEvent, stripPeerTransportScaffold } from "../lib/adapters";
+import { stripPeerTransportScaffold } from "../lib/adapters";
+import { describeMemoryEventForPeople, isOpenLoopNudge } from "../lib/memory-event-words";
 import { describeFailure } from "../lib/failure-summary";
 import { memberKickoffNotice, memberKickoffPhaseLabel, type MemberKickoffNotice } from "@console-core";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../types";
 import { countRender } from "../lib/render-counts";
+import { turnSenderLine } from "../lib/turn-origin";
+// Pure kit helpers only: this rail's node test bundle cannot resolve React
+// from the kit package, so it uses the kit's CSS classes in its own markup.
+import {
+  EMPTY_AGENT_DIRECTORY,
+  agentDisplayName,
+  type AgentDirectory,
+} from "../../../packages/console-components/src/panel-kit/agents";
+import { formatAbsoluteTime, formatRelativeTime, humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 
 interface SignalsRailProps {
   frames: ConsoleFrame[];
@@ -12,6 +22,10 @@ interface SignalsRailProps {
   activePresetId?: string;
   emptyText?: string;
   watchedIdentities?: Set<string>;
+  /** Resolves agent keys to display names ("Support Triage replied"). Without
+   * it, or for agents it does not know, a key gets the console's shared
+   * display title for it. */
+  agentDirectory?: AgentDirectory;
   onPresetChange?: (presetId: string) => void;
   onSelect?: (frame: ConsoleFrame) => void;
 }
@@ -25,6 +39,7 @@ interface Signal {
   detail: string;
   agent: string;
   at: string;
+  atMs: number;
   raw: ConsoleFrame;
 }
 
@@ -35,6 +50,7 @@ interface SignalGroup {
   detail: string;
   agent: string;
   at: string;
+  atMs: number;
   items: Signal[];
 }
 
@@ -94,13 +110,18 @@ function truncate(value: string, max = 110): string {
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}...`;
 }
 
-function displayName(value: string): string {
-  if (!value || value === "_system") return "System";
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join(" ");
+type NameResolver = (value: string) => string;
+
+/** Names agents the way every surface does: the directory's display name
+ * when it knows the agent, else the name the shared naming function gives
+ * the key ("identity:support-triage" reads "Support triage"), and "System"
+ * for console events. */
+export function signalNameResolver(directory: AgentDirectory = EMPTY_AGENT_DIRECTORY): NameResolver {
+  return (value) => {
+    if (!value || value === "_system") return "System";
+    const label = directory.lookup(value)?.label?.trim();
+    return label || agentDisplayName(value, directory);
+  };
 }
 
 function isMeaningfulReply(value: string): boolean {
@@ -224,7 +245,11 @@ function severityOf(frame: ConsoleFrame): Severity {
   return "info";
 }
 
-function signalFromFrame(frame: ConsoleFrame): Signal | null {
+function signalFromFrame(
+  frame: ConsoleFrame,
+  displayName: NameResolver,
+  turnLabels?: ReadonlyMap<string, string>,
+): Signal | null {
   const data = recordOf(frame.data);
   const severity = severityOf(frame);
   const base = {
@@ -232,13 +257,14 @@ function signalFromFrame(frame: ConsoleFrame): Signal | null {
     severity,
     agent: agentFor(frame),
     at: timeFor(frame.timestampMs),
+    atMs: frame.timestampMs || 0,
     raw: frame,
   };
 
   if (severity === "critical") {
     return {
       ...base,
-      label: frame.event === "interaction_failed" ? "Agent turn failed" : frame.event.replace(/_/g, " "),
+      label: frame.event === "interaction_failed" ? "Agent turn failed" : humanizeEnum(frame.event),
       detail: truncate(
         describeFailure(data, "")
           || textFromValue(data.error ?? data.reason ?? data.message)
@@ -255,10 +281,19 @@ function signalFromFrame(frame: ConsoleFrame): Signal | null {
       );
       if (!request) return null;
       if (isScaffoldRequest(request)) return null;
+      // Name the real sender from the typed origin. A runtime's
+      // interaction_started carries none: it takes the label of its turn's
+      // user_input when there is one, so the two still collapse into one
+      // signal, and otherwise says the agent started a turn.
+      const hasOrigin = Boolean(textFromValue(data.origin_kind) || textFromValue(data.origin));
+      const name = displayName(base.agent);
+      const label = frame.event === "user_input" || hasOrigin
+        ? turnSenderLine(data, name)
+        : turnLabels?.get(frame.interactionId || "") ?? `${name} started a turn`;
       return {
         ...base,
         id: `user:${frame.id || frame.interactionId || frame.timestampMs || request}`,
-        label: `You asked ${displayName(base.agent)}`,
+        label,
         detail: truncate(request),
       };
     }
@@ -322,18 +357,20 @@ function signalFromFrame(frame: ConsoleFrame): Signal | null {
     case "gating_decision":
       return {
         ...base,
-        label: `Gate ${String(data.decision || "decision")}`,
-        detail: truncate(textFromValue(data.reason) || "Gating decision recorded"),
+        label: approvalLabel(String(data.decision || "")),
+        detail: truncate(textFromValue(data.reason) || "Approval decision recorded"),
       };
     case "member_retired":
       return { ...base, label: "Member retired", detail: truncate(textFromValue(data.reason) || "Lifecycle change") };
-    case "state_changed":
-      return { ...base, label: `State -> ${String(data.state || data.new_state || "changed")}`, detail: base.agent };
+    case "state_changed": {
+      const state = String(data.state || data.new_state || "");
+      return { ...base, label: "State changed", detail: state ? `Now ${humanizeEnum(state).toLowerCase()}` : "Lifecycle change" };
+    }
     case "route_changed":
       return { ...base, label: "Route changed", detail: truncate(textFromValue(data.reason) || "Routing updated") };
     default:
       if (frame.event.startsWith("memory.")) {
-        return memorySignal(frame, data, base);
+        return memorySignal(frame, data, base, displayName);
       }
       return null;
   }
@@ -349,8 +386,11 @@ function memorySignal(
   frame: ConsoleFrame,
   data: Record<string, unknown>,
   base: Omit<Signal, "label" | "detail">,
+  displayName: NameResolver,
 ): Signal | null {
-  const detail = truncate(describeMemoryTimelineEvent(frame.event, data));
+  // Agents by name and plain words; the technical line stays in the shared
+  // describeMemoryTimelineEvent for the transcript and audits.
+  const detail = truncate(describeMemoryEventForPeople(frame.event, data, { agentName: displayName }));
   const warning = (label: string): Signal => ({ ...base, severity: "warning", label, detail });
   const info = (label: string): Signal => ({ ...base, severity: "info", label, detail });
 
@@ -358,25 +398,26 @@ function memorySignal(
     case "memory.write.quarantined":
       return warning("Memory write quarantined");
     case "memory.taint.transition":
-      return data.kind === "tainted" ? warning("Session memory tainted") : null;
+      return data.kind === "tainted" ? warning("Session became untrusted") : null;
     case "memory.budget.denied":
-      return warning("Memory budget denied");
+      return warning("Memory budget reached");
     case "memory.hygiene.blocked":
-      return warning("Memory hygiene blocked");
+      return warning("Memory tidy-up blocked");
     case "memory.quarantine.release_blocked":
       return warning("Quarantine release blocked");
     case "memory.conflict.signal":
-      return warning("Memory conflict");
+      return warning("Conflicting memories");
     case "memory.dream.completed":
       return info("Memory dream completed");
     case "memory.record.promoted":
-      return info("Memory record promoted");
+      return info("Memory record moved");
     case "memory.harvest.completed":
-      return info("Memory harvest completed");
+      return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
-      return info("Quarantine verdict");
+      // The steward's open-loop nudge rides the verdict event.
+      return info(isOpenLoopNudge(frame.event, data) ? "Open loop needs follow-up" : "Quarantine verdict");
     case "memory.promotion.pending_gate":
-      return info("Promotion awaiting gate");
+      return info("Memory record waiting to move");
     default:
       // memory.dream.started/skipped, memory.hygiene.proposed/applied/skipped,
       // memory.distill.timed_out, and any other subtype are not shown.
@@ -428,6 +469,7 @@ function groupSignals(signals: Signal[]): SignalGroup[] {
       existing.detail = detailForGroup(existing.items);
       existing.agent = existing.items[0]?.agent || signal.agent;
       existing.at = existing.items[0]?.at || signal.at;
+      existing.atMs = existing.items[0]?.atMs || signal.atMs;
       continue;
     }
     const group = {
@@ -437,6 +479,7 @@ function groupSignals(signals: Signal[]): SignalGroup[] {
       detail: detailForGroup([signal]),
       agent: signal.agent,
       at: signal.at,
+      atMs: signal.atMs,
       items: [signal],
     };
     byId.set(key, group);
@@ -462,20 +505,36 @@ function detailForGroup(items: Signal[]): string {
   return newestReply?.detail || userRequest?.detail || items[0]?.detail || "";
 }
 
+/** Compact relative time, fixed when the groups are built: the rail does not
+ * tick, so typing elsewhere never re-renders it. */
 function timeFor(tsMs?: number): string {
-  if (!tsMs) return "--";
-  const diff = Date.now() - tsMs;
-  if (diff < 60_000) return `${Math.max(1, Math.floor(diff / 1000))}s`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / 3_600_000)}h`;
+  return formatRelativeTime(tsMs);
 }
 
-export function buildSignalGroupsForTest(frames: ConsoleFrame[]): SignalGroup[] {
+/** Approval decisions in words: "Approval requested", "Approved". */
+function approvalLabel(decision: string): string {
+  const word = decision.trim().toLowerCase();
+  if (word === "requested" || word === "pending") return "Approval requested";
+  if (word === "approve" || word === "approved" || word === "auto_approved") return "Approved";
+  if (word === "reject" || word === "rejected" || word === "denied") return "Approval refused";
+  if (word === "escalate" || word === "escalated") return "Approval escalated";
+  return word ? `Approval ${humanizeEnum(word).toLowerCase()}` : "Approval decision";
+}
+
+export function buildSignalGroupsForTest(frames: ConsoleFrame[], directory: AgentDirectory = EMPTY_AGENT_DIRECTORY): SignalGroup[] {
+  const displayName = signalNameResolver(directory);
   const seen = new Set<string>();
   const seenSemantic = new Set<string>();
   const next: Signal[] = [];
-  for (const frame of frames.slice(0, 260)) {
-    const signal = signalFromFrame(frame);
+  const window = frames.slice(0, 260);
+  // Each turn's sender line, from its user_input frame.
+  const turnLabels = new Map<string, string>();
+  for (const frame of window) {
+    if (frame.event !== "user_input" || !frame.interactionId) continue;
+    turnLabels.set(frame.interactionId, turnSenderLine(recordOf(frame.data), displayName(agentFor(frame))));
+  }
+  for (const frame of window) {
+    const signal = signalFromFrame(frame, displayName, turnLabels);
     if (!signal) continue;
     if (seen.has(signal.id)) continue;
     seen.add(signal.id);
@@ -498,6 +557,7 @@ export const SignalsRail = React.memo(function SignalsRail({
   activePresetId,
   emptyText,
   watchedIdentities,
+  agentDirectory = EMPTY_AGENT_DIRECTORY,
   onPresetChange,
   onSelect,
 }: SignalsRailProps): React.JSX.Element {
@@ -508,6 +568,7 @@ export const SignalsRail = React.memo(function SignalsRail({
   }, [filterPresets]);
   const [filter, setFilter] = React.useState<string>(activePresetId || presets[0]?.id || "all");
   const [expandedGroups, setExpandedGroups] = React.useState<Set<string>>(() => new Set());
+  const detailIdPrefix = React.useId();
 
   React.useEffect(() => {
     if (activePresetId && presets.some((preset) => preset.id === activePresetId)) {
@@ -516,8 +577,9 @@ export const SignalsRail = React.memo(function SignalsRail({
   }, [activePresetId, presets]);
 
   const groups: SignalGroup[] = React.useMemo(() => {
-    return buildSignalGroupsForTest(frames);
-  }, [frames]);
+    return buildSignalGroupsForTest(frames, agentDirectory);
+  }, [frames, agentDirectory]);
+  const nameOf = React.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
 
   function groupMatchesPreset(group: SignalGroup, preset: ConsoleRailFilterPresetConfig): boolean {
     if (preset.watchedOnly) {
@@ -598,8 +660,11 @@ export const SignalsRail = React.memo(function SignalsRail({
             {emptyText || "No meaningful signals yet."}
           </div>
         )}
-        {shown.map((s) => {
+        {shown.map((s, index) => {
           const expanded = expandedGroups.has(s.id);
+          const detailId = `${detailIdPrefix}detail-${index}`;
+          const grouped = s.items.length > 1;
+          const agentKey = s.agent && s.agent !== "_system" ? s.agent : "";
           return (
           <div
             key={s.id}
@@ -607,19 +672,35 @@ export const SignalsRail = React.memo(function SignalsRail({
             data-sev={s.severity}
             data-testid={`signal:${s.id}`}
             data-expanded={expanded ? "true" : "false"}
-            onClick={() => toggleGroup(s)}
-            role="button"
-            tabIndex={0}
+            onClick={(event) => {
+              // The label button and the row's other controls handle their
+              // own clicks; anywhere else on the row opens it.
+              const target = event.target as Element | null;
+              if (target?.closest?.("a, button, input, select, textarea, summary")) return;
+              toggleGroup(s);
+            }}
           >
             <span className="signal__bar" />
             <span className="signal__body">
-              <span className="signal__label">
-                {s.items.length > 1 && <span className="signal__chevron">{expanded ? "▾" : "▸"}</span>}
-                {s.title}
-                {s.items.length > 1 && <span className="signal__count">{s.items.length}</span>}
+              {/* The label is the row's button; the Memory pivot and the
+                  grouped events sit beside it, never inside. */}
+              <button
+                type="button"
+                className="signal__hit"
+                aria-expanded={grouped ? expanded : undefined}
+                aria-describedby={detailId}
+                onClick={() => toggleGroup(s)}
+              >
+                <span className="signal__label">
+                  {grouped && <span className="signal__chevron" aria-hidden="true" />}
+                  {s.title}
+                  {grouped && <span className="signal__count">{s.items.length}</span>}
+                </span>
+              </button>
+              <span className="signal__detail" id={detailId}>{s.detail}</span>
+              <span className="signal__agent cc-agent" title={agentKey || undefined}>
+                <span className="cc-agent__name">{nameOf(s.agent)}</span>
               </span>
-              <span className="signal__detail">{s.detail}</span>
-              <span className="signal__agent">{s.agent}</span>
               {s.items.length === 1 &&
                 s.items[0].raw.event.startsWith("memory.") &&
                 onSelect ? (
@@ -632,7 +713,7 @@ export const SignalsRail = React.memo(function SignalsRail({
                     onSelect(s.items[0].raw);
                   }}
                 >
-                  state here
+                  Open in Memory
                 </button>
               ) : null}
               {s.items.length > 1 && expanded && (
@@ -655,7 +736,11 @@ export const SignalsRail = React.memo(function SignalsRail({
               )}
             </span>
             <span className="signal__meta">
-              <span className="signal__time">{s.at}</span>
+              {s.atMs ? (
+                <time className="signal__time" dateTime={new Date(s.atMs).toISOString()} title={formatAbsoluteTime(s.atMs)}>
+                  {s.at}
+                </time>
+              ) : null}
             </span>
           </div>
         );})}

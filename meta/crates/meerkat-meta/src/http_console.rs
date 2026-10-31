@@ -73,8 +73,8 @@ use crate::runtime::MetaRuntimeHandle;
 use crate::runtime::{
     ConsoleAgentLiveSnapshot, ConsoleLiveSnapshot, ConsoleMember, ConsoleModelCapabilities,
     ConsoleRestJsonRequest, DeliveryHistoryRequest, GatingDecideRequest, GatingDecision,
-    RuntimeDecisionState, extract_bearer_token_from_header,
-    handle_console_rest_json_route_with_pending_rows,
+    RuntimeDecisionState, authorize_console_rest_json_route, extract_bearer_token_from_header,
+    render_console_rest_json_route,
 };
 use crate::runtime::{RuntimeMetadataTable, labels_to_json_value};
 use crate::unified_runtime::console_events::{
@@ -1061,6 +1061,16 @@ pub async fn console_json_handler(
         path = format!("{path}{sep}auth_token={encoded}");
     }
 
+    let request = ConsoleRestJsonRequest {
+        method: "GET".to_string(),
+        path,
+        auth: None,
+    };
+    // The route and credential checks run first, so the reads that only a
+    // served request needs are skipped for a refused one.
+    let authorized =
+        authorize_console_rest_json_route(&state.decisions, &state.session_fences, &request);
+
     let config_module_ids: Vec<String> = state
         .decisions
         .modules
@@ -1105,6 +1115,28 @@ pub async fn console_json_handler(
         apply_console_visibility_policy(&mut snapshot, state.visibility_policy.as_ref());
         snapshot
     });
+    // Each row's last console activity, read from the console frame log
+    // alone: the read enters no member actor, so it wakes no dormant member.
+    // Without an answer the rows carry none, and the console reads unknown.
+    // Only an experience the route serves carries it, so a refused request
+    // or a modules read does not pay for it.
+    let live_snapshot = match (live_snapshot, state.console_aggregator.as_ref()) {
+        (Some(snapshot), Some(aggregator))
+            if authorized.is_ok() && uri.path() == "/console/experience" =>
+        {
+            let identities = snapshot.listed_identities();
+            match aggregator.last_activity_for_identities(&identities).await {
+                Ok(last_activity) => {
+                    Some(snapshot.with_last_activity_ms(last_activity.into_iter().collect()))
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "console last activity unavailable");
+                    Some(snapshot)
+                }
+            }
+        }
+        (snapshot, _) => snapshot,
+    };
 
     let panel_runtimes = match state
         .console_aggregator
@@ -1131,20 +1163,20 @@ pub async fn console_json_handler(
                 .iter()
                 .any(|runtime| runtime.runtime.workgraph_service().is_some())
         });
-    let mut response = handle_console_rest_json_route_with_pending_rows(
-        &state.decisions,
-        &state.session_fences,
-        &ConsoleRestJsonRequest {
-            method: "GET".to_string(),
-            path,
-            auth: None,
-        },
-        live_snapshot.as_ref(),
-        state.access.as_ref(),
-        memory_available,
-        workgraph_available,
-        &pending_identities,
-    );
+    let mut response = match authorized {
+        Ok(resolved_auth) => render_console_rest_json_route(
+            &state.decisions,
+            &state.session_fences,
+            &request,
+            resolved_auth.as_ref(),
+            live_snapshot.as_ref(),
+            state.access.as_ref(),
+            memory_available,
+            workgraph_available,
+            &pending_identities,
+        ),
+        Err(refused) => refused,
+    };
     if response.status == 200
         && uri.path() == "/console/experience"
         && let Some(auth) = console_request_auth_context(&state, &headers, &uri)
@@ -13809,8 +13841,8 @@ async fn handle_console_wire_local(
 }
 
 /// The console's live snapshot, and the identities whose rows it answers
-/// pending (the experience renders them withheld, see
-/// [`handle_console_rest_json_route_with_pending_rows`]).
+/// pending (the experience renders them withheld, see the console ingress
+/// route, `handle_console_rest_json_route_with_pending_rows`).
 ///
 /// With an identity runtime, the snapshot reads it once per request
 /// ([`IdentityBindingCut`]) and never serves a fact walked under an earlier

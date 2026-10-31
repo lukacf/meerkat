@@ -14,11 +14,16 @@ import {
   useTopologyActivity,
 } from "./data";
 import type { ConsoleAgent, ConsoleFrame, ConsoleTopologyNode } from "./types";
+import { humanizeEnum } from "../panel-kit/format";
 
 interface RoleTreeProps {
   nodes: ConsoleTopologyNode[];
   agents: ConsoleAgent[];
   activity: ConsoleFrame[];
+  /** When given, agent chips are buttons that select the agent. */
+  onSelectAgent?: (agentId: string) => void;
+  /** The root's name: the team's display name when the host has one. */
+  teamName?: string;
 }
 
 const STATE_COLOUR: Record<string, string> = {
@@ -40,6 +45,8 @@ export function RoleTree({
   nodes,
   agents,
   activity,
+  onSelectAgent,
+  teamName,
 }: RoleTreeProps): React.JSX.Element {
   const graph = React.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
   const roleIndex = React.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
@@ -86,7 +93,7 @@ export function RoleTree({
             ▸
           </span>
           <span className="topo-roletree__dot" style={{ background: "var(--ok)" }} />
-          <span className="topo-roletree__label">mob</span>
+          <span className="topo-roletree__label">{teamName?.trim() || "Team"}</span>
           <span className="topo-roletree__count">{graph.agents.length} agents · {graph.roles.length} roles</span>
           {rootBusy && <span className="topo-roletree__busy" aria-label="agents working" />}
         </button>
@@ -113,7 +120,7 @@ export function RoleTree({
                 ▸
               </span>
               <span className="topo-roletree__dot" style={{ background: colour }} />
-              <span className="topo-roletree__label">{role}</span>
+              <span className="topo-roletree__label" title={role}>{humanizeEnum(role) || role}</span>
               <span className="topo-roletree__count">{list.length}</span>
               {sectionBusy && (
                 <span className="topo-roletree__busy" aria-label={`${sectionBusyCount} working`}>
@@ -126,19 +133,37 @@ export function RoleTree({
                 {list.map((agent) => {
                   const isHot = !!live.active[agent.id];
                   const isBusy = !!live.busy[agent.id];
-                  return (
-                    <div
-                      key={agent.id}
-                      className={`topo-roletree__agent ${isHot ? "is-hot" : ""}${isBusy ? " is-busy" : ""}`}
-                      data-testid={`topology-node:${agent.id}`}
-                      title={`${agent.id}${agent.state ? " · " + agent.state : ""}${isBusy ? " · working" : ""}`}
-                    >
+                  const chip = (
+                    <>
                       <span
                         className="topo-roletree__agent-dot"
                         style={{ background: stateColour(agent.state) }}
                       />
                       <span className="topo-roletree__agent-label">{agent.label || agent.id}</span>
                       {isBusy && <span className="topo-roletree__busy" aria-label="working" />}
+                    </>
+                  );
+                  const chipClass = `topo-roletree__agent ${isHot ? "is-hot" : ""}${isBusy ? " is-busy" : ""}`;
+                  const chipTitle = `${agent.id}${agent.state ? " · " + agent.state : ""}${isBusy ? " · working" : ""}`;
+                  return onSelectAgent ? (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      className={`${chipClass} is-interactive`}
+                      data-testid={`topology-node:${agent.id}`}
+                      title={chipTitle}
+                      onClick={() => onSelectAgent(agent.id)}
+                    >
+                      {chip}
+                    </button>
+                  ) : (
+                    <div
+                      key={agent.id}
+                      className={chipClass}
+                      data-testid={`topology-node:${agent.id}`}
+                      title={chipTitle}
+                    >
+                      {chip}
                     </div>
                   );
                 })}

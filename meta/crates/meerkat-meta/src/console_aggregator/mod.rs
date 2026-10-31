@@ -1612,6 +1612,16 @@ impl MetaConsoleAggregator {
         Ok(phases)
     }
 
+    /// The last console activity of each named identity, in milliseconds
+    /// since the epoch ([`ConsoleLogStore::latest_activity_times`]). It reads
+    /// the console log alone: it enters no member actor and wakes no member.
+    pub(crate) async fn last_activity_for_identities(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        self.inner.store.latest_activity_times(identities).await
+    }
+
     /// The spawn registry's labels for each record, in record order: what the
     /// agent-tool spawn path registered for the record's identity in the
     /// record's own runtime, its `spawned_by` lineage among them. `None` for a

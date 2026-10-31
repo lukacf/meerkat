@@ -5,7 +5,7 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { chromium } = require("playwright");
 const { startFixture, eventually } = require("../acceptance-runtime.cjs");
-const { assertSidebarCompletion, waitForExplicitIdleRoster, waitForSidebarCompletion } = require("../sidebar-activity-oracle.cjs");
+const { assertActivityRecorded, assertSidebarCompletion, expectedActivityOrder, waitForExplicitIdleRoster, waitForSidebarCompletion } = require("../sidebar-activity-oracle.cjs");
 
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const router = "router:main";
@@ -175,6 +175,17 @@ async function sidebarActivity() {
     await choose("Quiet", baselineOrder, "completed router returns to Quiet without reordering");
     await choose("Unknown", []);
     await choose("All", baselineOrder);
+    // Sort: Last activity follows the owner's recorded activity (the console
+    // frame log's last_activity_ms), and Manual returns the roster order.
+    result.activityOwner = await eventually(async () => {
+      const agents = await ownerRoster(fixture);
+      return assertActivityRecorded(agents, router);
+    }, "owner records the router's activity");
+    const sort = sidebar().getByTestId("sidebar-view-sort");
+    await sort.selectOption("activity");
+    await assertRows(expectedActivityOrder(result.activityOwner), "last activity sort follows the owner's activity");
+    await sort.selectOption("manual");
+    await assertRows(baselineOrder, "manual sort restores the roster order");
     await page.setViewportSize({ width: 1600, height: 1000 });
     await capture("completed-light-1600");
     assertSidebarCompletion(result.finalFrames, { toolId, answer });

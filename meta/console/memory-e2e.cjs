@@ -266,10 +266,11 @@ const openAccessFlows = [
       // Knowledge: identity selector + composition segments.
       await openTab(page, "knowledge");
       await page.getByTestId(T.KNOWLEDGE).waitFor({ timeout: 10_000 });
+      // Options read display names; the raw identities are their values.
       const identityOptions = await page
         .getByTestId(T.KNOWLEDGE_IDENTITY)
         .locator("option")
-        .allTextContents();
+        .evaluateAll((nodes) => nodes.map((node) => node.value));
       assert(
         identityOptions.includes("router") && identityOptions.includes("delivery"),
         `knowledge identity options: ${JSON.stringify(identityOptions)}`,
@@ -279,17 +280,17 @@ const openAccessFlows = [
       await page.getByTestId(T.KNOWLEDGE_IDENTITY).selectOption("router");
       await page.getByTestId(T.knowledgeSegment("identity:router")).waitFor({ timeout: 10_000 });
 
-      // Pipeline: stages summary counts both parked promotions.
+      // Pipeline: the stage stepper counts both parked promotions.
       await openTab(page, "pipeline");
       await page.getByTestId(T.PIPELINE).waitFor({ timeout: 10_000 });
       const stages = await page.getByTestId(T.PIPELINE_STAGES).innerText();
-      assert(stages.includes("PENDING GATE (2)"), `pipeline stages: ${stages}`);
+      assert(/Waiting for approval\s+2/.test(stages), `pipeline stages: ${stages}`);
 
       // Dreams: the seeded run with both touched-record links.
       await openTab(page, "dreams");
       await page.getByTestId(T.dream("run-dream-e2e-1")).waitFor({ timeout: 10_000 });
       const dreamText = await page.getByTestId(T.dream("run-dream-e2e-1")).innerText();
-      assert(dreamText.includes("2 ops"), `dream run summary: ${dreamText}`);
+      assert(dreamText.includes("2 changes"), `dream run summary: ${dreamText}`);
       for (const memoryId of seed.dreamRun.memory_ids) {
         await page
           .getByTestId(T.dreamRecord("run-dream-e2e-1", memoryId))
@@ -324,24 +325,36 @@ const openAccessFlows = [
         "tip must be the current lineage node",
       );
 
-      // Life: the seeded build-surface injection, humanized.
+      // Life: the seeded build-surface injection, as a sentence naming the
+      // agent; the raw identity is the name's tooltip.
       const life = await page.getByTestId(T.DETAIL_LIFE).innerText();
-      assert(/build • router/.test(life), `life section injection line: ${life}`);
+      assert(/Given to .+ at startup/.test(life), `life section injection line: ${life}`);
+      assert(
+        (await page.getByTestId(T.DETAIL_LIFE).locator('[title="router"]').count()) > 0,
+        "the injection names identity router (in the agent name's tooltip)",
+      );
       assertNoRawJson(await page.getByTestId(T.DETAIL).innerText(), "biography");
 
       // Evidence click-through: the seeded ref names a session absent from
       // the console timeline, so it must degrade to the label-only fallback.
+      // The link reads as a conversation; its session ID and generation are
+      // in the Biography's collapsed technical details, not on the link.
       const evidenceRef = page.getByTestId(T.evidenceRef(0));
       await evidenceRef.waitFor({ timeout: 10_000 });
       const evidenceText = await evidenceRef.innerText();
       assert(
-        evidenceText.includes("sess-router-archived-1") && evidenceText.includes("gen 2"),
+        evidenceText.startsWith("Conversation") && !evidenceText.includes("sess-router-archived-1"),
         `evidence label: ${evidenceText}`,
+      );
+      const detailAllText = (await page.getByTestId(T.DETAIL).textContent()) ?? "";
+      assert(
+        detailAllText.includes("sess-router-archived-1") && detailAllText.includes("generation 2"),
+        "the evidence session ID and generation stay in the technical details",
       );
       await evidenceRef.click();
       await page.getByTestId(T.EVIDENCE_DEGRADED).waitFor({ timeout: 10_000 });
       const degraded = await page.getByTestId(T.EVIDENCE_DEGRADED).innerText();
-      // Gate fix: the copy no longer claims the session is gone — it may
+      // Gate fix: the copy no longer claims the session is gone; it may
       // merely be outside the recent-1000 timeline window.
       assert(
         degraded.includes("not found in the recent timeline window"),
@@ -482,14 +495,14 @@ const openAccessFlows = [
 
       // Open access on a mutable console offers the decision. Gated
       // promotions are waiting on this record, so a release is refused
-      // typed (the Gating inbox decides it) and nothing changes.
+      // typed (Approvals decides it) and nothing changes.
       await page.getByTestId(T.QUARANTINE_DECIDE).waitFor({ timeout: 10_000 });
       await page.getByTestId(T.QUARANTINE_RELEASE).click();
       const refusal = page.getByTestId(T.QUARANTINE_ERROR);
       await refusal.waitFor({ timeout: 10_000 });
       const refusalText = await refusal.innerText();
       assert(
-        refusalText.includes("gated promotion") && refusalText.includes("Gating inbox"),
+        refusalText.includes("waiting for approval") && refusalText.includes("Approvals"),
         `gated release refusal: ${refusalText}`,
       );
       const after = await rpc(baseUrl, "meta/memory/panel/record", {
@@ -502,7 +515,7 @@ const openAccessFlows = [
       );
       await page.getByTestId(T.DETAIL_BACK).click();
 
-      // The decide button is a door into the Gating inbox.
+      // The decide button is a door into Approvals (the gating panel).
       await openTab(page, "pipeline");
       await page.getByTestId(T.pipelineDecide("gate-mob-promotion")).click();
       await page.getByTestId("gating-panel").waitFor({ timeout: 10_000 });
@@ -541,7 +554,7 @@ const openAccessFlows = [
       // No-flicker contract (gate fix): lattice re-checks retain the prior
       // verdict instead of resetting to "unverifiable", so once the walk
       // above has landed HOLDING, every tile reads its settled status
-      // directly — an instantaneous read regressing here means the flicker
+      // directly; an instantaneous read regressing here means the flicker
       // came back.
       for (const [id, status] of Object.entries(expected)) {
         const tile = page.getByTestId(T.verdictTile(id));
@@ -553,7 +566,10 @@ const openAccessFlows = [
         );
       }
       const latticeText = await page.getByTestId(T.verdictTile("lattice")).innerText();
-      assert(latticeText.includes("0 violations"), `lattice tile: ${latticeText}`);
+      assert(
+        latticeText.includes("No record breaks the trust rules"),
+        `lattice tile: ${latticeText}`,
+      );
       assert(
         (await page.getByTestId(T.verdictTile("echo-safety")).innerText()).includes(
           "UNVERIFIABLE",
@@ -641,7 +657,7 @@ const openAccessFlows = [
       await page.getByTestId(T.LIVE_SEAM).waitFor({ timeout: 10_000 });
       assertNoRawJson(await strip.innerText(), "live strip");
 
-      // Rows whose payload names a record carry the "state here" pivot.
+      // Rows whose payload names a record carry the "Open record" pivot.
       const pivot = strip.locator('[data-testid^="memory-live-pivot:"]').first();
       await pivot.waitFor({ timeout: 10_000 });
       await pivot.click();
@@ -687,7 +703,7 @@ const grantFlows = [
         0,
         "nav:memory must not render without a memory read grant",
       );
-      // Gate finding: the rail's "state here" pivot must not outrun the
+      // Gate finding: the rail's "Open in Memory" pivot must not outrun the
       // nav gate. The seeded memory.* frames (system-attributed, globally
       // visible) still produce rail signals for this caller — wait for one,
       // then assert NO pivot button rendered anywhere.
@@ -712,7 +728,7 @@ const grantFlows = [
       await openTab(page, "pipeline");
       await page.getByTestId(T.PIPELINE_NO_GRANT).waitFor({ timeout: 10_000 });
       const stages = await page.getByTestId(T.PIPELINE_STAGES).innerText();
-      assert(stages.includes("no grant"), `reader pipeline stages: ${stages}`);
+      assert(stages.includes("no access"), `reader pipeline stages: ${stages}`);
       assert.equal(
         await page.locator('[data-testid^="memory-pending:"]').count(),
         0,
@@ -728,7 +744,7 @@ const grantFlows = [
 
   {
     // Gate finding: a partial-grant principal (unscoped agent+mob reads,
-    // NO operator.memory.read) must see "no grant" — never the empty-store
+    // NO operator.memory.read) must see "no access", never the empty-store
     // copy, never leaked operator rows.
     name: "partial grants render operator scope as no-grant",
     run: async ({ page, partialBaseUrl }) => {
@@ -744,7 +760,7 @@ const grantFlows = [
       const deniedRow = await page
         .getByTestId("memory-holdings-scope-denied:operator")
         .innerText();
-      assert(/no grant/i.test(deniedRow), `operator denied row copy: ${deniedRow}`);
+      assert(/no access/i.test(deniedRow), `operator denied row copy: ${deniedRow}`);
       assert.equal(
         await page.getByTestId("memory-holdings-scope-denied:mob").count(),
         0,
@@ -752,14 +768,14 @@ const grantFlows = [
       );
 
       // Records tab, scope=operator: the filtered query is DENIED (-32030
-      // entry gate) and must say "no grant", not "No memory records yet.".
+      // entry gate) and must say "no access", not "No memory records yet.".
       await openTab(page, "records");
       await page.getByTestId(T.FILTER).waitFor({ timeout: 10_000 });
       await page.getByTestId(T.FILTER_SCOPE).selectOption("operator");
       await page.waitForFunction(
         () => {
           const body = document.querySelector('[data-testid="memory-panel"]');
-          return body ? body.innerText.includes("Records: no grant.") : false;
+          return body ? body.innerText.includes("Records: no access.") : false;
         },
         null,
         { timeout: 10_000 },
@@ -823,7 +839,7 @@ const grantFlows = [
         { timeout: 15_000 },
       );
       const dreamsTile = await page.getByTestId(T.verdictTile("dreams")).innerText();
-      assert(/NO GRANT/.test(dreamsTile), `dreams tile copy: ${dreamsTile}`);
+      assert(/NO ACCESS/.test(dreamsTile), `dreams tile copy: ${dreamsTile}`);
 
       // The row-filtered listing still renders the granted agent's rows.
       await openTab(page, "records");

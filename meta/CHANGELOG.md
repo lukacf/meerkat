@@ -128,6 +128,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`ConflictingConfiguration`): the builder composes its own
   (`agent_customizer`).
 
+- The Console's roster can be ordered by hand: drag an agent by the grip that
+  shows on hover, or focus it and press Alt+Up or Alt+Down, to move it among
+  the agents of its category, subgroup or parent (its nested agents move with
+  it), and the move is announced. Group (Category or None) and Sort (Manual,
+  Name or Last activity) controls under the search box choose a categorized or
+  a flat list (in the category order until an agent is moved), kept in the
+  manual order, by name (numbers in order) or with the most recently active
+  agents first. The manual order, the view and the pins
+  are kept in the browser per user and console, and an `[agent_list]`
+  configuration edit no longer resets them; pins an earlier console kept carry
+  over once. An agent row's second line now reads as the agent's role or group
+  and its status in words or its last activity (`Router · active 3 min ago`);
+  its identity moved to the row's tooltip and a copy action, and an agent
+  without a display name is named by its identity in words (`router:main`
+  reads "Router main") or, for a generated id, by its kind and a short suffix.
+
+- `/console/experience` sidebar, `identity_status` and `health_overview` rows
+  carry `last_activity_ms`, the newest time the console's frame log recorded
+  the agent acting (a live runtime event, a console send or a tool
+  application, not a lifecycle record, an interaction failure or a memory
+  event), found among the agent's newest 512 frames. It is advisory (absent
+  means unknown) and reading it wakes no agent. `ConsoleLogStore` gains
+  `latest_activity_times`, with a default that reports none; a store that
+  wraps another must forward it.
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's
@@ -162,6 +187,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `UnifiedRuntimeBuilder::session_identity_config_root` with `mob_spec()` now
   says that the supplied spec's session service reports the root its agent
   builds use.
+- The Console's panels are redesigned in the app's visual language, on one
+  shared set of rows, chips, tabs, sections and empty, loading and error
+  states: Approvals, Memory, WorkGraph, Topology, Routing, Console access,
+  the Roster, an agent's details and schedules, Health, Logs and the
+  Signals rail, with tones that keep a 4.5:1 contrast in every theme. Names come first: an agent is
+  shown by its display name or, without one, by its identity in words
+  (`router:main` reads "Router main"), the same on every surface, and raw
+  identities, keys, grants and IDs moved to tooltips, copy actions and
+  technical details. Approval risk tiers read in words (R0 Minimal, R1 Low,
+  R2 Elevated, R3 High): the chip reads "High risk", the audit "Risk: High
+  (R3)", and a missing tier "Unknown". The panels say the memory store's
+  terms in everyday words (a record is "given to agents", "replaced" or
+  "discarded", and a missing permission reads "No access"). For keyboard
+  and screen reader users, no control sits inside another (a row with its
+  own actions makes its title the row's button), the WorkGraph graph is one
+  tab stop with the arrow keys, Home and End moving between its nodes, panel
+  tabs are tied to the panels they show, an opened detail takes the focus
+  and Back returns it, and headings no longer skip levels. The roster's manual
+  order, Group and Sort are described under Added.
 
 ### Fixed
 

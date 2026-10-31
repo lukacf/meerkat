@@ -91,6 +91,9 @@ export interface IdentityStatusRow {
   progress?: MemberProgress;
   session_repair?: IdentitySessionRepair | null;
   unobserved?: UnobservedFacts;
+  /// Advisory: the newest time, in milliseconds since the epoch, that the
+  /// console's frame log recorded the agent acting. Absent when unknown.
+  last_activity_ms?: number | null;
 }
 
 /// The identity inspect view. `continuity` carries Core's facts for the
@@ -416,6 +419,9 @@ export function normalizeIdentityStatusRow(value: unknown): IdentityStatusRow | 
       const unobserved = normalizeUnobservedFacts(record.unobserved);
       return unobserved ? { unobserved } : {};
     })(),
+    ...(typeof record.last_activity_ms === "number" && Number.isFinite(record.last_activity_ms) && record.last_activity_ms >= 0
+      ? { last_activity_ms: record.last_activity_ms }
+      : {}),
   };
 }
 

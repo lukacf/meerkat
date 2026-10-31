@@ -8,7 +8,7 @@ import {
   type ConsoleFrame, type ConsoleTransportState, type ConversationRichMarkdownBlock,
 } from "@console-core";
 import {
-  ApprovalCard, ConsoleConversationPanel, ConsoleTransportStatus, ConversationMarkdown,
+  ApprovalCard, Button, ConsoleConversationPanel, ConsoleTransportStatus, ConversationMarkdown,
   ConversationPane, QuoteContextChips,
   type ConversationScrollControllerOptions, type ConversationViewportKey, type MarkdownUrlPolicy,
 } from "@console-components";
@@ -68,6 +68,14 @@ const invalidRange: typeof quote.sourceRange = { start: 0, end: 6, unit: "bytes"
 // @ts-expect-error Unknown transport states are not display truth.
 const invalidTransport: ConsoleTransportState = { ...transportState, phase: "probably-live" };
 void invalidMarkdown; void invalidRange; void invalidTransport;
+// A kit button whose visible label can be missing names itself.
+const namedCollapsible = <Button collapsible aria-label="Refresh">Refresh</Button>;
+const namedIcon = <Button iconOnly icon="+" aria-label="Add" />;
+// @ts-expect-error A collapsible button's label hides in a narrow pane, so it needs an aria-label.
+const unnamedCollapsible = <Button collapsible>Refresh</Button>;
+// @ts-expect-error An icon-only button has no visible label, so it needs an aria-label.
+const unnamedIcon = <Button iconOnly icon="+" />;
+void namedCollapsible; void namedIcon; void unnamedCollapsible; void unnamedIcon;
 void controller.transport.send({ identity: viewportKey.identity, content, origin: "console:fixture", idempotencyKey: "key:fixture", handlingMode: "steer" });
 void createConsoleApp(document.createElement("div"), { baseUrl: "/console", storageNamespace: viewportKey.authority, markdownUrlPolicy: urlPolicy });
 

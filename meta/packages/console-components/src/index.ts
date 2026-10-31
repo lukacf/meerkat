@@ -107,3 +107,6 @@ export * from "./conversation/context-chips";
 export * from "./conversation/context-selection";
 
 export * from "./conversation/presentation-policy";
+
+// The panel kit: shared building blocks for console panels.
+export * from "./panel-kit";

@@ -2990,6 +2990,70 @@ mod tests {
         assert_eq!(request.messages, messages);
     }
 
+    /// A plain System row appended between two turns, the stand-in for an
+    /// operator instruction entry, has no Gemini wire form: System rows exist
+    /// only as the leading `systemInstruction`. The request is refused with
+    /// an input-shape error, never lowered with the row moved into
+    /// `systemInstruction`, and the catalog row refuses such rows too.
+    #[test]
+    fn gemini_mid_conversation_system_is_refused_not_rewritten() {
+        const MODEL: &str = "gemini-3.1-pro-preview";
+        const HEAD: &str = "You are the calendar domain agent.";
+        let client = GeminiClient::new("test-key".to_string());
+        let lower = |messages: &[Message]| -> Result<Value, LlmError> {
+            let mut request = LlmRequest::new(MODEL, messages.to_vec());
+            request.messages = client.project_replay_messages(&request.messages)?;
+            client.build_request_body(&request)
+        };
+        let answer = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let mut transcript = vec![
+            Message::System(meerkat_core::SystemMessage::new(HEAD)),
+            Message::User(UserMessage::text("note tomorrow's agenda")),
+            answer("Tomorrow: standup at 9, dentist at 14."),
+            Message::User(UserMessage::text("move the dentist to 15")),
+        ];
+        let turn_k = lower(&transcript).expect("turn k lowers");
+        assert_eq!(
+            turn_k["systemInstruction"]["parts"],
+            json!([{"text": HEAD}])
+        );
+
+        transcript.push(answer("Moved: dentist at 15."));
+        let entry_index = transcript.len();
+        transcript.push(Message::System(meerkat_core::SystemMessage::new(
+            "Operator instruction: give every time in 24-hour form.",
+        )));
+        transcript.push(Message::User(UserMessage::text(
+            "what is left for tomorrow?",
+        )));
+        let error =
+            lower(&transcript).expect_err("a mid-conversation System row is refused, not lowered");
+        let LlmError::InvalidInputShape { message } = &error else {
+            panic!("expected an input-shape refusal, got {error:?}");
+        };
+        assert!(
+            message.contains(&format!("transcript index {entry_index}")),
+            "{message}"
+        );
+        assert!(
+            message.contains("System rows must form a leading prefix"),
+            "{message}"
+        );
+        assert!(
+            meerkat_models::capabilities_for(Provider::Gemini, MODEL)
+                .is_some_and(|caps| !caps.supports_mid_conversation_system_messages),
+            "{MODEL}: the catalog row refuses mid-conversation System rows"
+        );
+    }
+
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
             image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),

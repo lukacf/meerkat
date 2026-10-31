@@ -1209,6 +1209,30 @@ them.
   the 8 MiB budget. The added size is virtual address space; pages are
   committed only when touched.
 
+- `meerkat-anthropic`: under the `system_and_conversation` prompt-cache
+  policy, a message whose content was a non-empty bare string (a text-only
+  user message, a system notice with one text part, a mid-conversation
+  System message) now lowers as one text block. Before, such content went
+  out as a bare string, and as a one-block array only while the message was
+  among the most recent messages the policy marks with a breakpoint, so a
+  message changed shape once later requests moved the breakpoints past it:
+  a request no longer repeated the previous request's messages byte for
+  byte, and a cache that keys the two forms differently missed from that
+  message on. Empty content and tool-result content are unchanged, and the
+  other cache policies lower messages as before.
+
+- `meerkat-anthropic`: under the `system_and_conversation` prompt-cache
+  policy, the cache-breakpoint evidence of a request no longer binds a
+  transcript prefix to messages that are not that prefix. The client lowers a
+  mid-conversation System message after the user message it governs, and the
+  evidence paired the lowered messages with transcript positions in
+  transcript order, so the breakpoint on that user message was claimed for
+  the transcript prefix through the System message, and the session kept
+  that claim. A breakpoint is now claimed only where the messages rendered
+  through it are exactly a transcript prefix, as
+  `LlmClient::authored_cache_breakpoints` requires; the request itself is
+  unchanged.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary

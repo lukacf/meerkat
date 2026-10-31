@@ -3952,6 +3952,148 @@ mod tests {
         );
     }
 
+    /// A plain System row appended between two turns, the stand-in for an
+    /// operator instruction entry, keeps turn k's request a byte prefix of
+    /// turn k+1's in both cache modes: every turn-k message, with its marker,
+    /// is byte-equal in turn k+1, and the model, tools, `prompt_cache_key`
+    /// and cache options are byte-equal.
+    #[test]
+    fn chat_completions_activation_is_append_monotone() {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+
+        const ENTRY: &str = "Operator instruction: give every time in 24-hour form.";
+        const CACHE_KEY: &str = "meerkat:profile:openai:gpt-5.6-sol";
+
+        // The lowering a backend that has admitted the prompt-cache fields
+        // receives; no compatible route's backend has today.
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        )
+        .with_openai_backend(meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi);
+        let tools = vec![Arc::new(meerkat_core::ToolDef::new(
+            "calendar_lookup",
+            "calendar_lookup tool",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))];
+        let answer = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let turn_k = vec![
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the calendar domain agent.",
+            )),
+            Message::User(UserMessage::text("note tomorrow's agenda")),
+            answer("Tomorrow: standup at 9, dentist at 14."),
+            Message::User(UserMessage::text("move the dentist to 15")),
+        ];
+        let mut next_turn = turn_k.clone();
+        next_turn.extend([
+            answer("Moved: dentist at 15."),
+            Message::System(meerkat_core::SystemMessage::new(ENTRY)),
+            Message::User(UserMessage::text("what is left for tomorrow?")),
+        ]);
+        let message_bytes = |body: &Value| -> Vec<String> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(Value::to_string)
+                .collect()
+        };
+        let marked = |body: &Value| -> Vec<usize> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    message
+                        .to_string()
+                        .contains("prompt_cache_breakpoint")
+                        .then_some(index)
+                })
+                .collect()
+        };
+        let without_messages = |body: &Value| {
+            let mut body = body.clone();
+            body.as_object_mut().unwrap().remove("messages");
+            body.to_string()
+        };
+
+        for mode in [
+            OpenAiPromptCacheMode::Explicit,
+            OpenAiPromptCacheMode::Implicit,
+        ] {
+            let lower = |messages: &[Message]| {
+                let request = LlmRequest::new("gpt-5.6-sol", messages.to_vec())
+                    .with_tools(tools.clone())
+                    .with_openai_tag_merge(|tag| {
+                        tag.prompt_cache_enabled = Some(true);
+                        tag.prompt_cache_key = Some(CACHE_KEY.to_string());
+                        tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                            mode: Some(mode),
+                            ttl: None,
+                        });
+                    });
+                client
+                    .build_chat_completions_body(&request)
+                    .expect("chat completions body")
+            };
+            let prior = lower(&turn_k);
+            let next = lower(&next_turn);
+
+            assert_eq!(
+                without_messages(&next),
+                without_messages(&prior),
+                "{mode:?}: model, tools and cache knobs are byte-equal"
+            );
+            assert_eq!(prior["prompt_cache_key"], CACHE_KEY, "{mode:?}");
+            assert!(prior["tools"].is_array(), "{mode:?}: {prior}");
+
+            let prior_messages = message_bytes(&prior);
+            assert_eq!(prior_messages.len(), turn_k.len(), "{mode:?}");
+            assert_eq!(
+                message_bytes(&next)[..prior_messages.len()],
+                prior_messages[..],
+                "{mode:?}: every turn-k message, with its marker, is byte-equal in turn k+1"
+            );
+            // The entry keeps its transcript position: after turn k's answer,
+            // before turn k+1's prompt.
+            let entry = &next["messages"][prior_messages.len() + 1];
+            assert_eq!(entry["role"], "system", "{mode:?}: {entry}");
+            assert!(entry.to_string().contains(ENTRY), "{mode:?}: {entry}");
+
+            let prior_marks = marked(&prior);
+            let next_marks = marked(&next);
+            if mode == OpenAiPromptCacheMode::Explicit {
+                assert!(!prior_marks.is_empty(), "{prior}");
+                assert_eq!(next_marks[..prior_marks.len()], prior_marks[..]);
+                assert!(
+                    next_marks[prior_marks.len()..]
+                        .iter()
+                        .all(|&index| index >= prior_messages.len()),
+                    "turn k+1 adds markers only after turn k's messages: {next_marks:?}"
+                );
+            } else {
+                assert!(
+                    prior_marks.is_empty() && next_marks.is_empty(),
+                    "implicit mode leaves breakpoint placement to OpenAI: {next}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn chat_explicit_handles_no_boundary_and_marks_final_multimodal_part() {
         use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;

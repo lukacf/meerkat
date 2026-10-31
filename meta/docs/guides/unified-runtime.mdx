@@ -878,7 +878,7 @@ let runtime = UnifiedRuntime::builder()
 | `actor_loop_terminated` | `detail`, `stall_id?` | the probe observed the actor's command or reply channel closing; the actor is gone |
 | `host_loop_crash` | `member_id`, `error` | a member run failed (`run_failed` during event drain); a run that ended cancelled, by an interrupt, a stop or a shutdown, does not fire it |
 | `rediscover_failure` | `error` | `rediscover` failed |
-| `event_log_flush_failure` | `error` | the operational event log could not flush |
+| `event_log_flush_failure` | `error` | the operational event log could not flush: the batch is kept and retried, and past 4,096 kept events the oldest are dropped and counted in `error`. Also fired once when the log's flush task has ended (its store or filter panicked): the events it had buffered, the batch it was writing and every later event are lost |
 | `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | a materialization an operator or a background warm asked for failed (`operation` `materialize_all` or the background warm's); nothing is throttled, and the next request asks Core again. `initiator` is no longer set: Meta no longer materializes a member's peers |
 | `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | not produced since MobKit 0.8.46 (meerkat 0.8.51's Stop no longer refuses on runtime-attach readiness); kept for wire compatibility |
 | `retired_member_release_failed` | `identity`, `agent_runtime_id`, `session_id?`, `cause`, `error` | a gateway host's retirement hook (`GatewayHostComposition::identity_member_retired`) answered an error for a retired incarnation. The retirement stands and is not retried; `cause` is `unlisted`, `retire` or `scoped` |

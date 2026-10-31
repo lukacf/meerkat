@@ -3,11 +3,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::types::{EventEnvelope, UnifiedEvent};
 
@@ -97,6 +97,10 @@ pub trait EventLogStore: Send + Sync {
     ///
     /// Must be idempotent — duplicate events (same `id`) should be ignored.
     /// Failures are logged via the error hook but never block agent execution.
+    /// A slow append does slow the runtime's event drain once the intake
+    /// buffer is full (see [`EventLogConfig::batch_size`]): the drain waits
+    /// for room rather than dropping events, and the console projection it
+    /// also feeds waits with it.
     fn append_batch(
         &self,
         events: Vec<PersistedEvent>,
@@ -122,6 +126,10 @@ pub struct EventLogConfig {
     pub filter: Option<EventFilter>,
     /// Number of events to buffer before flushing to storage.
     /// Default: 64.
+    ///
+    /// The intake buffer in front of the flush holds four batches (at least
+    /// 4 events). When it is full, the runtime's event drain waits for room
+    /// before it takes the next event; no event is dropped to make room.
     pub batch_size: usize,
     /// Maximum time between flushes, even if batch is not full.
     /// Default: 1 second.
@@ -171,9 +179,39 @@ impl EventLogStore for NullEventLogStore {
 /// Shared handle to the event log, held by UnifiedRuntime.
 pub(crate) struct EventLogHandle {
     store: Arc<dyn EventLogStore>,
-    /// Sender for the ingestion buffer. Events are sent here and flushed
-    /// in batches by a background task.
+    /// Sender for the intake buffer, which a background task flushes in
+    /// batches. The buffer is bounded, and an event is sent only into room
+    /// reserved for it ([`Self::room`]), so a full buffer makes intake wait
+    /// instead of dropping the event.
     ingress_tx: mpsc::Sender<EventEnvelope<UnifiedEvent>>,
+    /// Set once, by shutdown before it closes the event router
+    /// ([`Self::close_intake`]): a wait for room then ends, so a store that
+    /// never answers cannot hold the router open.
+    intake_closed: watch::Sender<bool>,
+    /// Whether the end of the flush task has been reported.
+    flush_task_end_reported: AtomicBool,
+}
+
+/// Room for one event in the event log's intake buffer, reserved by
+/// [`EventLogHandle::room`]. Ingesting through it neither waits nor drops;
+/// dropping it unused gives the room back.
+pub(crate) struct EventLogRoom<'a>(mpsc::Permit<'a, EventEnvelope<UnifiedEvent>>);
+
+impl EventLogRoom<'_> {
+    /// Ingest `event` into the room reserved for it.
+    pub(crate) fn ingest(self, event: EventEnvelope<UnifiedEvent>) {
+        self.0.send(event);
+    }
+}
+
+/// Why [`EventLogHandle::room`] handed out no room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventLogIntakeEnded {
+    /// Shutdown closed the intake ([`EventLogHandle::close_intake`]).
+    Closed,
+    /// The flush task has ended (a store or a filter panicked), so no event
+    /// reaches the store again.
+    FlushTaskEnded,
 }
 
 impl EventLogHandle {
@@ -182,11 +220,48 @@ impl EventLogHandle {
         self.store.clone()
     }
 
-    /// Ingest an event into the log (non-blocking, buffered).
-    pub fn ingest(&self, event: EventEnvelope<UnifiedEvent>) {
-        // Non-blocking: drop if the buffer is full (backpressure protection)
-        let _ = self.ingress_tx.try_send(event);
+    /// Room for one event in the intake buffer.
+    ///
+    /// While the buffer is full this waits for the flush task to take an
+    /// event out, so a burst is never dropped and a slow store slows the
+    /// caller instead. The wait is cancel-safe: reserve the room before
+    /// taking the event from its source, and a caller cut off while it
+    /// waits (a deadline, an abort) has taken nothing. Once shutdown has
+    /// closed the intake ([`Self::close_intake`]) this answers
+    /// [`EventLogIntakeEnded::Closed`] at once, room or not: the event router
+    /// is closing, and a drain stops there.
+    pub(crate) async fn room(&self) -> Result<EventLogRoom<'_>, EventLogIntakeEnded> {
+        let closed = self.intake_closed.subscribe();
+        tokio::select! {
+            biased;
+            () = until_intake_closed(closed) => Err(EventLogIntakeEnded::Closed),
+            reserved = self.ingress_tx.reserve() => reserved
+                .map(EventLogRoom)
+                .map_err(|_| EventLogIntakeEnded::FlushTaskEnded),
+        }
     }
+
+    /// Close the intake: every wait for room ends, the ones already waiting
+    /// included, and no room is handed out again. Shutdown calls this before
+    /// it closes the event router, so a drain waiting on a store that never
+    /// answers lets go of the router.
+    pub(crate) fn close_intake(&self) {
+        self.intake_closed.send_replace(true);
+    }
+
+    /// True for the first caller that learns the flush task has ended, so
+    /// that end is reported once.
+    pub(crate) fn first_to_see_flush_task_end(&self) -> bool {
+        !self.flush_task_end_reported.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// Resolves once the intake is closed. The value is read through a guard
+/// that is dropped here, so the caller's future stays `Send`.
+async fn until_intake_closed(mut closed: watch::Receiver<bool>) {
+    // An error means the handle, and with it the sender, is gone: there is
+    // nothing left to wait for.
+    let _ = closed.wait_for(|closed| *closed).await;
 }
 
 /// Hard cap on retained events while the store is unavailable. Beyond
@@ -212,13 +287,17 @@ pub(crate) fn start_event_log(
     // `EventLogConfig` directly.
     let flush_interval = config.flush_interval.max(Duration::from_millis(1));
     // Buffer capacity: 4x batch size to absorb bursts; floor at 4 so a
-    // tiny batch_size doesn't starve.
+    // tiny batch_size doesn't starve. A full buffer makes intake wait for
+    // room (`EventLogHandle::room`), so the capacity bounds how far intake
+    // runs ahead of the store, never what reaches it.
     let channel_capacity = (batch_size * 4).max(4);
     let (ingress_tx, ingress_rx) = mpsc::channel(channel_capacity);
 
     let handle = EventLogHandle {
         store: store.clone(),
         ingress_tx,
+        intake_closed: watch::channel(false).0,
+        flush_task_end_reported: AtomicBool::new(false),
     };
 
     tokio::spawn(run_flush_loop(
@@ -481,16 +560,20 @@ mod tests {
             },
             None,
         );
-        handle.ingest(EventEnvelope {
-            event_id: "evt-zero-interval".to_string(),
-            source: "test".to_string(),
-            timestamp_ms: 0,
-            event: UnifiedEvent::Module(crate::types::ModuleEvent {
-                module: "test-module".into(),
-                event_type: "x".into(),
-                payload: serde_json::Value::Null,
-            }),
-        });
+        handle
+            .room()
+            .await
+            .expect("an empty intake has room")
+            .ingest(EventEnvelope {
+                event_id: "evt-zero-interval".to_string(),
+                source: "test".to_string(),
+                timestamp_ms: 0,
+                event: UnifiedEvent::Module(crate::types::ModuleEvent {
+                    module: "test-module".into(),
+                    event_type: "x".into(),
+                    payload: serde_json::Value::Null,
+                }),
+            });
 
         for _ in 0..400 {
             if !flaky.persisted.lock().expect("persisted").is_empty() {
@@ -499,6 +582,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("event never flushed: zero flush_interval killed the ingestion task");
+    }
+
+    /// A burst larger than the intake buffer reaches the store whole and in
+    /// order. With `batch_size: 1` the buffer holds 4 events. Six are
+    /// ingested back to back on a current-thread runtime, so the flush task
+    /// first runs when the fifth waits for room. Intake used to `try_send`
+    /// without waiting: the fifth and sixth found the buffer full and were
+    /// dropped with no error, log or count, and the store kept 4.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_burst_larger_than_the_intake_buffer_reaches_the_store_whole() {
+        let recorded = Arc::new(FlakyStore {
+            failures_remaining: Mutex::new(0),
+            persisted: Mutex::new(Vec::new()),
+            attempts: Mutex::new(0),
+        });
+        let handle = start_event_log(
+            EventLogConfig {
+                store: Box::new(SharedStore(recorded.clone())),
+                filter: None,
+                batch_size: 1,
+                flush_interval: Duration::from_secs(1),
+            },
+            None,
+        );
+        let burst: Vec<String> = (1..=6).map(|n| format!("evt-burst-{n}")).collect();
+        for id in &burst {
+            handle
+                .room()
+                .await
+                .expect("the intake hands out room, waiting for it while full")
+                .ingest(EventEnvelope {
+                    event_id: id.clone(),
+                    source: "module".to_string(),
+                    timestamp_ms: 0,
+                    event: UnifiedEvent::Module(crate::types::ModuleEvent {
+                        module: "test-module".into(),
+                        event_type: "x".into(),
+                        payload: serde_json::Value::Null,
+                    }),
+                });
+        }
+
+        let stored = || -> Vec<String> {
+            recorded
+                .persisted
+                .lock()
+                .expect("persisted")
+                .iter()
+                .map(|event| event.id.clone())
+                .collect()
+        };
+        for _ in 0..400 {
+            if stored().len() >= burst.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            stored(),
+            burst,
+            "every event of the burst reaches the store, in order"
+        );
     }
 
     #[test]

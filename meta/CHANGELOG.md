@@ -330,6 +330,208 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   until it is deleted, and fires into a new agent declared later under the
   same name while its sender may still send to it.
 
+## [0.9.7] - 2026-10-30
+
+### Breaking
+
+- Behaviour-only (not measured by the gate): a transport given to the Python
+  SDK's `MetaRuntime(config, transport)` is now started and initialized by
+  `connect()` when a gateway is configured, as in the TypeScript SDK, instead
+  of being replaced by a spawn of `gateway()`; an `AdoptedGatewayTransport`
+  given there is used even without `gateway()`. Before, a configured gateway
+  binary always spawned, and the constructor transport was left unstarted, or
+  kept running beside a second gateway if the caller had started it. A
+  constructor transport that was already started or stopped now raises
+  `GatewayTransportConflictError` at connect. With a gateway configured, a
+  constructor transport that is not a `PersistentTransport` now raises
+  `TypeError` at connect, where it was ignored before. To keep the spawn,
+  give the constructor no transport; to run the gateway over one, give a
+  `PersistentTransport` that was never started.
+- Behaviour-only (not measured by the gate): the event drain
+  (`UnifiedRuntime::drain_mob_agent_events`, and `subscribe_events`, which
+  drains first) now waits for the event log store to accept the queued
+  events, and a store that stops answering holds it until the runtime shuts
+  down. A host that awaits the drain in a `select!` arm or a shutdown
+  handler without racing it against its shutdown signal can hang (see Fixed
+  and Upgrade).
+
+### Upgrade
+
+- Meta 0.9.7 requires Meerkat Core 0.9.8: every Meerkat dependency, the
+  dev-dependencies and the `meerkat-store-conformance` suite included, is
+  pinned to the published 0.9.8 (`=0.9.8` from crates.io). Upgrade Meerkat
+  Core together with Meta; its 0.9.8 upgrade notes and Breaking list apply to
+  a Meta host too. The gateway's wire is unchanged: a 0.9.6 Python or
+  TypeScript SDK works against a 0.9.7 gateway.
+- No storage migration: 0.9.7 opens a 0.9.6 state directory as
+  it is. No store schema, file format or record version changed in the state
+  directory, nothing is renamed, moved or stamped at open, and Meerkat Core
+  0.9.8 needs no migration either. Rolling back in place to Meta 0.9.6 on
+  Meerkat Core 0.9.7 is safe for a state directory on the format side, though
+  it brings back the defects this release fixes. Before upgrading, back up as
+  the 0.9.6 Upgrade notes describe.
+- A host that awaits `UnifiedRuntime::drain_mob_agent_events` or
+  `subscribe_events` in a `select!` arm or a shutdown handler races it
+  against its own shutdown signal: a drain now waits for room in the event
+  log's intake, so a slow event log store can hold it (see Breaking and
+  Fixed).
+- Keep `console_fetch_timeout_ms`, the bundled console's fetch timeout, and
+  any other client's timeout for replaying or recovering a console send above
+  45 seconds: on a slow store such a call now waits up to 45 seconds (see
+  Fixed).
+
+### Added
+
+- The Python SDK can adopt a gateway child that the host started and keeps,
+  instead of spawning one. The host hands an `AdoptedGatewayChild` (the
+  child's `input` and `output` pipes, raw unbuffered ends or buffered ones,
+  a non-blocking `request_retirement()` and a bounded
+  `wait_process(timeout)`) to an `AdoptedGatewayTransport`, and
+  passes it to `MetaBuilder.gateway_transport()` (a transport, or a factory
+  called once per connect). The transport speaks the stock stdio protocol
+  over those pipes and never spawns, signals, reconnects to or replays a
+  gateway, even with `gateway()` set. From the hand-off, one exit watcher
+  thread is the only caller of `wait_process`, so a child that exits while a
+  process it started still holds its stdout fails its waiters about a second
+  later, as a spawned gateway does. The stop runs on a worker thread: it
+  makes the stock protocol shutdown, bounded by the shutdown horizon so a
+  writer stuck on a full pipe cannot hold it, then requests the host's
+  retirement once per child and waits for the child's own exit. A pending
+  exit raises `GatewayChildPendingError`, and the next stop observes the same
+  child again. It never awaits the host's own cleanup. A start that fails
+  after the hand-off, a cancelled one included, is stopped the same way. The
+  native terminal failure, the child's exit and the SDK reader's completion
+  are reported apart (`start_failure`, `child_exit`, `reader_completed`). Two
+  host transports, or one already started or stopped, raise
+  `GatewayTransportConflictError` before anything is handed over: unlike the
+  TypeScript factory, which takes precedence silently, a builder transport
+  given together with a constructor transport is refused.
+- `OwnerChangeChurn::wait_after_stale_read` (Meerkat 0.9.8) waits after a
+  host's own pure observation of a work's authorization publication (one
+  that reads owners and runs no effect, such as a check in a host tool's
+  body) that is still stale after its one rebuild. It waits for any change
+  in progress, an unpublished one included, within the churn's one deadline
+  (2 s, clamped to the budget passed, such as
+  `ToolDispatchContext::remaining_tool_time`). `Settled` means make the same
+  observation once more; `NotSettled` means answer the read as stale, never
+  as unavailable. Hold nothing across the wait and never wait around an
+  effect. Meta's own code makes no such observation.
+
+### Changed
+
+- Every owner-change wait (`OwnerChangeChurn`), Core's own and a host's, also
+  waits while another actor holds the work's authorization publication
+  without having published, such as a grant issuance before its acknowledged
+  append publishes, a held exclusion or another operation's final entry
+  (Meerkat 0.9.8). So Core's waits after a stale authorization read
+  (`ReprepareRequired`), at a member's model request, a governed tool
+  dispatch, the `web_search` helper and a compaction summary, may now wait
+  for such a holder within the same bounds (2 s, or the budget passed when
+  less) and rebuild, where they answered at once and the operation was
+  refused as a stale read. The native work owner's
+  `WorkAuthorization::owner_change_in_progress` names such a hold too;
+  `LocalAuthorizationPublication::change_in_progress` still names published
+  changes only.
+
+### Fixed
+
+- The event log no longer drops events when its intake buffer fills during a
+  burst, such as runs resumed at boot. The events that did not fit were
+  discarded with no error, log or count, so the log could miss a run's
+  `turn_completed` or its terminal. Intake now waits for room, so
+  `drain_mob_agent_events`, and `subscribe_events`, which drains first, can
+  wait on the event log store: a slow store slows the drain and the console
+  projection it feeds. The wait is cancel-safe, and a host loop that awaits a
+  drain inside a `select!` handler must race it against its own shutdown
+  signal. Each drain call takes the backlog it found, and the runtime's own
+  drain loops go again at once while events stay queued. A store that stops
+  answering holds the drain until shutdown, and what it holds then (the
+  intake buffer and the batch it is writing) is lost when the process
+  exits. Shutdown still ends within its bounds (as does
+  `UnifiedRuntime::run`), but with events still queued it reports
+  `drain.timed_out`, so its cleanup is not attested. Two losses remain,
+  before the event log's intake: events still on the event router when
+  shutdown closes it are dropped, now counted in a warning, and under
+  sustained overload Core reports a typed `stream_truncated` gap. An event
+  log whose flush task has ended (its store or filter panicked) is reported
+  once as an `EventLogFlushFailure` error event, naming the events it had
+  buffered, the batch it was writing and every later event as lost; before,
+  they were lost silently. The drain's new wait is listed under Breaking,
+  and what a host does about it under Upgrade.
+- The idle sweep no longer gives up its store read for a member that no live
+  session serves (a dormant member, for example after a restart) after
+  250 ms. On a store whose reads take longer, such as a remote one, such a
+  member that owed no work was never idle-retired, and every pass of the
+  sweep started the same read again from the beginning. The sweep now reads
+  the store for such a member only once its idle window has passed, waits up
+  to a minute for each answer, and retires the member when this process
+  holds its session and it owes no work. Until the member is due, a pass
+  reads nothing from the store for it. A store read that fails or does not
+  answer in time keeps the member and is logged at WARN. A member the previous
+  pass did not find idle starts a fresh window. When the member's runtime
+  reports its runs, so does a member that ran a turn since the sweep last
+  found it idle, even a turn the sweep never saw (its last finished run
+  changed); a session that answers no execution snapshot reads idle. A member
+  every pass finds idle, under the same session and with no new run, keeps its
+  window however long the passes take.
+- Recovering an interrupted console send no longer gives up after 2 s on a
+  slow store. A send that a stopped process accepted but did not settle is
+  settled from the runtime's admission evidence, and after a restart reading
+  that evidence loads the session the send recorded: on a remote store that
+  takes seconds, so a replay of the send and a request for its recovery
+  answered `unknown` every time. A delivered send stayed unsettled, inviting
+  a duplicate resend, and a send that never reached the runtime was never
+  dispatched again. A sender's replay or recovery request now waits up to 45
+  seconds in all for the evidence of both of the send's delivery keys, within
+  the 60 s default request timeout of the console and of the SDKs' stdio
+  transports. A client whose own timeout is shorter gives up first, so
+  `console_fetch_timeout_ms`, the bundled console's fetch timeout, should stay
+  above 45 seconds. The startup pass that settles interrupted sends before the
+  gateway serves keeps a 2 s bound per send and leaves a slower send to its
+  sender.
+- A respawn of a built member (`meta/respawn`, `IdentityRuntime::respawn`)
+  again builds it once, with one `customize_build` and one `after_create`, as
+  before 0.9.6. Core keeps a retired member's session archived, so the
+  respawn's seat revives the member on it, which builds it. Since 0.9.6 the
+  seat released that revival at once, and the respawn's wake built the
+  member a second time, after a second `customize_build`; when Core refused
+  the immediate release, the respawn made one call, so the count depended on
+  timing. A member a seat step builds (such a revival, or a declared role
+  migration's move of the member onto its session) now stays live when the
+  caller makes the member live right after the step: a respawn, an explicit
+  materialization or warm, and the seat before a delivery. So a
+  materialization or delivery that revives an identity Core retired (for
+  example one whose respawn failed after its retire), or that applies a
+  declared role migration, builds the member once too. A delivery takes the
+  identity's lifecycle lock again after its seat released it, so a delivery
+  refused in between leaves the member its seat built live until it is
+  released. The roster pass still asks Core to release such a member; a
+  release Core refuses right after the revival leaves the member live until
+  it is released. After a respawn the member serves the tools of the
+  respawn's one `customize_build`. A lazily seated identity still gets two
+  `customize_build` calls before its first run (its seat's, then its first
+  build's), and so does a respawn of a member that was never built.
+- A respawn (`meta/respawn`, `IdentityRuntime::respawn`), the in-place
+  rebuilds of `meta/compact_member`, and a reload (`meta/reload_member`,
+  `IdentityRuntime::reload_member`) that wakes the member (the
+  retire-then-wake fallback on a session bridge without Core's registration
+  reload, or the wake of an identity held for an audited-endpoint repair)
+  wire the identity's managed edges again, the roster's and the topology
+  controller's, as a reset does. Core's retirement of the member ends every
+  edge of it, and none of them wired the edges again, so the identity stayed
+  without its managed peers until a later reconcile wired them. A re-wire
+  that fails is logged, and the next reconcile retries it.
+- An owner-change wait (`OwnerChangeChurn`), Core's own or a host's, no
+  longer settles at or past its deadline (Meerkat 0.9.8). A change that
+  completed during the wait's last sleep before the deadline, or that
+  cleared during a later wait of a churn whose deadline had passed, settled
+  the wait and granted a free rebuild past the 2 s bound or the caller's
+  budget. A read at or after the deadline now answers `NotSettled`.
+
+### Known limitations
+
+- None new; the 0.9.6 known limitations still apply.
+
 ## [0.9.6] - 2026-10-27
 
 ### Breaking

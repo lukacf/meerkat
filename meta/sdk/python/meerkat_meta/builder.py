@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
+from ._transport import PersistentTransport
+from .errors import GatewayTransportConflictError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
 from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
@@ -50,6 +52,9 @@ class MetaBuilderConfig:
     implicit_delegate_idle_retire_secs: int | None = None
     implicit_delegate_idle_retire_configured: bool = False
     gateway_bin: str | None = None
+    # A host gateway transport, or a factory called once per connect that
+    # returns one (``gateway_transport()``); None spawns ``gateway_bin``.
+    gateway_transport: Any | None = None
     # Caller cap, in seconds, on waiting for an accepted meta/init to
     # settle. None waits until the gateway settles, exits, or the reader
     # fails. Running out raises InitOutcomeUnknownError.
@@ -930,6 +935,36 @@ class MetaBuilder:
         self._config.gateway_bin = bin_path
         return self
 
+    def gateway_transport(
+        self,
+        transport: PersistentTransport | Callable[[], PersistentTransport],
+    ) -> MetaBuilder:
+        """Run the gateway through a host transport instead of spawning one.
+
+        ``transport`` is a transport the host composed, typically an
+        ``AdoptedGatewayTransport`` over a gateway child the host started and
+        keeps, or a factory taking no arguments that every ``connect()`` calls
+        once to build one. ``connect()`` starts and initializes it, and
+        ``shutdown()`` and a failed start stop it. It is host-local only:
+        nothing about it is sent in RPC.
+
+        The SDK then never spawns a gateway, even when ``gateway()`` is set
+        too, and never falls back to one. A transport serves one connect; a
+        factory serves each. ``build()`` refuses, with
+        ``GatewayTransportConflictError`` and before anything is handed over,
+        a transport that was already started or stopped. A transport given
+        to ``MetaRuntime(config, transport)`` as well is refused the same way
+        at connect. Python twin of the TypeScript ``gatewayTransport()``,
+        which in TypeScript also requires ``gateway()``.
+        """
+        if not isinstance(transport, PersistentTransport) and not callable(transport):
+            raise TypeError(
+                "gateway_transport() takes a PersistentTransport or a factory that "
+                f"returns one; got {type(transport).__name__}"
+            )
+        self._config.gateway_transport = transport
+        return self
+
     def gateway_init_timeout(self, seconds: float) -> MetaBuilder:
         """Cap how long ``connect()`` waits for the gateway to answer ``meta/init``.
 
@@ -1256,6 +1291,13 @@ class MetaBuilder:
             raise ValueError(
                 "identity_bootstrap_mode() requires roster() because every "
                 "explicit bootstrap mode is identity-first"
+            )
+        transport = self._config.gateway_transport
+        if isinstance(transport, PersistentTransport) and not transport._is_fresh():
+            raise GatewayTransportConflictError(
+                "gateway_transport() was given a transport that was already started "
+                "or stopped; a host transport serves one connect, and a factory "
+                "serves each"
             )
 
     def _apply_convention_defaults(self) -> None:

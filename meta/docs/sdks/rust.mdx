@@ -348,10 +348,13 @@ calls them at these points:
   in, a hosted identity its host creates), when a reset or a delete starts
   the identity's fresh life, and when a declared role migration moves it to
   its new role. That call publishes the identity's customizer tools and
-  records the customized spawn spec in the seat or rotation, nothing more:
-  nothing is built, and `meta/identity/resolved_tools`, which reports the
-  tools a build actually resolved, answers `no_build_recorded` until the
-  member's first build. Each of
+  records the customized spawn spec in the seat or rotation. It builds
+  nothing, except where the seat step builds the member from it: a seat
+  that revives the archived session of a member Core retired after it was
+  built (a respawn, for example), and a declared role migration's restamp
+  of the member onto its session. `meta/identity/resolved_tools`, which
+  reports the tools a build actually resolved, answers `no_build_recorded`
+  until the member's first build. Each of
   these calls gets the runtime's real context: every registered identity as
   `active_peers`, the roster's managed edges, and the runtime services. It
   also runs at every build of the member (each wake Core makes), right
@@ -360,6 +363,19 @@ calls them at these points:
 - `after_create` is called once after each seat, fresh life or migration that
   ran `customize_build`, with the session the identity is bound to, as at an
   identity's creation. A wake's build never calls it.
+
+A respawn of a built member calls `customize_build` once and `after_create`
+once, with the session the respawn keeps, and Core builds the member once,
+with that call's tools: Core keeps the retired member's session archived, so
+the respawn's seat revives the member on it, and Core's wake then finds the
+member live. The same holds for a materialization, a warm or a delivery
+whose seat step builds the member: the member stays live for it. The roster
+pass asks Core to release a member its seat step built, so that identity is
+then like a lazily seated one. A lazily seated identity (one seated with
+nothing built yet) gets two `customize_build` calls before its first run:
+its seat's, then its first build's. A respawn of a member that was never
+built does the same: its seat calls `customize_build`, and its build calls
+it again.
 
 `after_create` is best-effort: an error is logged and the seat or build
 stands. The gateway calls it with no lock of the identity held, so once the

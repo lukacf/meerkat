@@ -130,8 +130,8 @@ pub use error::{
     OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
 };
 pub use event::{
-    AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberWireEdge, MobEvent, MobEventKind,
-    NewMobEvent, detached_outcome_digest,
+    AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberRetiredFacts, MemberWireEdge,
+    MobEvent, MobEventKind, NewMobEvent, detached_outcome_digest,
 };
 pub use forked_participant::ForkedParticipantSourceRuntime;
 pub use identity::{
@@ -372,8 +372,8 @@ pub use runtime::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
     LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
-    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, SeatedMember,
-    UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
+    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, RetiredRotation, SeatRotation,
+    SeatedMember, UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{

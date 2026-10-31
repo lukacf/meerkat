@@ -5681,6 +5681,7 @@ mod tests {
                     generation: Generation::new(1),
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             })
             .await

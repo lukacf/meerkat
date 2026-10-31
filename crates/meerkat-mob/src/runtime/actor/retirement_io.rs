@@ -6523,6 +6523,7 @@ impl MobActor {
                         generation: continuation.entry.generation,
                         role: continuation.entry.role.clone(),
                         session_archived: false,
+                        facts: crate::event::MemberRetiredFacts::default(),
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, true)));
                 }

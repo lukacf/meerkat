@@ -1069,6 +1069,7 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             generation,
             role: ProfileName::from("worker"),
             session_archived: true,
+            facts: crate::event::MemberRetiredFacts::default(),
         },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,

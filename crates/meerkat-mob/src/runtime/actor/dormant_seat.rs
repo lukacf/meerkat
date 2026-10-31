@@ -1856,6 +1856,7 @@ impl MobActor {
                     generation: entry.generation,
                     role: entry.role.clone(),
                     session_archived: disposal == mob_dsl::MemberSessionDisposal::Archived,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             },
             NewMobEvent {

@@ -600,6 +600,15 @@ pub enum MobEventKind {
         /// as false.
         #[serde(skip, default)]
         session_archived: bool,
+        /// What the row records for the member lifecycle journal read
+        /// ([`crate::MemberLifecycleEvent::Retired`]): the retired
+        /// incarnation's session, the identity entry it was the member of,
+        /// why it ended and the rotation whose terminal step retired it. The
+        /// replay reads none of it. Stored only by the internal event codec;
+        /// a reader that predates it ignores it, and a journal written before
+        /// it decodes it as absent.
+        #[serde(skip, default)]
+        facts: MemberRetiredFacts,
     },
     /// A respawn attempt terminally abandoned the topology preserved for the
     /// retired incarnation.
@@ -1214,6 +1223,15 @@ pub struct MemberSpawnedEvent {
     /// ignores it, and journals written before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// What seated this incarnation when a rotation did: a rotation's
+    /// terminal step, which retired the identity's previous incarnation in
+    /// the same step, or a fresh life of an identity no member held
+    /// ([`crate::runtime::SeatRotation`]). For the member lifecycle journal
+    /// read; the replay reads none of it. Stored only by the internal event
+    /// codec; a reader that predates it ignores it, and journals written
+    /// before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) seat_rotation: Option<crate::runtime::SeatRotation>,
 }
 
 impl MemberSpawnedEvent {
@@ -1253,6 +1271,7 @@ impl MemberSpawnedEvent {
             unknown_identity_entry: None,
             resume_from_role: None,
             history_unavailable: None,
+            seat_rotation: None,
         }
     }
 
@@ -1510,6 +1529,41 @@ impl MemberSessionBindingRecoveredEvent {
     pub(crate) fn member_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
         self.member_peer_endpoint.as_ref()
     }
+}
+
+/// What a [`MobEventKind::MemberRetired`] row records for the member
+/// lifecycle journal read ([`crate::MemberLifecycleEvent::Retired`]) beyond
+/// its public fields: the session the retired incarnation was bound to, the
+/// identity entry it was the member of, why it ended, and the rotation whose
+/// terminal step retired it.
+///
+/// MobMachine decided each in the step that ended the incarnation: the
+/// writer records them from the machine's state before that step and from
+/// the step's journal effect. The replay reads none of them; a host reads
+/// them through the journal read ([`crate::MobHandle::member_lifecycle_events`]).
+/// The internal event codec stores them (`retired_session`, `retired_cause`,
+/// `retired_entry`, `retired_rotation`) and the public event payload never
+/// carries them; a row written before them decodes them as absent (the
+/// default), as does the row that closes a failed spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberRetiredFacts {
+    /// The session its `MemberRetired` journal effect names: the session the
+    /// incarnation was bound to at its end (none for a peer-only member).
+    pub(crate) session_id: Option<SessionId>,
+    /// Why the incarnation ended, when the journal records it: the declared
+    /// apply's seal unlisted the identity, and the end ended its entry.
+    pub(crate) cause: Option<crate::runtime::MemberRetirementCause>,
+    /// The identity entry the incarnation was the member of when its
+    /// retirement ended (read before the step that may end the entry).
+    pub(crate) identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The stored origin token of the row's identity entry when this build
+    /// does not know it (a row a later release wrote): the internal codec
+    /// writes it back as it was stored.
+    pub(crate) unknown_identity_entry: Option<String>,
+    /// The rotation whose terminal step retired the incarnation and seated
+    /// the identity's next one.
+    pub(crate) rotation: Option<crate::runtime::RetiredRotation>,
 }
 
 pub(crate) fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
@@ -3400,6 +3454,7 @@ mod tests {
                 generation: Generation::new(0),
                 role: ProfileName::from("worker"),
                 session_archived,
+                facts: MemberRetiredFacts::default(),
             },
         };
         let archived = row(true);
@@ -4203,6 +4258,7 @@ mod tests {
             generation: Generation::new(2),
             role: ProfileName::from("worker"),
             session_archived: false,
+            facts: MemberRetiredFacts::default(),
         });
     }
 

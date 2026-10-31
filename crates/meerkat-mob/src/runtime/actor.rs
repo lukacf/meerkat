@@ -41433,6 +41433,7 @@ impl MobActor {
                             generation,
                             role: profile_name.clone(),
                             session_archived: false,
+                            facts: crate::event::MemberRetiredFacts::default(),
                         },
                     })
                     .await
@@ -64242,6 +64243,7 @@ impl MobActor {
             generation: entry.generation,
             role: entry.role.clone(),
             session_archived,
+            facts: crate::event::MemberRetiredFacts::default(),
         };
         let append = self
             .events

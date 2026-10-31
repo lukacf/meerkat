@@ -465,7 +465,113 @@ impl MobJournalCursor {
     }
 }
 
+/// What seated a member incarnation, when a rotation did: the `rotation` of
+/// [`MemberLifecycleEvent::Spawned`].
+///
+/// Each fact is MobMachine's: a rotation's terminal step, or the generation
+/// the machine retained for an identity no member held. The seat's journal
+/// row records it, so a reader pairs a retirement with the seat that follows
+/// it from the facts alone, never from their positions in the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SeatRotation {
+    /// A rotation's terminal step seated the incarnation: the same MobMachine
+    /// step retired the identity's incarnation `predecessor`, whose `Retired`
+    /// fact names this rotation ([`RetiredRotation`]), and seated this one
+    /// at `target`, a new session (a reset, a deletion) or the member's own
+    /// (a same-session successor).
+    #[non_exhaustive]
+    Successor {
+        /// The incarnation the same step retired.
+        predecessor: Generation,
+        /// Where the rotation seated this incarnation.
+        target: super::RotationTarget,
+    },
+    /// A fresh life of an identity no member held
+    /// ([`super::MobHandle::rotate_member`] of an identity whose last
+    /// incarnation's retirement had ended): it follows `predecessor`, that
+    /// last incarnation, the generation MobMachine retained for the identity
+    /// since the mob's last reset. The rotation is the request's; the seat is
+    /// an ordinary one, and nothing retired in its step.
+    #[non_exhaustive]
+    FreshLifeAfter {
+        /// The identity's last incarnation, which its own retirement ended.
+        predecessor: Generation,
+    },
+}
+
+impl SeatRotation {
+    /// A rotation's terminal step that retired `predecessor` and seated the
+    /// incarnation at `target`.
+    #[must_use]
+    pub fn successor(predecessor: Generation, target: super::RotationTarget) -> Self {
+        Self::Successor {
+            predecessor,
+            target,
+        }
+    }
+
+    /// A fresh life of an identity no member held, following its last
+    /// incarnation `predecessor`.
+    #[must_use]
+    pub fn fresh_life_after(predecessor: Generation) -> Self {
+        Self::FreshLifeAfter { predecessor }
+    }
+
+    /// The incarnation the seated one follows.
+    #[must_use]
+    pub fn predecessor(&self) -> Generation {
+        match self {
+            Self::Successor { predecessor, .. } | Self::FreshLifeAfter { predecessor } => {
+                *predecessor
+            }
+        }
+    }
+}
+
+/// The rotation whose terminal step retired a member incarnation: the
+/// `rotation` of [`MemberLifecycleEvent::Retired`]. The same MobMachine step
+/// seated the identity's next incarnation, `successor`, under
+/// `successor_role`, and its `Spawned` fact names this retirement back
+/// ([`SeatRotation::Successor`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetiredRotation {
+    /// Where the rotation seated the next incarnation: a new session (a
+    /// reset, a deletion) or the member's own (a same-session successor).
+    pub target: super::RotationTarget,
+    /// The incarnation the same step seated.
+    pub successor: Generation,
+    /// The role the same step seated it under.
+    pub successor_role: ProfileName,
+}
+
+impl RetiredRotation {
+    /// The rotation that seated `successor` under `successor_role` at
+    /// `target`.
+    #[must_use]
+    pub fn new(
+        target: super::RotationTarget,
+        successor: Generation,
+        successor_role: ProfileName,
+    ) -> Self {
+        Self {
+            target,
+            successor,
+            successor_role,
+        }
+    }
+}
+
 /// One member lifecycle fact of the journal.
+///
+/// Every fact is one MobMachine decided, read from the journal row that
+/// records it: a row records the machine's state before the step that wrote
+/// it, or the step's own journal effect. A row written before a field was
+/// recorded reads it as absent, as do the rows that close a failed spawn (its
+/// rollback's `Retired` fact). No row records the runtime registration an
+/// incarnation held: a registration belongs to one process, and none of a
+/// stopped process outlives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberLifecycleEvent {
@@ -473,14 +579,21 @@ pub enum MemberLifecycleEvent {
     /// a rotation's terminal. `identity_entry` is set for the member of an
     /// identity entry, and `history_unavailable` for an identity seated on a
     /// fresh session because its archived session is gone from the store.
+    /// `session_id` is the session it was seated on (none for a member bound
+    /// to no session of its own, a peer-only member), and `rotation` is set
+    /// when a rotation seated it ([`SeatRotation`]).
+    #[non_exhaustive]
     Spawned {
         agent_identity: AgentIdentity,
         generation: Generation,
         role: ProfileName,
         identity_entry: Option<IdentityEntryOrigin>,
         history_unavailable: Option<HistoryUnavailable>,
+        session_id: Option<SessionId>,
+        rotation: Option<SeatRotation>,
     },
     /// A legacy member was adopted as an identity entry.
+    #[non_exhaustive]
     EntryAdopted {
         agent_identity: AgentIdentity,
         generation: Generation,
@@ -493,25 +606,41 @@ pub enum MemberLifecycleEvent {
     /// retirement started: the declared apply unlisted the identity
     /// ([`MemberRetirementCause::Unlisted`]), and the retirement's end ends
     /// its entry.
+    #[non_exhaustive]
     RetirementStarted {
         agent_identity: AgentIdentity,
         generation: Generation,
         rotation: Option<super::RotationTarget>,
         cause: Option<MemberRetirementCause>,
     },
-    /// A member incarnation was retired.
+    /// A member incarnation was retired. `session_id` is the session it was
+    /// bound to at its end (none for a peer-only member). `identity_entry`
+    /// is the identity entry it was the member of when its retirement ended,
+    /// set even when that end ended the entry. `cause` says why the
+    /// incarnation ended: [`MemberRetirementCause::Unlisted`] when the
+    /// declared apply's seal unlisted the identity and the end ended its
+    /// entry; none for any other end. `rotation` is set when a rotation's
+    /// terminal step retired it and seated the identity's next incarnation
+    /// in the same step ([`RetiredRotation`]); such an end has no cause.
+    #[non_exhaustive]
     Retired {
         agent_identity: AgentIdentity,
         generation: Generation,
         role: ProfileName,
+        session_id: Option<SessionId>,
+        identity_entry: Option<IdentityEntryOrigin>,
+        cause: Option<MemberRetirementCause>,
+        rotation: Option<RetiredRotation>,
     },
     /// A legacy member reset carried the member to its next generation.
+    #[non_exhaustive]
     Reset {
         agent_identity: AgentIdentity,
         previous_generation: Generation,
         new_generation: Generation,
     },
     /// The mob was reset: no member before it is a member after it.
+    #[non_exhaustive]
     MobReset,
 }
 
@@ -811,6 +940,8 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             role: spawned.role.clone(),
             identity_entry: spawned.identity_entry(),
             history_unavailable: spawned.history_unavailable().cloned(),
+            session_id: None,
+            rotation: None,
         }),
         MobEventKind::MemberSessionBindingRecovered(recovered) => {
             recovered
@@ -842,6 +973,10 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             agent_identity: agent_identity.clone(),
             generation: *generation,
             role: role.clone(),
+            session_id: None,
+            identity_entry: None,
+            cause: None,
+            rotation: None,
         }),
         MobEventKind::MemberReset {
             agent_identity,
@@ -1347,6 +1482,7 @@ mod tests {
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             ),
         ];

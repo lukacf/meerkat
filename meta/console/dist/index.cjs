@@ -26701,7 +26701,9 @@ function formatAbsoluteTime(value) {
 function formatClockTime(value) {
   const ms = toEpochMs(value);
   if (ms === null) return "";
-  return new Date(ms).toLocaleTimeString(void 0, { hour: "2-digit", minute: "2-digit" });
+  const date6 = new Date(ms);
+  const pad = (part) => String(part).padStart(2, "0");
+  return "".concat(pad(date6.getHours()), ":").concat(pad(date6.getMinutes()));
 }
 function formatDuration(ms) {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
@@ -57753,10 +57755,13 @@ function sidebarPinnedFamilyPinIds(agent, agents) {
 function bucketOf(a) {
   const g2 = (a.group || "").toLowerCase();
   const p2 = (a.role || a.kind || "").toLowerCase();
-  if (g2.includes("coordinator") || p2.includes("coord") || p2.includes("triage") || p2.includes("router") || p2.includes("commander")) return "Coordinators";
-  if (g2.includes("personal") || p2.includes("personal") || p2.includes("identity") || p2.includes("lead")) return "Personal";
-  if (g2.includes("internal") || p2.includes("gate") || p2.includes("monitor") || p2.includes("scribe")) return "Internal";
+  if (g2.includes("coordinator")) return "Coordinators";
+  if (g2.includes("personal")) return "Personal";
+  if (g2.includes("internal")) return "Internal";
   if (g2.includes("domain") || g2.includes("responder") || g2.includes("communication") || g2.includes("specialist")) return "Domains";
+  if (p2.includes("coord") || p2.includes("triage") || p2.includes("router") || p2.includes("commander")) return "Coordinators";
+  if (p2.includes("personal") || p2.includes("identity") || p2.includes("lead")) return "Personal";
+  if (p2.includes("gate") || p2.includes("monitor") || p2.includes("scribe")) return "Internal";
   return "Domains";
 }
 var SECTION_ORDER = ["Personal", "Coordinators", "Domains", "Internal", "Other"];

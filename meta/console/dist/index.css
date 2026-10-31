@@ -6642,6 +6642,8 @@ button.topo-roletree__agent:focus-visible {
 
 /* ../packages/console-components/src/conversation/approvals.css */
 .cc-approval {
+  container-type: inline-size;
+  container-name: cc-approval;
   margin: 12px 0;
   padding: 14px 16px;
   border: 1px solid var(--_cc-border-soft);
@@ -6689,6 +6691,15 @@ button.topo-roletree__agent:focus-visible {
 }
 .cc-approval__scope.cc-kv {
   margin-top: 12px;
+}
+@container cc-approval (max-width: 325px) {
+  .cc-approval .cc-kv {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
+  }
+  .cc-approval .cc-kv dd {
+    margin-bottom: 6px;
+  }
 }
 .cc-approval__details code {
   font-family: var(--_cc-font-mono);

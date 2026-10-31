@@ -6,8 +6,11 @@
 // unenforced console), seeds a deterministic six-item fixture through the
 // real `POST /console/rpc` wire contract (goal/create root + 5 children,
 // 5 parent edges + 1 blocks edge, one claim/close/block each), then
-// asserts the layered-DAG graph view: node/edge counts, per-status
-// classes, wheel-zoom + drag-pan transform changes, click-select detail.
+// asserts the graph view (console v2 spec B2): the goal's frame holds its
+// five items (containment, not parent lines), the one blocks edge is drawn
+// with its word, per-status classes, the glance figures, the critical path
+// and its toggle, wheel-zoom + drag-pan, Fit, a refresh that keeps the
+// person's pan and zoom, and click-select into the drawer.
 //
 // Structure mirrors memory-e2e.cjs / browser-e2e.cjs (spawn backend via
 // repo-cargo, wait for /healthz + /console, playwright chromium, assert,
@@ -175,7 +178,13 @@ async function seedWorkGraph(baseUrl) {
   assert.equal(snapshot.edges.length, 6, "seeded edge count (5 parent + 1 blocks)");
   assert.equal(snapshot.attention.length, 1, "goal binding present");
   console.log(`workgraph e2e: seeded root ${rootId} + ${children.length} children`);
-  return { rootId, claimedId: children[0].id };
+  return {
+    rootId,
+    childIds: children.map((child) => child.id),
+    claimedId: children[0].id,
+    claimedRevision: claimed.item.revision,
+    blockedTargetId: children[3].id,
+  };
 }
 
 // ── Browser assertions ───────────────────────────────────────────────────
@@ -187,7 +196,8 @@ async function runBrowserChecks(page, baseUrl, seeded) {
 
   await page.click('[data-testid="workgraph-view-toggle:graph"]');
   await page.waitForSelector('[data-testid="workgraph-graph"]', { timeout: 15_000 });
-  // Snapshot hydration is async; wait for the full fixture to draw.
+  // Snapshot hydration is async; wait for the full fixture to draw: the
+  // goal's header is a node, so 6 nodes.
   await page.waitForFunction(
     () => document.querySelectorAll('[data-testid="workgraph-graph-node"]').length === 6,
     null,
@@ -195,7 +205,6 @@ async function runBrowserChecks(page, baseUrl, seeded) {
   );
 
   assert.equal(await page.locator('[data-testid="workgraph-graph-node"]').count(), 6);
-  assert.equal(await page.locator('[data-testid="workgraph-graph-edge"]').count(), 6);
   for (const status of ["in_progress", "completed", "blocked"]) {
     const count = await page
       .locator(`[data-testid="workgraph-graph-node"][data-status="${status}"]`)
@@ -206,9 +215,36 @@ async function runBrowserChecks(page, baseUrl, seeded) {
       .getAttribute("class")) ?? "";
     assert.ok(classes.includes(`is-${status}`), `node carries is-${status}: ${classes}`);
   }
+
+  // Containment, not parent lines: the goal heads its own frame and the
+  // five children sit inside it; only the blocks edge is drawn.
+  assert.equal(
+    await page.locator(`[data-testid="workgraph-graph-frame:${seeded.rootId}"]`).count(),
+    1,
+    "the goal draws its frame",
+  );
+  assert.equal(
+    await page.locator(`[data-testid="workgraph-graph-node"][data-goal-id="${seeded.rootId}"]`).count(),
+    5,
+    "the five children carry their goal",
+  );
+  const frameBox = await page.locator(`[data-testid="workgraph-graph-frame:${seeded.rootId}"]`).boundingBox();
+  assert.ok(frameBox, "the goal frame has a box");
+  for (const childId of seeded.childIds) {
+    const box = await page.locator(`[data-testid="workgraph-graph-node"][data-item-id="${childId}"]`).boundingBox();
+    assert.ok(box, `child ${childId} is drawn`);
+    assert.ok(
+      box.x >= frameBox.x - 1 && box.y >= frameBox.y - 1
+        && box.x + box.width <= frameBox.x + frameBox.width + 1
+        && box.y + box.height <= frameBox.y + frameBox.height + 1,
+      `child ${childId} sits inside its goal's frame`,
+    );
+  }
+  assert.equal(await page.locator('[data-testid="workgraph-graph-edge"]').count(), 1);
   assert.equal(
     await page.locator('[data-testid="workgraph-graph-edge"][data-kind="parent"]').count(),
-    5,
+    0,
+    "parent membership is containment, not a line",
   );
   assert.equal(
     await page.locator('[data-testid="workgraph-graph-edge"][data-kind="blocks"]').count(),
@@ -240,6 +276,34 @@ async function runBrowserChecks(page, baseUrl, seeded) {
     1,
     "the blocks edge carries its label",
   );
+
+  // The glance strip answers the first question with the seeded numbers.
+  // A tile reads label, figure, then its foot: its first number is the figure.
+  const figure = async (key) => {
+    const text = ((await page.locator(`[data-testid="workgraph-glance:${key}"]`).textContent()) ?? "").replace(/\s+/g, " ");
+    return { text, value: Number((text.match(/\d+/) || ["NaN"])[0]) };
+  };
+  const done = await figure("done");
+  assert.equal(done.value, 1, `one item is done: ${done.text}`);
+  assert.ok(/of\s*6/.test(done.text), `of six items: ${done.text}`);
+  assert.equal((await figure("in_progress")).value, 1, "one item in progress");
+  assert.equal((await figure("blocked")).value, 1, "one item blocked");
+  const toFinish = await figure("to_finish");
+  assert.equal(toFinish.value, 2, `the critical path has two steps: ${toFinish.text}`);
+
+  // The critical path (the claimed item, then the item it blocks) is on by
+  // default for a chain of two, drawn in the accent; the toggle turns it off.
+  const criticalToggle = page.locator('[data-testid="workgraph-critical-path"]');
+  assert.equal(await criticalToggle.getAttribute("aria-pressed"), "true", "the critical path is on by default");
+  const accentNodes = () => page.locator('[data-testid="workgraph-graph-node"].is-accent').evaluateAll(
+    (nodes) => nodes.map((node) => node.getAttribute("data-item-id")).sort(),
+  );
+  assert.deepEqual(await accentNodes(), [seeded.claimedId, seeded.blockedTargetId].sort(), "the chain is drawn in the accent");
+  await criticalToggle.click();
+  assert.equal(await criticalToggle.getAttribute("aria-pressed"), "false");
+  assert.deepEqual(await accentNodes(), [], "the toggle turns the highlight off");
+  await criticalToggle.click();
+  assert.equal(await criticalToggle.getAttribute("aria-pressed"), "true");
 
   // Pan/zoom smoke: both gestures must move the viewport transform.
   const viewport = page.locator('[data-testid="workgraph-graph-viewport"]');
@@ -284,16 +348,50 @@ async function runBrowserChecks(page, baseUrl, seeded) {
   const pannedTransform = await viewport.getAttribute("transform");
   assert.notEqual(pannedTransform, zoomedTransform, "drag pan changes the transform");
 
-  // Fit returns to the initial fitted view.
-  await page.click('[data-testid="workgraph-graph-fit"]');
-  assert.equal(await viewport.getAttribute("transform"), initialTransform, "Fit resets the view");
+  // A refresh never resets the person's pan and zoom, even when the data
+  // changed under it (spec B2): close the blocked item's blocker on the
+  // server, refresh, and the moved view stays where it was.
+  await rpc(baseUrl, "meta/workgraph/close", {
+    id: seeded.claimedId,
+    expected_revision: seeded.claimedRevision,
+  });
+  const refreshed = page.waitForResponse((response) => {
+    if (!response.url().endsWith("/console/rpc") || response.request().method() !== "POST") return false;
+    try {
+      return response.request().postDataJSON()?.method === "meta/workgraph/snapshot";
+    } catch {
+      return false;
+    }
+  }, { timeout: 10_000 });
+  await page.getByTestId("workgraph-panel-refresh").click();
+  await refreshed;
+  await page.waitForFunction(
+    (id) => document.querySelector(`[data-testid="workgraph-graph-node"][data-item-id="${id}"]`)?.getAttribute("data-status") === "completed",
+    seeded.claimedId,
+    { timeout: 10_000 },
+  );
+  assert.equal(await viewport.getAttribute("transform"), pannedTransform, "a refresh keeps the moved view");
 
-  // Click-select: the footer detail names the selected item and status.
-  await page.click('[data-testid="workgraph-graph-node"][data-status="in_progress"]');
-  const detail =
-    (await page.locator('[data-testid="workgraph-graph-detail"]').textContent()) ?? "";
-  assert.ok(detail.includes(seeded.claimedId), `detail names the item: ${detail}`);
-  assert.ok(detail.includes("In progress"), `detail carries the readable status: ${detail}`);
+  // Fit returns to a fitted view and resumes following the data.
+  await page.click('[data-testid="workgraph-graph-fit"]');
+  await page.waitForFunction(
+    (previous) =>
+      document
+        .querySelector('[data-testid="workgraph-graph-viewport"]')
+        ?.getAttribute("transform") !== previous,
+    pannedTransform,
+    { timeout: 5_000 },
+  );
+
+  // Click-select: the drawer names the selected item, its status and id.
+  await page.click(`[data-testid="workgraph-graph-node"][data-item-id="${seeded.blockedTargetId}"]`);
+  const detail = page.locator('[data-testid="workgraph-graph-detail"]');
+  await detail.waitFor({ timeout: 5_000 });
+  const detailText = (await detail.textContent()) ?? "";
+  assert.ok(detailText.includes(seeded.blockedTargetId), `drawer names the item: ${detailText}`);
+  assert.ok(/Open|Blocked/.test(detailText), `drawer carries the readable status: ${detailText}`);
+  assert.equal(await detail.getByRole("heading").count(), 1, "the drawer has one heading");
+  assert.equal(await detail.locator("[data-status]").count(), 1, "the drawer has one status");
 
   const screenshotPath = path.join(screenshotDir, "workgraph-graph.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });

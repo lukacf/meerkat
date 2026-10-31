@@ -4277,7 +4277,7 @@ impl MemberLifecycleFact {
 /// ([`SessionBridge::member_standing`]): the incarnation that holds the
 /// identity, and whether its retirement started, or none. Build one with its
 /// constructor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberStanding {
     /// No member holds the identity: Core never seated it since the mob's

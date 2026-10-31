@@ -69,11 +69,14 @@
 //! owes, with the session and role of the incarnation it follows, which the
 //! seat's fact does not carry, read by that exact generation from Core's
 //! member history, else from the retirement Core journaled for it. Whether a
-//! seat's incarnation is still Core's is read from Core's standing of the
-//! identity's member (`SessionBridge::member_standing`); that standing is the
-//! state Core's actor last published, which can trail the journal by the
-//! step it is committing, so a seat it does not show yet is read against the
-//! journal after it: one whose end Core journaled is no longer Core's.
+//! seat's incarnation is still Core's is read from its own page first, then
+//! from Core's standing of the identity's member
+//! (`SessionBridge::member_standing`); that standing is the state Core's
+//! actor last published, which can trail the journal by the step it is
+//! committing, so a seat whose end its page holds is not told whatever the
+//! standing shows, and a seat the standing does not show yet is read against
+//! the journal after its page: one whose end Core journaled is no longer
+//! Core's.
 //!
 //! Core's journal does not say which Meta verb asked for a step: a reset and
 //! a delete are the same rotation to Core, and the roster's unlisting the
@@ -90,12 +93,13 @@
 //! past that head, says the rotation reached Core, and its absence says
 //! nothing of it did, so it takes its record back and puts back the one it
 //! replaced (a later verb's record replaces an earlier one's). A head that
-//! does not read refuses the step before Core is asked. Once the cursor past the fact that consumed a record
-//! is recorded, the record goes. A roster pass that lists an identity again
-//! takes back an unlisting whose retirement Core's standing shows never
-//! started. Whether a member is the identity's is read from the marker or
-//! the label its binding carries, in one place ([`PageMembers`]), until
-//! membership is read from Core's identity entry fact.
+//! does not read refuses the step before Core is asked. Once the cursor past
+//! the fact that consumed a record is recorded, the record goes. A roster
+//! pass that lists an identity again takes back an unlisting whose
+//! retirement Core's standing shows never started. Whether a member is the
+//! identity's is read from the marker or the label its binding carries, in
+//! one place ([`PageMembers`]), until membership is read from Core's
+//! identity entry fact.
 //!
 //! What a step knows that no durable record keeps (the exact registration
 //! the retiring incarnation held, read before Core was asked; the build
@@ -128,9 +132,10 @@
 //! identity's binding from the same fold, so a page reads the fold once),
 //! one read of Core's published standing per seat it may tell, and runs the
 //! side effects of different identities at most [`EFFECT_CONCURRENCY`] at
-//! once in each lane (one identity's in journal order). A seat Core's
-//! standing does not show yet reads the journal on to its head, once per
-//! page for all such seats. A start that owes a predecessor's backlog reads
+//! once in each lane (one identity's in journal order). A seat whose end
+//! its page holds reads no standing; a seat Core's standing does not show
+//! yet reads the journal after its page on to the head, once per page for
+//! all such seats. A start that owes a predecessor's backlog reads
 //! the backlog's pages once more, for which identities it owes. It wakes no
 //! member: an idle journal costs one empty page read per sweep.
 //!
@@ -229,6 +234,11 @@ const FAILURES_KEPT: usize = 1024;
 /// After how many failures recorded in one run the projection prunes them
 /// again: a long run keeps at most [`FAILURES_KEPT`] and this many more.
 const FAILURES_PRUNED_EVERY: usize = 256;
+
+/// The identity whose member's standing a preparation reads, only to learn
+/// whether the session bridge reads Core's standing at all: no member needs
+/// to hold it for that.
+const STANDING_PROBE: &str = "lifecycle-projection-standing-probe";
 
 fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1263,27 +1273,20 @@ struct FreshLifeOwes {
     retirement: Option<Retirement>,
 }
 
-/// Of `seats`, whose incarnations Core's standing does not show, those whose
-/// incarnation Core's journal ends after the seat ([`ends_incarnation`]),
-/// read from `records` (the page), then from the journal after `upto` up to
-/// its head. Core's standing is the machine state its actor last published,
-/// which can trail the journal by the step the actor is committing, and Core
-/// journals an incarnation's end before it publishes the state that shows
-/// it: a seat whose end the journal does not hold is the incarnation Core
-/// holds.
-async fn seats_ended_since(
+/// Of `seats`, whose incarnations neither their page nor Core's standing
+/// shows ended, those whose incarnation Core's journal ends after `upto`
+/// (the page's last event), read up to the journal's head
+/// ([`ends_incarnation`]). Core's standing is the machine state its actor
+/// last published, which can trail the journal by the step the actor is
+/// committing, and Core journals an incarnation's end before it publishes
+/// the state that shows it: a seat whose end the journal does not hold is
+/// the incarnation Core holds.
+async fn seats_ended_after(
     bridge: &Arc<dyn SessionBridge>,
-    records: &[MemberLifecycleFactRecord],
     upto: u64,
     seats: &[PendingSeat],
 ) -> Result<BTreeSet<u64>, PageError> {
     let mut ended = BTreeSet::new();
-    for record in records {
-        note_ended_seats(record, seats, &mut ended);
-    }
-    if ended.len() == seats.len() {
-        return Ok(ended);
-    }
     let head = match bridge.member_lifecycle_journal_head().await {
         Ok(head) => head.cursor,
         Err(BridgeError::Unsupported { .. }) => {
@@ -1542,9 +1545,9 @@ impl IdentityRuntime {
     /// before every step Meta asks Core for, so every such step is
     /// projected; cheap once prepared. A candidate launch and a runtime
     /// without a session bridge project nothing; a bridge that cannot read
-    /// Core's journal turns the projection off. A failure says whether a
-    /// cursor is stored already, and counts toward the stall the status
-    /// reports.
+    /// Core's journal, or Core's standing of an identity's member, turns the
+    /// projection off. A failure says whether a cursor is stored already,
+    /// and counts toward the stall the status reports.
     pub(super) async fn prepare_lifecycle_projection(&self) -> Result<(), UnpreparedProjection> {
         let projection = &self.lifecycle_projection;
         if !matches!(projection.phase(), Phase::Unprepared) {
@@ -1630,6 +1633,18 @@ impl IdentityRuntime {
                     "reading Core's member lifecycle journal after its head: {error}"
                 )));
             }
+        }
+        // Nor, perhaps, Core's standing of an identity's member: the read of
+        // any identity's says whether the bridge reads it. A read that fails
+        // otherwise is read again where a page needs it.
+        let probe = AgentIdentity::parse(STANDING_PROBE).map_err(|error| {
+            unprepared(format!(
+                "the identity Core's standing is first read for: {error}"
+            ))
+        })?;
+        if let Err(BridgeError::Unsupported { .. }) = bridge.member_standing(&probe).await {
+            self.turn_lifecycle_projection_off("read Core's standing of an identity's member");
+            return Ok(());
         }
         // With no cursor yet (a new mob, or one an earlier release ran, which
         // owed its side effects in its own process), or one of an earlier
@@ -2971,11 +2986,12 @@ impl IdentityRuntime {
     /// Core's member history ([`page_members`]: whether each member is the
     /// identity's, and the session and role of the incarnation a respawn
     /// retired, which its seat's fact does not carry, else read from Core's
-    /// journal) and, for each seat, Core's standing of the identity's
-    /// member. A seat is told
-    /// `after_create` while Core still holds its incarnation, seated or
-    /// retiring; one whose incarnation ended since is told nothing, its
-    /// retirement standing for it.
+    /// journal) and, for each seat whose end the page does not hold, Core's
+    /// standing of the identity's member. A seat is told `after_create`
+    /// while Core still holds its incarnation, seated or retiring; one whose
+    /// incarnation ended since (on its page, in Core's standing, or in the
+    /// journal after the page) is told nothing, its retirement standing for
+    /// it.
     async fn resolve_member_facts(
         &self,
         records: &[MemberLifecycleFactRecord],
@@ -3074,9 +3090,19 @@ impl IdentityRuntime {
                 }),
             ));
         }
+        // A seat whose end its own page holds is not told, whatever Core's
+        // standing shows: that standing is the state Core's actor last
+        // published, which can trail the journal.
+        let mut ended_on_page = BTreeSet::new();
+        for record in records {
+            note_ended_seats(record, &seats, &mut ended_on_page);
+        }
         let mut current = Vec::new();
         let mut unplaced = Vec::new();
         for seat in seats {
+            if ended_on_page.contains(&seat.cursor) {
+                continue;
+            }
             // A seat no identity-first step made is a worker's.
             if !members.is_identitys(
                 &seat.identity,
@@ -3098,7 +3124,7 @@ impl IdentityRuntime {
             }
         }
         if !unplaced.is_empty() {
-            let ended = seats_ended_since(bridge, records, upto, &unplaced).await?;
+            let ended = seats_ended_after(bridge, upto, &unplaced).await?;
             current.extend(
                 unplaced
                     .into_iter()

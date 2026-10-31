@@ -1124,17 +1124,18 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
     // explores products of the regions' states within the step bound: the
     // instruction region next to the live region's six-step chains took it
     // from 18,936 states (249M generated) to about 487,000 (6.5G). These
-    // bounds bring it to about 24,700 states and 185M generated.
+    // bounds bring it to about 24,700 states and 99M generated.
     // - Step bound 5: TLC checks every successor, also one step past the
     //   bound, so every first-turn, live and lifecycle state (the deepest is
     //   six steps in) and every class of instruction state that a guard or an
     //   invariant tells apart is still checked. The instruction boundary
     //   audit, bound by this config, still reaches each witness and refuses
     //   each mutant within 5 machine steps, in as many states as at 6.
-    // - Durable-tail counts {0, 1}: the four stateless classification arms
-    //   make most of every state's successors, and they compare each count
-    //   with zero only; the durable-tail classification audit checks the arms
-    //   over all of 0..2 with its own tuples.
+    // - Durable-tail counts {0}: the four stateless classification arms make
+    //   most of every state's successors; with both counts at zero each arm
+    //   still fires (Ambiguous through its other conditions), and the
+    //   durable-tail classification audit checks the arms over all of 0..2
+    //   with its own tuples.
     // - Instruction samples, which keep every class of instruction state and
     //   every arm's firing from each:
     //   - target_generation {2}: a recovered mob target at the top of a mob
@@ -1155,12 +1156,12 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
     .with_input_field_domain(
         input_variant_id("ClassifyDurableTail"),
         crate::identity::FieldId::from_trusted_catalog_literal("dangling_tool_use_count"),
-        crate::InputFieldDomainKind::CiValues([0, 1].into_iter().collect()),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
     )
     .with_input_field_domain(
         input_variant_id("ClassifyDurableTail"),
         crate::identity::FieldId::from_trusted_catalog_literal("orphan_tool_result_count"),
-        crate::InputFieldDomainKind::CiValues([0, 1].into_iter().collect()),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
     )
     .with_input_field_domain(
         input_variant_id("RecoverSessionInstructionState"),

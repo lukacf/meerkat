@@ -5729,8 +5729,8 @@ mod tests {
             .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
             .expect("Next block");
         for (input, field, ci_values) in [
-            ("ClassifyDurableTail", "dangling_tool_use_count", "{0, 1}"),
-            ("ClassifyDurableTail", "orphan_tool_result_count", "{0, 1}"),
+            ("ClassifyDurableTail", "dangling_tool_use_count", "{0}"),
+            ("ClassifyDurableTail", "orphan_tool_result_count", "{0}"),
             ("RecoverSessionInstructionState", "target_generation", "{2}"),
             ("RecoverSessionInstructionState", "entry_sequence", "{0}"),
             ("RecoverSessionInstructionEffective", "generation", "{0}"),

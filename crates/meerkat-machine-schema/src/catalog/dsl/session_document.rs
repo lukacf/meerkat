@@ -5442,7 +5442,9 @@ machine! {
         // The slots in effect and the generation they realize, after the
         // owner: an Active slot was put there by an entry, and the
         // entry-sequence high-water becomes the later of the recorded one
-        // and the session's last entry row.
+        // and the session's last entry row. The slots in effect are Active
+        // slots only, as an application leaves them: a projection holding a
+        // revoked slot in effect is torn.
         transition RecoverSessionInstructionEffective {
             on input RecoverSessionInstructionEffective {
                 session_id,
@@ -5461,6 +5463,8 @@ machine! {
                     || for_all(slot in effect.keys(),
                         effect.get_cloned(slot).get("value") != InstructionEffect::Active))
                 && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && for_all(slot in effect.keys(),
+                    effect.get_cloned(slot).get("value") == InstructionEffect::Active)
                 && 1048576 >= session_document_instruction_active_bytes(effect, bytes)
             }
             update {

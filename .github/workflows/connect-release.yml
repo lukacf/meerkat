@@ -1,5 +1,5 @@
 name: Connect release
-# DRAFT for the 0.9.8 monorepo (Connect under connect/).
+# DRAFT for the 0.9.9 monorepo (Connect under connect/).
 #
 # Connect's own release line: tags connect-vX.Y.Z. Connect publishes no
 # registry package: its products, gateway archives, wheel and npm tarball are

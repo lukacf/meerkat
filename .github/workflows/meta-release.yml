@@ -1,5 +1,5 @@
 name: Meta release
-# DRAFT for the 0.9.8 monorepo (Meta under meta/, one Cargo workspace).
+# DRAFT for the 0.9.9 monorepo (Meta under meta/, one Cargo workspace).
 #
 # Meta's own release line: tags meta-vX.Y.Z, independent of Core's vX.Y.Z.
 # It publishes ONLY Meta's packages: crates meta-extension-state then

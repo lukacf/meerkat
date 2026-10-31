@@ -6737,6 +6737,16 @@ button.topo-roletree__agent:focus-visible {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.cc-approval__actions .cc-host-attention__open {
+  flex: 0 1 auto;
+  max-width: 100%;
+  height: auto;
+  min-height: var(--_cc-panel-control-h);
+  padding-block: 5px;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .cc-approval-attention {
   padding: 7px 8px;
   border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555));

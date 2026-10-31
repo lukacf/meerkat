@@ -14,8 +14,8 @@ use crate::types::{
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
     ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey,
     WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim, WorkCompletionPolicy,
-    WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem,
-    WorkItemAdmissionState, WorkItemId, WorkNamespace, WorkStatus,
+    WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphMachineState, WorkItem, WorkItemAdmissionState, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 /// Machine-owned public error classification surfaced to REST/RPC callers.
@@ -801,6 +801,9 @@ impl WorkGraphMachine {
         let admission_request_digest =
             admission.map(|(_, digest)| wg_dsl::WorkAdmissionDigestRef::from(digest));
         let title = validate_title(request.title)?;
+        for (position, evidence) in request.evidence_refs.iter().enumerate() {
+            validate_evidence_withdrawals(&request.evidence_refs[..position], evidence)?;
+        }
         let status = request.status.unwrap_or_default();
         // The creation policy "a new work item may only start open or blocked"
         // is owned by WorkGraphLifecycleMachine, not this shell. We extract the
@@ -1246,11 +1249,18 @@ impl WorkGraphMachine {
         Ok((item, event))
     }
 
+    /// Append one evidence ref to the item.
+    ///
+    /// A ref that withdraws earlier evidence is checked against the item's
+    /// current refs before anything changes. The check sees the ref as its
+    /// producer stamped it, so goal-confirm evidence is checked with its
+    /// confirmation classification.
     pub fn add_evidence(
         mut item: WorkItem,
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        validate_evidence_withdrawals(&item.evidence_refs, &request.evidence)?;
         let evidence_kind = request
             .evidence
             .confirmation_kind
@@ -1515,6 +1525,78 @@ fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGr
         normalized.insert(label.to_string());
     }
     Ok(normalized)
+}
+
+/// Admission rules of a typed evidence withdrawal, checked against `prior`,
+/// the evidence that precedes `evidence` on its item: the item's refs for an
+/// addition, the earlier refs of the request for a create.
+///
+/// A ref withdraws earlier evidence by listing ids in `withdraws`, and a ref
+/// is withdrawn when a later ref on the item lists its id. Every listed id
+/// must name at least one earlier ref and never the withdrawing ref's own
+/// id; every earlier ref with that id must be ordinary evidence that itself
+/// withdraws nothing (a withdrawal covers every earlier ref with the id).
+/// Withdrawing an id again is allowed.
+///
+/// Confirmation evidence and execution evidence cannot be withdrawn, and a
+/// withdrawing ref carries neither classification. These two rules keep a
+/// withdrawal out of every machine decision: completion-policy accounting
+/// and the execution bridge never read a withdrawn ref, so "withdrawn" stays
+/// derived data over append-only refs, not a lifecycle fact. Withdrawing
+/// confirmation or execution evidence would be a lifecycle change and
+/// belongs to the machines.
+fn validate_evidence_withdrawals(
+    prior: &[WorkEvidenceRef],
+    evidence: &WorkEvidenceRef,
+) -> Result<(), WorkGraphError> {
+    if evidence.withdraws.is_empty() {
+        return Ok(());
+    }
+    if evidence.confirmation_classification().is_some() {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "evidence {} withdraws earlier evidence, so it cannot carry a confirmation classification",
+            evidence.id
+        )));
+    }
+    if evidence.execution_binding_id.is_some() {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "evidence {} withdraws earlier evidence, so it cannot carry execution provenance",
+            evidence.id
+        )));
+    }
+    for target in &evidence.withdraws {
+        if *target == evidence.id {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "evidence {target} cannot withdraw itself"
+            )));
+        }
+        let mut named = false;
+        for earlier in prior.iter().filter(|earlier| earlier.id == *target) {
+            named = true;
+            if earlier.confirmation_classification().is_some() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is confirmation evidence and cannot be withdrawn"
+                )));
+            }
+            if earlier.execution_binding_id.is_some() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is execution evidence and cannot be withdrawn"
+                )));
+            }
+            if !earlier.withdraws.is_empty() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is itself a withdrawal and cannot be withdrawn"
+                )));
+            }
+        }
+        if !named {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "evidence {} withdraws {target}, but no earlier evidence on this item has that id",
+                evidence.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Apply a create input and return the new lifecycle state together with the

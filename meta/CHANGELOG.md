@@ -338,6 +338,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   width, so a narrow pane left the values a column too narrow to read ("Not
   specified" ran down the card a letter at a time). A card narrower than
   360 px now lists each value under its label, wherever it is shown.
+- The Console sidebar now places an agent in the category its group label
+  names (Personal, Coordinators, Domains or Internal) before it looks at the
+  agent's role, and the roster's group filter does the same. Before, the role
+  came first: an agent in group "Domain" or "Internal" whose role is "lead"
+  was listed under Personal, and one with a router or triage role under
+  Coordinators. An agent whose group label names no category is still placed
+  by its role.
 
 ### Known limitations
 

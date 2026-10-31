@@ -1032,7 +1032,7 @@ async fn write_created_owner_fixture(name: &str, peer: FixturePeer) {
     })
     .await;
     let mob_id = MobId::from(mob_id.as_str());
-    let stores = crate::store::SqliteMobStores::open(&dir.join("mob.sqlite"))
+    let stores = crate::store::SqliteMobStores::open(dir.join("mob.sqlite"))
         .expect("open the fixture store");
     stores
         .identity_store()

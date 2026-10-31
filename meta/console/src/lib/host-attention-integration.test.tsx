@@ -87,8 +87,11 @@ describe("host-provided attention in the console", () => {
     view.unmount();
   }, 30_000);
 
-  it("Needs you brings an inbox open on another tab back to Pending", async () => {
-    const view = render(<ConsoleApp baseUrl="" transport={transport("host-attention-runtime")} />);
+  it.each([
+    ["a runtime", "host-attention-runtime"],
+    ["an aggregate", SHARED_CONSOLE_RUNTIME_ID],
+  ])("Needs you brings %s console's inbox open on another tab back to Pending", async (_kind, runtimeId) => {
+    const view = render(<ConsoleApp baseUrl="" transport={transport(runtimeId)} />);
     await settle();
     const needsYou = () => within(view.getByTestId("approval-attention")).getByRole("button");
     await act(async () => { fireEvent.click(needsYou()); });

@@ -1,12 +1,15 @@
 //! The terminal shutdown's budgets: the root mob's teardown waits for its
 //! members' runtime unregisters within its budget, and the durable child
 //! root stands down in a window of its own once the root has returned.
+//! Within the root's budget the shutdown also waits for the root mob's actor
+//! to exit, so a successor in this process composes on the same state
+//! directory once the runtime has dropped.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
 use meerkat_core::types::SessionId;
@@ -14,6 +17,7 @@ use meerkat_mob::{
     AgentIdentity, MobDefinition, MobId, MobRuntimeMode, ProfileName, SpawnMemberSpec,
 };
 use serde_json::json;
+use tokio::sync::oneshot;
 
 use crate::child_mob_storage::{
     ChildMobRootClaim, ChildMobStandDownOutcome, ChildMobStorage, child_mob_root,
@@ -30,6 +34,12 @@ const SLOW_UNREGISTER: Duration = Duration::from_secs(6);
 /// Bound for a held saga's release task; it only turns a hang into a
 /// failure.
 const RELEASE_BOUND: Duration = Duration::from_mins(1);
+
+/// How long the row that holds the root mob's actor exit waits for shutdown
+/// before it lets the exit go: far longer than the steps shutdown runs after
+/// its mob's answer, so a shutdown that does not wait for the actor has
+/// returned by then.
+const ACTOR_EXIT_HOLD: Duration = Duration::from_secs(5);
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
@@ -271,4 +281,145 @@ async fn a_root_that_spends_its_whole_budget_releases_an_empty_child_root() {
         .await
         .expect("the held saga is released")
         .expect("the release task");
+}
+
+/// The persistent composition of mob `mob_id` over `dir`, its child mobs
+/// process-bound. The held-exit row depends on it: with a claimed durable
+/// child root, the child stand-down closes the root mob's admission with a
+/// command its actor answers only once it has dropped itself, and waits for
+/// that answer or the root's task end, so even a shutdown that does not wait
+/// for the actor would not return while the actor's exit is held.
+async fn process_bound_spec(
+    dir: &Path,
+    mob_id: &str,
+) -> Result<MobBootstrapSpec, crate::storage_health::StorageResolutionError> {
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
+            .expect("root mob storage");
+    let spec = MobBootstrapSpec::persistent(
+        root_definition(mob_id),
+        storage,
+        provenance,
+        dir.to_path_buf(),
+        8,
+    )
+    .await?;
+    Ok(spec.with_child_mob_storage(ChildMobStorage::ProcessBound))
+}
+
+/// The row's side of [`ActorExitHold`]: unarmed, the hold lets the exit go
+/// at once.
+#[derive(Default)]
+struct ExitGate {
+    armed: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+impl ExitGate {
+    /// Arm the hold. The receiver resolves once the actor's exit reaches it;
+    /// sending on (or dropping) the sender lets the exit go on.
+    fn arm(&self) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+        let (reached_tx, reached) = oneshot::channel();
+        let (release, release_rx) = mpsc::channel();
+        *self.armed.lock().unwrap_or_else(PoisonError::into_inner) = Some((reached_tx, release_rx));
+        (reached, release)
+    }
+}
+
+/// Holds the root mob actor's exit while its gate is armed. A mob-wide
+/// external-tools provider owns it, and only the actor holds that provider:
+/// the actor drops it in its exit, after its terminal Shutdown has answered.
+/// The wait runs in `block_in_place`, which hands the worker's other tasks to
+/// another thread meanwhile.
+struct ActorExitHold(Arc<ExitGate>);
+
+impl ActorExitHold {
+    /// The provider's answer at a spawn: no external tools.
+    fn no_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        None
+    }
+}
+
+impl Drop for ActorExitHold {
+    fn drop(&mut self) {
+        let armed = self
+            .0
+            .armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = armed {
+            let _ = reached.send(());
+            tokio::task::block_in_place(|| {
+                let _ = release.recv();
+            });
+        }
+    }
+}
+
+/// A host that shuts a runtime down, drops it and composes a successor on
+/// the same state directory in this process at once is not refused as in
+/// use. The root mob's actor answers its terminal Shutdown first and drops
+/// what it owns after, Core's execution custody of `runtime.sqlite` among
+/// it: shutdown returns only once that actor has exited, so the runtime's
+/// own drop leaves nothing holding the custody. Held in its exit, the actor
+/// keeps shutdown from returning; let go, the successor composes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_waits_for_the_root_actor_so_a_successor_composes_at_once() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let mob_id = unique("terminal-successor");
+    let gate = Arc::new(ExitGate::default());
+    let hold = ActorExitHold(Arc::clone(&gate));
+    let mut spec = process_bound_spec(dir.path(), &mob_id)
+        .await
+        .expect("compose the runtime")
+        .with_default_external_tools_provider(Arc::new(move || hold.no_tools()));
+    spec.options.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .mob_spec(spec)
+            .module_config(MetaConfig {
+                modules: vec![],
+                discovery: DiscoverySpec {
+                    namespace: unique("terminal-successor"),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            })
+            .timeout(Duration::from_secs(10))
+            .build(),
+    )
+    .await
+    .expect("build the runtime");
+
+    let (reached, release) = gate.arm();
+    let (returned_tx, mut returned) = oneshot::channel();
+    let shutdown = tokio::spawn(async move {
+        let report = runtime.shutdown().await;
+        let _ = returned_tx.send(());
+        (runtime, report)
+    });
+    tokio::time::timeout(RELEASE_BOUND, reached)
+        .await
+        .expect("the root mob's actor exits after its Shutdown")
+        .expect("the held exit reports reaching the hold");
+    assert!(
+        tokio::time::timeout(ACTOR_EXIT_HOLD, &mut returned)
+            .await
+            .is_err(),
+        "shutdown returned while the root mob's actor was still exiting"
+    );
+    let _ = release.send(());
+    let (runtime, report) = shutdown.await.expect("join the shutdown");
+    assert!(
+        matches!(
+            report.mob_terminal_shutdown,
+            MobTerminalShutdownOutcome::Completed(_)
+        ),
+        "{report:?}"
+    );
+    drop(runtime);
+
+    if let Err(error) = process_bound_spec(dir.path(), &mob_id).await {
+        panic!("the successor on the same state directory is refused: {error}");
+    }
 }

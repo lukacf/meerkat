@@ -6,7 +6,9 @@
 //! made it, that rotation; a rotation's terminal step, whose retirement and
 //! seat name each other; a retirement, with its session and why it ended; a
 //! fresh life of an identity no member held, which names the incarnation it
-//! follows. Some of these steps owe side effects that Meta runs:
+//! follows; a host's legacy respawn, two steps whose seat names the
+//! incarnation the first retired. Some of these steps owe side effects that
+//! Meta runs:
 //!
 //! | Journal fact | Side effects |
 //! |---|---|
@@ -14,8 +16,8 @@
 //! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
 //! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the distillation of the retired session behind its reset boundary, the retirement hook (`reset`) |
 //! | a delete's rotation onto a fresh session | the drop of the retired session's semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
-//! | a role move's rotation onto a fresh session, or one no Meta verb asked for that seated another role | the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
-//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own) | the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
+//! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
+//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own, or its legacy respawn) | the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
 //! | the fresh life a reset or a delete seats after an incarnation Core had already retired | that verb's memory side effects of the session the retired incarnation left, and no retirement hook |
 //! | any other retirement: a reload's, a respawn on the same session, Core's own | none |
 //!
@@ -61,13 +63,16 @@
 //! in the journal: which rotation a retirement ended in and the seat the
 //! same step made (and under which role), the session of each incarnation,
 //! why Core's seal unlisted an identity, and which incarnation a fresh life
-//! follows. Which retirement owes what is decided in one place
-//! ([`retirement_owes`]), the facts first. Whether a seat's incarnation is
-//! still Core's is read from Core's standing of the identity's member
-//! (`SessionBridge::member_standing`); that standing is the state Core's
-//! actor last published, which can trail the journal by the step it is
-//! committing, so a seat it does not show yet is read against the journal
-//! after it: one whose end Core journaled is no longer Core's.
+//! or a legacy respawn's seat follows. Which retirement owes what is decided
+//! in one place ([`retirement_owes`]), the facts first; a legacy respawn's
+//! seat, whose retirement was a step of its own, owes what such a rotation
+//! owes, with the session and role of the incarnation it follows read from
+//! Core's member history, which the seat's fact does not carry. Whether a
+//! seat's incarnation is still Core's is read from Core's standing of the
+//! identity's member (`SessionBridge::member_standing`); that standing is the
+//! state Core's actor last published, which can trail the journal by the
+//! step it is committing, so a seat it does not show yet is read against the
+//! journal after it: one whose end Core journaled is no longer Core's.
 //!
 //! Core's journal does not say which Meta verb asked for a step: a reset and
 //! a delete are the same rotation to Core, and the roster's unlisting the
@@ -970,6 +975,36 @@ struct PendingRotation {
     cause: RetiredIdentityCause,
 }
 
+/// The seat of a host's legacy respawn (`SeatRotation::RespawnAfter`):
+/// Core retired the incarnation `predecessor` in a step of its own, a plain
+/// retirement that owed nothing, and seated this one. The respawn owes what
+/// a rotation no Meta verb asked for owes, when the retired incarnation is
+/// the identity's and the seat runs on another session.
+struct PendingRespawn {
+    cursor: u64,
+    identity: AgentIdentity,
+    member: meerkat_mob::AgentIdentity,
+    predecessor: u64,
+    /// The seat's role and session.
+    role: meerkat_mob::ProfileName,
+    session: Option<SessionId>,
+}
+
+/// What of a page waits for the page's reads of Core's member history and
+/// standing.
+#[derive(Default)]
+struct PendingFacts {
+    seats: Vec<PendingSeat>,
+    rotations: Vec<PendingRotation>,
+    respawns: Vec<PendingRespawn>,
+}
+
+impl PendingFacts {
+    fn is_empty(&self) -> bool {
+        self.seats.is_empty() && self.rotations.is_empty() && self.respawns.is_empty()
+    }
+}
+
 /// The facts of `page` a lane runs, and the cursor it stands at once they
 /// ran. A lane that ends at `until` takes no fact past it, and covers its
 /// range once the page read up to its end.
@@ -1017,10 +1052,10 @@ async fn page_members(bridge: &Arc<dyn SessionBridge>) -> Result<PageMembers, Pa
 impl PageMembers {
     /// Core's binding of `member`'s incarnation `generation` as the history
     /// keeps it: the member's latest binding, the latest binding of
-    /// `session` (the session the fact names), or of another session since
-    /// the mob's last reset; else the member's latest binding of any
-    /// generation, whose spawn spec its earlier incarnations carried too.
-    fn binding(
+    /// `session` (the session the fact names, when it names one), or of
+    /// another session since the mob's last reset. `None` when the history
+    /// keeps no binding of that incarnation.
+    fn incarnation(
         &self,
         member: &meerkat_mob::AgentIdentity,
         generation: u64,
@@ -1029,8 +1064,9 @@ impl PageMembers {
         let of_generation = |binding: &&meerkat_mob::MemberBinding| {
             binding.identity() == member && binding.generation().get() == generation
         };
-        let last = self.history.last_binding(member);
-        last.filter(of_generation)
+        self.history
+            .last_binding(member)
+            .filter(of_generation)
             .or_else(|| {
                 session
                     .and_then(|session| self.history.binding_for_session(session))
@@ -1041,7 +1077,18 @@ impl PageMembers {
                     .session_bindings_since_reset()
                     .find(of_generation)
             })
-            .or(last)
+    }
+
+    /// [`Self::incarnation`], else the member's latest binding of any
+    /// generation, whose spawn spec its earlier incarnations carried too.
+    fn binding(
+        &self,
+        member: &meerkat_mob::AgentIdentity,
+        generation: u64,
+        session: Option<&SessionId>,
+    ) -> Option<&meerkat_mob::MemberBinding> {
+        self.incarnation(member, generation, session)
+            .or_else(|| self.history.last_binding(member))
     }
 
     /// Whether `member`'s incarnation `generation` (on `session`) is
@@ -2393,8 +2440,7 @@ impl IdentityRuntime {
         self.scan_owed_lifecycle_backlog().await?;
         let customizer = self.after_create_customizer().await;
         let mut effects: Vec<(EffectKey, AgentIdentity, Effect)> = Vec::new();
-        let mut seats: Vec<PendingSeat> = Vec::new();
-        let mut rotations: Vec<PendingRotation> = Vec::new();
+        let mut pending = PendingFacts::default();
         let mut consumed = Vec::new();
         let (store, mob_id) = self.identity_record_store();
         for record in records {
@@ -2411,6 +2457,10 @@ impl IdentityRuntime {
                         continue;
                     };
                     match rotation {
+                        // A rotation's terminal step seated it: the
+                        // retirement the same step journaled names the link
+                        // and owes the rotation's side effects.
+                        Some(meerkat_mob::SeatRotation::Successor { .. }) => {}
                         // A fresh life of an identity whose last incarnation
                         // Core had retired owes what a reset or a delete
                         // recorded for that incarnation.
@@ -2427,20 +2477,31 @@ impl IdentityRuntime {
                                 ));
                             }
                         }
-                        Some(_) | None => {
-                            // A rotation's terminal step seated it: the
-                            // retirement the same step journaled names the
-                            // link and owes the rotation's side effects. A
-                            // seat no rotation made owes its predecessor
-                            // nothing.
+                        // A host's legacy respawn: Core retired the
+                        // incarnation it follows in a step of its own, and
+                        // this seat names it. What it owes is read with the
+                        // page's member history.
+                        Some(meerkat_mob::SeatRotation::RespawnAfter { predecessor, .. }) => {
+                            pending.respawns.push(PendingRespawn {
+                                cursor: record.cursor,
+                                identity: identity.clone(),
+                                member: member.clone(),
+                                predecessor: predecessor.get(),
+                                role: role.clone(),
+                                session: session.clone(),
+                            });
                         }
+                        // A seat no rotation made owes its predecessor
+                        // nothing; so does one whose rotation this build
+                        // cannot read, which reads as a plain seat.
+                        Some(_) | None => {}
                     }
                     // Nothing to tell without a customizer, nor for a member
                     // bound to no session of its own (a peer-only member).
                     let (Some(_), Some(session)) = (customizer.as_ref(), session) else {
                         continue;
                     };
-                    seats.push(PendingSeat {
+                    pending.seats.push(PendingSeat {
                         cursor: record.cursor,
                         identity,
                         member: member.clone(),
@@ -2526,15 +2587,17 @@ impl IdentityRuntime {
                                 }),
                             ));
                         }
-                        RetirementOwes::IdentitysMember(cause) => rotations.push(PendingRotation {
-                            cursor: record.cursor,
-                            identity,
-                            member: member.clone(),
-                            generation: *generation,
-                            role: role.clone(),
-                            session,
-                            cause,
-                        }),
+                        RetirementOwes::IdentitysMember(cause) => {
+                            pending.rotations.push(PendingRotation {
+                                cursor: record.cursor,
+                                identity,
+                                member: member.clone(),
+                                generation: *generation,
+                                role: role.clone(),
+                                session,
+                                cause,
+                            });
+                        }
                         RetirementOwes::Nothing => {}
                     }
                 }
@@ -2546,8 +2609,8 @@ impl IdentityRuntime {
                 | MemberLifecycleFact::MobReset => {}
             }
         }
-        if !seats.is_empty() || !rotations.is_empty() {
-            self.resolve_member_facts(records, upto, seats, rotations, &mut effects)
+        if !pending.is_empty() {
+            self.resolve_member_facts(records, upto, pending, &mut effects)
                 .await?;
         }
         // One identity's side effects in journal order; different
@@ -2758,10 +2821,12 @@ impl IdentityRuntime {
         Ok(())
     }
 
-    /// The side effects of the page's seats and of its rotations no Meta
-    /// verb asked for, from the page's one read of Core's member history
-    /// ([`page_members`]: whether each member is the identity's) and, for
-    /// each seat, Core's standing of the identity's member. A seat is told
+    /// The side effects of the page's seats, of its rotations no Meta verb
+    /// asked for and of its legacy respawns, from the page's one read of
+    /// Core's member history ([`page_members`]: whether each member is the
+    /// identity's, and the session and role of the incarnation a respawn
+    /// retired, which its seat's fact does not carry) and, for each seat,
+    /// Core's standing of the identity's member. A seat is told
     /// `after_create` while Core still holds its incarnation, seated or
     /// retiring; one whose incarnation ended since is told nothing, its
     /// retirement standing for it.
@@ -2769,14 +2834,64 @@ impl IdentityRuntime {
         &self,
         records: &[MemberLifecycleFactRecord],
         upto: u64,
-        seats: Vec<PendingSeat>,
-        rotations: Vec<PendingRotation>,
+        pending: PendingFacts,
         effects: &mut Vec<(EffectKey, AgentIdentity, Effect)>,
     ) -> Result<(), PageError> {
         let Some(bridge) = self.bridge.as_ref() else {
             return Ok(());
         };
+        let PendingFacts {
+            seats,
+            rotations,
+            respawns,
+        } = pending;
         let members = page_members(bridge).await?;
+        for respawn in respawns {
+            // The incarnation the respawn retired, as Core's member history
+            // keeps it. One the history no longer keeps owes nothing here.
+            let Some(retired) = members.incarnation(&respawn.member, respawn.predecessor, None)
+            else {
+                continue;
+            };
+            let retired_session = retired.session_id().cloned();
+            let retired_role = retired.role().clone();
+            // A member no identity-first step made is a worker's.
+            if !members.is_identitys(
+                &respawn.identity,
+                &respawn.member,
+                respawn.predecessor,
+                retired_session.as_ref(),
+            ) {
+                continue;
+            }
+            // A respawn onto the session the retired incarnation ran on owes
+            // nothing, as any replacement on its own session does; nor does
+            // one of a member bound to no session of its own.
+            let (Some(retired_session), Some(seated)) = (retired_session, respawn.session.as_ref())
+            else {
+                continue;
+            };
+            if retired_session == *seated {
+                continue;
+            }
+            let cause = if retired_role == respawn.role {
+                RetiredIdentityCause::Rotated
+            } else {
+                RetiredIdentityCause::RoleMove
+            };
+            effects.push((
+                EffectKey::predecessor(respawn.cursor),
+                respawn.identity,
+                Effect::Retirement(Retirement {
+                    member: respawn.member,
+                    generation: respawn.predecessor,
+                    session: Some(retired_session),
+                    cause,
+                    asked_at_ms: None,
+                    hook_role: Some(retired_role),
+                }),
+            ));
+        }
         for rotation in rotations {
             // A member no identity-first step made is a worker's.
             if !members.is_identitys(

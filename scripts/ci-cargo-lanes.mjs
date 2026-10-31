@@ -1491,10 +1491,11 @@ function isExampleWebPath(path) {
 }
 
 // The typed governance gates (effect-authority, ownership-ledger, strict
-// RMAT, strict seam inventory, runtime authority bypass, machine-authority
-// docs) run on the agent gate's governance paths (scripts/cargo-agent-gate,
-// is_governance_path): the machine-authority paths and these dogma
-// documents. The self-test keeps the two lists equal.
+// RMAT, strict seam inventory, machine-authority docs) run on the agent
+// gate's governance paths (scripts/cargo-agent-gate, is_governance_path):
+// the machine-authority paths and these dogma documents; the runtime
+// authority bypass audit runs on them too, and on every Rust change. The
+// self-test keeps the two lists equal.
 export const GOVERNANCE_DOC_PATTERNS = [
   ".claude/skills/meerkat-dogma-inquisition/*",
   "docs/architecture/meerkat-dogma.md",

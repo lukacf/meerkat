@@ -470,10 +470,12 @@ and its CI must be green before a release tag (`require_ci_green`):
   `machine-check-drift`/`protocol-check-drift` when machine authority changed;
   `verify-machine-poster-coverage` when machine authority or a poster input
   (`scripts/machine-posters-changed`, a separate classifier so poster-only
-  changes never start the machine lanes) changed.
+  changes never start the machine lanes) changed; `make
+  runtime-authority-bypass` on every Rust change and every governance change
+  (the audit reads every production Rust source of the workspace).
 - `governance-gates`: the typed governance gates (`make rmat-audit
-  seam-inventory runtime-authority-bypass`; `rmat-audit` runs its three
-  audits concurrently once xtask is built) in a job of their own, and
+  seam-inventory`; `rmat-audit` runs its three audits concurrently once
+  xtask is built) in a job of their own, and
   `governance-docs-gate` (`make machine-authority-docs-gate`, which compiles
   a test of its own) beside it, on the agent gate's governance paths: a
   machine-authority change or a dogma document (`governance_gates` in the
@@ -882,7 +884,7 @@ the push stage ran these before 0.9.3, 68-116 minutes of every push on 2026-10-1
 and CI runs each of them before merge or on the push a release tag requires
 green, except the deterministic gate's lib tests under the workspace's unified
 features, which only nightly's workspace unit lane runs:
-- `changed-path-ratchets`: `scripts/pre-push-ratchets.sh` (the agent gate's changed-path ratchets: formal/governance targets, generated contract freshness, Web SDK tests, wasm check; no Clippy). CI: the `ratchets` job (generated contracts; drift on a machine-authority change), the `governance-gates` job (the typed governance gates on a machine-authority or dogma change), `example-web` and `wasm-check`, selected by the same paths; `scripts/test-pre-push-ratchets.sh` pins it (each ratchet's CI step and trigger included) and runs in `make ci-lanes-selftest`
+- `changed-path-ratchets`: `scripts/pre-push-ratchets.sh` (the agent gate's changed-path ratchets: formal/governance targets, generated contract freshness, Web SDK tests, wasm check; no Clippy). CI: the `ratchets` job (generated contracts; drift on a machine-authority change; the runtime authority bypass audit on every Rust or governance change), the `governance-gates` job (the typed governance gates on a machine-authority or dogma change), `example-web` and `wasm-check`, selected by the same paths; `scripts/test-pre-push-ratchets.sh` pins it (each ratchet's CI step and trigger included) and runs in `make ci-lanes-selftest`
 - `machine-codegen-drift` / `machine-codegen-verify`: `scripts/pre-push-machines.sh --codegen-only|--verify-only` (machine and protocol codegen under the clean-tree contract; the canonical TLC lane). CI: the `ratchets` job's `machine-check-drift`/`protocol-check-drift` and the `tlc-audits` shards on a machine-authority change; the `machine-verify --all` sweep nightly and on the release gate
 - `cargo-test`: `scripts/pre-push-unit.sh` (deterministic Cargo/nextest gate: when fresh execution is needed, runs workspace unit, integration-fast, HeadCanonical cold-restart, and `e2e-fast` lanes; serializes identical source evidence and retries a timed-out lane once. `MEERKAT_BUILDBUDDY` does not switch this hook's backend). CI: the pull request's unit lanes for the changed packages, the push's `main-unit` and `closure-tests` rows, nightly's workspace unit lane
 - `release-test-code-guards-contract`, `release-doctor-workflow-contract`, `release-find-prebuild-contract`, `release-standalone-gate-contract`, `macos-x86-release-binary-check-contract`, `release-sqlite-profile-check-contract`, `release-asset-provenance-contract`: CI's `Format + governance` job runs these on every pull request

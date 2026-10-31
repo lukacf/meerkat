@@ -19,10 +19,10 @@ name: CI
 #                     session-control routes, deprecated backend)
 #   ratchets        - generated-contract freshness when contract paths
 #                     changed; machine/protocol drift when machine authority
-#                     changed
-#   governance-gates - the typed governance gates (rmat-audit, seam-inventory,
-#                     runtime authority) when machine authority or a dogma
-#                     document changed
+#                     changed; the runtime authority bypass audit when Rust,
+#                     machine authority or a dogma document changed
+#   governance-gates - the typed governance gates (rmat-audit, seam-inventory)
+#                     when machine authority or a dogma document changed
 #   governance-docs-gate - the machine-authority docs gate, on the same
 #                     changes, in parallel with governance-gates
 #   tlc-audits      - (x16) the hand-written TLC audit shards on a
@@ -856,16 +856,28 @@ jobs:
         if: ${{ needs.changes.outputs.machine_authority == 'true' || needs.changes.outputs.machine_posters == 'true' }}
         run: make verify-machine-poster-coverage
 
+      # The runtime authority bypass audit reads every production Rust source
+      # of the workspace: the raw runtime queue calls, and the callers of the
+      # session service's mob-only operator-instruction entry points, which
+      # any crate could add. It runs on every pull request that changes Rust
+      # or a governance path, in this job, which every pull request runs;
+      # after the poster check it reuses that step's xtask build.
+      # `make runtime-authority-bypass` is the same command locally.
+      - name: Runtime authority bypass audit
+        if: ${{ needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.governance_gates == 'true' }}
+        run: make runtime-authority-bypass
+
   # The typed governance gates over the live workspace: the effect-authority,
-  # ownership-ledger and strict RMAT audits, the strict seam inventory, the
-  # runtime authority bypass audit and the machine-authority docs alignment
-  # test. They run on the agent gate's governance paths (machine authority
-  # or a dogma document; governance_gates in scripts/ci-cargo-lanes.mjs),
-  # where the pre-push hook's changed-path ratchets ran them before every
-  # push; the hook no longer runs them, and no other per-push lane does. A
-  # job of its own, beside `ratchets`: they took 400 s locally, 114 s of it
-  # building xtask, which after the drift checks would hold the ratchets job
-  # past the pull-request lane target.
+  # ownership-ledger and strict RMAT audits, the strict seam inventory and
+  # the machine-authority docs alignment test (the runtime authority bypass
+  # audit runs in `ratchets`, on every Rust change). They run on the agent
+  # gate's governance paths (machine authority or a dogma document;
+  # governance_gates in scripts/ci-cargo-lanes.mjs), where the pre-push
+  # hook's changed-path ratchets ran them before every push; the hook no
+  # longer runs them, and no other per-push lane does. A job of its own,
+  # beside `ratchets`: they took 400 s locally, 114 s of it building xtask,
+  # which after the drift checks would hold the ratchets job past the
+  # pull-request lane target.
   governance-gates:
     name: Typed governance gates
     needs: changes
@@ -903,7 +915,7 @@ jobs:
           cache-on-failure: true
 
       - name: Typed governance gates
-        run: make rmat-audit seam-inventory runtime-authority-bypass
+        run: make rmat-audit seam-inventory
 
   # The machine-authority docs gate in a job of its own, beside the other
   # typed governance gates: in one job the four gates ran 664-1048 s on

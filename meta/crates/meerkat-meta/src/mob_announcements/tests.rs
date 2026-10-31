@@ -2410,6 +2410,8 @@ pub(super) struct ScriptedNative {
     wedged: tokio::sync::watch::Sender<BTreeSet<String>>,
     /// How many times each member's check was made.
     checks: Mutex<BTreeMap<String, u64>>,
+    /// Members whose check panics, as a native read whose task fails.
+    panicking: Mutex<BTreeSet<String>>,
 }
 
 /// A member's role and labels, as a scripted roster records them.
@@ -2446,6 +2448,7 @@ impl ScriptedNative {
             role_reads: AtomicU64::new(0),
             wedged: tokio::sync::watch::Sender::new(BTreeSet::new()),
             checks: Mutex::new(BTreeMap::new()),
+            panicking: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -2478,6 +2481,12 @@ impl ScriptedNative {
             .get(identity)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Make the check of `identity` panic, as a native read whose task
+    /// fails.
+    fn panic_at_check(&self, identity: &str) {
+        self.panicking.lock().unwrap().insert(identity.to_string());
     }
 
     /// Record `identity`'s role and labels on this mob's roster.
@@ -2718,6 +2727,9 @@ impl NativeDelivery for ScriptedNative {
             .unwrap()
             .entry(identity.to_string())
             .or_default() += 1;
+        if self.panicking.lock().unwrap().contains(identity) {
+            panic!("the scripted check of {identity} panicked");
+        }
         let wedged = self.wedged.borrow().contains(identity);
         if wedged {
             let _ = self

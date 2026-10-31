@@ -2158,7 +2158,10 @@ async fn an_apply_behind_a_read_wedged_on_a_store_call_waits_at_most_the_bound()
         started.elapsed()
     );
     assert!(
-        refused.code == -32000 && refused.message.contains("AnnouncementStore::role_children"),
+        refused.code == -32000
+            && refused
+                .message
+                .contains("an earlier call of AnnouncementStore::role_children is still running"),
         "the apply's read of its result meets the call still running there: {refused:?}"
     );
     let read = within("the read ends", reading).await.unwrap().unwrap_err();
@@ -2285,6 +2288,44 @@ async fn a_reconcile_stopped_before_it_replaced_a_changed_record_is_finished_at_
         found["subscription"]["selector"]["topics"],
         serde_json::json!(["ops.two"]),
         "the health pass replaces the record whose declaration changed"
+    );
+}
+
+/// A call under the declarations gate whose task fails (a panic) answers
+/// nothing, and what it failed with is logged, never carried on: a declared
+/// subscription whose member check panics is pending, refused
+/// `native_unavailable` with a fixed text that names the call.
+#[tokio::test]
+async fn a_member_check_that_panics_leaves_its_record_pending_with_a_fixed_refusal() {
+    let harness = harness_with(native_serving(&[]));
+    let service = &harness.service;
+    harness.native.panic_at_check("agent:a");
+    within(
+        "revision 1 applies, its record pending",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([]),
+            serde_json::json!([declared_subscription("a-mail", "agent:a", &["ops.one"])]),
+        ),
+    )
+    .await
+    .unwrap();
+    let view = declared(service).await;
+    let found = record(&view, "subscription", "a-mail");
+    assert_eq!(
+        found.map(|record| record["status"].clone()),
+        Some(serde_json::json!("pending")),
+        "{view}"
+    );
+    assert_eq!(
+        found.map(|record| record["refusal"].clone()),
+        Some(serde_json::json!({
+            "kind": "native_unavailable",
+            "message": "native state unavailable: NativeDelivery::check_member ended without an \
+                        answer"
+        })),
+        "the refusal names the call, not what its task failed with"
     );
 }
 

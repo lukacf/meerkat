@@ -1650,12 +1650,12 @@ impl From<meerkat_core::InstructionEntryIdentity> for WireInstructionEntryIdenti
 /// Public wire form of the marker of an instruction activation row whose
 /// body a compaction retired.
 ///
-/// Reads are tolerant: a marker whose form this version does not know (a
-/// later render version with a field this version does not know) reads as
-/// [`Self::Raw`], the value as it was sent, and is written back the same. It
-/// never fails the history page or bridge message that carries it; either
-/// form marks the row's body as retired. The session document keeps the
-/// closed core type.
+/// Reads are tolerant: a marker reads as [`Self::Known`] whenever its fields
+/// decode (a later render version with the same two fields included), and
+/// one with a field this version does not know reads as [`Self::Raw`], the
+/// value as it was sent, and is written back the same. It never fails the
+/// history page or bridge message that carries it; either form marks the
+/// row's body as retired. The session document keeps the closed core type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]

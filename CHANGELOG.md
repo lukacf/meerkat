@@ -1368,11 +1368,13 @@ them.
   retired body is torn: its model requests fail closed with a projection
   error that names the key.
 
-- `meerkat-core`, `meerkat-session`: a host removes ordinary System rows it
-  names from an idle session in one audited rewrite, without waking it or
-  calling a model: `SessionServiceTranscriptEditExt::prune_system_rows`
-  (`SystemRowPruneRequest`, `SystemRowPruneResult`; the default method
-  answers `Unsupported`, and `PersistentSessionService` implements it) and
+- `meerkat-core`, `meerkat-session`, `meerkat`: a host removes ordinary
+  System rows it names from an idle session in one audited rewrite, without
+  waking it or calling a model:
+  `SessionServiceTranscriptEditExt::prune_system_rows`
+  (`SystemRowPruneRequest`, `SystemRowPruneResult`, re-exported by the
+  facade with the other prune types; the default method answers
+  `Unsupported`, and `PersistentSessionService` implements it) and
   `Session::prune_system_rows` (`SystemRowPruneCommit`). Each row is named
   as a history read showed it (`SystemRowRef`): its 0-based message index
   and `sha256:<64 lowercase hex>` over its content as UTF-8 text; Core never

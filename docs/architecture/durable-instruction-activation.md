@@ -160,10 +160,11 @@ equality. A fork child reads a copied retired row through the same v2
 projection as a live copy, taking `body_bytes` from the marker, so its
 requests do not depend on whether the source compacted before the fork.
 The session document keeps the marker strict; history reads carry it as
-`WireRetiredInstructionBody`, `Known` or, for a form the reader does not
-know (a later render version with another field), `Raw` as it was sent, so
-a newer member host's history never fails an older reader's page. A reader
-treats either form as a retired body.
+`WireRetiredInstructionBody`: `Known` whenever its fields decode (a later
+render version with the same two fields included), and `Raw` as it was sent
+for one with a field the reader does not know, so a newer member host's
+history never fails an older reader's page. A reader treats either form as
+a retired body.
 
 The sealed identity contains:
 

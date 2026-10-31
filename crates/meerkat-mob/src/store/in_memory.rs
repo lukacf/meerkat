@@ -551,6 +551,10 @@ pub(super) struct InMemoryMobAggregateState {
     pub(super) creation: Option<MobCreationRecord>,
     pub(super) external_deliveries: BTreeMap<(MobId, String), MobExternalDeliveryRecord>,
     pub(super) identity: IdentityAuthorityState,
+    /// Test builds only: how many rows the identity scans have classified,
+    /// so a row can show that a scan page reads only its own rows.
+    #[cfg(test)]
+    pub(super) identity_scan_classifications: std::sync::atomic::AtomicUsize,
 }
 
 /// In-memory runtime metadata store for tests and ephemeral mobs.
@@ -753,6 +757,16 @@ impl InMemoryMobIdentityStore {
                 }
             },
         }
+    }
+
+    /// Test builds only: how many rows the identity scans have classified.
+    #[cfg(test)]
+    pub(crate) async fn identity_scan_classifications(&self) -> usize {
+        self.aggregate
+            .read()
+            .await
+            .identity_scan_classifications
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Remove `identity`'s row from the intents table, whatever it holds, as
@@ -1417,6 +1431,10 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
             if stored_mob_id != mob_id || !after_cursor(identity) {
                 continue;
             }
+            #[cfg(test)]
+            aggregate
+                .identity_scan_classifications
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let observation = if record.mob_id != *mob_id || record.intent.identity() != identity {
                 malformed_identity_record(
                     record,
@@ -1429,6 +1447,10 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         }
         for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
             if stored_mob_id == mob_id && !raw.created_domain && after_cursor(identity) {
+                #[cfg(test)]
+                aggregate
+                    .identity_scan_classifications
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 rows.insert(identity.clone(), raw.intent_observation());
             }
         }
@@ -1467,6 +1489,10 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
             if stored_mob_id != mob_id || !after_cursor(identity) {
                 continue;
             }
+            #[cfg(test)]
+            aggregate
+                .identity_scan_classifications
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let observation = if record.mob_id != *mob_id || record.agent_identity != *identity {
                 crate::identity::CreatedIdentityObservation::Unreadable {
                     evidence_digest: identity_evidence_digest(record)?,
@@ -1486,6 +1512,10 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         }
         for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
             if stored_mob_id == mob_id && raw.created_domain && after_cursor(identity) {
+                #[cfg(test)]
+                aggregate
+                    .identity_scan_classifications
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 rows.insert(
                     identity.clone(),
                     crate::identity::CreatedIdentityObservation::Unreadable {
@@ -4805,6 +4835,115 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// The identity scans classify only the rows of the page they return:
+    /// over more than three pages of host-adopted intents and of created
+    /// entries' rows (an unreadable row among each), every page of the
+    /// intent scan and of the created identity scan classifies at most its
+    /// own rows, and the pages together return every row once.
+    ///
+    /// RED: classify every row of the mob after the cursor before keeping a
+    /// page (the shape before this fix): the first page of each scan
+    /// classifies every row.
+    #[tokio::test]
+    async fn identity_scans_classify_only_the_rows_of_their_page() {
+        let store = InMemoryMobIdentityStore::new();
+        let mob_id = MobId::from("paged-scan-mob");
+        let limit = 4;
+        let rows = 3 * limit + 1;
+        for index in 0..rows {
+            let identity = AgentIdentity::from(format!("intent-{index:02}"));
+            let (_, compiled) = crate::identity::identity_adoption_fixture(
+                mob_id.clone(),
+                identity.clone(),
+                &format!("adopt-{index:02}"),
+                SessionId::new(),
+            );
+            store
+                .put_raw_identity_row(
+                    &mob_id,
+                    &identity,
+                    serde_json::to_vec(&compiled).expect("encode the intent"),
+                )
+                .await;
+            store
+                .put_created_identity(
+                    crate::identity::CreatedIdentityRecord::sealed(
+                        mob_id.clone(),
+                        AgentIdentity::from(format!("made-{index:02}")),
+                        1,
+                        crate::identity::CreatedIdentityPresence::Present,
+                        crate::identity::CreatedIdentityProvenance::new(
+                            format!("create-{index:02}"),
+                            1,
+                        ),
+                    )
+                    .expect("a sealed created row"),
+                )
+                .await
+                .expect("keep the created row");
+        }
+        store
+            .put_raw_identity_row(
+                &mob_id,
+                &AgentIdentity::from("intent-unreadable"),
+                br#"{"schema_version":1,"future_shape":true}"#.to_vec(),
+            )
+            .await;
+        store
+            .put_raw_identity_row(
+                &mob_id,
+                &AgentIdentity::from("made-later"),
+                br#"{"schema_version":3,"a_later_field":true}"#.to_vec(),
+            )
+            .await;
+
+        let mut intents = std::collections::BTreeSet::new();
+        let mut after = None;
+        loop {
+            let before = store.identity_scan_classifications().await;
+            let page = store
+                .scan_identity_intents_page(&mob_id, after.as_ref(), limit)
+                .await
+                .expect("an intent scan page");
+            let classified = store.identity_scan_classifications().await - before;
+            assert!(
+                classified <= limit,
+                "an intent scan page classified {classified} rows"
+            );
+            for identity in page.observations.into_keys() {
+                assert!(intents.insert(identity), "a row is returned once");
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(intents.len(), rows + 1, "every intent row, once");
+
+        let mut created = std::collections::BTreeSet::new();
+        let mut after = None;
+        loop {
+            let before = store.identity_scan_classifications().await;
+            let page = store
+                .scan_created_identities_page(&mob_id, after.as_ref(), limit)
+                .await
+                .expect("a created scan page");
+            let classified = store.identity_scan_classifications().await - before;
+            assert!(
+                classified <= limit,
+                "a created scan page classified {classified} rows"
+            );
+            for identity in page.observations.into_keys() {
+                assert!(created.insert(identity), "a row is returned once");
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(created.len(), rows + 1, "every created row, once");
     }
 
     #[tokio::test]

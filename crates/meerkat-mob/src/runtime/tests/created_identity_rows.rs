@@ -456,7 +456,9 @@ async fn a_worker_reconcile_never_spawns_or_retires_an_unreadable_or_tombstoned_
 ///
 /// RED: drop `ProbeMemberAdmissionIdentityNameReserved` and the reserved-name
 /// guards of the admission probe and of `BeginSpawnExec`: the spawn of the
-/// removed name is admitted.
+/// removed name opens its ladder, and the ladder close's own guard refuses
+/// it untyped (`MobError::Internal`) once its session was created. Drop the
+/// close guards too, and the spawn seats a member under the removed name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_spawn_never_takes_a_tombstoned_or_unreadable_name() {
     let mut mob = CreatedMob::new("created-spawn").await;
@@ -589,8 +591,11 @@ async fn the_adoption_reconciler_skips_created_rows() {
     mob.put_created("owner", CreatedIdentityPresence::Present)
         .await;
     mob.put_raw("later", later_build_row()).await;
+    // An intent row this build cannot read, ordered after every other row:
+    // the discovery records a page's rows in identity order, so once this
+    // one is recorded, every row before it was read.
     mob.put_raw(
-        "control",
+        "zz-control",
         br#"{"schema_version":1,"future_shape":true}"#.to_vec(),
     )
     .await;
@@ -598,7 +603,7 @@ async fn the_adoption_reconciler_skips_created_rows() {
 
     let deadline = tokio::time::Instant::now() + STEP;
     while !matches!(
-        mob.reconcile_status("control").await,
+        mob.reconcile_status("zz-control").await,
         IdentityStoredObservation::Valid(_)
     ) {
         assert!(
@@ -607,8 +612,6 @@ async fn the_adoption_reconciler_skips_created_rows() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // The discovery recorded every row it read in the same pass.
-    tokio::time::sleep(Duration::from_millis(200)).await;
     for name in ["owner", "later"] {
         assert!(
             matches!(
@@ -622,27 +625,42 @@ async fn the_adoption_reconciler_skips_created_rows() {
 }
 
 /// The legacy adoption never adopts a created entry's name, nor a removed
-/// or unreadable one: each is answered `NotAdoptable`, typed, and nothing is
-/// written.
+/// or unreadable one, a declared entry's name that a created row the journal
+/// contradicts reserves included: each is answered `NotAdoptable`, typed,
+/// and nothing is written.
 ///
 /// RED: answer `AlreadyAnEntry` for an entry of any origin before MobMachine
 /// decides (the handle's shortcut over every origin, the shape before this
 /// fix): the created owner is answered `AlreadyAnEntry`, as if a host had
-/// adopted it.
+/// adopted it. Answer it for a declared entry whatever its name's
+/// reservation (the shortcut without its unreadable check): the reserved
+/// declared name is answered `AlreadyAnEntry`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_legacy_adoption_answers_a_created_or_reserved_name_not_adoptable() {
     let mut mob = CreatedMob::new("created-adoption").await;
     mob.spawn_worker("owner").await;
+    mob.handle
+        .spawn_spec(entry_spec("declared"))
+        .await
+        .expect("a declared entry");
     mob.put_created("owner", CreatedIdentityPresence::Present)
+        .await;
+    // A created row of a declared entry's name: the journal contradicts it,
+    // so the name is reserved unreadable and keeps its declared entry.
+    mob.put_created("declared", CreatedIdentityPresence::Present)
         .await;
     mob.put_created("removed", CreatedIdentityPresence::Removed)
         .await;
     mob.put_raw("later", later_build_row()).await;
     mob.restart().await;
     assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
+    assert!(matches!(
+        mob.read("declared"),
+        IdentityEntryRead::Unreadable { member: Some(_) }
+    ));
 
     let journal = mob.journal_len().await;
-    for name in ["owner", "removed", "later"] {
+    for name in ["owner", "declared", "removed", "later"] {
         let answer = tokio::time::timeout(STEP, mob.handle.adopt_legacy_identity_entry(&id(name)))
             .await
             .expect("the adoption answers")
@@ -797,16 +815,29 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
 /// a reader that knows no created entry finds none, and the journal it
 /// leaves is edited to the predecessor's rows.
 ///
+/// The seat carries no roster labels, whatever the member's last spawn row
+/// carried, so no label-based authority reaches a created identity.
+///
 /// RED: drop the start's seat of the created entries owed their seat
 /// (`reseat_owed_created_entries`): the entry stays unseated, owed its seat,
 /// and no member holds it. Drop `RecoverCreatedIdentityEntryRetired`: the
 /// start refuses the present row of an identity the journal left without a
-/// member.
+/// member. Copy the last spawn row's labels into the seat (`reseat_spec`):
+/// the seated entry carries the owner's label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseated_on_its_archived_session()
  {
     let mut mob = CreatedMob::new("created-reseat").await;
-    let session = mob.spawn_worker("owner").await;
+    let mut owner = worker_spec("owner");
+    owner.labels = Some(BTreeMap::from([("team".to_string(), "alpha".to_string())]));
+    mob.handle
+        .spawn_spec(owner)
+        .await
+        .expect("the labelled owner");
+    let session = mob
+        .session("owner")
+        .await
+        .expect("the owner is bound to a session");
     mob.put_created("owner", CreatedIdentityPresence::Present)
         .await;
     mob.restart().await;
@@ -865,6 +896,16 @@ async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseate
             .await
             .is_some_and(|generation| generation > retired_generation),
         "the entry is seated at its next generation"
+    );
+    assert!(
+        mob.handle
+            .get_member(&id("owner"))
+            .await
+            .expect("roster read")
+            .expect("the seated owner")
+            .labels
+            .is_empty(),
+        "a created seat carries no roster labels"
     );
     tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("owner")))
         .await

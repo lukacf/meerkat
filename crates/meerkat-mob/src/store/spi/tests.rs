@@ -1336,6 +1336,132 @@ async fn a_later_build_row_on_a_host_store_reads_unreadable_for_that_identity_al
             .expect("the intent reader answers"),
         IdentityStoredObservation::Missing
     ));
+
+    // No identity-first mutation acts on the later build's row or on the
+    // created entry's, and neither entry changes.
+    let mob_id = MobId::from("mob");
+    let before = full_export(&reopened.stores).await;
+    for name in ["later", "created"] {
+        let identity = AgentIdentity::from(name);
+        let (adoption, compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            &format!("adopt-{name}"),
+            meerkat_core::SessionId::new(),
+        );
+        let declaration = match &compiled.intent {
+            crate::identity::IdentityIntent::Present { member, .. } => {
+                member.material.member_tool_declaration()
+            }
+            crate::identity::IdentityIntent::Absent { .. } => {
+                panic!("the adoption fixture compiles a present intent")
+            }
+        };
+        let tool_declaration = crate::identity::ApplyMemberToolDeclaration {
+            mob_id: mob_id.clone(),
+            agent_identity: identity.clone(),
+            request_id: crate::identity::MemberToolMutationId::new(format!("tools-{name}"))
+                .expect("a mutation id"),
+            expected_intent_revision: 1,
+            declaration,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        let resolution = crate::identity::ResolveIdentityConvergenceBlock {
+            mob_id: mob_id.clone(),
+            agent_identity: identity.clone(),
+            request_id: crate::identity::IdentityConvergenceResolutionId::new(format!(
+                "resolve-{name}"
+            ))
+            .expect("a resolution id"),
+            expected_desired_revision: 1,
+            observed_active_revision: 1,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        assert!(
+            matches!(
+                store
+                    .adopt_member_identity_declaration(&adoption, &compiled)
+                    .await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the adoption is refused"
+        );
+        assert!(
+            matches!(
+                store.apply_member_tool_declaration(&tool_declaration).await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the member tool declaration is refused"
+        );
+        assert!(
+            matches!(
+                store
+                    .resolve_identity_convergence_block(&resolution, 1)
+                    .await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the convergence resolution is refused"
+        );
+    }
+    let after = full_export(&reopened.stores).await;
+    for name in ["later", "created"] {
+        let entry = format!(
+            "mbi:{}",
+            hashed_name(G_INTENT, &(mob_id.clone(), AgentIdentity::from(name)))
+                .expect("the entry's name")
+        );
+        assert!(before.contains_key(&entry), "{name}'s entry is stored");
+        assert_eq!(
+            after.get(&entry),
+            before.get(&entry),
+            "{name}'s entry is kept"
+        );
+    }
+}
+
+/// An identity intents entry this build cannot attribute to an identity (its
+/// envelope is of a format this build does not read) refuses the mob's open,
+/// as an entry of any other group does: no read could report it, so a name it
+/// may hold would read free.
+///
+/// RED: keep such an entry by name, unread, and open (the shape before this
+/// fix): the reopen succeeds.
+#[tokio::test]
+async fn an_unattributable_intents_entry_on_a_host_store_refuses_the_open() {
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let key = (MobId::from("mob"), AgentIdentity::from("later"));
+    // A later build's envelope format, under the name its key hashes to.
+    let stored = serde_json::to_vec(&serde_json::json!({
+        "v": 99,
+        "k": ["mob", "later"],
+        "d": {"schema_version": 1},
+    }))
+    .expect("a later build's entry");
+    write_intents(&process, move |identity| {
+        identity.unreadable_intents.insert(
+            key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: false,
+                detail: "an envelope of a later format".to_string(),
+            },
+        );
+    })
+    .await;
+    drop(process);
+
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("open the realm");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("claim the mob families");
+    assert!(
+        matches!(mobs.open("mob").await, Err(MobStoreError::ReadFailed(_))),
+        "the open refuses the entry"
+    );
 }
 
 /// Every rewrite of a host store's identity intents group writes an entry

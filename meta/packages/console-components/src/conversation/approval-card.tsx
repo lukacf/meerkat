@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { ApprovalAction, ApprovalDecisionState, PendingApproval, PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
+import type { HostAttentionItem } from "../../../console-core/src/host-attention";
 import {
   AgentName,
   Button,
@@ -136,23 +137,68 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
   );
 }
 
-export function ApprovalAttention({ snapshot, onOpen }: {
-  snapshot: PendingApprovalSnapshot;
-  onOpen(pendingId?: string): void;
-}) {
-  if (snapshot.status === "forbidden" || snapshot.status === "unsupported") return null;
-  const requests = snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled");
-  const ready = snapshot.status === "ready";
-  const status = ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot.status === "loading" ? "Checking approvals" : snapshot.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
+/** A host-provided attention item, in the approval card's family: its title,
+ * its source as a chip, the host's details and one Open link drawn as a
+ * console button. It has no status and no decision: the console never
+ * decides it, and Open loads the host's own page top-level, which does. */
+export function HostAttentionCard({ item }: { item: HostAttentionItem }) {
   return (
-    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={snapshot.status} data-pending={ready && requests.length > 0}>
+    <article
+      className="cc-approval cc-host-attention"
+      data-kind="host"
+      data-tone={item.tone || "attention"}
+      data-testid={`host-attention:${item.sourceId}:${item.id}`}
+    >
+      <header className="cc-approval__header">
+        <div className="cc-approval__heading">
+          <strong className="cc-approval__title">{item.title}</strong>
+        </div>
+        {item.sourceLabel ? <Chip className="cc-host-attention__source">{`From ${item.sourceLabel}`}</Chip> : null}
+      </header>
+      <KeyValueList
+        className="cc-approval__scope"
+        items={item.details.map((detail, index) => ({ key: `${detail.label}:${index}`, label: detail.label, value: detail.value }))}
+      />
+      <div className="cc-approval__actions">
+        <a
+          className="cc-btn cc-host-attention__open"
+          href={item.href}
+          target="_top"
+          aria-label={`Open: ${item.title}`}
+          data-testid={`host-attention-open:${item.sourceId}:${item.id}`}
+        >
+          Open
+        </a>
+      </div>
+    </article>
+  );
+}
+
+export function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }: {
+  snapshot?: PendingApprovalSnapshot;
+  onOpen(pendingId?: string): void;
+  /** Host-provided attention items, counted with the approvals. */
+  hostItems?: number;
+}) {
+  // Approvals count only where the connection can show them; host items
+  // count on any connection, so an aggregate console still names them.
+  const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  if (!approvalsShown && hostItems === 0) return null;
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const ready = !approvalsShown || snapshot?.status === "ready";
+  const approvalStatus = !approvalsShown ? "" : ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
+  const hostStatus = hostItems ? `${hostItems} item${hostItems === 1 ? "" : "s"} from the host` : "";
+  const status = [approvalStatus, hostStatus].filter(Boolean).join(", ");
+  const count = requests.length + hostItems;
+  return (
+    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={ready && count > 0}>
       <button className="cc-approval-attention__open" type="button" aria-label={`Needs you, ${status}`} title={status}
         onClick={() => onOpen(ready && requests.length === 1 ? requests[0].pendingId : undefined)}>
         <svg className="cc-approval-attention__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m4 5-2 9v5h20v-5l-2-9H4Z" /><path d="M2 14h6l2 3h4l2-3h6" />
         </svg>
         <span className="cc-approval-attention__label">Needs you</span>
-        <span className="cc-approval-attention__count" aria-hidden="true">{ready ? requests.length : snapshot.status === "loading" ? "..." : "!"}</span>
+        <span className="cc-approval-attention__count" aria-hidden="true">{ready ? count : snapshot?.status === "loading" ? "..." : "!"}</span>
         <svg className="cc-approval-attention__chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
       </button>
       <span className="cc-approval-attention__status" role="status">{status}</span>

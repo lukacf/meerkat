@@ -85,6 +85,15 @@
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
 }
+/* A host-provided attention item: the approval card's frame with the source
+   as a kit chip, the host's details and one Open link drawn as a kit button.
+   The detail labels are the host's words, so they wrap instead of widening
+   the label column. */
+.cc-host-attention .cc-kv dt {
+  max-width: 24ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .cc-approval-attention { padding: 7px 8px; border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555)); }
 .cc-approval-attention__open { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-muted, var(--_cc-foreground-muted)); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
 .cc-approval-attention__open:hover { background: var(--bg-hover, var(--_cc-surface-hover)); color: var(--ink, var(--_cc-foreground)); }

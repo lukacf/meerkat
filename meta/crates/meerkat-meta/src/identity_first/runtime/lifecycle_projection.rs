@@ -740,7 +740,9 @@ pub(super) enum StepReach {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StepFirstFact {
     /// Core held the live incarnation `generation`: the rotation starts its
-    /// retirement first, naming the rotation's target.
+    /// retirement first, naming the rotation's target. When a host's
+    /// retirement of that incarnation ended before the rotation reached
+    /// Core, Core seats the fresh life after it first instead.
     RetirementStart { generation: u64 },
     /// Core had retired the incarnation `predecessor`: the rotation seats
     /// the fresh life after it first.
@@ -777,7 +779,10 @@ impl StepFirstFact {
                 },
             ) => started == member && *retiring == generation,
             (
-                Self::FreshLifeAfter { predecessor },
+                Self::RetirementStart {
+                    generation: predecessor,
+                }
+                | Self::FreshLifeAfter { predecessor },
                 MemberLifecycleFact::Seated {
                     member: seated,
                     rotation:

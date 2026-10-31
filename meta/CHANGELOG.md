@@ -245,6 +245,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   between its nodes, panel tabs are tied to the panels they show, an opened
   detail takes the focus and Back returns it, and headings no longer skip
   levels. The roster's manual order, Group and Sort are described under Added.
+- The Console's Approvals header reads "Not available on this connection"
+  where the connection offers no approvals (a gateway without
+  `meta/gating/pending`, or an aggregate console, whose inbox lists host
+  attention items only) instead of pending and automatic counts that cannot
+  apply there.
 
 ### Fixed
 

@@ -1113,7 +1113,7 @@ fn the_template_binding_digest_covers_the_sealed_template_facts() {
     assert_eq!(base.accounts, strings(["binding:notes"]));
     assert_eq!(base.floor, strings(["notes_read"]));
     assert_eq!(base.preparation, PreparationMode::None);
-    assert_eq!(base.digest(), base.clone().digest());
+    assert_eq!(base.digest(), base.digest());
 
     let unchanged = [
         binding_change(|value| value["templates"]["research"]["title"] = json!("Another title")),
@@ -1358,7 +1358,8 @@ fn the_build_check_compares_the_given_callbacks_with_the_sealed_ones() {
 
     // Anything but exactly the sealed definitions is a changed binding.
     let other_schema = json!({"type": "object", "required": ["id"]});
-    let changed: [&[(&str, Option<&str>, Option<&Value>)]; 6] = [
+    type CallbackRow<'a> = (&'a str, Option<&'a str>, Option<&'a Value>);
+    let changed: [&[CallbackRow<'_>]; 6] = [
         &[
             ("notes_read", Some("Read every note"), Some(&schema)),
             ("notes_write", None, None),

@@ -72,11 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   compiles and blocks the operator instructions of every member behind it;
   Meta's own wrappers forward them (see Changed).
 
-- A rollback to Meta 0.9.7 (on Core 0.9.8) does not resume a gateway whose
-  own mob recorded an operator instruction: the mob's journal holds rows at
-  mob event schema 10, which Core 0.9.8 refuses, so the gateway's mob does
-  not start. Before such a rollback, run `rkat storage doctor` on the
-  current release and destroy, or move out of the mob root, every mob
+- A rollback to Meta 0.9.7 (on Core 0.9.8) or Meta 0.9.6 (on Core 0.9.7)
+  does not resume a gateway whose own mob recorded an operator instruction:
+  the mob's journal holds rows at mob event schema 10, which Core 0.9.8 and
+  0.9.7 refuse, so the gateway's mob does not start, and neither does any
+  other mob of that realm. Before such a rollback, run `rkat storage doctor`
+  on the current release and destroy, or move out of the mob root, every mob
   database it lists under `operator-instruction-mob-events`, as Core's
   CHANGELOG describes in its Upgrade notes.
 

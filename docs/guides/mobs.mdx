@@ -1415,7 +1415,7 @@ forward, so a session never sees an older snapshot replace a newer one. A
 placed member is reported blocked (`member_host_unsupported`) until member
 hosts take deliveries. A mob that recorded operator instructions journals
 them at mob event schema 10, which a release before operator instructions
-refuses for every mob on the host, not only that one: see
+refuses for every mob of that realm, not only that one: see
 [Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8) before any
 downgrade. `rkat storage doctor` lists such mobs
 (`operator-instruction-mob-events`); it reads the mob databases on disk

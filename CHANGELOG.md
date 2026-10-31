@@ -740,10 +740,11 @@ them.
   journal older releases read. A release before operator instructions
   refuses the journal of a mob that recorded one, typed ("unsupported stored
   mob event schema_version=10; expected 9"), and Core 0.9.7 and 0.9.8 stop
-  restoring a host's mobs at the first such journal, so no mob on that host
-  restores until the mob's database is gone or the host is rolled forward;
-  see Upgrade notes for the steps before a downgrade. `rkat storage doctor`
-  lists such mob databases (Info finding `operator-instruction-mob-events`).
+  restoring every mob of that realm at the first such journal, so no mob of
+  that realm restores until the mob's database is gone or the host is rolled
+  forward; see Upgrade notes for the steps before a downgrade.
+  `rkat storage doctor` lists such mob databases (Info finding
+  `operator-instruction-mob-events`).
   `MobSessionService` gains `record_member_instruction_target`,
   `release_member_instruction_target` and `read_member_instructions`, each
   defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
@@ -1938,16 +1939,17 @@ them.
   operator instruction journals rows at mob event schema 10, which Core 0.9.7
   and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
   9"). Their realm restore (the mob roots of the rkat CLI, RPC and MCP hosts)
-  stops at the first such mob database, so every mob on that host fails to
+  stops at the first such mob database, so every mob of that realm fails to
   restore and every mob verb answers that error; a Meta gateway whose own mob
   recorded an operator instruction does not resume its mob. Before any
   downgrade to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9, then
   destroy each mob listed under `operator-instruction-mob-events`, or move
   its database (`mobs/<name>.db` in the realm's state directory, the path
-  the finding names) out of that directory, before the older binary starts. The doctor reads the mob databases on disk only: for a realm
-  on a host store, look in the host's store for mob events at schema 10. A
-  member session that recorded its snapshot is written at session envelope
-  5, which the older binary refuses session by session (the
+  the finding names) out of that directory, before the older binary starts.
+  The doctor reads the mob databases on disk only: for a realm on a host
+  store, look in the host's store for mob events at schema 10. A member
+  session that recorded its snapshot is written at session envelope 5, which
+  the older binary refuses session by session (the
   `operator-instruction-envelope` finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary

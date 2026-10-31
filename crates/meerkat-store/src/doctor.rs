@@ -185,7 +185,9 @@ pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-en
 /// written at mob event schema
 /// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`]. A release
 /// before operator instructions refuses such a mob typed until a
-/// roll-forward; an operator lists them before a rollback. Informational.
+/// roll-forward, and Core 0.9.7 and 0.9.8 stop restoring every mob of the
+/// realm at such a journal: before a downgrade, an operator destroys each
+/// listed mob or moves its database out of the mob root. Informational.
 /// The census reads the per-mob databases on disk (`mobs/<name>.db`).
 pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-mob-events";
 /// Durable rows or documents the storage census could not measure. The
@@ -1939,7 +1941,9 @@ fn census_operator_instruction_mob_events(
             format!(
                 "the mob recorded operator instructions: {count} event(s) at mob event schema \
                  {schema_version}; a release before operator instructions refuses the mob typed \
-                 until a roll-forward"
+                 until a roll-forward, and Core 0.9.7 and 0.9.8 stop restoring every mob of this \
+                 realm at this journal: destroy the mob or move this database out of the mob root \
+                 before a downgrade"
             ),
         )
         .with_path(db_path.to_path_buf())

@@ -178,8 +178,8 @@ Check for mobs that used operator instructions first. A mob that recorded an
 operator instruction journals rows at mob event schema 10. Core 0.9.8 and
 0.9.7 refuse such a journal ("unsupported stored mob event
 schema_version=10; expected 9"), and their realm restore (the mob roots of
-the rkat CLI, RPC and MCP hosts) stops at the first such mob, so every mob on
-that host fails to restore and every mob verb answers the error. A Meta
+the rkat CLI, RPC and MCP hosts) stops at the first such mob, so every mob of
+that realm fails to restore and every mob verb answers the error. A Meta
 gateway whose own mob recorded an operator instruction does not resume its
 mob. Before any downgrade to 0.9.8 or 0.9.7:
 

@@ -41,8 +41,11 @@ pub const MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES: usize = 1024 * 1024;
 /// operator-instruction events: the records it committed and the member
 /// targets its members' sessions recorded. Every other mob event stays at
 /// the current stored version, so a mob that never records an operator
-/// instruction writes nothing at this version; a release before operator
-/// instructions refuses a mob journal that holds one.
+/// instruction writes nothing at this version. A release before operator
+/// instructions refuses a mob journal that holds one, and Core 0.9.7 and
+/// 0.9.8 stop restoring every mob of the realm at such a journal: before a
+/// downgrade, destroy the mob or move its database out of the mob root
+/// (`rkat storage doctor` lists them).
 pub const OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION: u32 = 10;
 
 const ENTRY_HEADER_V1: &str = "[meerkat-operator-instructions-v1]";

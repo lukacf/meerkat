@@ -7751,6 +7751,7 @@ export interface WireSessionMessageSystem {
   created_at: string;
   identity?: Record<string, unknown> | null;
   instruction_activation?: InstructionActivationIdentity | null;
+  instruction_entry?: Record<string, unknown> | unknown | null;
   prompt_version?: SystemPromptVersionIdentity | null;
   role: "system";
 }

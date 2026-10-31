@@ -9882,6 +9882,7 @@ class WireSessionMessageSystem(TypedDict, total=False):
     created_at: Required[str]
     identity: NotRequired[Optional[dict[str, Any]]]
     instruction_activation: NotRequired[Optional[InstructionActivationIdentity]]
+    instruction_entry: NotRequired[Optional[dict[str, Any] | Any]]
     prompt_version: NotRequired[Optional[SystemPromptVersionIdentity]]
     role: Required[Literal['system']]
 

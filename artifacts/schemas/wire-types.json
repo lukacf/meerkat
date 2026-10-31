@@ -35063,8 +35063,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -35090,6 +35269,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -36946,6 +37131,18 @@
         "$ref": "#/$defs/WireSessionMessage",
         "description": "Equality adapter over a canonical wire transcript row.\n\n`WireSessionMessage` deliberately derives no `PartialEq` (opaque\ntool-call args ride `RawValue`), but the bridge reply chain that\ncarries history pages must be `Eq` (the comms envelope enums derive\nit). Equality here is semantic-JSON equality of the serialized wire\nform — exactly the fact reply comparison needs. Transparent: the wire\nshape stays the raw row object."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireMemberHistoryPageBody": {
         "additionalProperties": false,
         "description": "Shared transcript page body used by both the bridge\n`MemberHistoryPage` reply and the console `mob/member_history` result —\nsame page shape for local and remote members.",
@@ -37265,6 +37462,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -46697,8 +46905,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -46724,6 +47111,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -51956,6 +52349,18 @@
         ],
         "type": "string"
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -52816,6 +53221,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -66014,8 +66430,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -66041,6 +66636,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -72905,6 +73506,18 @@
         ],
         "type": "string"
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -74508,6 +75121,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -87785,8 +88409,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -87812,6 +88615,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -93044,6 +93853,18 @@
         ],
         "type": "string"
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -93904,6 +94725,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -128993,8 +129825,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -129020,6 +130031,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -130880,6 +131897,18 @@
         "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
         "type": "string"
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireMemberHistoryPageBody": {
         "additionalProperties": false,
         "description": "Shared transcript page body used by both the bridge\n`MemberHistoryPage` reply and the console `mob/member_history` result —\nsame page shape for local and remote members.",
@@ -131207,6 +132236,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -173506,8 +174546,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -173533,6 +174752,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -175385,6 +176610,18 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -175663,6 +176900,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -183214,8 +184462,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -183241,6 +184668,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -185097,6 +186530,18 @@
         "$ref": "#/$defs/WireSessionMessage",
         "description": "Equality adapter over a canonical wire transcript row.\n\n`WireSessionMessage` deliberately derives no `PartialEq` (opaque\ntool-call args ride `RawValue`), but the bridge reply chain that\ncarries history pages must be `Eq` (the comms envelope enums derive\nit). Equality here is semantic-JSON equality of the serialized wire\nform — exactly the fact reply comparison needs. Transparent: the wire\nshape stays the raw row object."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -185375,6 +186820,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -192150,8 +193606,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -192177,6 +193812,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -194029,6 +195670,18 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -194307,6 +195960,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [
@@ -195360,8 +197024,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -195387,6 +197230,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -197239,6 +199088,18 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -197638,6 +199499,17 @@
               }
             ],
             "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+          },
+          "instruction_entry": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionEntryIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
           },
           "prompt_version": {
             "anyOf": [
@@ -199030,8 +200902,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -199057,6 +201108,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -200909,6 +202966,18 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -201187,6 +203256,17 @@
                   }
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
               },
               "prompt_version": {
                 "anyOf": [

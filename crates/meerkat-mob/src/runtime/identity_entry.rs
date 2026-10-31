@@ -359,8 +359,9 @@ pub enum IdentityEntryRead {
     /// The identity's entry is one this build cannot read: its created entry
     /// row is in a format this build does not know, the journal contradicts
     /// the row, or its member's row names an origin this build does not
-    /// know. The name is reserved, and nothing acts on it (no spawn, seat,
-    /// declaration, worker reconcile, adoption or agent-lane command).
+    /// know. The name is reserved: it keeps what the journal recorded for
+    /// it, and nothing new acts on it (no spawn or seat starts, and no
+    /// declaration, worker reconcile, adoption or agent-lane command acts).
     /// `member` is where the member that holds the name stands, if one does.
     Unreadable { member: Option<EntryStanding> },
     /// The identity was a created entry and was removed: its name is never

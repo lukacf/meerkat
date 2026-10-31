@@ -231,8 +231,10 @@ included), reserves the name
 (`identity_entry_unreadable`). No arm records an entry for a tombstoned
 name, and no replay seats a member under one. The replay
 reserves the name of a member row whose origin token this build does not
-know the same way. A reserved name is never an entry or a member: the
-admission probe answers `IdentityNameReserved`, the worker reconcile helpers
+know the same way. A removed entry's name is never an entry or a member
+again; an unreadable name keeps what the replay recorded for it (a
+`Declared` entry, a member) and takes nothing new: the admission probe
+answers `IdentityNameReserved` (no spawn ladder opens), the worker reconcile helpers
 skip it, the declared apply refuses it typed (`RefusedNameTombstoned`,
 `RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable` and the
 agent lane's admission `UnreadableName`. Custody of one origin never takes

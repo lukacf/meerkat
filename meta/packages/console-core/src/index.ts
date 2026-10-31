@@ -483,6 +483,7 @@ export type {
 } from "./timeline-subscription";
 
 export * from "./pending-approvals";
+export * from "./host-attention";
 
 export * from "./send-attempt";
 

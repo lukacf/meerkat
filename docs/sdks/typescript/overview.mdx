@@ -479,7 +479,7 @@ them; see [scoped tool grants](/api/rpc#scoped-tool-grants). `grantTool`
 rejects with `INVALID_ARGS`, before sending, a target that names both or
 neither of `tool` and `family`, and a window that names both or neither of
 `durationMs` and `expiresAtMs`. The client sends a gate only to a server whose
-contract is 0.9.8 or later, and otherwise throws `CapabilityUnavailableError`:
+contract is 0.9.9 or later, and otherwise throws `CapabilityUnavailableError`:
 an older server would build the session with the gated tools ungated.
 
 ---

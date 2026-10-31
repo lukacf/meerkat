@@ -31,7 +31,7 @@ const RUN_RESULT = {
   usage: { input_tokens: 1, output_tokens: 1 },
 };
 
-function fakeClient(results, contractVersion = "0.9.8") {
+function fakeClient(results, contractVersion = "0.9.9") {
   const client = new MeerkatClient();
   client._serverContractVersion = contractVersion;
   const calls = [];
@@ -150,7 +150,7 @@ describe("scoped tool grant wrappers", () => {
 
     await assert.rejects(
       client.createSession("hello", gated),
-      /grantGatedTools needs a server contract >= 0\.9\.8/,
+      /grantGatedTools needs a server contract >= 0\.9\.9/,
     );
     await assert.rejects(client.createDeferredSession("hello", gated), /grantGatedTools/);
     assert.deepEqual(calls, []);
@@ -197,7 +197,7 @@ describe("scoped tool grant wrappers", () => {
 
     assert.throws(
       () => client.createSessionStreaming("hello", { grantGatedTools: { families: ["shell"] } }),
-      /grantGatedTools needs a server contract >= 0\.9\.8/,
+      /grantGatedTools needs a server contract >= 0\.9\.9/,
     );
     assert.deepEqual(written, []);
 

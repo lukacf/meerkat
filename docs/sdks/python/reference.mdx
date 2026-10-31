@@ -324,7 +324,7 @@ store path and otherwise remain process-local. See
 `create_session(..., grant_gated_tools={"families": ["shell"]})` (and the
 streaming and deferred variants) gates built-in tool families and tool names:
 the session mounts them hidden and refuses their calls until a grant opens
-them. The client sends a gate only to a server whose contract is 0.9.8 or
+them. The client sends a gate only to a server whose contract is 0.9.9 or
 later, and otherwise raises `CapabilityUnavailableError`: an older server would
 build the session with the gated tools ungated.
 

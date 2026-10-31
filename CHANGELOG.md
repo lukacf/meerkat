@@ -671,7 +671,7 @@ them.
   `grant_gated_tools` on the create methods) and TypeScript (`grantTool`,
   `revokeToolGrant`, `listToolGrants`, `toolGrantAudit` and
   `SessionOptions.grantGatedTools`) wrap them; both refuse to send a gate to a
-  server older than contract 0.9.8, which would build the session ungated.
+  server older than contract 0.9.9, which would build the session ungated.
 
 - `meerkat-core`: `SessionCommsIdentityRoot` says where a session service's
   agent builds keep each session's durable comms identity (its key pair) on
@@ -935,7 +935,7 @@ them.
 - An `rkat-rpc` older than scoped tool grants ignores `session/create`
   `grant_gated_tools` and builds the session with those tools ungated. A
   JSON-RPC client that is not one of the SDKs (which refuse) must check the
-  server's contract version (0.9.8 or later) before sending a gate.
+  server's contract version (0.9.9 or later) before sending a gate.
 
 ### Known limitations
 

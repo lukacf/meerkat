@@ -37,7 +37,7 @@ RUN_RESULT = {
 
 def fake_client(
     results: dict[str, dict[str, Any]],
-    contract_version: str = "0.9.8",
+    contract_version: str = "0.9.9",
 ) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]]]:
     client = MeerkatClient()
     client._server_contract_version = contract_version

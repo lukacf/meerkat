@@ -9216,6 +9216,12 @@ pub(super) struct MobActor {
     pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
     #[cfg(test)]
     pub(super) resume_readiness_fault: Option<super::state::ResumeReadinessFaultForTest>,
+    /// State injection, test builds only: the name a test armed to be
+    /// reserved as unreadable the moment its spawn ladder opens, with the
+    /// test's answer (`MobCommand::InjectUnreadableNameAtLadderOpenForTest`).
+    #[cfg(test)]
+    pub(super) unreadable_name_at_ladder_open:
+        Option<(AgentIdentity, oneshot::Sender<Result<(), MobError>>)>,
     /// Rotating admission cursor for the bounded off-actor interrupt window.
     pub(super) autonomous_stop_interrupt_cursor: usize,
     /// The Stop or Shutdown awaiting its interrupted members' end of turn.
@@ -17809,6 +17815,39 @@ impl MobActor {
         .then(|| MobError::IdentityMember {
             member_id: agent_identity.clone(),
         })
+    }
+
+    /// State injection, test builds only: when a test armed it for this name
+    /// (`MobCommand::InjectUnreadableNameAtLadderOpenForTest`), reserve the
+    /// name of the spawn ladder that just opened as unreadable in
+    /// MobMachine's state, as the boot scan's Unreadable arm would, and
+    /// answer the test. The live authority keeps its owner token: only its
+    /// state is replaced, by one that holds every invariant. No production
+    /// path reserves a name under an open ladder.
+    #[cfg(test)]
+    fn inject_armed_unreadable_name_at_ladder_open(&mut self, agent_identity: &AgentIdentity) {
+        let Some((armed, injected_tx)) = self.unreadable_name_at_ladder_open.take() else {
+            return;
+        };
+        if armed != *agent_identity {
+            self.unreadable_name_at_ladder_open = Some((armed, injected_tx));
+            return;
+        }
+        let mut state = self.dsl_authority.state().clone();
+        state
+            .identity_entry_unreadable
+            .insert(mob_dsl::AgentIdentity::from_domain(agent_identity));
+        let injected = match mob_dsl::MobMachineAuthority::recover_from_state(state) {
+            Ok(recovered) => {
+                self.dsl_authority.restore_snapshot(recovered.snapshot());
+                self.publish_machine_state_projection();
+                Ok(())
+            }
+            Err(error) => Err(MobError::Internal(format!(
+                "the injected unreadable name breaks a MobMachine invariant: {error}"
+            ))),
+        };
+        let _ = injected_tx.send(injected);
     }
 
     /// The one member-admission verdict a `ProbeMemberAdmission` transition
@@ -31437,6 +31476,15 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 #[cfg(test)]
+                MobCommand::InjectUnreadableNameAtLadderOpenForTest {
+                    agent_identity,
+                    injected_tx,
+                    reply_tx,
+                } => {
+                    self.unreadable_name_at_ladder_open = Some((agent_identity, injected_tx));
+                    let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
                 MobCommand::DslT2Snapshot { reply_tx } => {
                     let dsl = self.dsl_authority.state();
                     let _ = reply_tx.send(super::state::MobDslT2Snapshot {
@@ -40811,6 +40859,10 @@ impl MobActor {
                 .await;
                 return Err(error);
             }
+            // State injection, test builds only: a test may reserve the name
+            // here, under the open ladder, which no production path does.
+            #[cfg(test)]
+            self.inject_armed_unreadable_name_at_ladder_open(agent_identity);
         }
         // Remote: the ladder was opened at enqueue (`BeginSpawnExecRemote`,
         // rung = MaterializePending); the member recipient trust window

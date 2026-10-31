@@ -11301,6 +11301,8 @@ impl MobBuilder {
                 stop_member_outcomes: BTreeMap::new(),
                 #[cfg(test)]
                 resume_readiness_fault: None,
+                #[cfg(test)]
+                unreadable_name_at_ladder_open: None,
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),

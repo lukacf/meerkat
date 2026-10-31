@@ -1462,6 +1462,19 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// State injection, test builds only: arm the actor to reserve
+    /// `agent_identity` as unreadable in its machine state, as the boot
+    /// scan's Unreadable arm does, the moment that name's local spawn ladder
+    /// opens (`BeginSpawnExec`), before the ladder's close is prepared. No
+    /// production path reserves a name under an open ladder: the boot scan
+    /// runs before any ladder opens, and `BeginSpawnExec` refuses a reserved
+    /// name. `injected_tx` answers once the name is reserved.
+    #[cfg(test)]
+    InjectUnreadableNameAtLadderOpenForTest {
+        agent_identity: crate::ids::AgentIdentity,
+        injected_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Queue one routed effect behind the actor's pending routed effects; the
     /// boundary flush after this command dispatches it.
     #[cfg(test)]
@@ -2322,6 +2335,10 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
             Self::WakeMemberFromEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2549,6 +2566,10 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                "InjectUnreadableNameAtLadderOpenForTest"
+            }
             #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => "QueueRoutedEffectForTest",
             #[cfg(test)]

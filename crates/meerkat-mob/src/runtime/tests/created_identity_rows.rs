@@ -657,6 +657,76 @@ async fn the_legacy_adoption_answers_a_created_or_reserved_name_not_adoptable() 
     assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
 }
 
+/// A spawn under way when its name is reserved seats no member under it:
+/// MobMachine refuses the ladder's close, the shell answers the spawn with
+/// the name's admission refusal and aborts the ladder, and the name stays
+/// reserved with no member. No production path reaches this order (a
+/// ladder opens only through BeginSpawnExec, which refuses a reserved name,
+/// and the boot scan runs before any ladder opens), so a test-only state
+/// injection reserves the name, as the boot scan's Unreadable arm would,
+/// under the worker spawn's open ladder. A local spawn opens its ladder
+/// after its session is created and prepares the ladder's close in the same
+/// actor step, so no command lands between the two: the injection is armed
+/// before the spawn and fires the moment the ladder opens.
+///
+/// RED: drop `name_not_reserved` from the ladder close arms (as before the
+/// close guard): the worker is seated under the reserved name and the spawn
+/// succeeds. Drop the shell's typed refusal (`reserved_name_refusal`): the
+/// spawn answers the machine's untyped refusal, `MobError::Internal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_under_way_when_its_name_is_reserved_is_aborted_and_the_name_not_taken() {
+    let mob = CreatedMob::new("created-reserved-mid-spawn").await;
+    let name = "reserved-mid-spawn";
+    let (injected_tx, mut injected_rx) = tokio::sync::oneshot::channel();
+    let armed = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| {
+            MobCommand::InjectUnreadableNameAtLadderOpenForTest {
+                agent_identity: id(name),
+                injected_tx,
+                reply_tx,
+            }
+        })
+        .await
+        .expect("enqueue the state injection");
+    tokio::time::timeout(STEP, armed)
+        .await
+        .expect("the injection is armed in time")
+        .expect("the actor replies")
+        .expect("the injection is armed");
+
+    let answer = tokio::time::timeout(STEP, mob.handle.spawn_spec(worker_spec(name)))
+        .await
+        .expect("the spawn answers");
+    // The injection fires inside the spawn's actor step, before the spawn
+    // answers.
+    injected_rx
+        .try_recv()
+        .expect("the injection fired under the worker spawn's open ladder")
+        .expect("the name is reserved unreadable");
+    assert!(
+        matches!(&answer, Err(error) if is_identity_member(error, name)),
+        "the spawn is refused typed: {answer:?}"
+    );
+    assert!(!mob.is_member(name).await, "the name takes no member");
+    let dsl_name = crate::machines::mob_machine::AgentIdentity::from_domain(&id(name));
+    assert!(
+        !mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .spawn_exec_phase
+            .contains_key(&dsl_name),
+        "the refused ladder is aborted"
+    );
+    assert!(
+        matches!(
+            mob.read(name),
+            IdentityEntryRead::Unreadable { member: None }
+        ),
+        "the name stays reserved with no member"
+    );
+}
+
 /// The census counts created entries apart from declared ones, by standing
 /// and cause, counts removed and unreadable names apart, and is incomplete
 /// while a name is unreadable; the reads list an unreadable name as such and

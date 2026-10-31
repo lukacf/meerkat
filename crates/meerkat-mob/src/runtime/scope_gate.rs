@@ -334,6 +334,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
@@ -626,6 +627,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
@@ -963,6 +965,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]

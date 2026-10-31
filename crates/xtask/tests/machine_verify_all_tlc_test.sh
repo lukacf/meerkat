@@ -1045,9 +1045,10 @@ run_machine_verify() {
 # distinct states at 14 steps), nine witness runs and nine single-worker
 # mutant runs took 100 s on a 4-worker local run; the SessionDocumentMachine
 # instruction boundary audit with --mutants joined it after these
-# measurements (sixteen runs, a safety run, five witness runs and ten mutant
-# runs, over a model that does not extend meerkat_machine; not yet
-# measured);
+# measurements: its sixteen runs (a safety run over 9203 distinct states,
+# five witness runs and ten mutant runs, over a model that does not extend
+# meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
+# 4-worker local run (2026-10-31);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

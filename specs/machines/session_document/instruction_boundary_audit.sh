@@ -38,7 +38,7 @@
 #     dropped);
 #   - keep a released mob's instructions at a run start (the no-change arm
 #     taken whatever is pending);
-#   - keep the target on a release (its revision map left as it was).
+#   - keep the target on a release (its four slot maps left as they were).
 # No run uses -continue. TLC checks the invariants of every new state and of
 # every successor past the step constraint, each time it generates one, and
 # under -continue prints a whole trace for each violation but names only the
@@ -244,26 +244,29 @@ for witness in ${witnesses}; do
 done
 
 if [[ "${run_mutants}" == "true" ]]; then
-  # usage: mutate <name> <target invariant> <arm> <anchor> <new line>
-  # Copies the specs, replaces the one line of <arm> that contains <anchor>
-  # with <new line>, runs the target as the only invariant, and requires TLC
-  # to report it violated.
+  # usage: mutate <name> <target invariant> <arm> <anchor> <new line> [<anchor> <new line>...]
+  # Copies the specs, replaces the one line of <arm> that contains each
+  # <anchor> with its <new line>, runs the target as the only invariant, and
+  # requires TLC to report it violated.
   mutate() {
-    local name="$1" target="$2" arm="$3" anchor="$4" line="$5"
+    local name="$1" target="$2" arm="$3"
+    shift 3
     local dir="${work_dir}/mutant-${name}"
     mkdir -p "${dir}"
     cp "${spec_dir}/model.tla" "${spec_dir}/instruction_boundary_audit.tla" "${dir}/"
-    MODEL="${dir}/model.tla" ARM="${arm}" ANCHOR="${anchor}" LINE="${line}" python3 - <<'PY'
-import os
-path = os.environ["MODEL"]
-arm, anchor, line = os.environ["ARM"], os.environ["ANCHOR"], os.environ["LINE"]
+    MODEL="${dir}/model.tla" ARM="${arm}" python3 - "$@" <<'PY'
+import os, sys
+path, arm = os.environ["MODEL"], os.environ["ARM"]
+edits = sys.argv[1:]
+assert edits and len(edits) % 2 == 0, "edits come in (anchor, new line) pairs"
 text = open(path).read()
 start = text.index("\n" + arm + "(") + 1
 end = text.index("\n\n", start)
 lines = text[start:end].split("\n")
-hits = [i for i, current in enumerate(lines) if anchor in current]
-assert len(hits) == 1, f"expected one line with {anchor!r} in {arm}, found {len(hits)}"
-lines[hits[0]] = line
+for anchor, line in zip(edits[0::2], edits[1::2]):
+    hits = [i for i, current in enumerate(lines) if anchor in current]
+    assert len(hits) == 1, f"expected one line with {anchor!r} in {arm}, found {len(hits)}"
+    lines[hits[0]] = line
 text = text[:start] + "\n".join(lines) + text[end:]
 open(path, "w").write(text)
 PY
@@ -308,8 +311,17 @@ PY
   mutate unowned_run_start_keeps_released_instructions AuditUnownedRunStartRevokesWhatIsInEffect \
     ResolveRunStartInstructionsNoChange 'instruction_change_pending(' \
     '    /\ TRUE'
+  # The release leaves the whole target as it was: its four slot maps stay
+  # in lockstep, so the audit's own operators still read it.
   mutate release_keeps_the_target AuditReleaseEmptiesTheTarget \
-    ReleaseInstructionTarget "session_instruction_target_revision' =" \
-    "    /\\ session_instruction_target_revision' = session_instruction_target_revision"
+    ReleaseInstructionTarget \
+    "session_instruction_target_revision' =" \
+    "    /\\ session_instruction_target_revision' = session_instruction_target_revision" \
+    "session_instruction_target_effect' =" \
+    "    /\\ session_instruction_target_effect' = session_instruction_target_effect" \
+    "session_instruction_target_digest' =" \
+    "    /\\ session_instruction_target_digest' = session_instruction_target_digest" \
+    "session_instruction_target_bytes' =" \
+    "    /\\ session_instruction_target_bytes' = session_instruction_target_bytes"
 fi
 echo "instruction boundary audit passed"

@@ -9245,6 +9245,20 @@ impl Session {
                 ));
             }
         }
+        // A commit that moves an activation row to another offset, or that
+        // retires a body (a retiring prune), records the envelope-5 marker
+        // once it is installed: the stored instruction state is read now,
+        // so a state that does not read refuses the commit before anything
+        // changes, and the recording after it cannot fail.
+        let records_envelope_marker = shifts_activation_offsets
+            || matches!(
+                guard,
+                RewriteCommitGuard::Retiring(retirement) if retirement.retired_bodies() > 0
+            );
+        if records_envelope_marker {
+            self.instruction_target_state()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        }
         // One required hash of the genuinely new content, computed FIRST so
         // the whole-span digests below reuse it instead of re-hashing the
         // same bytes. The reuse conditions are slice-identity arithmetic,
@@ -9316,7 +9330,9 @@ impl Session {
         if shifts_activation_offsets {
             // The graph now retains a record that moved an activation row
             // to another offset: the document carries a fact only envelope 5
-            // reads ([`Self::carries_operator_instruction_facts`]).
+            // reads ([`Self::carries_operator_instruction_facts`]). The
+            // stored state was read before the commit, so this records the
+            // marker or keeps the state already recorded.
             self.record_unowned_instruction_state()
                 .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         }

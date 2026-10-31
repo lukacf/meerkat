@@ -265,7 +265,9 @@ impl Session {
         let retired_bodies = match retirement.as_ref() {
             Some(retirement) => {
                 // The document now holds a retired body, a fact only
-                // envelope 5 reads.
+                // envelope 5 reads. The commit read the stored state before
+                // it was installed, so this records the marker or keeps the
+                // state already recorded.
                 self.record_activation_body_retirement(retirement)
                     .map_err(|error| {
                         TranscriptEditError::HistoryStateMalformed(error.to_string())

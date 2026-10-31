@@ -1411,18 +1411,27 @@ member's session refuses its own host's session-level writes
 `owned_by_mob`) from the moment a mob seats it, even before the mob writes
 anything, so the mob's first write never replaces a write the host was told
 was recorded; write to a member through `MobHandle::set_operator_instruction`
-with a member target instead. The member binding a mob stamps on a session is
-never cleared, so a session a mob seated keeps refusing its host's own writes
-after the member retires with the session kept, or after a failed attach rolls
-back. A member seated over an existing session whose own host wrote its target
-before (an attach) hands that target to the mob at the mob's first delivery:
-the mob's snapshot replaces what the host wrote. That first delivery waits
-until the member's spawn has activated, so an attach whose activation fails
-rolls back with the host's session untouched. A blocked member stays blocked
-until a write with a new revision of a slot that selects it, a new seat of the
-member, or a restart; an exact repeat of a write does not unblock it. A reset
-clears the records and keeps the generation moving forward, so a session never
-sees an older snapshot replace a newer one. A
+with a member target instead. A dormant resume seat stamps the member binding
+at the seat, without a wake, on a session that names none. The member binding
+a mob stamps on a session is never cleared, so a session a mob seated keeps
+refusing its host's own writes after the member retires with the session kept,
+or after a failed attach rolls back. A failed attach, or a member that retires
+before the mob's first write, therefore leaves the instructions its host wrote
+before the attach in effect, and its host can no longer change or revoke them:
+revoke them before attaching a session that may leave the mob. A host's
+standalone adoption (`Session::rebind_instruction_owner` to the session) of a
+session a mob built or seated is refused `owned_by_mob` too. A member seated
+over an existing session whose own host wrote its target before (an attach)
+hands that target to the mob at the mob's first delivery: the mob's snapshot
+replaces what the host wrote. That first delivery waits until the member's
+spawn has activated, so an attach whose activation fails rolls back with the
+host's session untouched. An attached member's first activation turn (its
+kickoff or initial message) therefore runs before the mob's instructions
+arrive; they apply from its next fresh run start. A blocked member stays
+blocked until a write with a new revision of a slot that selects it, a new
+seat of the member, or a restart; an exact repeat of a write does not unblock
+it. A reset clears the records and keeps the generation moving forward, so a
+session never sees an older snapshot replace a newer one. A
 placed member is reported blocked (`member_host_unsupported`) until member
 hosts take deliveries. A mob that recorded operator instructions journals
 them at mob event schema 10, which a release before operator instructions

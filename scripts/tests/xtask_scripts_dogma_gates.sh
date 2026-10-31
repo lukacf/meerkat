@@ -430,9 +430,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # operator_instruction_delivery_audit.sh (mob_machine) requires a final
 # distinct-state count for each of its two runs, a coverage block in which
 # each covered action of both runs generated a state, its seven step
-# witnesses and three state witnesses violated, and with --mutants each
-# seeded defect's target property violated and its live-only delivery
-# mutant's run to end without an error (the success line above).
+# witnesses and four state witnesses violated, and with --mutants each
+# seeded defect's target property violated and its live-only delivery and
+# bound-only release mutants' runs to end without an error (the success line
+# above).
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -941,7 +942,7 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
   'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
-  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
   'echo "Error: Action property NotAuditWitnessRecordedReowed is violated."' \
@@ -952,6 +953,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessDormantDeliverable is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnbornOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
   'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
   'echo "Error: Invariant AuditDeliversOnlyToBoundLocalBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \

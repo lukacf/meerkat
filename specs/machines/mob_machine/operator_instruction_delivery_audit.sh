@@ -20,7 +20,7 @@
 # - one run per reachability witness, with that witness's negation as an
 #   extra invariant (a state goal) or action property (a step goal),
 #   requiring TLC to report exactly that violation;
-# - with --mutants, five defects seeded into a copy of the generated model:
+# - with --mutants, six defects seeded into a copy of the generated model:
 #   four refused by the property each targets, checked as the run's only
 #   property:
 #     profile_check_dropped (the target predicate selects every member for a
@@ -31,9 +31,12 @@
 #       AuditSeatOwesTheGeneration;
 #     unseat_keeps_owed (a replayed retirement keeps the obligation) by
 #       AuditUnseatLeavesNoFact;
-#   and deliver_only_live (a delivery prepared only for a Live member, as a
-#   shell that woke members to deliver would need), which must leave the
-#   DormantDeliverable witness unreachable.
+#   and two that must leave a witness unreachable: deliver_only_live (a
+#   delivery prepared only for a Live member, as a shell that woke members
+#   to deliver would need) the DormantDeliverable witness, and
+#   release_ignores_retiring_session (the release verdict sees only a bound
+#   session, so a releasing retire, which unbinds its member first, never
+#   releases) the RetiringReleasable witness.
 # No run uses -continue: a witness run stops at the first state that reaches
 # its witness, and a mutant run, whose only property is its target, exactly
 # when some reachable state or step of the mutant breaks the target. Each TLC
@@ -49,10 +52,11 @@ if [[ "${1:-}" == "--mutants" ]]; then
   shift
 fi
 
-# The mob generation bound of each run: the write run reaches three committed
-# writes (a write, a retarget and a re-owing write after a record or a
-# refusal), the seat run two. A deeper bound may be run by hand through the
-# environment; the witnesses need at least these.
+# The mob generation bound of each run. The write run's writes and revokes on
+# its one slot, at revisions 1 and 2, commit at most two generations (a write
+# then a retarget, a re-owing write or a revoke); its bound of 3 only leaves
+# room. The seat run commits at most two. A deeper bound may be run by hand
+# through the environment; the witnesses need at least these.
 max_write_generation="${OPERATOR_INSTRUCTION_DELIVERY_AUDIT_MAX_WRITE_GENERATION:-3}"
 max_seat_generation="${OPERATOR_INSTRUCTION_DELIVERY_AUDIT_MAX_SEAT_GENERATION:-2}"
 if ! [[ "${max_write_generation}" =~ ^[0-9]+$ ]] || (( max_write_generation < 3 )); then
@@ -89,10 +93,15 @@ write_covered_actions=(
   RefuseMemberInstructionTargetBlockedRunning
 )
 
-# The seat run's deferrals; each must fire.
+# The seat run's deferrals, its releasing retire and the release verdict;
+# each must fire.
 seat_covered_actions=(
   PrepareMemberInstructionDeliveryUnbornRunning
   PrepareMemberInstructionDeliveryUnboundRunning
+  PrepareMemberInstructionDeliveryRetiringRunning
+  RetireRunningReleasingArchiveOnly
+  ResolveMemberInstructionReleaseAuthorizedRunning
+  ResolveMemberInstructionReleaseNotNeededRunning
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,12 +121,14 @@ revoke = "slot, revision"
 prepare = "agent_identity"
 record = "agent_identity, session_id, generation"
 refuse = "agent_identity, session_id, generation, block"
+release = "agent_identity, session_id, disposal"
 arms = {
     "RecoverRosterMemberRunning": "agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable",
     "RecoverMemberSessionBindingFreshRunning": "agent_identity, agent_runtime_id, bridge_session_id, replacing",
     "RecoverMemberSeatSessionUnbornRunning": "agent_identity, agent_runtime_id, unborn",
     "RecoverMemberSeatSessionBornRunning": "agent_identity, agent_runtime_id, unborn",
     "RecoverRosterMemberRetiredRunning": "agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation",
+    "RetireRunningReleasingArchiveOnly": "mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id",
     "SetOperatorInstructionNewRunning": write,
     "SetOperatorInstructionAdvanceRunning": write,
     "SetOperatorInstructionDuplicateRunning": write,
@@ -131,6 +142,7 @@ arms = {
     "PrepareMemberInstructionDeliveryNotOwedRunning": prepare,
     "PrepareMemberInstructionDeliveryUnbornRunning": prepare,
     "PrepareMemberInstructionDeliveryUnboundRunning": prepare,
+    "PrepareMemberInstructionDeliveryRetiringRunning": prepare,
     "PrepareMemberInstructionDeliveryDeliverRunning": prepare,
     "RecordMemberInstructionTargetNotOwedRunning": record,
     "RecordMemberInstructionTargetStaleSessionRunning": record,
@@ -141,6 +153,8 @@ arms = {
     "RefuseMemberInstructionTargetStaleSessionRunning": refuse,
     "RefuseMemberInstructionTargetSupersededRunning": refuse,
     "RefuseMemberInstructionTargetBlockedRunning": refuse,
+    "ResolveMemberInstructionReleaseAuthorizedRunning": release,
+    "ResolveMemberInstructionReleaseNotNeededRunning": release,
 }
 for arm, params in arms.items():
     heads = re.findall(r"(?m)^" + arm + r"\(([^)]*)\) ==$", text)
@@ -163,6 +177,7 @@ for name in (
     "member_instruction_owed",
     "member_instruction_recorded",
     "member_instruction_blocked",
+    "runtime_retire_pending_sessions",
 ):
     assert re.search(r"\b" + name + r"\b", variables[0]), f"model.tla declares no variable {name}"
 print("premise holds: the generated model defines every operator-instruction arm the audit drives")
@@ -387,7 +402,8 @@ for witness in \
   "seat:Action property:SeatAfterWriteOwed" \
   "seat:Action property:UnseatDropsFacts" \
   "seat:Invariant:UnbornOwedDeferred" \
-  "seat:Invariant:UnboundOwedDeferred"; do
+  "seat:Invariant:UnboundOwedDeferred" \
+  "seat:Invariant:RetiringReleasable"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -504,5 +520,11 @@ PY
   mutate_unreachable write deliver_only_live DormantDeliverable \
     PrepareMemberInstructionDeliveryDeliverRunning 'member_session_bindings' \
     '    /\ ((agent_identity \in DOMAIN member_session_bindings) /\ (agent_identity \in DOMAIN member_materialization) /\ (member_materialization[agent_identity] = "Live"))'
+  # The release verdict sees only a bound session: a releasing retire unbinds
+  # its member before the member's session is disposed of, so its session
+  # is never released.
+  mutate_unreachable seat release_ignores_retiring_session RetiringReleasable \
+    ResolveMemberInstructionReleaseAuthorizedRunning 'runtime_retire_pending_sessions' \
+    '    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some(member_session_bindings[agent_identity]) ELSE None) = Some(session_id))'
 fi
 echo "operator-instruction delivery audit passed"

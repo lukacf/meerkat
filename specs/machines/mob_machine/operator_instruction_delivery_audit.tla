@@ -20,9 +20,11 @@
 \*     only once both members are bound (AuditWriteConstraint), so the run
 \*     stays small; the seat run covers seats after writes.
 \*   seat (AuditSeatSpec): two identities seated, bound, made unborn seats,
-\*     born and unseated in any order around writes on one slot for a mob
-\*     and a profile target, with the delivery's preparation (not owed,
-\*     unborn, unbound, prepared) and the record of the current generation.
+\*     born, retired (a releasing retire, archive-only for a Dormant member)
+\*     and unseated in any order around writes on one slot for a mob and a
+\*     profile target, with the delivery's preparation (not owed, unborn,
+\*     unbound, retiring, prepared), the record of the current generation
+\*     and the release verdict of a retiring or seated member's session.
 \*
 \* Properties, in both runs, beside every generated invariant of ci.cfg (the
 \* region's seven among them):
@@ -55,7 +57,8 @@
 \*     BlockedThenUnblocked, RecordCloses (step goals), DormantDeliverable
 \*     (state goal);
 \*   seat: SeatAfterWriteOwed, UnseatDropsFacts (step goals),
-\*     UnbornOwedDeferred, UnboundOwedDeferred (state goals).
+\*     UnbornOwedDeferred, UnboundOwedDeferred, RetiringReleasable (state
+\*     goals).
 \* With --mutants the runner seeds defects into a copy of the generated
 \* model and requires TLC to refuse each with its target as the run's only
 \* property (see the runner).
@@ -86,6 +89,8 @@ AuditProfileOne == [kind |-> "Profile", profile |-> "profile_1", member |-> None
 AuditMemberTwo == [kind |-> "Member", profile |-> "", member |-> Some("agentidentity_2")]
 AuditWriteTargets == {AuditMob, AuditProfileOne, AuditMemberTwo}
 AuditSeatTargets == {AuditMob, AuditProfileOne}
+AuditMobId == "mobid_1"
+AuditDisposals == {"RuntimeReleasedOnlyHostOwned", "Archived"}
 
 \* ---------------------------------------------------------------------------
 \* Seats (the epoch replay's signals)
@@ -95,21 +100,37 @@ AuditSeat ==
     \E id \in AuditIds :
         RecoverRosterMemberRunning(id, AuditRuntime(id), 1, 1, AuditProfile(id), AuditMode, FALSE)
 
+\* A retiring member is not bound, made unborn or born again here: after its
+\* retire only its delivery, its records, its release verdict and its unseat
+\* apply to it.
+AuditNotRetiring(id) == AuditRuntime(id) \notin DOMAIN runtime_retire_pending_sessions
+
 AuditBind ==
     \E id \in AuditIds :
-        RecoverMemberSessionBindingFreshRunning(id, AuditRuntime(id), AuditSession(id), None)
+        /\ AuditNotRetiring(id)
+        /\ RecoverMemberSessionBindingFreshRunning(id, AuditRuntime(id), AuditSession(id), None)
 
 AuditUnborn ==
     \E id \in AuditIds :
-        RecoverMemberSeatSessionUnbornRunning(id, AuditRuntime(id), TRUE)
+        /\ AuditNotRetiring(id)
+        /\ RecoverMemberSeatSessionUnbornRunning(id, AuditRuntime(id), TRUE)
 
 AuditBorn ==
     \E id \in AuditIds :
-        RecoverMemberSeatSessionBornRunning(id, AuditRuntime(id), FALSE)
+        /\ AuditNotRetiring(id)
+        /\ RecoverMemberSeatSessionBornRunning(id, AuditRuntime(id), FALSE)
 
 AuditUnseat ==
     \E id \in AuditIds :
         RecoverRosterMemberRetiredRunning(id, AuditRuntime(id), 1, FALSE, FALSE, TRUE, FALSE)
+
+\* A releasing retire of a bound member: it unbinds the member and moves its
+\* session to the runtime's pending retirement. A seated member is Dormant
+\* here, so the retire is archive-only.
+AuditRetire ==
+    \E id \in AuditIds :
+        RetireRunningReleasingArchiveOnly(AuditMobId, AuditRuntime(id), id, 1,
+            Some(AuditSession(id)), Some(AuditSession(id)))
 
 \* ---------------------------------------------------------------------------
 \* Writes and revokes
@@ -188,6 +209,15 @@ AuditRefuseBlocked ==
     \E id \in AuditIds, s \in AuditSessions, g \in 1..AuditMaxWriteGeneration :
         RefuseMemberInstructionTargetBlockedRunning(id, s, g, AuditBlock)
 
+\* The release verdict of a member's own session, or of the other member's
+\* session, for a host-kept and an archived session.
+AuditRelease ==
+    \E id \in AuditIds, s \in AuditSessions, d \in AuditDisposals :
+        \/ ResolveMemberInstructionReleaseAuthorizedRunning(id, s, d)
+        \/ ResolveMemberInstructionReleaseNotNeededRunning(id, s, d)
+
+AuditPrepareRetiring == \E id \in AuditIds : PrepareMemberInstructionDeliveryRetiringRunning(id)
+
 \* The seat run records only the current generation, on the member's own
 \* session.
 AuditSeatRecordCurrent ==
@@ -238,13 +268,16 @@ AuditSeatNext ==
     \/ AuditUnborn
     \/ AuditBorn
     \/ AuditUnseat
+    \/ AuditRetire
     \/ AuditSetNew(AuditSeatTargets)
     \/ AuditSetAdvance(AuditSeatTargets)
     \/ AuditPrepareNotOwed
     \/ AuditPrepareUnborn
     \/ AuditPrepareUnbound
+    \/ AuditPrepareRetiring
     \/ AuditPrepareDeliver
     \/ AuditSeatRecordCurrent
+    \/ AuditRelease
 
 AuditSeatSpec == Init /\ [][AuditSeatNext]_vars
 
@@ -430,6 +463,18 @@ AuditWitnessUnboundOwedDeferred ==
         /\ id \notin DOMAIN member_session_bindings
         /\ ENABLED PrepareMemberInstructionDeliveryUnboundRunning(id)
 
+\* Seat run: a retiring member whose session recorded a snapshot (its
+\* releasing retire unbound it) has the release of its session authorized
+\* for a host that keeps the session.
+AuditWitnessRetiringReleasable ==
+    \E id \in AuditIds :
+        /\ id \in DOMAIN identity_to_runtime
+        /\ id \notin DOMAIN member_session_bindings
+        /\ AuditRuntime(id) \in DOMAIN runtime_retire_pending_sessions
+        /\ id \in DOMAIN member_instruction_recorded
+        /\ ENABLED ResolveMemberInstructionReleaseAuthorizedRunning(
+               id, AuditSession(id), "RuntimeReleasedOnlyHostOwned")
+
 NotAuditWitnessProfileWriteOwesOne == [][~AuditWitnessProfileWriteOwesOneStep]_vars
 NotAuditWitnessRetargetOwesLeaver == [][~AuditWitnessRetargetOwesLeaverStep]_vars
 NotAuditWitnessRecordedReowed == [][~AuditWitnessRecordedReowedStep]_vars
@@ -440,4 +485,5 @@ NotAuditWitnessSeatAfterWriteOwed == [][~AuditWitnessSeatAfterWriteOwedStep]_var
 NotAuditWitnessUnseatDropsFacts == [][~AuditWitnessUnseatDropsFactsStep]_vars
 NotAuditWitnessUnbornOwedDeferred == ~AuditWitnessUnbornOwedDeferred
 NotAuditWitnessUnboundOwedDeferred == ~AuditWitnessUnboundOwedDeferred
+NotAuditWitnessRetiringReleasable == ~AuditWitnessRetiringReleasable
 ====

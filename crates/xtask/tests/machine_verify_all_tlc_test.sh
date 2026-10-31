@@ -851,18 +851,21 @@ fi
 # and topology counters: the write run (two bound Dormant members under two
 # profiles; every write, revoke, preparation, record and refusal arm its
 # domains reach for a mob, a profile and a member target) and the seat run
-# (two identities seated, bound, made unborn seats, born and unseated around
-# writes). Beside every generated invariant it checks that a committed write
-# owes the new generation to exactly the members the slot's old or new
-# target selects, a seat owes the mob's generation, an unseat leaves no
-# delivery fact, a delivery is prepared only for an owed, bound, born, local
-# member, and no region step touches residency or wakes. It first checks
-# that the generated model defines every arm it drives, requires each run's
-# covered arms to fire and its ten witnesses reached, one run each, and with
-# --mutants refuses four seeded defects, each by the property it targets run
-# as the only property, and requires a live-only delivery to leave the
-# Dormant delivery witness unreachable. No run uses -continue. Not yet
-# measured; it joins this shard as the lightest one measured locally.
+# (two identities seated, bound, made unborn seats, born, retired by a
+# releasing retire and unseated around writes, with the release verdict of
+# their sessions). Beside every generated invariant it checks that a
+# committed write owes the new generation to exactly the members the slot's
+# old or new target selects, a seat owes the mob's generation, an unseat
+# leaves no delivery fact, a delivery is prepared only for an owed, bound,
+# born, local member, and no region step touches residency or wakes. It
+# first checks that the generated model defines every arm it drives,
+# requires each run's covered arms to fire and its eleven witnesses reached
+# (among them a retiring member's release, after its retire unbound it), one
+# run each, and with --mutants refuses four seeded defects, each by the
+# property it targets run as the only property, and requires a live-only
+# delivery and a bound-only release verdict to leave their witnesses
+# unreachable. No run uses -continue. Not yet measured; it joins this shard
+# as the lightest one measured locally.
 operator_instruction_delivery_audit="${workspace_root}/specs/machines/mob_machine/operator_instruction_delivery_audit.sh"
 if [[ ! -x "${operator_instruction_delivery_audit}" ]]; then
   echo "error: operator-instruction delivery audit runner is missing from workspace runfiles: ${operator_instruction_delivery_audit}" >&2
@@ -1143,7 +1146,7 @@ run_machine_verify() {
 # meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
 # 4-worker local run (2026-10-31); the MobMachine operator-instruction
 # delivery audit with --mutants joined it after these measurements (not yet
-# measured: two whole-space runs, ten witness runs and five mutant runs over
+# measured: two whole-space runs, eleven witness runs and six mutant runs over
 # the MobMachine model, whose JVM start and model parse are about 5 s a run
 # in audits-i, so an estimated 110-200 s locally with its small spaces, and
 # the shard about 230-320 s; if the first hosted run takes the shard past 10

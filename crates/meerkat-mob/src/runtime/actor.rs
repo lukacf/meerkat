@@ -17820,10 +17820,11 @@ impl MobActor {
     /// State injection, test builds only: when a test armed it for this name
     /// (`MobCommand::InjectUnreadableNameAtLadderOpenForTest`), reserve the
     /// name of the spawn ladder that just opened as unreadable in
-    /// MobMachine's state, as the boot scan's Unreadable arm would, and
-    /// answer the test. The live authority keeps its owner token: only its
-    /// state is replaced, by one that holds every invariant. No production
-    /// path reserves a name under an open ladder.
+    /// MobMachine's state, as the boot scan's Unreadable arm does for a row
+    /// of a name under an open ladder, and answer the test. The live
+    /// authority keeps its owner token: only its state is replaced, by one
+    /// that holds every invariant. No production path reserves a name under
+    /// an open ladder.
     #[cfg(test)]
     fn inject_armed_unreadable_name_at_ladder_open(&mut self, agent_identity: &AgentIdentity) {
         let Some((armed, injected_tx)) = self.unreadable_name_at_ladder_open.take() else {
@@ -17833,10 +17834,13 @@ impl MobActor {
             self.unreadable_name_at_ladder_open = Some((armed, injected_tx));
             return;
         }
+        // The Unreadable arm's whole update: the name is reserved and leaves
+        // the worker reconcile sets.
+        let name = mob_dsl::AgentIdentity::from_domain(agent_identity);
         let mut state = self.dsl_authority.state().clone();
-        state
-            .identity_entry_unreadable
-            .insert(mob_dsl::AgentIdentity::from_domain(agent_identity));
+        state.members_to_spawn.remove(&name);
+        state.members_to_retire.remove(&name);
+        state.identity_entry_unreadable.insert(name);
         let injected = match mob_dsl::MobMachineAuthority::recover_from_state(state) {
             Ok(recovered) => {
                 self.dsl_authority.restore_snapshot(recovered.snapshot());

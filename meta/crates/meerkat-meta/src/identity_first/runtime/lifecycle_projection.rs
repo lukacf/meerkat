@@ -2223,7 +2223,9 @@ impl IdentityRuntime {
     /// of the identity's member says so: it still holds the incarnation the
     /// unlisting named, seated and not retiring. An unlisting whose
     /// retirement Core started (it journaled the start, and the member reads
-    /// retiring) stands: the retirement Core ends is the unlisting's.
+    /// retiring) stands: the retirement Core ends is the unlisting's. An
+    /// identity whose lifecycle lock a step holds past a side effect's
+    /// deadline is skipped, and a later pass takes its unlisting back.
     pub(super) async fn take_back_relisted_unlistings(&self, roster: &[DurableAgentSpec]) {
         let Phase::Ready { incarnation } = self.lifecycle_projection.phase() else {
             return;
@@ -2258,9 +2260,22 @@ impl IdentityRuntime {
             }
             // Under the identity's lifecycle lock, which a step holds while
             // it records: the record is taken back only while it is still
-            // the unlisting's, never one a step recorded since.
-            let lifecycle_lock = self.lifecycle_lock_for(&identity).await;
-            let _lifecycle_guard = lifecycle_lock.lock().await;
+            // the unlisting's, never one a step recorded since. A step that
+            // holds the lock past a side effect's deadline (a build stuck in
+            // the customizer) is not waited for: the record stays, and a
+            // later pass takes it back.
+            let step = self.lifecycle_lock_for(&identity).await;
+            let deadline = self.lifecycle_projection.limits().deadline;
+            let Ok(_lifecycle_guard) = tokio::time::timeout(deadline, step.lock_owned()).await
+            else {
+                tracing::warn!(
+                    %identity,
+                    ?deadline,
+                    "a step of a relisted identity held its lifecycle lock past a side effect's \
+                     deadline; its unlisting is taken back by a later roster pass"
+                );
+                continue;
+            };
             match store.lifecycle_effect_intent(&mob_id, &intent.key()).await {
                 Ok(Some(current)) if current == intent => {}
                 Ok(_) => continue,

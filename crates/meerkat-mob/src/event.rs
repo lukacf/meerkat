@@ -1562,7 +1562,9 @@ impl MemberSessionBindingRecoveredEvent {
 /// The internal event codec stores them (`retired_session`, `retired_cause`,
 /// `retired_entry`, `retired_rotation`) and the public event payload never
 /// carries them; a row written before them decodes them as absent (the
-/// default), as does the row that closes a failed spawn.
+/// default), as do the rows that close a spawn with no retirement step of the
+/// machine (a membership step that failed after the spawn row was durable,
+/// and a resumed spawn's rollback).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MemberRetiredFacts {

@@ -415,9 +415,11 @@ them.
   rotation whose terminal step retired it (`RetiredRotation`: the target and
   the generation and role the same step seated). A reader pairs a
   retirement with the seat that follows it from these facts, never from
-  their positions in the journal. A row written before them, and a row that
-  closes a failed spawn, reads them absent. No row names the runtime
-  registration an incarnation held, which belongs to one process.
+  their positions in the journal. A row written before them reads them
+  absent, as do the rows that close a spawn with no retirement step of the
+  machine (a membership step that failed after the spawn row was durable,
+  and a resumed spawn's rollback). No row names the runtime registration an
+  incarnation held, which belongs to one process.
   `SeatRotation` and `RetiredRotation` are `#[non_exhaustive]`, with
   constructors. The facts are internal to the stored event codec, under keys
   of their own with the stored schema version unchanged, so an older

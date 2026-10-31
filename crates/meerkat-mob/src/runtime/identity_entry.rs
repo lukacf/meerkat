@@ -662,10 +662,11 @@ impl RetiredRotation {
 /// Every fact is one MobMachine decided, read from the journal row that
 /// records it: a row records the machine's state before the step that wrote
 /// it, or the step's own journal effect. A row written before a field was
-/// recorded reads it as absent, as do the rows that close a failed spawn (its
-/// rollback's `Retired` fact). No row records the runtime registration an
-/// incarnation held: a registration belongs to one process, and none of a
-/// stopped process outlives it.
+/// recorded reads it as absent, as do the two rows that close a spawn with no
+/// retirement step of the machine: a spawn whose membership step failed
+/// after its spawn row was durable, and a resumed spawn's rollback. No row
+/// records the runtime registration an incarnation held: a registration
+/// belongs to one process, and none of a stopped process outlives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberLifecycleEvent {

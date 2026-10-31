@@ -286,15 +286,18 @@ rotation's target and the incarnation and role the same step seated
 (`SeatRotation::Successor`). `rotate_member` of an identity no member holds
 seats a fresh life whose row names the incarnation it follows
 (`SeatRotation::FreshLifeAfter`, the generation MobMachine retains for the
-identity); the fresh life of an identity no incarnation preceded since the
-mob's last reset names none. Any other seat or retirement names no rotation,
-wherever it sits in the journal, so a reader pairs a retirement with the
-seat that follows it from the facts, never from their positions. A
-rotation's retirement records no cause: the rotation keeps the identity's
-standing. No row names the runtime registration an incarnation held, which
-belongs to one process. A row written before these facts, and a row that
-closes a failed spawn, reads them absent. They are internal to the stored
-event codec, under keys of their own, so an older release ignores them.
+identity before the step that seats the fresh life); the fresh life of an
+identity no incarnation preceded since the mob's last reset names none. Any
+other seat or retirement names no rotation, wherever it sits in the journal,
+so a reader pairs a retirement with the seat that follows it from the facts,
+never from their positions. A rotation's retirement records no cause: the
+rotation keeps the identity's standing. No row names the runtime
+registration an incarnation held, which belongs to one process. A row
+written before these facts reads them absent, as do the rows that close a
+spawn with no retirement step of the machine (a membership step that failed
+after the spawn row was durable, and a resumed spawn's rollback). They are
+internal to the stored event codec, under keys of their own, so an older
+release ignores them.
 
 ### The declared apply
 

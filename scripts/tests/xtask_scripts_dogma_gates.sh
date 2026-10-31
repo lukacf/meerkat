@@ -349,8 +349,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # mob_operator_grant_audit.sh requires each of its seven reachability
 # witnesses violated, and with --mutants each seeded defect's property.
 # generation_highwater_audit.sh requires each of its six reachability
-# witnesses violated, and with --mutants each seeded defect's property or
-# invariant; its exact-successor mutant needs the success line above.
+# witnesses violated, the success line for its reset run and its reset
+# witness violated, and with --mutants each seeded defect's property or
+# invariant (its two reset mutants' target invariants among them); its
+# exact-successor mutant needs the success line above.
 # member_lifecycle_audit.sh requires a final distinct-state count at or
 # above its floor, a coverage block in which each of its covered actions
 # generated a state, its five state witnesses and three step witnesses
@@ -501,6 +503,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRetainedBelowHighwater is violated."' \
   'echo "Error: Invariant NotAuditWitnessFirstRecoveredAboveZero is violated."' \
   'echo "Error: Invariant NotAuditWitnessResetGap is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResetFolded is violated."' \
+  'echo "Error: Invariant AuditRetainedOnlyThisEpoch is violated."' \
+  'echo "Error: Invariant AuditMintAboveEverySeat is violated."' \
   'echo "Error: Invariant next_generation_above_highwater is violated."' \
   'echo "Error: Action property AuditSealClosesRecovery is violated."' \
   'echo "Error: Action property AuditHighwaterNeverLowers is violated."' \

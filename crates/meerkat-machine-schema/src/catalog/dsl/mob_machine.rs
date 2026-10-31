@@ -3735,8 +3735,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Whatever an identity mints next is above its recovered high-water,
         // so no generation repeats within the mob incarnation, across a reset
-        // and a restart too. None is an exhausted generation space, which
-        // mints nothing.
+        // and a restart too (a reset folds each retained generation into the
+        // high-water as it drops it, ResetToRunning). None is an exhausted
+        // generation space, which mints nothing.
         invariant next_generation_above_highwater {
             for_all(id in self.identity_generation_highwater.keys(),
                 mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, id) == None
@@ -3748,7 +3749,9 @@ macro_rules! mob_catalog_machine_dsl {
         // above are the durable incarnation high-water history used to mint
         // and fence a later generation. Every current binding therefore has
         // history, but a fully retired identity intentionally has history
-        // without a current binding.
+        // without a current binding, until a mob reset drops the history of
+        // every identity (ResetToRunning folds the generation into the
+        // high-water), as a restart after the reset does.
         invariant current_runtime_binding_has_history {
             for_all(id in self.identity_to_runtime.keys(), self.member_profile_names.contains_key(id))
             && for_all(id in self.identity_to_runtime.keys(), self.member_runtime_modes.contains_key(id))
@@ -15867,6 +15870,26 @@ macro_rules! mob_catalog_machine_dsl {
                 // names are the identity store's, which a reset keeps, so it
                 // keeps them too.
                 self.spawn_exec_created_custody = EmptySet;
+                // A mob reset ends every incarnation's retained history, as a
+                // restart after the reset does (the resume replays only the
+                // events after the last reset): each identity's retained
+                // generation is folded into its high-water, so its next
+                // incarnation still mints above every generation it used, and
+                // the retained generation, fence, profile and runtime mode are
+                // dropped together. No incarnation after the reset follows one
+                // before it, live or restarted.
+                for id in self.identity_runtime_generations.keys() {
+                    if self.identity_generation_highwater.contains_key(id) == false
+                        || self.identity_runtime_generations.get_copied(id).get("value")
+                            > self.identity_generation_highwater.get_copied(id).get("value")
+                    {
+                        self.identity_generation_highwater.insert(id, self.identity_runtime_generations.get_copied(id).get("value"));
+                    }
+                }
+                self.identity_runtime_generations = EmptyMap;
+                self.identity_runtime_fence_tokens = EmptyMap;
+                self.member_profile_names = EmptyMap;
+                self.member_runtime_modes = EmptyMap;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;
             }

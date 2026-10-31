@@ -213,7 +213,14 @@ made, on the internal lane: no grant and no Shutdown step refuses the close.
 A mob reset ends every identity entry, and it commits
 only on an empty roster (`ResetToRunning`'s `roster_empty` guard): its
 preflight, `AdmitReset`, answers the reset's other guards, changing nothing,
-before the retirement batch that empties the roster. The audit's apply runs
+before the retirement batch that empties the roster. It also ends every
+identity's retained incarnation history, as a restart after the reset does
+(the resume replays only the events after the last reset): it folds each
+retained generation into the identity's high-water
+(`identity_generation_highwater`), so the next incarnation still mints above
+every generation the identity used, and drops the retained generation,
+fence, profile and runtime mode together. The generation high-water audit's
+reset run checks both, with a witness of the fold and one mutant per half. The audit's apply runs
 (`apply`, `legacy`, `resume`, `roles`, `hold`, `held` and `placed`) drive
 the declare arms, the seal, the legacy adoption before an unlisted
 retirement, the dormant seat with and without an archived record, the

@@ -553,9 +553,16 @@ macro_rules! mob_catalog_machine_dsl {
             // Seeded once at build (SeedMemberResidency), never journaled.
             member_restore_policy: Enum<MemberRestorePolicyKind>,
             composition_authority: Enum<CompositionAuthorityKind>,
-            // Identities whose host preparation (a first-boot row) has not
-            // been carried out: their wakes are refused, retryable.
-            member_host_preparation_pending: Set<AgentIdentity>,
+            // Identities whose host preparation is owed, with its cause: a
+            // first-boot request the host has not carried out (FirstBootRow,
+            // seeded at build by SeedMemberResidency), or a role move the host
+            // has not declared (RoleMigrationUndeclared, written by the
+            // declared apply's RoleMigrationHeld verdict). Every wake through
+            // WakeMember, the boot plan or a placed peer is refused for such a
+            // member, retryable, whatever the cause. Never journaled: the
+            // build seeds the first-boot requests and the next declared apply
+            // derives a role hold again.
+            member_host_preparation_causes: Map<AgentIdentity, Enum<HostPreparationCause>>,
             // Set once the boot plan settled; dormant_member_has_durable_endpoint and
             // wiring_edges_connect_seated_members hold from here on.
             boot_plan_sealed: bool,
@@ -622,12 +629,17 @@ macro_rules! mob_catalog_machine_dsl {
             // are refused for it (ResolveAgentLaneMemberAdmission). An entry
             // is recorded by the membership commit of a spawn or the dormant
             // seat that carried entry custody, by the adoption of a legacy
-            // member (AdoptLegacyIdentityEntry) and by the replay of either
+            // member (AdoptLegacyIdentityEntry), by the declared apply
+            // (DeclareIdentityEntry) and by the replay of a seat or adoption
             // row (RecoverIdentityEntry); a rotation keeps it. An entry is
-            // always seated here: every unseat removes it, as do the destroy
-            // and the replay of a retirement
-            // (entry_is_seated_or_has_an_unseated_cause). Only local members
-            // are entries (identity_entry_is_local).
+            // seated, or unseated with a typed cause (identity_entry_unseated,
+            // entry_is_seated_or_has_an_unseated_cause): the end of its
+            // member's retirement keeps it unseated, owed a seat, unless the
+            // declared apply's seal unlisted it (identity_entry_retiring).
+            // Only that seal, the destroy and the mob's reset end a Declared
+            // entry. A placed entry's member lives on its member host, created
+            // by a placed spawn that holds the entry's custody
+            // (placed_entry_custody_is_hosted_on_first_use).
             identity_entry_origins: Map<AgentIdentity, Enum<IdentityEntryOrigin>>,
             // The open spawn ladders that act for their identity's entry: a
             // BeginSpawnExec that carried entry custody records its identity
@@ -646,6 +658,45 @@ macro_rules! mob_catalog_machine_dsl {
             // again (RecoverMemberRotationIntent); every step that drops the
             // intent drops it.
             member_rotation_targets: Map<AgentIdentity, Enum<RotationTarget>>,
+            // The unseated identity entries, each with its typed cause: owed a
+            // seat (SeatOwed: the declared apply seats it Dormant), hosted on
+            // its first use (HostedOnFirstUse: a placed or externally bound
+            // entry, whose host creates it when it is first used), or awaiting
+            // its held creation (HeldCreation: the host's held protocol creates
+            // it; the dormant seat never takes it). Written by the declared
+            // apply's verdicts and by the end of an entry's retirement that the
+            // seal did not start; every seat or spawn of the identity removes
+            // it (unseated_entry_is_not_a_member). Never journaled: the next
+            // declared apply derives it again.
+            identity_entry_unseated: Map<AgentIdentity, Enum<UnseatedEntryCause>>,
+            // The Declared entries the seal of a complete declared roster
+            // unlisted while their member is seated: the shell retires each
+            // member with the cause Unlisted, whose start row records the cause
+            // (its replay marks the entry again, RecoverIdentityEntryRetiring),
+            // and the end of that retirement removes the entry and the mark. A
+            // later seal that lists the identity again drops the mark while
+            // the member's retirement has not started.
+            identity_entry_retiring: Set<AgentIdentity>,
+            // The session an identity entry's member was bound to when its
+            // retirement archived it. A later seat of the entry revives the
+            // entry on it, Dormant, so the identity keeps its history: the seat
+            // binds that session and no other (archived_record_session), and
+            // the member's first wake revives the session. The end of the
+            // retirement records it (and so does the replay of its row); it
+            // outlives the entry, so an unlisted identity listed again comes
+            // back on its own session. Every seat of the identity drops it, as
+            // do ForgetArchivedSession (the session is lost, or the host asked
+            // for a fresh life), the destroy and the mob's reset
+            // (archived_session_record_is_unseated).
+            identity_entry_archived_sessions: Map<AgentIdentity, SessionId>,
+            // Whether a declared apply of this mob is open: an apply opens it
+            // before its first step (OpenDeclaredApply) and closes it after
+            // its last (CloseDeclaredApply), and a concurrent apply is refused,
+            // typed and retryable, so two applies never interleave (a partial
+            // one could otherwise answer an identity Seated that a complete
+            // one's seal removes). Never journaled: a restart has no apply
+            // open.
+            declared_apply_open: bool,
         }
 
         init(Running) {
@@ -940,7 +991,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_boot_obligation_owed = EmptyMap,
             member_restore_policy = MemberRestorePolicyKind::OnDemand,
             composition_authority = CompositionAuthorityKind::Authoritative,
-            member_host_preparation_pending = EmptySet,
+            member_host_preparation_causes = EmptyMap,
             boot_plan_sealed = false,
             member_rotation_session_ids = EmptyMap,
             member_rotation_peer_endpoints = EmptyMap,
@@ -953,6 +1004,10 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_origins = EmptyMap,
             spawn_exec_entry_custody = EmptySet,
             member_rotation_targets = EmptyMap,
+            identity_entry_unseated = EmptyMap,
+            identity_entry_retiring = EmptySet,
+            identity_entry_archived_sessions = EmptyMap,
+            declared_apply_open = false,
         }
 
         terminal [Destroyed]
@@ -1924,6 +1979,38 @@ macro_rules! mob_catalog_machine_dsl {
             // one member: refused for an identity entry. A pure verdict in
             // every lifecycle phase; the command's own arms decide the rest.
             ResolveAgentLaneMemberAdmission { agent_identity: AgentIdentity },
+            // The declared apply's verdict for one identity a host's roster
+            // declares (MobHandle::apply_declared_roster): one arm per verdict,
+            // decided by identity_entry_verdict over the declaration and the
+            // machine's member facts. intent_managed (the identity store holds
+            // an intent row for the identity), session_memory_only (the
+            // session service keeps no durable sessions) and
+            // resume_session_role (the role the session an unseated
+            // identity's seat would resume was last built under: its archived
+            // session, or its first-boot request's session; None for a fresh
+            // seat, a session no build created, or one that records no role)
+            // are the shell's raw observations. first_boot is the kind of the
+            // host's first-boot request for the identity, if the roster carries
+            // one: the step ends the first-boot preparation the request carries
+            // out (a seated member's Resume, a hosted or held identity's
+            // request), so no window opens before the role check.
+            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind> },
+            // The seal of a complete declared roster: `desired` is every
+            // identity the roster lists.
+            SealDeclaredRoster { desired: Set<AgentIdentity> },
+            // An unseated identity's archived session record is let go: the
+            // shell observed the session absent from the store, or the host
+            // asked for a fresh life (a first-boot Fresh request). The seat
+            // that follows takes a fresh session.
+            ForgetArchivedSession { agent_identity: AgentIdentity, session_id: SessionId, reason: Enum<ArchivedSessionForgetReason> },
+            // A declared apply opens (MobHandle::apply_declared_roster): one
+            // apply of the mob at a time.
+            OpenDeclaredApply,
+            // The open declared apply closes, whatever its outcome.
+            CloseDeclaredApply,
+            // The reset's preflight (MobHandle::reset probes it before its
+            // retirement batch empties the roster): a pure verdict.
+            AdmitReset,
         }
 
         surface_only [
@@ -1964,7 +2051,16 @@ macro_rules! mob_catalog_machine_dsl {
             ObserveRespawnTopologyAbandoned { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRemoteMemberRuntimeRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRemoteMemberSupervisorRevoked { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
-            RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, preserve_machine_topology: bool, preservation_started: bool },
+            // session_archived is the row's record that the retirement
+            // archived the member's session (its disposal was Archived), as
+            // the live end read it: only then does the replay record an
+            // identity entry's archived session. hosted_incarnation is the
+            // journal's record that the retired incarnation was hosted
+            // elsewhere (its spawn row is a placed spawn's or an externally
+            // bound member's): the generic replay of a retired incarnation
+            // restores no placement, and the live end kept such an entry
+            // hosted on its first use, with no archived session.
+            RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, preserve_machine_topology: bool, preservation_started: bool, session_archived: bool, hosted_incarnation: bool },
             ConvergeRecoveredRosterTopology { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             ConvergeRecoveredRespawnTopology { agent_identity: AgentIdentity },
             RecoverMemberKickoff { member_id: AgentIdentity, phase: KickoffPhase, error: Option<String> },
@@ -2072,6 +2168,11 @@ macro_rules! mob_catalog_machine_dsl {
             // stored rotation: target, next session, endpoint), on the
             // Retiring incarnation the replay of that row restored.
             RecoverMemberRotationIntent { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: Enum<RotationTarget>, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint> },
+            // Replay: the retirement of an identity entry that the declared
+            // apply's seal unlisted (its start row records the cause
+            // Unlisted), on the Retiring incarnation the replay of that row
+            // restored.
+            RecoverIdentityEntryRetiring { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
         }
 
         effect MobMachineEffect {
@@ -2475,6 +2576,27 @@ macro_rules! mob_catalog_machine_dsl {
             // A fresh-life respawn the machine refuses (`Respawn`): the shell
             // answers it typed, and nothing changed.
             RespawnRefused { agent_identity: AgentIdentity, reason: Enum<RespawnRefusalReason> },
+            // The verdict of one declared identity (DeclareIdentityEntry),
+            // which the shell realizes (a seat, a rotation, a release) or
+            // answers. archived_session is the identity's archived session
+            // record after the step: the seat a SeatOwed verdict owes revives
+            // the entry on it.
+            IdentityEntryDeclared { agent_identity: AgentIdentity, verdict: Enum<IdentityEntryVerdict>, archived_session: Option<SessionId> },
+            // The verdict of the seal of a declared roster
+            // (SealDeclaredRoster): the shell retires the member of every
+            // entry the seal marked (identity_entry_retiring).
+            DeclaredRosterSealed { verdict: Enum<DeclaredRosterSealVerdict> },
+            // An unseated identity's archived session record was let go
+            // (ForgetArchivedSession).
+            ArchivedSessionForgotten { agent_identity: AgentIdentity, session_id: SessionId, reason: Enum<ArchivedSessionForgetReason> },
+            // The explicit resume's member authorization for a member whose
+            // host preparation is owed (AuthorizeExplicitResumeMemberHeldRunning,
+            // and its Stopped twin the resume's candidate selection probes):
+            // the resume neither prepares nor rebuilds it, and answers it held
+            // with the cause.
+            ExplicitResumeMemberHeld { agent_identity: AgentIdentity, cause: Enum<HostPreparationCause> },
+            // The verdict of a declared apply's opening (OpenDeclaredApply).
+            DeclaredApplyOpenResolved { verdict: Enum<DeclaredApplyOpenVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3010,6 +3132,84 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}
         }
 
+        // The declared apply's verdict for one identity (DeclareIdentityEntry),
+        // over the declaration and member facts only: no lifecycle phase is
+        // passed, and each verdict is its own arm. A candidate composition,
+        // an identity the identity store manages and a name a worker holds are
+        // refused; a member whose retirement, spawn or wake is in flight is
+        // left to the next apply. An unseated identity is hosted on its first
+        // use (placed or externally bound), awaits its held creation (declared
+        // held and never created) or is owed a seat; a seat that would resume
+        // a session last built under another role is owed only when the
+        // migration from that role is declared, and is held otherwise (its
+        // session's next build would refuse the role move). A seated member
+        // keeps its seat when its role and runtime mode match the declaration;
+        // otherwise a session that lives in memory only moves to a fresh
+        // session (no session to carry over), a declared migration from its
+        // current role and a runtime-mode change are restamped on the same
+        // session, and an undeclared role move is held.
+        helper identity_entry_verdict(
+            composition_authoritative: bool,
+            intent_managed: bool,
+            worker_holds_name: bool,
+            lifecycle_in_flight: bool,
+            seated: bool,
+            ever_created: bool,
+            placement: Enum<EntryPlacementKind>,
+            held_creation: bool,
+            profile_matches: bool,
+            migration_declared_from_current: bool,
+            session_memory_only: bool,
+            mode_matches: bool,
+            resume_role_moved: bool,
+            migration_declared_from_resume_role: bool
+        ) -> Enum<IdentityEntryVerdict> {
+            if composition_authoritative == false {
+                IdentityEntryVerdict::RefusedNonAuthoritative
+            } else {
+            if intent_managed == true {
+                IdentityEntryVerdict::RefusedHostAdopted
+            } else {
+            if worker_holds_name == true {
+                IdentityEntryVerdict::RefusedNameHeldByWorker
+            } else {
+            if lifecycle_in_flight == true {
+                IdentityEntryVerdict::LifecycleInFlight
+            } else {
+            if seated == false {
+                if placement != EntryPlacementKind::Local {
+                    IdentityEntryVerdict::HostedOnFirstUse
+                } else {
+                if held_creation == true && ever_created == false {
+                    IdentityEntryVerdict::AwaitHeldCreation
+                } else {
+                if resume_role_moved == true && migration_declared_from_resume_role == false {
+                    IdentityEntryVerdict::RoleMigrationHeld
+                } else {
+                    IdentityEntryVerdict::SeatOwed
+                }}}
+            } else {
+            if profile_matches == false {
+                if session_memory_only == true {
+                    IdentityEntryVerdict::RoleRotate
+                } else {
+                if migration_declared_from_current == true {
+                    IdentityEntryVerdict::RoleMigrate
+                } else {
+                    IdentityEntryVerdict::RoleMigrationHeld
+                }}
+            } else {
+            if mode_matches == false {
+                if session_memory_only == true {
+                    IdentityEntryVerdict::RoleRotate
+                } else {
+                    IdentityEntryVerdict::RuntimeModeRestamp
+                }
+            } else {
+                IdentityEntryVerdict::Kept
+            }}}}}}}
+        }
+
         // The wake refusal for one member, over MEMBER facts only: no
         // lifecycle phase is passed; every lifecycle phase has its own
         // WakeMember arm. None means not refused: the member's phase then
@@ -3417,6 +3617,11 @@ macro_rules! mob_catalog_machine_dsl {
         disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
         disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
         disposition RespawnRefused => local seam SurfaceResultAlignment,
+        disposition IdentityEntryDeclared => local seam SurfaceResultAlignment,
+        disposition DeclaredRosterSealed => local seam SurfaceResultAlignment,
+        disposition ArchivedSessionForgotten => local seam SurfaceResultAlignment,
+        disposition ExplicitResumeMemberHeld => local seam SurfaceResultAlignment,
+        disposition DeclaredApplyOpenResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -4409,21 +4614,73 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_placement.contains_key(id) == false)
         }
 
-        // Every identity entry is seated: an entry is recorded only for a
-        // seated member (a commit that carried entry custody, an adoption,
-        // the replay of its row) and every unseat removes it. A later
-        // release adds the unseated causes this invariant is named for.
+        // Every identity entry is seated, or unseated with a typed cause
+        // (identity_entry_unseated): the declared apply records an entry it
+        // owes a seat, hosts on its first use or awaits its held creation,
+        // and the end of a retirement the seal did not start keeps the entry
+        // unseated, owed a seat.
         invariant entry_is_seated_or_has_an_unseated_cause {
             for_all(id in self.identity_entry_origins.keys(),
-                self.identity_to_runtime.contains_key(id))
+                self.identity_to_runtime.contains_key(id)
+                || self.identity_entry_unseated.contains_key(id))
         }
 
-        // An identity entry is a local member: a placed spawn never carries
-        // entry custody, and the adoption and the replay of an entry refuse
-        // a placed member.
-        invariant identity_entry_is_local {
-            for_all(id in self.identity_entry_origins.keys(),
-                self.member_placement.contains_key(id) == false)
+        // An unseated cause belongs to an identity entry no member holds:
+        // every seat or spawn of the identity removes it, as do the entry's
+        // removal, the destroy and the mob's reset.
+        invariant unseated_entry_is_not_a_member {
+            for_all(id in self.identity_entry_unseated.keys(),
+                self.identity_entry_origins.contains_key(id)
+                && self.identity_to_runtime.contains_key(id) == false)
+        }
+
+        // The seal unlists only Declared entries whose member is seated, and
+        // the end of that member's retirement removes the mark with the
+        // entry.
+        invariant retiring_entry_is_a_declared_entry {
+            for_all(id in self.identity_entry_retiring,
+                self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
+                && self.identity_to_runtime.contains_key(id))
+        }
+
+        // An entry awaiting its held creation was never created: the declared
+        // apply records that cause only for an identity with no incarnation,
+        // and the spawn that creates it removes the cause in its own commit.
+        invariant held_creation_entry_was_never_created {
+            for_all(id in self.identity_entry_unseated.keys(),
+                self.identity_entry_unseated.get_cloned(id) != Some(UnseatedEntryCause::HeldCreation)
+                || self.identity_runtime_generations.contains_key(id) == false)
+        }
+
+        // An archived session record belongs to an identity no member holds:
+        // the end of a retirement records it as it unseats the member, and
+        // every seat of the identity drops it.
+        invariant archived_session_record_is_unseated {
+            for_all(id in self.identity_entry_archived_sessions.keys(),
+                self.identity_to_runtime.contains_key(id) == false)
+        }
+
+        // A role hold (RoleMigrationUndeclared) belongs to an identity entry:
+        // every step that ends an entry ends its role hold (the end of its
+        // member's retirement, live, replayed or in the destroy's ladder, the
+        // seal that removes an unseated entry, the reset and the destroy), so
+        // no later member of the name inherits it.
+        invariant role_hold_belongs_to_an_entry {
+            for_all(id in self.member_host_preparation_causes.keys(),
+                self.member_host_preparation_causes.get_cloned(id) != Some(HostPreparationCause::RoleMigrationUndeclared)
+                || self.identity_entry_origins.contains_key(id) == true)
+        }
+
+        // A placed spawn ladder acts for an identity entry only when the host
+        // declared the entry hosted on its first use: a ladder that holds an
+        // entry's custody is local, or placed for an entry unseated
+        // HostedOnFirstUse (BeginSpawnExecRemote's
+        // placed_custody_hosted_on_first_use guard). A placed entry's member
+        // lives on its member host and is never seated Dormant here.
+        invariant placed_entry_custody_is_hosted_on_first_use {
+            for_all(id in self.spawn_exec_entry_custody,
+                self.member_placement.contains_key(id) == false
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::HostedOnFirstUse))
         }
 
         // A worker reconcile never spawns or retires an identity entry: the
@@ -4436,12 +4693,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_origins.contains_key(id) == false)
         }
 
-        // Entry custody belongs to an open local spawn ladder: the opener
-        // records it, the membership commit or the dormant seat consumes it,
-        // and an abort and the destroy drop it.
+        // Entry custody belongs to an open spawn ladder (a local one Opened,
+        // a placed one MaterializePending): the opener records it, the
+        // membership commit or the dormant seat consumes it, and an abort,
+        // the destroy and the mob's reset drop it.
         invariant entry_custody_ladder_is_open {
             for_all(id in self.spawn_exec_entry_custody,
-                self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::Opened))
+                self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::Opened)
+                || self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::MaterializePending))
         }
 
         // An owed edge repair is a wired edge between seated members, and an
@@ -4460,7 +4719,8 @@ macro_rules! mob_catalog_machine_dsl {
         // The destroy beats every member lifecycle. A destroyed mob holds
         // no residency, rotation intent or target, pending host preparation or
         // archive-only retirement, so nothing waits on a rotation or a host
-        // carry-out after it, and no identity entry or entry custody.
+        // carry-out after it, and no identity entry, unseated cause, unlisted
+        // mark, archived session record or entry custody.
         invariant destroyed_mob_holds_no_member_lifecycle {
             self.lifecycle_phase != Phase::Destroyed
             || (self.member_materialization == EmptyMap
@@ -4468,9 +4728,12 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_rotation_session_ids == EmptyMap
                 && self.member_rotation_peer_endpoints == EmptyMap
                 && self.member_rotation_targets == EmptyMap
-                && self.member_host_preparation_pending == EmptySet
+                && self.member_host_preparation_causes == EmptyMap
                 && self.runtime_retire_archive_only == EmptySet
                 && self.identity_entry_origins == EmptyMap
+                && self.identity_entry_unseated == EmptyMap
+                && self.identity_entry_retiring == EmptySet
+                && self.identity_entry_archived_sessions == EmptyMap
                 && self.spawn_exec_entry_custody == EmptySet)
         }
 
@@ -7019,6 +7282,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -7138,6 +7405,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -7294,6 +7565,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -7361,6 +7636,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
                 self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
+                // A ladder opened with entry custody hosts the identity's
+                // entry: the member is recorded an entry in this same step,
+                // and leaves the worker reconcile sets.
+                if self.spawn_exec_entry_custody.contains(agent_identity) == true {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                    self.members_to_spawn.remove(agent_identity);
+                    self.members_to_retire.remove(agent_identity);
+                }
+                self.spawn_exec_entry_custody.remove(agent_identity);
                 // Phase ladder: MaterializePending -> MembershipCommitted.
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
                 // A new incarnation starts without an execution-health
@@ -8031,9 +8315,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "placement_present" { placement != None }
-            // An identity entry is a local member: a placed spawn never
-            // carries entry custody.
-            guard "placed_spawn_without_entry_custody" { entry_custody == false }
+            // No spawn without entry custody takes an identity entry's name.
+            guard "entry_name_free" { self.identity_entry_origins.contains_key(agent_identity) == false || entry_custody == true }
+            // A placed spawn acts for an identity entry only when the host
+            // declared the entry hosted on its first use: its member lives on
+            // the member host and is never seated Dormant here.
+            guard "placed_custody_hosted_on_first_use" {
+                entry_custody == false
+                || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+            }
             guard "placed_spawn_id_present" { placed_spawn_id != None }
             guard "placed_operation_owner_present" {
                 placed_provision_operation_id != None
@@ -8097,6 +8387,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             update {
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MaterializePending);
+                // The ladder acts for the identity's entry: the membership
+                // commit that closes it records the member an entry.
+                if entry_custody {
+                    self.spawn_exec_entry_custody.insert(agent_identity);
+                }
                 self.member_placement.insert(agent_identity, placement.get("value"));
                 self.pending_placed_spawn_ids.insert(agent_identity, placed_spawn_id.get("value"));
                 self.pending_placed_spawn_generations.insert(agent_identity, generation);
@@ -8528,6 +8823,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -8670,6 +8969,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -9026,6 +9329,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 // The reset incarnation's session state comes from its own rows.
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -9515,11 +9822,45 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberRetiredRunning {
-            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started }
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             update {
+                // The replay of an identity entry's retirement: as its live end,
+                // the entry outlives a retirement the seal did not start
+                // (unseated: owed a seat, or hosted on its first use when its
+                // incarnation was hosted elsewhere, by its placement or by the
+                // row's hosted_incarnation) and the session it was bound to is
+                // recorded when the retirement archived a local member's
+                // session (the row's session_archived, the live end's own
+                // condition); the end of an unlisted retirement removes the
+                // entry. Read before this step unseats the member.
+                if self.identity_entry_origins.contains_key(agent_identity) == true && self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) {
+                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false && hosted_incarnation == false {
+                        if self.member_session_bindings.contains_key(agent_identity) == true {
+                            self.identity_entry_archived_sessions.insert(agent_identity, self.member_session_bindings.get_cloned(agent_identity).get("value"));
+                        } else {
+                            if self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true {
+                                self.identity_entry_archived_sessions.insert(agent_identity, self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id).get("value"));
+                            }
+                        }
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                        // The entry's role hold ends with it, as at the live end.
+                        if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                            self.member_host_preparation_causes.remove(agent_identity);
+                        }
+                    } else {
+                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
+                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        } else {
+                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        }
+                    }
+                }
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -9545,7 +9886,6 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -9626,7 +9966,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberRetiredCurrentAlreadyAbsent {
-            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started }
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "generation_matches_retired_runtime" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
@@ -9635,6 +9975,40 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
             }
             update {
+                // The replay of an identity entry's retirement: as its live end,
+                // the entry outlives a retirement the seal did not start
+                // (unseated: owed a seat, or hosted on its first use when its
+                // incarnation was hosted elsewhere, by its placement or by the
+                // row's hosted_incarnation) and the session it was bound to is
+                // recorded when the retirement archived a local member's
+                // session (the row's session_archived, the live end's own
+                // condition); the end of an unlisted retirement removes the
+                // entry. Read before this step unseats the member.
+                if self.identity_entry_origins.contains_key(agent_identity) == true && self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) {
+                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false && hosted_incarnation == false {
+                        if self.member_session_bindings.contains_key(agent_identity) == true {
+                            self.identity_entry_archived_sessions.insert(agent_identity, self.member_session_bindings.get_cloned(agent_identity).get("value"));
+                        } else {
+                            if self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true {
+                                self.identity_entry_archived_sessions.insert(agent_identity, self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id).get("value"));
+                            }
+                        }
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                        // The entry's role hold ends with it, as at the live end.
+                        if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                            self.member_host_preparation_causes.remove(agent_identity);
+                        }
+                    } else {
+                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
+                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        } else {
+                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        }
+                    }
+                }
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -9656,7 +10030,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -12675,7 +13048,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: a placed entry stays unseated, hosted on its first
+                // use. Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                    }
+                }
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_materialization.remove(agent_identity);
@@ -12740,7 +13125,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
@@ -12786,7 +13171,25 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: it stays unseated, owed a seat, and its archived
+                // session is recorded, so the next apply seats it there again.
+                // Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if disposal == MemberSessionDisposal::Archived && session_id != None {
+                        self.identity_entry_archived_sessions.insert(agent_identity, session_id.get("value"));
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                    }
+                }
+                // A seated member's role hold goes with it; a first-boot
+                // preparation waits for the host (or the destroy beats it).
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -12842,7 +13245,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
@@ -12944,7 +13347,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
@@ -12986,7 +13389,25 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: it stays unseated, owed a seat, and its archived
+                // session is recorded, so the next apply seats it there again.
+                // Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if disposal == MemberSessionDisposal::Archived && session_id != None {
+                        self.identity_entry_archived_sessions.insert(agent_identity, session_id.get("value"));
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                    }
+                }
+                // A seated member's role hold goes with it; a first-boot
+                // preparation waits for the host (or the destroy beats it).
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13042,7 +13463,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
@@ -13077,7 +13498,25 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: it stays unseated, owed a seat, and its archived
+                // session is recorded, so the next apply seats it there again.
+                // Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if disposal == MemberSessionDisposal::Archived && session_id != None {
+                        self.identity_entry_archived_sessions.insert(agent_identity, session_id.get("value"));
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                    }
+                }
+                // A seated member's role hold goes with it; a first-boot
+                // preparation waits for the host (or the destroy beats it).
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13133,7 +13572,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
@@ -13227,7 +13666,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.destroy_admitted == true
             }
             guard "host_preparation_settled_or_destroying" {
-                self.member_host_preparation_pending.contains(agent_identity) == false
+                self.member_host_preparation_causes.get_cloned(agent_identity) != Some(HostPreparationCause::FirstBootRow)
                 || self.destroy_admitted == true
             }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
@@ -13262,7 +13701,25 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: it stays unseated, owed a seat, and its archived
+                // session is recorded, so the next apply seats it there again.
+                // Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if disposal == MemberSessionDisposal::Archived && session_id != None {
+                        self.identity_entry_archived_sessions.insert(agent_identity, session_id.get("value"));
+                    }
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                    }
+                }
+                // A seated member's role hold goes with it; a first-boot
+                // preparation waits for the host (or the destroy beats it).
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13349,7 +13806,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: a placed entry stays unseated, hosted on its first
+                // use. Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                    }
+                }
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13454,7 +13923,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
-                self.identity_entry_origins.remove(agent_identity);
+                // An identity entry outlives a retirement the declared apply did
+                // not start: a placed entry stays unseated, hosted on its first
+                // use. Only the end of an unlisted retirement (the seal's mark)
+                // removes the entry.
+                if self.identity_entry_origins.contains_key(agent_identity) == true {
+                    if self.identity_entry_retiring.contains(agent_identity) == true {
+                        self.identity_entry_origins.remove(agent_identity);
+                        self.identity_entry_retiring.remove(agent_identity);
+                    } else {
+                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                    }
+                }
+                self.member_host_preparation_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13661,6 +14142,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13744,6 +14230,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13821,6 +14312,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13897,6 +14393,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13989,6 +14490,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14085,6 +14591,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14594,6 +15105,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.identity_entry_origins = EmptyMap;
+                self.identity_entry_unseated = EmptyMap;
+                self.identity_entry_retiring = EmptySet;
+                self.identity_entry_archived_sessions = EmptyMap;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
@@ -14625,7 +15139,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints = EmptyMap;
                 self.member_rotation_targets = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
-                self.member_host_preparation_pending = EmptySet;
+                self.member_host_preparation_causes = EmptyMap;
                 // Spawn-exec phase ladder: total teardown — clear the whole phase
                 // map so no in-flight spawn-exec survives into Destroyed (every
                 // late CommitSpawnActivation/AbortSpawnExec becomes a Settled no-op).
@@ -15047,6 +15561,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            // No member before the reset is a member after it: the reset
+            // commits only once its retirement batch emptied the roster. Its
+            // preflight (AdmitReset) admits a mob with members.
+            guard "roster_empty" { self.identity_to_runtime == EmptyMap }
             guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
             guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
             guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
@@ -15074,6 +15592,22 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = EmptySet;
                 self.member_seat_session_unborn = EmptySet;
                 self.unborn_seat_sessions = EmptySet;
+                // The role hold of every entry ends with it (a first-boot
+                // preparation stays the host's).
+                for id in self.identity_entry_origins.keys() {
+                    if self.member_host_preparation_causes.get_cloned(id) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                        self.member_host_preparation_causes.remove(id);
+                    }
+                }
+                // A mob reset ends every identity entry and its standing (no
+                // member before it is a member after it): the next declared
+                // apply declares the roster afresh, on fresh sessions. A spawn
+                // ladder still open acts for no entry any more.
+                self.identity_entry_origins = EmptyMap;
+                self.identity_entry_unseated = EmptyMap;
+                self.identity_entry_retiring = EmptySet;
+                self.identity_entry_archived_sessions = EmptyMap;
+                self.spawn_exec_entry_custody = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;
             }
@@ -15139,7 +15673,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_a(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -15160,7 +15694,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_b(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -15210,7 +15744,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_a(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -15231,7 +15765,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_b(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -21984,6 +22518,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.identity_entry_origins = EmptyMap;
+                self.identity_entry_unseated = EmptyMap;
+                self.identity_entry_retiring = EmptySet;
+                self.identity_entry_archived_sessions = EmptyMap;
                 // No spawn ladder acts for an identity entry after the
                 // destroy.
                 self.spawn_exec_entry_custody = EmptySet;
@@ -22008,7 +22545,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_peer_endpoints = EmptyMap;
                 self.member_rotation_targets = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
-                self.member_host_preparation_pending = EmptySet;
+                self.member_host_preparation_causes = EmptyMap;
                 self.runtime_retire_archive_only = EmptySet;
                 self.runtime_retire_refusal_codes = EmptyMap;
                 self.runtime_retire_refusal_reasons = EmptyMap;
@@ -22595,6 +23132,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_readiness_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -25214,8 +25752,9 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         // The build seed: restore policy, composition authority and the host's
-        // pending preparations. Seeded before the boot plan seals, never while
-        // a wake attempt is open, never journaled.
+        // first-boot requests, each owed its host preparation (FirstBootRow).
+        // Seeded before the boot plan seals, never while a wake attempt is
+        // open, never journaled.
         transition SeedMemberResidency {
             per_phase [Running, Stopped, Completed]
             on input SeedMemberResidency { policy, composition_authority, host_pending }
@@ -25224,7 +25763,10 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_restore_policy = policy;
                 self.composition_authority = composition_authority;
-                self.member_host_preparation_pending = host_pending;
+                self.member_host_preparation_causes = EmptyMap;
+                for id in host_pending {
+                    self.member_host_preparation_causes.insert(id, HostPreparationCause::FirstBootRow);
+                }
             }
             to Running
         }
@@ -25247,7 +25789,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     input_class,
                     sender_waking,
                     observed_missing,
@@ -25301,7 +25843,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     input_class,
                     sender_waking,
                     observed_missing,
@@ -25335,7 +25877,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     input_class,
                     sender_waking,
                     observed_missing,
@@ -25371,7 +25913,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     input_class,
                     sender_waking,
                     observed_missing,
@@ -25394,7 +25936,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     input_class,
                     sender_waking,
                     observed_missing,
@@ -25437,7 +25979,7 @@ macro_rules! mob_catalog_machine_dsl {
                 member_boot_materialization(
                     self.member_restore_policy,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     self.placed_completion_lifecycle_quiescing == false,
                     obligation,
                     self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
@@ -25493,7 +26035,7 @@ macro_rules! mob_catalog_machine_dsl {
                 member_boot_materialization(
                     self.member_restore_policy,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     self.placed_completion_lifecycle_quiescing == false,
                     obligation,
                     self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
@@ -25524,7 +26066,7 @@ macro_rules! mob_catalog_machine_dsl {
                 member_boot_materialization(
                     self.member_restore_policy,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
-                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.member_host_preparation_causes.contains_key(agent_identity),
                     self.placed_completion_lifecycle_quiescing == false,
                     obligation,
                     self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
@@ -25624,8 +26166,30 @@ macro_rules! mob_catalog_machine_dsl {
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
-            // Never bind an archived session.
-            guard "session_not_archived" { session_archived == false }
+            // Never bind an archived session, but an identity entry's own: its
+            // retirement archived it, and this seat revives the entry on it
+            // (the member's first wake revives the session).
+            guard "session_not_archived_or_revived" {
+                session_archived == false
+                || self.identity_entry_archived_sessions.get_cloned(agent_identity) == Some(bridge_session_id)
+            }
+            // A seat that acts for an entry with an archived session record
+            // takes that session: a fresh one only once the record is let go
+            // (ForgetArchivedSession: the session is lost, or the host asked
+            // for a fresh life).
+            guard "archived_record_session" {
+                self.spawn_exec_entry_custody.contains(agent_identity) == false
+                || self.identity_entry_archived_sessions.contains_key(agent_identity) == false
+                || self.identity_entry_archived_sessions.get_cloned(agent_identity) == Some(bridge_session_id)
+            }
+            // The dormant seat seats an unseated entry only when the declared
+            // apply owes it a seat: never one hosted on its first use (its
+            // host creates it), one awaiting its held creation (the host's
+            // held protocol creates it), or one of any later cause.
+            guard "unseated_entry_owed_its_seat" {
+                self.identity_entry_unseated.contains_key(agent_identity) == false
+                || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+            }
             // A session no build has created is seated unborn whatever the
             // store shows (the first wake adopts one an interrupted create
             // left): the record, not the store, tells it from a lost session.
@@ -25663,6 +26227,10 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // A seat ends the identity entry's unseated standing and its
+                // archived session record: the identity is a member again.
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -25708,8 +26276,13 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
                 }
-                // The host's carry-out of this identity is this seat.
-                self.member_host_preparation_pending.remove(agent_identity);
+                // The host's carry-out of this identity is this seat: it ends
+                // the identity's first-boot preparation, and no other cause (a
+                // role hold stays on the seated member, whose wakes it refuses
+                // until an apply ends it).
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 // A seat clears kickoff residue, as the fresh spawn commit does,
                 // and owes no kickoff: a spec that owes one is spawned embodied
                 // through the ordinary spawn path, never seated.
@@ -25773,14 +26346,19 @@ macro_rules! mob_catalog_machine_dsl {
             emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
-        // The host carried out an identity's pending preparation without a
+        // The host carried out an identity's first-boot request without a
         // seat (the identity is already seated on that session). Total: an
-        // identity that is not pending is a no-op.
+        // identity with no first-boot preparation owed is a no-op. A role
+        // hold (RoleMigrationUndeclared) never ends here: it ends at the
+        // declared apply that restores the role, or in the step that commits
+        // the declared one.
         transition ResolveMemberHostPreparation {
             per_phase [Running, Stopped, Completed]
             on input ResolveMemberHostPreparation { agent_identity }
             update {
-                self.member_host_preparation_pending.remove(agent_identity);
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
             }
             to Running
         }
@@ -26016,6 +26594,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -26046,7 +26633,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // The host's rotation carries out a first-boot preparation; a
+                // role hold ends above, only when this step commits another
+                // role.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -26204,6 +26796,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -26234,7 +26835,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // The host's rotation carries out a first-boot preparation; a
+                // role hold ends above, only when this step commits another
+                // role.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -26598,6 +27204,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_readiness_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -26638,6 +27245,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_topology_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -26645,6 +27253,43 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_waking" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking) }
             update { self.explicit_resume_member_work.insert(agent_identity, binding); }
             to Running
+        }
+
+        // A member whose host preparation is owed (a first-boot request not
+        // carried out, a role hold) is never rebuilt by the explicit resume:
+        // every wake of it is refused, and the resume answers it held,
+        // typed, and goes on with the other members. A Live member keeps its
+        // materialization, whose run starts the role hold holds until it is
+        // released when idle; a Dormant one stays Dormant.
+        transition AuthorizeExplicitResumeMemberHeldRunning {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit ExplicitResumeMemberHeld { agent_identity: agent_identity, cause: self.member_host_preparation_causes.get_cloned(agent_identity).get("value") }
+        }
+
+        // The Held arm's twin while the mob is still Stopped: the explicit
+        // resume selects its candidates and prepares them (reads a Live
+        // member's session, asks the host's customizer, retires an actor
+        // whose binding changed) before the durable Resume, and answers a
+        // member whose host preparation is owed held there, before anything
+        // acts on it. A pure verdict, as the Running arm is; no other arm
+        // authorizes a member in Stopped.
+        transition AuthorizeExplicitResumeMemberHeldStopped {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == true }
+            update {}
+            to Stopped
+            emit ExplicitResumeMemberHeld { agent_identity: agent_identity, cause: self.member_host_preparation_causes.get_cloned(agent_identity).get("value") }
         }
 
         // The release verdict for one member (the shell's release_member
@@ -26812,6 +27457,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -26842,7 +27496,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // The host's rotation carries out a first-boot preparation; a
+                // role hold ends above, only when this step commits another
+                // role.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 // The owed kickoff, recorded pending on the next incarnation
                 // in the same step (KickoffClear + KickoffMarkPending): its
                 // boot verdict wakes it, and the kickoff runs once on the new
@@ -27011,6 +27670,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27041,7 +27709,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // The host's rotation carries out a first-boot preparation; a
+                // role hold ends above, only when this step commits another
+                // role.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 // The owed kickoff, recorded pending on the next incarnation
                 // in the same step (KickoffClear + KickoffMarkPending): its
                 // boot verdict wakes it, and the kickoff runs once on the new
@@ -27200,6 +27873,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27363,6 +28045,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27566,7 +28257,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_a(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -27633,7 +28324,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_b(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -27705,7 +28396,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_a(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -27785,7 +28476,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.destroy_admitted == false,
                     self.composition_authority == CompositionAuthorityKind::Authoritative,
                     self.placed_completion_lifecycle_quiescing == false,
-                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    self.member_host_preparation_causes.contains_key(mob_machine_wiring_edge_b(edge)),
                     PeerInputClass::Content,
                     false,
                     false,
@@ -28068,13 +28759,13 @@ macro_rules! mob_catalog_machine_dsl {
         // entry, or the row of a legacy member's adoption. Replay only (the
         // boot plan is not sealed yet), after the row's seat, in a running
         // mob or a stopped one, as the replay of a wiring exemption. Only the
-        // current incarnation of a seated local identity is recorded.
+        // current incarnation of a seated identity is recorded, local or
+        // placed (a placed entry's row replays after its carrier).
         transition RecoverIdentityEntrySeated {
             per_phase [Running, Stopped]
             on signal RecoverIdentityEntry { agent_identity, agent_runtime_id, origin }
             guard "replay_not_sealed" { self.boot_plan_sealed == false }
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
-            guard "member_local" { self.member_placement.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, origin);
                 self.members_to_spawn.remove(agent_identity);
@@ -28227,6 +28918,800 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit AgentLaneMemberAdmissionResolved { agent_identity: agent_identity, admission: AgentLaneMemberAdmissionKind::IdentityMember }
+        }
+
+        // =====================================================================
+        // The declared apply (0.9.9): one arm per verdict of a declared
+        // identity, the seal of a complete declared roster, the replay of an
+        // unlisted retirement, and the release of an archived session record.
+        // Appended after every published transition.
+        // =====================================================================
+
+        // A seated entry whose role and runtime mode match the declaration
+        // keeps its seat: a descriptive facet (its display name, labels,
+        // instructions) is no lifecycle fact, so nothing is written but the
+        // end of a role hold the host ended by restoring the role.
+        transition DeclareIdentityEntryKept {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_kept" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::Kept
+            }
+            update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::Kept, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A local entry no member holds is owed its seat: the declared apply
+        // records the entry and the shell seats it Dormant, on its archived
+        // session when the identity has one (the entry comes back with its
+        // history), on a fresh one otherwise.
+        transition DeclareIdentityEntrySeatOwed {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_seat_owed" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::SeatOwed
+            }
+            update {
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                // A session service that keeps no durable sessions has no
+                // archived session to revive the entry on.
+                if session_memory_only {
+                    self.identity_entry_archived_sessions.remove(agent_identity);
+                }
+                // The seat takes the declared role on a session built under
+                // it, or declares the migration from the role its session was
+                // built under: a role hold an earlier apply wrote ends. No
+                // member holds the identity, so none was held under its
+                // previous role.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::SeatOwed, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A placed or externally bound entry no member holds is hosted on
+        // its first use: the entry is recorded, and its host creates the
+        // member (a spawn holding the entry's custody), never the dormant
+        // seat.
+        transition DeclareIdentityEntryHostedOnFirstUse {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_hosted_on_first_use" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::HostedOnFirstUse
+            }
+            update {
+                // The identity's host creates its member: a first-boot request
+                // for it is settled here, and carried out by that creation.
+                if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::HostedOnFirstUse, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // An entry the host declares held and that was never created awaits
+        // its held creation: the entry is recorded, and only a spawn holding
+        // its custody (the host's held protocol) creates it.
+        transition DeclareIdentityEntryAwaitHeldCreation {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_await_held_creation" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::AwaitHeldCreation
+            }
+            update {
+                // The identity's host creates its member: a first-boot request
+                // for it is settled here, and carried out by that creation.
+                if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HeldCreation);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::AwaitHeldCreation, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A seated entry declared with another runtime mode is restamped on
+        // its own session (a same-session rotation, when the member is
+        // idle); a role hold ends.
+        transition DeclareIdentityEntryRuntimeModeRestamp {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_runtime_mode_restamp" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RuntimeModeRestamp
+            }
+            update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RuntimeModeRestamp, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A seated entry declared under another role, with the migration
+        // declared from its current role, is restamped on its own session
+        // under the new role (a same-session rotation, when the member is
+        // idle). A role hold an earlier apply wrote stays until the restamp's
+        // terminal commits the new role: a deferred or refused restamp keeps
+        // the member held.
+        transition DeclareIdentityEntryRoleMigrate {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_role_migrate" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RoleMigrate
+            }
+            update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A seated entry whose role or runtime mode changes on a session that
+        // lives in memory only moves to a fresh session (a rotation, when the
+        // member is idle): there is no session to carry over. A role hold
+        // ends here when the declared role is the member's own (only its
+        // runtime mode moves); a role move keeps it until the rotation's
+        // terminal commits the new role.
+        transition DeclareIdentityEntryRoleRotate {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_role_rotate" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RoleRotate
+            }
+            update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.member_profile_names.get_cloned(agent_identity) == Some(profile_name) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleRotate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A seated entry declared under another role with no migration
+        // declared is held: its host preparation is owed
+        // (RoleMigrationUndeclared), so no wake (a host's, a peer's, the boot
+        // plan's) builds it under its previous role until an apply declares
+        // the move or restores the role. A first-boot preparation still owed
+        // keeps its own cause, which holds the wakes as well. An unseated
+        // identity whose seat would resume a session last built under another
+        // role, with no migration from that role declared, is held the same
+        // way: it is recorded an entry owed its seat, and no apply seats it
+        // until one declares the migration or restores the role.
+        transition DeclareIdentityEntryRoleMigrationHeld {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_role_migration_held" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RoleMigrationHeld
+            }
+            update {
+                // A seated member carries out its first-boot Resume request
+                // first, so the role hold that request's preparation masked is
+                // written in this same step.
+                if first_boot == FirstBootRequestKind::Resume && self.identity_to_runtime.contains_key(agent_identity) == true && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                if self.identity_to_runtime.contains_key(agent_identity) == true {
+                    // Listed again before its unlisted retirement started: the mark
+                    // goes, so a later retirement keeps the entry.
+                    self.identity_entry_retiring.remove(agent_identity);
+                }
+                if self.identity_entry_origins.contains_key(agent_identity) == false {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                    self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                    self.members_to_spawn.remove(agent_identity);
+                    self.members_to_retire.remove(agent_identity);
+                }
+                if self.member_host_preparation_causes.contains_key(agent_identity) == false {
+                    self.member_host_preparation_causes.insert(agent_identity, HostPreparationCause::RoleMigrationUndeclared);
+                }
+            }
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrationHeld, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A member whose spawn, wake or retirement is in flight is left to
+        // the next apply: nothing is written.
+        transition DeclareIdentityEntryLifecycleInFlight {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_lifecycle_in_flight" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::LifecycleInFlight
+            }
+            update {}
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::LifecycleInFlight, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A worker member holds the name: refused for this identity alone,
+        // and nothing is written.
+        transition DeclareIdentityEntryRefusedNameHeldByWorker {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_refused_name_held_by_worker" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RefusedNameHeldByWorker
+            }
+            update {}
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameHeldByWorker, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // The identity store manages the identity (an intent row): refused,
+        // and nothing is written.
+        transition DeclareIdentityEntryRefusedHostAdopted {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_refused_host_adopted" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RefusedHostAdopted
+            }
+            update {}
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedHostAdopted, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A candidate composition declares nothing: refused, and nothing is
+        // written.
+        transition DeclareIdentityEntryRefusedNonAuthoritative {
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            guard { self.lifecycle_phase == Phase::Running }
+            // The declared apply acts on Declared entries only, by this
+            // explicit check: an identity another origin holds is never
+            // declared over (no arm takes it).
+            guard "declared_entry_or_no_entry" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            }
+            guard "verdict_refused_non_authoritative" {
+                identity_entry_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    intent_managed,
+                    self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.contains_key(agent_identity),
+                    placement,
+                    held_creation,
+                    self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                    session_memory_only,
+                    self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                    resume_session_role != None && resume_session_role != Some(profile_name),
+                    declared_migration_from != None && declared_migration_from == resume_session_role
+                ) == IdentityEntryVerdict::RefusedNonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNonAuthoritative, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+        }
+
+        // A mob that is not running declares nothing.
+        transition DeclareIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            update {}
+            to Running
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None }
+        }
+
+        // The seal of a complete declared roster, by an explicit check on
+        // Declared entries only. A Declared entry the roster does not list is
+        // unlisted: a seated one is marked (identity_entry_retiring) while its
+        // member is not retiring, and the shell retires the member with the
+        // cause Unlisted, whose end removes the entry; an unseated one is
+        // removed at once, unless a spawn ladder is open for it (its commit
+        // seats it, and a later seal marks it). A listed entry loses its mark
+        // while its member's retirement has not started: the host listed it
+        // again. A member whose retirement started for another reason is
+        // left to that retirement, whose end keeps the entry unseated, and a
+        // later seal removes it.
+        transition SealDeclaredRosterSealed {
+            on input SealDeclaredRoster { desired }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            update {
+                for id in self.identity_entry_origins.keys() {
+                    if self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared) {
+                        if self.identity_to_runtime.contains_key(id) == true {
+                            if self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) != Some(MobMemberState::Retiring) {
+                                if desired.contains(id) == false {
+                                    self.identity_entry_retiring.insert(id);
+                                } else {
+                                    self.identity_entry_retiring.remove(id);
+                                }
+                            }
+                        } else {
+                            if desired.contains(id) == false && self.spawn_exec_phase.contains_key(id) == false {
+                                self.identity_entry_origins.remove(id);
+                                self.identity_entry_unseated.remove(id);
+                                // Its role hold ends with it: a member later
+                                // seated under the name inherits none.
+                                if self.member_host_preparation_causes.get_cloned(id) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                    self.member_host_preparation_causes.remove(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            to Running
+            emit DeclaredRosterSealed { verdict: DeclaredRosterSealVerdict::Sealed }
+        }
+
+        // A candidate composition seals nothing.
+        transition SealDeclaredRosterNonAuthoritative {
+            on input SealDeclaredRoster { desired }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_non_authoritative" { self.composition_authority == CompositionAuthorityKind::NonAuthoritative }
+            update {}
+            to Running
+            emit DeclaredRosterSealed { verdict: DeclaredRosterSealVerdict::NonAuthoritative }
+        }
+
+        transition SealDeclaredRosterMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input SealDeclaredRoster { desired }
+            update {}
+            to Running
+            emit DeclaredRosterSealed { verdict: DeclaredRosterSealVerdict::MobNotRunning }
+        }
+
+        // The replay of an unlisted retirement's start row (its stored cause
+        // Unlisted): the Declared entry the seal unlisted is marked again on
+        // the incarnation the row names, so the end of its retirement (live,
+        // or the replay of its MemberRetired row, which the replay marks the
+        // entry before) removes the entry. Replay only (the boot plan is not
+        // sealed yet), on the identity's seated incarnation, as the replay of
+        // a rotation intent.
+        transition RecoverIdentityEntryRetiringMarked {
+            per_phase [Running]
+            on signal RecoverIdentityEntryRetiring { agent_identity, agent_runtime_id }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared) }
+            update {
+                self.identity_entry_retiring.insert(agent_identity);
+            }
+            to Running
+        }
+
+        // The replay of an unlisted retirement's start row whose incarnation
+        // is no longer the identity's seated Declared entry (a later row
+        // replaced the member, or ended the entry): it marks nothing. The
+        // shell passes every such row, and the machine decides.
+        transition RecoverIdentityEntryRetiringStale {
+            per_phase [Running]
+            on signal RecoverIdentityEntryRetiring { agent_identity, agent_runtime_id }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "not_the_seated_declared_entry" {
+                self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+                || self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared)
+            }
+            update {}
+            to Running
+        }
+
+        // An unseated identity's archived session record is let go: the shell
+        // observed the session absent from the store, or the host asked for a
+        // fresh life. The seat that follows takes a fresh session
+        // (archived_record_session). Running and an authoritative composition
+        // only, and only the record of the session the shell observed.
+        transition ForgetArchivedSession {
+            on input ForgetArchivedSession { agent_identity, session_id, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "identity_unseated" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            guard "record_names_session" { self.identity_entry_archived_sessions.get_cloned(agent_identity) == Some(session_id) }
+            update {
+                self.identity_entry_archived_sessions.remove(agent_identity);
+            }
+            to Running
+            emit ArchivedSessionForgotten { agent_identity: agent_identity, session_id: session_id, reason: reason }
+        }
+
+        // A declared apply opens: one apply of the mob at a time. A second
+        // apply while one is open is refused (Busy), typed and retryable,
+        // and changes nothing.
+        transition OpenDeclaredApplyOpened {
+            on input OpenDeclaredApply
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "no_apply_open" { self.declared_apply_open == false }
+            update {
+                self.declared_apply_open = true;
+            }
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::Opened }
+        }
+
+        transition OpenDeclaredApplyBusy {
+            on input OpenDeclaredApply
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "apply_open" { self.declared_apply_open == true }
+            update {}
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::Busy }
+        }
+
+        transition OpenDeclaredApplyMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input OpenDeclaredApply
+            update {}
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::MobNotRunning }
+        }
+
+        // The open declared apply closes, whatever its outcome and the mob's
+        // lifecycle phase. Total: closing when none is open is a no-op.
+        transition CloseDeclaredApply {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input CloseDeclaredApply
+            update {
+                self.declared_apply_open = false;
+            }
+            to Running
+        }
+
+        // The reset's preflight: the shell probes it before the retirement
+        // batch that empties the roster, which ResetToRunning then requires.
+        // Admitted exactly when every guard of ResetToRunning but the empty
+        // roster holds, in each phase a reset leaves; a pure verdict that
+        // changes nothing. No arm answers a destroyed mob or a reset that
+        // must wait (a resume attempt, adaptive work, remote or placed
+        // custody, no reset intent): the shell answers the reset an invalid
+        // transition. Appended after every published transition.
+        transition AdmitReset {
+            per_phase [Running, Stopped, Completed]
+            on input AdmitReset
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
+            guard "adaptive_lifecycle_drained" {
+                mob_machine_adaptive_lifecycle_drained(
+                    self.adaptive_active_run,
+                    self.adaptive_active_layer,
+                    self.adaptive_active_members,
+                    self.adaptive_layer_phase,
+                    self.adaptive_layer_disposition)
+            }
+            guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
+            guard "placed_completion_pending_drained" { self.pending_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_cancel_requested_drained" { self.cancel_requested_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_reset_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Reset) }
+            guard "placed_kickoff_pending_drained" { self.pending_placed_kickoff_outcomes == EmptySet }
+            guard "placed_kickoff_resolved_drained" { self.resolved_placed_kickoff_outcomes == EmptySet }
+            update {}
+            to Running
         }
     }
         }
@@ -31373,6 +32858,137 @@ pub enum AgentLaneMemberAdmissionKind {
     Admitted,
     /// The member is an identity entry: the agent lane does not act on it.
     IdentityMember,
+}
+
+/// The kind of a host's first-boot request for one declared identity
+/// ([`MobMachineInput::DeclareIdentityEntry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FirstBootRequestKind {
+    /// The roster carries no first-boot request for the identity.
+    #[default]
+    None,
+    /// Seat the identity on the request's session (a seated member carries
+    /// it out at once).
+    Resume,
+    /// Start the identity's fresh life on a new session.
+    Fresh,
+}
+
+/// The verdict of a declared apply's opening
+/// ([`MobMachineInput::OpenDeclaredApply`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DeclaredApplyOpenVerdict {
+    /// The apply is open.
+    #[default]
+    Opened,
+    /// Another apply of the mob is open: refused, retryable.
+    Busy,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// Why an identity entry is unseated (`identity_entry_unseated`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum UnseatedEntryCause {
+    /// The declared apply owes the entry a seat: the shell seats it Dormant.
+    #[default]
+    SeatOwed,
+    /// A placed or externally bound entry: its host creates the member when
+    /// the identity is first used.
+    HostedOnFirstUse,
+    /// The host declared the entry's creation held and the identity was never
+    /// created: the host's held protocol creates it.
+    HeldCreation,
+}
+
+/// Why an identity's host preparation is owed
+/// (`member_host_preparation_causes`). Every cause refuses the member's
+/// wakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum HostPreparationCause {
+    /// A first-boot request the host has not carried out.
+    #[default]
+    FirstBootRow,
+    /// A role move the host has not declared (the declared apply's
+    /// RoleMigrationHeld verdict).
+    RoleMigrationUndeclared,
+    /// A build preparation the host asked to retry. No transition records it
+    /// yet.
+    BuildPreparationRetry,
+}
+
+/// Where a declared identity entry's member lives
+/// ([`MobMachineInput::DeclareIdentityEntry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum EntryPlacementKind {
+    /// A local member, seated Dormant by the declared apply.
+    #[default]
+    Local,
+    /// A member placed on a member host.
+    Placed,
+    /// A member bound to an external session backend.
+    External,
+}
+
+/// The declared apply's verdict for one identity
+/// ([`MobMachineInput::DeclareIdentityEntry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityEntryVerdict {
+    /// A seated entry keeps its seat.
+    #[default]
+    Kept,
+    /// The entry is owed a seat: the shell seats it Dormant.
+    SeatOwed,
+    /// The entry's host creates its member when the identity is first used.
+    HostedOnFirstUse,
+    /// The entry awaits its held creation.
+    AwaitHeldCreation,
+    /// The member is restamped with its new runtime mode on its own session.
+    RuntimeModeRestamp,
+    /// The member is restamped under its declared new role on its own
+    /// session.
+    RoleMigrate,
+    /// The member moves to a fresh session (its session lives in memory
+    /// only).
+    RoleRotate,
+    /// The member's undeclared role move is held: its wakes are refused.
+    RoleMigrationHeld,
+    /// The member's spawn, wake or retirement is in flight: the next apply
+    /// decides.
+    LifecycleInFlight,
+    /// A worker member holds the name.
+    RefusedNameHeldByWorker,
+    /// The identity store manages the identity.
+    RefusedHostAdopted,
+    /// A candidate composition declares nothing.
+    RefusedNonAuthoritative,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// The verdict of the seal of a declared roster
+/// ([`MobMachineInput::SealDeclaredRoster`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DeclaredRosterSealVerdict {
+    /// The roster is sealed: every unlisted Declared entry is marked or
+    /// removed.
+    #[default]
+    Sealed,
+    /// A candidate composition seals nothing.
+    NonAuthoritative,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// Why an unseated identity's archived session record is let go
+/// ([`MobMachineInput::ForgetArchivedSession`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ArchivedSessionForgetReason {
+    /// The shell observed the session absent from the store.
+    #[default]
+    SessionAbsent,
+    /// The host asked for a fresh life (a first-boot Fresh request).
+    FreshLifeRequested,
 }
 
 /// Row #260: typed step-output fault carried by

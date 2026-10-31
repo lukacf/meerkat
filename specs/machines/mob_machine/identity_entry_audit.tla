@@ -11,7 +11,8 @@
 \*   identity 1: a member recovered by replay (its roster row and session
 \*     binding), which the replay of an entry row (RecoverIdentityEntry) or
 \*     the legacy adoption (AdoptLegacyIdentityEntry) can make an entry, and
-\*     the replay of its retirement unseats;
+\*     the replay of its retirement unseats (an entry stays, unseated and
+\*     owed its seat);
 \*   identity 2: a member seated by the spawn ladder (AuthorizeSpawnProfile,
 \*     BeginSpawnExecFresh with or without entry custody, CommitSpawnMembership
 \*     or AbortSpawnExec), and unseated by the replay of its retirement;
@@ -30,8 +31,9 @@
 \* model_step_count and topology_epoch, which no guard reads, with TLC
 \* coverage. Properties:
 \*   every generated invariant of ci.cfg (kept), among them the entry ones:
-\*     entry_is_seated_or_has_an_unseated_cause (its present form: every
-\*     entry is seated), identity_entry_is_local,
+\*     entry_is_seated_or_has_an_unseated_cause (an entry is seated, or
+\*     unseated with a typed cause), unseated_entry_is_not_a_member,
+\*     placed_entry_custody_is_hosted_on_first_use,
 \*     worker_reconcile_spares_entries and entry_custody_ladder_is_open;
 \*   AuditProbeExactlyOne, AuditAgentLaneExactlyOne and
 \*     AuditAdoptionExactlyOne (invariants, ENABLED form): exactly one arm of
@@ -40,8 +42,9 @@
 \*   AuditProbeRefusesEntryName (invariant): an entry's name, probed without
 \*     entry custody, answers IdentityMemberRejected;
 \*   AuditEntryOnlyWithCause (action property): an identity becomes an entry
-\*     only by the commit of a ladder that holds its entry custody, an
-\*     observed adoption, or the replay of its row on its seated incarnation;
+\*     only by the declared apply (which records its unseated cause), the
+\*     commit of a ladder that holds its entry custody, an observed adoption,
+\*     or the replay of its row on its seated incarnation;
 \*   AuditAdoptionNeedsObservation (action property): an adoption without the
 \*     shell's legacy observation records no entry.
 \*
@@ -90,8 +93,8 @@ R1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 
 \* The replay of a retirement row: the identity is unseated.
 RetiredReplay(id, rid) ==
-    \/ RecoverRosterMemberRetiredRunning(id, rid, 0, FALSE, FALSE)
-    \/ RecoverRosterMemberRetiredCurrentAlreadyAbsent(id, rid, 0, FALSE, FALSE)
+    \/ RecoverRosterMemberRetiredRunning(id, rid, 0, FALSE, FALSE, TRUE, FALSE)
+    \/ RecoverRosterMemberRetiredCurrentAlreadyAbsent(id, rid, 0, FALSE, FALSE, TRUE, FALSE)
 
 \* Identity 2's spawn ladder, opened with or without entry custody.
 L2Authorize ==
@@ -234,11 +237,13 @@ AuditAdoptionExactlyOne ==
         \A id \in AuditIds, g \in AuditGenerations, observed \in BOOLEAN :
             Cardinality({i \in 1..8 : AuditAdoptionVerdicts(id, g, observed)[i]}) = 1
 
-\* An identity becomes an entry only by the commit of a ladder that holds
-\* its entry custody, an observed adoption, or the replay of its row on its
+\* An identity becomes an entry only by the declared apply (which records the
+\* entry with its unseated cause), the commit of a ladder that holds its
+\* entry custody, an observed adoption, or the replay of its row on its
 \* seated incarnation.
 AuditEntryOnlyWithCause ==
     [][\A id \in NewEntries :
+         \/ id \in DOMAIN identity_entry_unseated'
          \/ id \in spawn_exec_entry_custody
          \/ \E g \in AuditGenerations : AdoptLegacyIdentityEntryAdopted(id, g, TRUE)
          \/ \E rid \in AuditRids : ReplayArm(id, rid)
@@ -273,8 +278,13 @@ AuditWitnessReconcileSparesEntry ==
 AuditWitnessReconcileSpawnsWorkerOnly ==
     /\ \E desired \in SUBSET AuditIds : ReconcileRunning(desired, FALSE) /\ \E id \in Entries : id \in desired
     /\ members_to_spawn' # {}
-\* The retirement replay unseats an entry, which ends the entry.
-AuditWitnessUnseated == \E id \in Entries : id \notin DOMAIN identity_to_runtime'
+\* The retirement replay unseats an entry, which keeps the entry, unseated
+\* and owed its seat.
+AuditWitnessUnseated ==
+    \E id \in Entries :
+        /\ id \notin DOMAIN identity_to_runtime'
+        /\ id \in DOMAIN identity_entry_unseated'
+        /\ identity_entry_unseated'[id] = "SeatOwed"
 \* A seated entry's name is refused to a probe without custody (state goal).
 AuditWitnessProbeRefused == \E id \in Entries : phase = "Running" /\ ENABLED ProbeMemberAdmissionIdentityMemberRunning(id, FALSE)
 \* The agent lane refuses an entry in a stopped mob (state goal).

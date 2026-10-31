@@ -403,7 +403,7 @@ WBind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 WBindCurrent == RecoverMemberSessionBindingAlreadyCurrentRunning(Id1, Rid1, Sess1, None)
 WEndpoint == RecoverMemberPeerEndpointFreshRunning(Id1, Rid1, Sess1, E1Inproc)
 WRegisterPeer == RegisterMemberPeerRunning(Id1, Rid1, 0, 1, E1Inproc)
-WRecoverRetired == \E p \in BOOLEAN, started \in BOOLEAN : RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, p, started)
+WRecoverRetired == \E p \in BOOLEAN, started \in BOOLEAN : RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, p, started, TRUE, FALSE)
 \* The replayed restore failures (Broken setters).
 WRestoreFailure ==
     \/ RecoverMemberRestoreFailureRunning(Id1, AuditReason)
@@ -1154,7 +1154,7 @@ YWire ==
 
 \* Member 1's MemberRetired row: its same-session start preserved the
 \* binding, not the topology, so the replay ends the incarnation's edges.
-YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE)
+YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE, TRUE, FALSE)
 
 \* The end-of-replay roster topology convergence of the edge.
 YConverge ==
@@ -1189,11 +1189,13 @@ AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
 (* Properties.                                                             *)
 (***************************************************************************)
 
-\* The same-session terminal neither ends nor records a host's preparation
-\* mark: only the host's seat step ends it, so a host-pending member's
-\* successor never wakes before that step.
+\* The same-session terminal neither ends nor records a host's first-boot
+\* preparation: only the host's seat step ends it, so a host-pending member's
+\* successor never wakes before that step. (The terminal ends a role hold
+\* when it commits another role; this run declares no role, and the
+\* identity entry audit's hold run checks that end.)
 AuditSameSessionTerminalKeepsHostMark ==
-    [][QCommit => (Id1 \in member_host_preparation_pending' <=> Id1 \in member_host_preparation_pending)]_vars
+    [][QCommit => (member_host_preparation_causes' = member_host_preparation_causes)]_vars
 
 \* A recovery or seat step leaves every existing phase as it was (a
 \* phase may only be added, by the one seating arm, or removed, by an unseat).
@@ -1439,14 +1441,16 @@ ArchiveEnabled ==
     \/ ENABLED ObserveMemberRetirementArchivedRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, FALSE)
 
 \* A settled retirement can always archive. Outside a destroy
-\* a rotation or a pending host carry-out may hold the plain terminal (the
-\* rotation's own terminal re-seats the identity); under an admitted destroy
-\* nothing holds it: the destroy beats the rotation and the host carry-out.
+\* a rotation or a pending first-boot carry-out may hold the plain terminal
+\* (the rotation's own terminal re-seats the identity); any other host
+\* preparation cause never holds it. Under an admitted destroy nothing holds
+\* it: the destroy beats the rotation and the host carry-out.
 AuditRetirementArchivable ==
     (/\ RetiringRid1Settled
      /\ \/ destroy_admitted
         \/ /\ Id1 \notin DOMAIN member_rotation_session_ids
-           /\ Id1 \notin member_host_preparation_pending)
+           /\ ~(Id1 \in DOMAIN member_host_preparation_causes
+                 /\ member_host_preparation_causes[Id1] = "FirstBootRow"))
         => ArchiveEnabled
 
 \* No rotation begins or commits under an admitted destroy.
@@ -1671,7 +1675,7 @@ AuditWitnessDestroyBeatsRotationStep ==
 \* Retire run: under an admitted destroy the plain terminal archives a
 \* host-pending identity.
 AuditWitnessDestroyBeatsHostPendingStep ==
-    /\ Id1 \in member_host_preparation_pending
+    /\ Id1 \in DOMAIN member_host_preparation_causes
     /\ destroy_admitted
     /\ PlainArchives
 \* Retire run: a Stop that landed mid-rotation lets the terminal finish it.
@@ -1801,14 +1805,14 @@ AuditWitnessEntryRotatedSameSessionStep ==
 \* Rotate-same run: a host-pending member's same-session terminal keeps the
 \* mark.
 AuditWitnessHostMarkKeptStep ==
-    /\ Id1 \in member_host_preparation_pending
+    /\ Id1 \in DOMAIN member_host_preparation_causes
     /\ QCommit
 \* Rotate-same run: the successor's wake is refused while the host's mark
 \* stands.
 AuditWitnessHeldSuccessorRefusedStep ==
     /\ Id1 \in DOMAIN identity_to_runtime
     /\ identity_to_runtime[Id1] = Rid3
-    /\ Id1 \in member_host_preparation_pending
+    /\ Id1 \in DOMAIN member_host_preparation_causes
     /\ WakeMemberRefusedRunning(Id1, "Operator", FALSE, "Content", FALSE)
 \* Recover-rotation run: a FreshSession rotation whose intent the replay
 \* recorded is finished by its own terminal (the run begins no rotation).

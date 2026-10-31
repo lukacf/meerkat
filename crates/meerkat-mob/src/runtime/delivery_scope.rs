@@ -1699,6 +1699,7 @@ mod tests {
             agent_identity: identity.clone(),
             generation: Generation::new(generation),
             role: ProfileName::from("worker"),
+            session_archived: false,
         }
     }
 

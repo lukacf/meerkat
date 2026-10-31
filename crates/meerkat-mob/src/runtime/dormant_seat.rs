@@ -484,6 +484,26 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// through the spawn provision path, with the host's registration hook.
     /// Set by [`prepare_dormant_seat`].
     pub(in crate::runtime) session_unborn: bool,
+    /// Whether the seat names the identity entry's archived session record
+    /// (MobMachine's `identity_entry_archived_sessions`, read at the plan):
+    /// the entry's member was retired, its session archived, and this seat
+    /// brings the entry back on it, Dormant, history kept.
+    pub(in crate::runtime) revives_archived_session: bool,
+    /// Whether the seat's session is archived and revivable, as the
+    /// preparation observed it: the raw observation MobMachine's dormant seat
+    /// decides by. It admits only the identity entry's own archived session
+    /// record (a revival, whose member's first wake revives the session) and
+    /// refuses any other. Set by [`prepare_dormant_seat`].
+    pub(in crate::runtime) session_archived: bool,
+    /// The notice a fresh seat carries when the identity's archived session
+    /// is gone from the store: its row records it.
+    pub(in crate::runtime) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// The role a resume seat's session was last built under, when the seat
+    /// takes another one (a declared role migration, from the spec's
+    /// `MemberLaunchMode::Resume::resume_from_role`): its row records it,
+    /// so the session's next build, after a restart too, declares the
+    /// migration and restamps the session.
+    pub(in crate::runtime) resume_from_role: Option<ProfileName>,
     pub(in crate::runtime) runtime_mode: crate::MobRuntimeMode,
     pub(in crate::runtime) labels: BTreeMap<String, String>,
     pub(in crate::runtime) continuity_intent: super::SpawnContinuityIntent,
@@ -605,6 +625,40 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
         .map_err(|error| refused(MobError::from(error)))?
         .lifecycle();
     candidate.session_unborn = match lifecycle {
+        // An archived session, revivable: the observation goes to MobMachine
+        // with the seat, whatever the seat. Its guard
+        // (session_not_archived_or_revived) admits only the identity entry's
+        // own archived session record, which the seat binds as it is and the
+        // member's first wake revives, history kept; any other archived
+        // session is refused there, and answered SessionArchived.
+        super::session_service::SessionResumeLifecycle::Archived {
+            revivable: true, ..
+        } => {
+            candidate.session_archived = true;
+            false
+        }
+        // A revival whose session is archived with a runtime that is not at
+        // rest (it runs, or is stopped or initializing elsewhere): refused
+        // retryable, never answered with a fresh session.
+        super::session_service::SessionResumeLifecycle::Archived {
+            revivable: false,
+            runtime_state,
+            ..
+        } if candidate.revives_archived_session
+            && !matches!(
+                runtime_state,
+                Some(meerkat_runtime::RuntimeState::Destroyed)
+            ) =>
+        {
+            return Err(refused(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "revive the archived session {session_id} of '{agent_identity}', whose \
+                     runtime is {}",
+                    runtime_state.map_or_else(|| "unknown".to_string(), |state| state.to_string())
+                ),
+            }));
+        }
+        // An archived session that cannot be revived is never bound.
         super::session_service::SessionResumeLifecycle::Archived { .. } => {
             return Err(Box::new(DormantSeatOutcome::SessionArchived {
                 agent_identity: agent_identity.clone(),

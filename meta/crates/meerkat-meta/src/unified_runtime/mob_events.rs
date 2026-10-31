@@ -1113,6 +1113,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation: Generation::INITIAL,
                 role: ProfileName::from("review"),
+                session_archived: false,
             },
             MobEventKind::StepDispatched {
                 run_id: RunId::new(),

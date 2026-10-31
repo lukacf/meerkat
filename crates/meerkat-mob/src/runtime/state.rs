@@ -762,6 +762,9 @@ pub(super) enum ScopeAdmissionSubject {
     /// The legacy adoption of this member as an identity entry: a host
     /// verb, which an agent never runs.
     LegacyAdoption(crate::ids::AgentIdentity),
+    /// The declared apply of a host's roster of identity entries: a host
+    /// verb, which an agent never runs.
+    DeclaredApply,
 }
 
 pub(super) enum MobCommand {
@@ -989,6 +992,13 @@ pub(super) enum MobCommand {
     /// An owed edge repair's timer fired (the actor's own self-send).
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
+    },
+    /// Internal: the run a member whose role move MobMachine holds had when
+    /// its run starts were held on `session_id` settled (or it had none):
+    /// release the member while the hold still stands there.
+    ReleaseHeldMember {
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
     },
     /// Release a live member's materialization, keeping it seated
     /// ([`super::handle::MobHandle::release_member`]). With a scope
@@ -1529,6 +1539,36 @@ pub(super) enum MobCommand {
         legacy_roster_member: bool,
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
+    },
+    /// Decide one chunk of a declared roster's identities in one MobMachine
+    /// step (`MobHandle::apply_declared_roster`): each identity's verdict.
+    DeclareIdentityEntries {
+        declarations: Vec<super::declared_apply::IdentityDeclaration>,
+        reply_tx: oneshot::Sender<
+            Result<Vec<super::declared_apply::DeclarationVerdict>, crate::MobError>,
+        >,
+    },
+    /// Seal a complete declared roster in one MobMachine step: `desired` is
+    /// every identity the roster lists.
+    SealDeclaredRoster {
+        desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
+    },
+    /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
+    /// of the mob at a time, MobMachine's verdict. An opened apply is
+    /// answered with the lease of its open fact, whose close is the lease's
+    /// own command on the internal lane.
+    OpenDeclaredApply {
+        reply_tx: oneshot::Sender<
+            Result<super::declared_apply::DeclaredApplyOpening, crate::MobError>,
+        >,
+    },
+    /// Close the open declared apply, whatever its outcome: sent only by the
+    /// apply's lease, on the internal lane, and never refused (not by a
+    /// grant, not in a Shutdown step), so nothing leaves the mob's applies
+    /// refused.
+    CloseDeclaredApply {
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
@@ -2212,7 +2252,8 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => ShutdownAnswerClass::ActorCompletion,
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2295,6 +2336,13 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::OpenDeclaredApply { .. } => ShutdownAnswerClass::CallerRequest,
+            // The lease's close is retained through a Shutdown step: a
+            // Shutdown that then fails leaves the actor serving, and the
+            // close closes the fact, so the mob's next apply opens.
+            Self::CloseDeclaredApply { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2406,6 +2454,7 @@ impl MobCommand {
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
+            Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
             Self::StartupMemberRecovered { .. } => "StartupMemberRecovered",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
@@ -2527,6 +2576,10 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
+            Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
+            Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
+            Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",
+            Self::SealDeclaredRoster { .. } => "SealDeclaredRoster",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

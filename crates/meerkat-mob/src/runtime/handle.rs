@@ -7244,6 +7244,10 @@ pub struct SpawnMemberSpec {
     /// session is the seat's name-based one and a re-driven seat finds it;
     /// never taken from caller-supplied arguments.
     pub(crate) fresh_session_id: Option<SessionId>,
+    /// The notice a declared apply's fresh seat carries when the identity's
+    /// archived session is gone from the store: the dormant seat's row
+    /// records it. Set only by the declared apply; a spawn ignores it.
+    pub(crate) history_unavailable: Option<super::HistoryUnavailable>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7372,6 +7376,7 @@ impl SpawnMemberSpec {
             operator_authority_ceiling: None,
             inherited_operator_authority_bound: None,
             fresh_session_id: None,
+            history_unavailable: None,
         }
     }
 
@@ -7900,7 +7905,7 @@ impl MobHandle {
         }
     }
 
-    async fn send_actor_command<R>(
+    pub(super) async fn send_actor_command<R>(
         &self,
         build: impl FnOnce(oneshot::Sender<R>) -> MobCommand,
     ) -> Result<R, MobError> {
@@ -9284,7 +9289,10 @@ impl MobHandle {
     /// keeps holding it until Resume). Releasing before the member's runtime
     /// has registered cancels the hold its registration would apply. A member
     /// that does not hold `reason` is an Ok no-op; a non-member is
-    /// [`MobError::MemberNotFound`].
+    /// [`MobError::MemberNotFound`]. The mob's own hold of a role move
+    /// ([`crate::HostRunStartHoldReason::HostPreparation`]) is never a
+    /// host's to release: it is refused with [`MobError::WiringError`], and
+    /// an apply that ends the role hold releases it.
     ///
     /// A kickoff a Shutdown kept in flight for the member waits for this
     /// release while the host holds the member: the release re-attaches it,
@@ -10238,8 +10246,10 @@ impl MobHandle {
     /// The members whose run starts this mob's host holds for `reason`, in
     /// identity order: the members whose session registration still
     /// stages that hold, as [`Self::release_member_run_starts`] would release
-    /// it. Read from the published machine state and the runtime's hold
-    /// registry, with no actor command and no wake; the
+    /// it. For [`crate::HostRunStartHoldReason::HostPreparation`], the
+    /// members whose role move the declared apply holds, whose run starts the
+    /// mob holds itself. Read from the published machine state and the
+    /// runtime's hold registry, with no actor command and no wake; the
     /// [`crate::ControlScope::List`] scope. A mob without the runtime adapter
     /// holds no member's run starts.
     pub fn members_holding_run_starts(
@@ -19655,7 +19665,7 @@ impl MobHandle {
     /// `subject`: chokepoint (a) applies the lane rules the operation itself
     /// meets (an agent never acts on an identity entry's member, and never
     /// runs a host-only verb) before the caller does anything.
-    async fn admit_control_scope_for(
+    pub(super) async fn admit_control_scope_for(
         &self,
         required: mob_dsl::ControlScope,
         subject: super::state::ScopeAdmissionSubject,

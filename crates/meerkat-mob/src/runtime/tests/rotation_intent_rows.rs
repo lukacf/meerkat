@@ -404,7 +404,7 @@ async fn respawn_is_one_machine_step_and_never_leaves_the_identity_unseated() {
 /// `AlreadySeated` and ends the mark, after which the successor wakes Live.
 ///
 /// RED: let the same-session terminal end the mark (remove the identity
-/// from `member_host_preparation_pending` in
+/// from `member_host_preparation_causes` in
 /// `CommitMemberRotationSameSession`): the mark is gone after the restart,
 /// and the successor wakes before the host's seat step.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -443,8 +443,8 @@ async fn a_host_pending_successor_waits_for_the_host_seat_step() {
         mob.handle
             .machine_state_watch_rx
             .borrow()
-            .member_host_preparation_pending
-            .contains(&dsl_identity),
+            .member_host_preparation_causes
+            .contains_key(&dsl_identity),
         "the mob's own same-session terminal keeps the host's mark"
     );
     assert_eq!(
@@ -494,8 +494,8 @@ async fn a_host_pending_successor_waits_for_the_host_seat_step() {
         !mob.handle
             .machine_state_watch_rx
             .borrow()
-            .member_host_preparation_pending
-            .contains(&dsl_identity),
+            .member_host_preparation_causes
+            .contains_key(&dsl_identity),
         "the host's seat step ends the mark"
     );
     tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("host-held")))

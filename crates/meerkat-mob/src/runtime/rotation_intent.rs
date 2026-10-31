@@ -71,7 +71,8 @@ impl RotationTarget {
 }
 
 /// Whether `identity`'s rotation is held for its host, in `state`: the
-/// member is host-pending (`member_host_preparation_pending`) and the
+/// member owes its host's first-boot preparation
+/// (`member_host_preparation_causes`, cause `FirstBootRow`) and the
 /// rotation that stands for it is a FreshSession one, which the host's own
 /// [`super::MobHandle::rotate_member`] finishes (as does
 /// [`super::MobHandle::redrive_retirement`]). The one predicate the start's
@@ -81,7 +82,8 @@ pub(crate) fn rotation_held_for_host(
     state: &mob_dsl::MobMachineState,
     identity: &mob_dsl::AgentIdentity,
 ) -> bool {
-    state.member_host_preparation_pending.contains(identity)
+    state.member_host_preparation_causes.get(identity)
+        == Some(&mob_dsl::HostPreparationCause::FirstBootRow)
         && state.member_rotation_targets.get(identity)
             == Some(&mob_dsl::RotationTarget::FreshSession)
 }

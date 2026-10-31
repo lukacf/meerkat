@@ -3413,6 +3413,10 @@ enum PlacedCarrierRecoveryDisposition {
 struct PlacedCarrierRecoveryEntry {
     record: crate::store::MobPlacedSpawnCarrierRecord,
     disposition: PlacedCarrierRecoveryDisposition,
+    /// The identity entry the carrier's exact MemberSpawned row records
+    /// (a placed member a spawn holding the entry's custody created): the
+    /// replay records the entry again once the carrier seats the member.
+    identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3782,9 +3786,12 @@ fn classify_placed_spawn_recovery(
                 }
             }
         };
+        let identity_entry =
+            exact_projection.and_then(|projection| projection.event.identity_entry());
         plan.entries.push(PlacedCarrierRecoveryEntry {
             record,
             disposition,
+            identity_entry,
         });
     }
 
@@ -4049,6 +4056,78 @@ fn recover_seat_session_row(
     )
 }
 
+/// The retirements an unlisted identity entry's start row records
+/// ([`crate::MemberRetirementCause::Unlisted`]), by identity and generation.
+fn unlisted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                generation,
+                ..
+            } if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::Unlisted) => {
+                Some((agent_identity.as_str().to_string(), generation.get()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The incarnations, by identity and generation, whose member was hosted
+/// elsewhere, as their `MemberSpawned` rows record: a placed spawn's member
+/// (on its member host) or an externally bound member. The generic replay of
+/// a retired incarnation restores no placement, so the replay of its
+/// retirement passes this record (`hosted_incarnation`): MobMachine keeps its
+/// identity entry hosted on its first use with no archived session, as the
+/// live end of the retirement did.
+fn hosted_incarnations(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberSpawned(spawned)
+                if spawned.placed_spawn_id().is_some()
+                    || matches!(
+                        spawned.bridge_member_ref(),
+                        Some(crate::event::MemberRef::BackendPeer {
+                            session_id: None,
+                            ..
+                        })
+                    ) =>
+            {
+                Some((
+                    spawned.agent_identity.as_str().to_string(),
+                    spawned.generation.get(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Mark again, at replay, the Declared entry whose member's retirement the
+/// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
+/// the retirement then ends the entry, as it did live. Every unlisted start
+/// row is passed; MobMachine marks only the identity's seated incarnation of
+/// a Declared entry, and a row of another one (a retirement whose member a
+/// later row already replaced, or whose entry it ended) takes its no-op arm.
+fn recover_unlisted_retirement_mark(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    agent_runtime_id: &AgentRuntimeId,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    apply_seeded_mob_signal(
+        authority,
+        mob_dsl::MobMachineSignal::RecoverIdentityEntryRetiring {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+        },
+        "recover_identity_entry_retiring",
+    )
+}
+
 fn seed_mob_authority_sync_from_events(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     events: &[crate::event::MobEvent],
@@ -4059,6 +4138,8 @@ fn seed_mob_authority_sync_from_events(
     use crate::machines::mob_machine as mob_dsl;
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
+    let unlisted_starts = unlisted_retirement_starts(events);
+    let hosted_incarnations = hosted_incarnations(events);
 
     for event in events {
         match &event.kind {
@@ -4448,6 +4529,7 @@ fn seed_mob_authority_sync_from_events(
             MobEventKind::MemberRetired {
                 agent_identity,
                 generation,
+                session_archived,
                 ..
             } => {
                 let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
@@ -4461,6 +4543,11 @@ fn seed_mob_authority_sync_from_events(
                     .starts
                     .get(&key)
                     .is_some_and(|start| start.preserve_machine_topology);
+                // The end of an unlisted retirement ends its entry: the
+                // start row's cause marks the entry before the end replays.
+                if unlisted_starts.contains(&key) {
+                    recover_unlisted_retirement_mark(authority, agent_identity, &agent_runtime_id)?;
+                }
                 apply_seeded_mob_signal(
                     authority,
                     mob_dsl::MobMachineSignal::RecoverRosterMemberRetired {
@@ -4469,6 +4556,8 @@ fn seed_mob_authority_sync_from_events(
                         generation: mob_dsl::Generation::from_domain(*generation),
                         preserve_machine_topology,
                         preservation_started,
+                        session_archived: *session_archived,
+                        hosted_incarnation: hosted_incarnations.contains(&key),
                     },
                     "recover_member_retired",
                 )?;
@@ -5229,6 +5318,12 @@ fn recover_pending_member_retirements(
                     },
                     "recover_pending_member_retirement_started",
                 )?;
+                // An unlisted identity entry's retirement marks its entry
+                // again, so the retirement's end, when the restarted mob
+                // finishes it, ends the entry.
+                if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::Unlisted) {
+                    recover_unlisted_retirement_mark(authority, agent_identity, agent_runtime_id)?;
+                }
                 // The rotation the start row records, recorded again on the
                 // Retiring incarnation the row restored: the restarted mob's
                 // re-drive finishes it with no host record.
@@ -5464,7 +5559,8 @@ fn recover_current_committed_placed_carrier_signals(
                 spawn_id: mob_dsl::PlacedSpawnId(entry.record.spawn_id.to_string()),
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::new(
-                    identity, generation,
+                    identity.clone(),
+                    generation,
                 )),
                 generation: mob_dsl::Generation::from_domain(generation),
                 fence_token: mob_dsl::FenceToken(entry.record.fence_token),
@@ -5484,6 +5580,22 @@ fn recover_current_committed_placed_carrier_signals(
             },
             "recover_committed_placed_carrier",
         )?;
+        // A placed identity entry's member: its row records the entry, and
+        // the replay records it again now that the carrier seated the member.
+        if let Some(origin) = entry.identity_entry {
+            apply_seeded_mob_signal(
+                authority,
+                mob_dsl::MobMachineSignal::RecoverIdentityEntry {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::new(
+                        identity.clone(),
+                        generation,
+                    )),
+                    origin: origin.to_machine(),
+                },
+                "recover_placed_identity_entry",
+            )?;
+        }
     }
     Ok(())
 }
@@ -8041,12 +8153,17 @@ impl MobBuilder {
         self
     }
 
-    /// Members the host must prepare before any of their work may run (for
-    /// example identities whose first-boot carry-out is still pending). The
-    /// start never materializes them, and every wake of one is refused
-    /// retryable until the host's seat step for it
-    /// ([`MobHandle::seat_dormant_members`], [`MobHandle::rotate_member`])
-    /// clears the mark, durably, in the same step.
+    /// Members the host must prepare before any of their work may run: the
+    /// identities whose first-boot request is still owed (MobMachine records
+    /// each with the host preparation cause
+    /// [`crate::HostPreparationCause::FirstBootRow`]). The start never
+    /// materializes them, and every wake of one is refused retryable until
+    /// the host's seat step for it ([`MobHandle::seat_dormant_members`],
+    /// [`MobHandle::rotate_member`], or the carry-out of the identity's
+    /// request by [`MobHandle::apply_declared_roster`]) clears the mark,
+    /// durably, in the same step. A role hold the declared apply records
+    /// ([`crate::HostPreparationCause::RoleMigrationUndeclared`]) is not this
+    /// mark: the host's seat step never ends it.
     ///
     /// A rotation's start row records it, so the start finishes a rotation a
     /// crash interrupted itself, with no host record. A member passed here
@@ -11304,6 +11421,8 @@ impl MobBuilder {
                 #[cfg(feature = "runtime-adapter")]
                 startup_member_recoveries: BTreeMap::new(),
                 member_wakes,
+                #[cfg(feature = "runtime-adapter")]
+                host_preparation_holds: BTreeMap::new(),
                 identity_reconcile_parked: BTreeMap::new(),
                 spawn_panic_log_ledger: Arc::new(
                     super::panic_capture::SpawnPanicLogLedger::default(),
@@ -14343,6 +14462,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
             event(3, spawned(Generation::new(1), durable.clone())),
@@ -15732,6 +15852,7 @@ mod tests {
             entries: vec![PlacedCarrierRecoveryEntry {
                 record: record.clone(),
                 disposition: PlacedCarrierRecoveryDisposition::CommittedCurrent,
+                identity_entry: None,
             }],
             current_committed_event_keys: BTreeSet::from([(
                 record.agent_identity.clone(),
@@ -15823,6 +15944,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation,
                 role: ProfileName::from("worker"),
+                session_archived: false,
             },
         }
     }
@@ -17166,6 +17288,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -17286,6 +17409,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -17381,6 +17505,7 @@ mod tests {
                     retiring_peer_endpoint: None,
                     preserve_machine_topology: false,
                     rotation: None,
+                    cause: None,
                 },
             },
         ];
@@ -18320,6 +18445,7 @@ mod tests {
                     retiring_peer_endpoint: None,
                     preserve_machine_topology: true,
                     rotation: None,
+                    cause: None,
                 },
             ),
             event(
@@ -18328,6 +18454,7 @@ mod tests {
                     agent_identity: retiring,
                     generation,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
         ]
@@ -18639,6 +18766,7 @@ mod tests {
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
                 rotation: None,
+                cause: None,
             },
         });
         let start_error = respawn_topology_ledger(&conflicting_starts)
@@ -18935,6 +19063,7 @@ mod tests {
                         retiring_peer_endpoint: None,
                         preserve_machine_topology,
                         rotation: None,
+                        cause: None,
                     },
                 ),
                 event(
@@ -18943,6 +19072,7 @@ mod tests {
                         agent_identity: retiring.clone(),
                         generation: generation_zero,
                         role: ProfileName::from("worker"),
+                        session_archived: false,
                     },
                 ),
             ];
@@ -19111,6 +19241,7 @@ mod tests {
                     retiring_peer_endpoint: Some(retiring_endpoint.clone()),
                     preserve_machine_topology: false,
                     rotation: None,
+                    cause: None,
                 },
             ),
             event(

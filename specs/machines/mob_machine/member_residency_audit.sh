@@ -1206,7 +1206,7 @@ add_guard("ResolveRuntimeBindingRefusalRunning", "((attempt = None) \\/ ((IF (ag
   # The destroy keeps the pending host preparations.
   mutate retire destroy_keeps_host_pending \
     "Error: Invariant destroyed_mob_holds_no_member_lifecycle is violated" \
-    'keep_var("DestroyMob", "member_host_preparation_pending")' "$@"
+    'keep_var("DestroyMob", "member_host_preparation_causes")' "$@"
   # The join refused once the resume settled a readiness: the lift of a
   # stopped mob, whose readiness ran before its Resume, could not join the
   # wakes its member plan opened.
@@ -1251,11 +1251,12 @@ add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readines
   mutate rotate-same redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
     'drop_guard("RetireRunningReleasingArchiveOnly", "\"SameSession\"")' "$@"
-  # A same-session terminal that ends a host's preparation mark: the
+  # A same-session terminal that ends a host's preparation mark (the
+  # terminal ends only a role hold, when it commits another role): the
   # successor could wake before the host's seat step.
   mutate rotate-same same_session_commit_ends_host_mark \
     "Error: Action property AuditSameSessionTerminalKeepsHostMark is violated" \
-    'rewrite_frame("CommitMemberRotationSameSessionRunning", {"member_host_preparation_pending": "(member_host_preparation_pending \\ {agent_identity})"})' "$@"
+    'replace_in_update("CommitMemberRotationSameSessionRunning", "member_host_preparation_causes", "ELSE member_host_preparation_causes", "ELSE MapRemove(member_host_preparation_causes, agent_identity)")' "$@"
   # The same releasing re-drive in a stopped mob (the guard's Stopped copy).
   mutate rotate-same stopped_redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \

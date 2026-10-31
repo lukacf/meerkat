@@ -336,6 +336,10 @@ pub use runtime::{
     stored_realm_profile_to_wire,
 };
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
+pub use runtime::{
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
+    DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest, UnlistedEntryOutcome,
+};
 #[cfg(feature = "openai-live")]
 pub use runtime::{
     DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
@@ -363,10 +367,11 @@ pub use runtime::{
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict};
 pub use runtime::{
-    EntryStanding, IDENTITY_ENTRY_PAGE_MAX, IdentityCensus, IdentityEntryOrigin, IdentityEntryPage,
-    IdentityEntryRead, IdentityEntryView, LegacyIdentityEntryAdoption, MemberBrokenFact,
-    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MobJournalCursor,
-    SeatedMember, WorkerMember,
+    EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
+    LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
+    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, SeatedMember,
+    UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{

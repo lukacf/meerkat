@@ -533,10 +533,12 @@ pub enum MobMachineRuntimeInternalReason {
     /// them; none is an independent public command.
     MemberResidencyAuthority,
     /// Identity entries: the adoption of a legacy member as an entry, driven
-    /// by the handle's adoption after it observed the member's spawn row, and
+    /// by the handle's adoption after it observed the member's spawn row,
     /// the agent lane's member admission, driven by the actor's command
-    /// admission for every agent-lane command addressed to a member. Neither
-    /// is an independent public command.
+    /// admission for every agent-lane command addressed to a member, and the
+    /// declared apply's verdicts, seal and archived session release, driven
+    /// by the handle's apply of a declared roster. None is an independent
+    /// public command.
     IdentityEntryAuthority,
 }
 
@@ -1422,6 +1424,33 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ResolveAgentLaneMemberAdmission,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DeclareIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SealDeclaredRoster,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ForgetArchivedSession,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::OpenDeclaredApply,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CloseDeclaredApply,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // The reset's preflight admission is decided by MobMachine from the
+        // reset's guards but its empty roster; the actor probes it before the
+        // retirement batch that empties the roster. Not a surface command.
+        input: MobMachineCatalogInput::AdmitReset,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
     },
 ];
 

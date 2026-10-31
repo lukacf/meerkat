@@ -1108,6 +1108,7 @@ mod tests {
             agent_identity: AgentIdentity::from(agent_identity),
             generation: Generation::INITIAL,
             role: ProfileName::from(role),
+            session_archived: false,
         }
     }
 
@@ -1773,6 +1774,7 @@ mod tests {
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
                 rotation: None,
+                cause: None,
             },
         );
         let roster = Roster::project(&[spawned.clone(), recovered.clone()]);
@@ -2193,6 +2195,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation: Generation::INITIAL,
                 role: ProfileName::from("worker"),
+                session_archived: false,
             },
         ));
         assert!(
@@ -2271,6 +2274,7 @@ mod tests {
             retiring_peer_endpoint: None,
             preserve_machine_topology: false,
             rotation: None,
+            cause: None,
         };
         retirement
             .set_retiring_peer_endpoint(endpoint)

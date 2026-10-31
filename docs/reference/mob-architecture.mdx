@@ -175,9 +175,15 @@ name.
 - A respawn of an entry's member rotates it onto its own session (see
   [Respawn, rotation and scoped release](#respawn-rotation-and-scoped-release)):
   the identity stays seated and an entry throughout, and a rotation
-  (`rotate_member`) keeps the identity's standing too. Every retirement ends
-  the entry: in this release an entry is always seated.
-- Only a local member is an entry: a placed spawn refuses entry custody.
+  (`rotate_member`) keeps the identity's standing too. A retirement keeps the
+  entry: the end of its member's retirement leaves it unseated, owed its seat,
+  with the session the retirement archived recorded, and the next declared
+  apply seats it again there (see [The declared apply](#the-declared-apply)).
+  Only the end of a retirement the apply's seal started (the host's roster
+  unlisted the identity), the destroy and the mob's reset end an entry.
+- A placed member is an entry only when the declared apply hosts the entry on
+  its first use: a placed spawn with entry custody of any other name is
+  refused `MobError::WiringError` before anything is created.
 
 `MobHandle::adopt_legacy_identity_entry(identity)` adopts, once, a member a
 host seated before identity entries existed: one whose spawn row carries the
@@ -200,10 +206,10 @@ The reads need no actor command and never wake a member:
 
 | Read | Answers |
 |------|---------|
-| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode), whether it is Broken, whether its host preparation is pending and the target of a rotation of it in flight (`RotationTarget`), if any; or `NotAnEntry` with the worker that holds the identity, if any. |
+| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, and the target of a rotation of it in flight (`RotationTarget`), if any; or `NotAnEntry` with the worker that holds the identity, if any. |
 | `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. |
-| `identity_census()` | The entries declared, seated, retiring, Broken, with host preparation pending and with a rotation in flight. |
-| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records), legacy adoptions, retirement starts (with the target of the rotation a start belongs to), retirements, member resets and mob resets. |
+| `identity_census()` | The entries declared, seated, retiring, unseated by cause (`UnseatedEntryCounts`), Broken, with host preparation pending and with a rotation in flight. |
+| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records, and the `HistoryUnavailable` notice of a seat on a fresh session whose archived session was gone), legacy adoptions, retirement starts (with the target of the rotation a start belongs to, and the cause `Unlisted` when the declared apply's seal started it), retirements, member resets and mob resets. |
 | `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
 
 All but the journal read answer from the machine state the actor last
@@ -214,6 +220,117 @@ read `ControlScope::SubscribeEvents`. An entry read whose machine facts are
 incomplete answers `MobError::Internal` rather than a default. An entry's
 fields are internal to the stored event codec, so an older release reads an
 entry's rows as an ordinary member's.
+
+### The declared apply
+
+Since 0.9.9 a Rust host declares its identity entries as data, and Core
+applies them: `MobHandle::apply_declared_roster(DeclaredRoster)`. The host's
+roster is the authority. A `DeclaredRoster` holds the identities it declares
+(`DeclaredEntry`: a `SpawnMemberSpec`, and whether the host holds the
+identity's creation for its held protocol), whether it is the host's complete
+roster, the role migrations it declares (`with_role_migration(identity,
+from)`) and the host's one-shot first-boot requests (`FirstBootRequest`).
+MobMachine decides each identity's verdict from its declaration and its member
+facts (`DeclareIdentityEntry`), in memory, in chunks of
+`DECLARED_APPLY_CHUNK` identities, each one machine step, and the handle
+realizes the verdict with the mob's own steps. Each identity is answered on
+its own (`DeclaredRosterOutcome::entries`, a `DeclaredEntryOutcome`): one
+identity's refusal or failure never fails the pass. The call fails as a whole
+only for a mob that is not running, an identity store whose intent rows
+cannot be read now (retryable), or another apply of the mob that is running:
+applies of one mob run one at a time, and a call while another runs is
+refused `MobError::LifecycleOperationPending`, retryable, and writes nothing.
+An apply's end always lets the next one open: a call dropped at any point, a
+caller whose grant is revoked or expires while it runs, and a Shutdown that
+fails while it closes.
+It needs `ControlScope::Retire` (and `ControlScope::SendCommand` for its
+seats); the agent lane is refused `MobError::ScopeDenied`.
+
+| Identity | Verdict and answer |
+|----------|--------------------|
+| No member holds it | Seated Dormant (`Seated`): on the session its retirement archived, on a first-boot request's session, or on a fresh session. No wake. A fresh seat of an identity that owes a kickoff is spawned live (`Embodied`). When the session the seat resumes was last built under another role, the seat declares the migration the roster declares from that role, and the session's next build moves it; with none declared the identity is held (`RoleMigrationHeld`) and not seated. |
+| Seated, role and runtime mode as declared | Kept (`Kept`): nothing is written. A change of display name, labels, context or instructions alone is no lifecycle fact: the facets are the host's and the apply stores none of them, so the member's next build applies the host's current ones only through the host's build preparer or spawn customizer (the build inputs a seat recorded stay as recorded). A change of placement alone is kept too: placement is read only for an identity no member holds. |
+| Seated, another runtime mode | Restamped on its own session at its next generation (`Restamped`), once it is idle. |
+| Seated, another role, the migration declared from its current role | Restamped under the new role on its own session (`RoleMigrated`), once it is idle. |
+| Seated, another role or mode, on a session that lives in memory only | Rotated onto a fresh session (`RoleRotated`). |
+| Seated, another role, no migration declared | Held (`RoleMigrationHeld`): every wake refused `HostPreparationPending` (a host's, a peer's, the boot plan's), and a Live local member's run starts held (`HostRunStartHoldReason::HostPreparation`): its run in flight finishes, never preempted, no new run starts under its previous role, and the mob releases it when idle. A placed member's runs start on its member host, which these holds do not reach: a Live placed member keeps serving under its previous role until an apply ends the hold. The explicit resume leaves it alone: MobMachine answers it held before the resume acts on any member, so a Live one keeps its live actor. An apply that restores the role ends the hold; one that declares the move ends it in the step that commits the new role, so a deferred or refused restamp keeps it. The hold ends with its entry too (its member's retirement, the seal that removes the unseated entry, the reset, the destroy), so no member later seated under the name inherits it. The entry reads name `HostPreparationCause::RoleMigrationUndeclared`, and `members_holding_run_starts(HostPreparation)` lists a held member. A hold never blocks a retirement. |
+| Placed or externally bound, no member | Hosted on its first use (`HostedOnFirstUse`): its host creates the member, a placed spawn holding the entry's custody. |
+| Held creation, never created | Awaits its held creation (`AwaitingHeldCreation`): the host's held protocol creates it. The host's current hold policy decides on every apply; nothing is kept of an earlier one. |
+| Spawn, wake or retirement in flight | Deferred to the next apply (`Deferred`). |
+| A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
+| Any, in a candidate composition | Refused `NonAuthoritative`: a candidate declares nothing and writes nothing. |
+
+A legacy member listed under its own name is adopted first
+(`adopt_legacy_identity_entry`) and then declared as the entry it is. A
+dormant seat never takes an identity hosted on its first use or awaiting its
+held creation (`MobError::WiringError`).
+
+A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
+every Declared entry it does not list is unlisted. Its member, when one is
+seated, is retired; the retirement's start row records the cause `Unlisted`
+(`MemberLifecycleEvent::RetirementStarted::cause`), and the end of the
+retirement ends the entry. An unlisted entry no member holds is removed at
+once. A worker is never unlisted. The answer names each unlisted entry
+(`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or `Failed`, which
+the next complete apply retries). Any other retirement keeps the entry: a
+host's `retire` of a declared identity that stays listed ends its member, and
+the next apply seats the identity again. To remove a declared identity, unlist
+it.
+
+An unlisted identity listed again comes back as the same identity. The end of
+its retirement recorded the session it archived (MobMachine's
+`identity_entry_archived_sessions`, also on the replay of the retirement's
+row, which records whether the retirement archived the session: one it only
+released, such as a session another host owns, is not recorded), and the
+apply seats it Dormant on that session at its next generation; its first
+wake revives the session, with its history. When that session is gone from
+the store (its retention purged it), the identity is seated on a fresh
+session, and its answer and its seat's journal row carry the typed notice
+`HistoryUnavailable`, naming the lost session (an identity that owes a
+kickoff is embodied with the same notice). When the store cannot read the
+session now, the identity is deferred, retryable, and never seated on a
+fresh session. A lost session never leaves a declared identity unseatable,
+but an intact one can: an archived session whose runtime refuses revival
+(its runtime was destroyed) is answered `Failed`
+(`MobError::SessionUnavailableForResume`, `ArchivedNotRevivable`) on every
+apply, since a fresh session would lose its history, until the host sends
+the identity's `Fresh` first-boot request, which starts its fresh life. A
+session no build created holds no history, and the identity is seated on it
+again. An identity retired before 0.9.9 has no record and is seated on a
+fresh session, and so is one whose record a member seated under its name
+ended (a worker spawned while it was unlisted), with no notice.
+
+A first-boot request is carried out once: `Resume { session_id }` seats the
+identity on that session (a member already seated carries it out in its
+declaration's own step), and `Fresh` starts its fresh life on a new session,
+letting its archived session record go. The answer names the requests the
+apply carried out (`DeclaredRosterOutcome::first_boot_requests_carried_out`),
+and the host consumes exactly those: a deferred, refused or failed answer
+leaves its request with the host for the next apply, and the host's own
+creation carries out the request of an identity hosted on its first use or
+awaiting its held creation.
+
+The verdicts write no journal row of their own: an unseated entry, a role
+hold and a held creation are MobMachine facts in memory, and the next apply
+declares them again. An unchanged roster writes nothing and wakes no member.
+Between a restart and the first apply after it, MobMachine knows only the
+entries its journal rows record: the seated ones, and those whose member a
+retirement other than the seal's ended (unseated, with the session the
+retirement archived). An entry no member ever held and a role hold are not
+restored: until that apply, a member whose role the host moved while the
+process was down is not held, and a peer delivery can wake it under its
+previous role. So a host applies its roster once after every start, before
+it wakes or seats its identities: a role moved while the process was down is
+held only from that apply on.
+
+The roster vocabulary keeps the residency words: a seated member is Dormant
+until its first delivery wakes it, whether the apply or a seat seated it; a
+held member is Dormant and refuses its wakes; an unseated entry is no member
+at all (`EntryStanding::Unseated`, with its `UnseatedEntryCause`: `SeatOwed`,
+`HostedOnFirstUse` or `HeldCreation`) and is listed by the entry reads only.
+
+The apply's types are `#[non_exhaustive]`, and the apply is Rust-only: the
+wire contracts do not carry it.
 
 ### One-shot durable role migration
 

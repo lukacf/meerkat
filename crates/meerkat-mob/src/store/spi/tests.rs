@@ -1020,7 +1020,10 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
                 fence_token: 1,
                 member_session_id: session.to_string(),
                 runtime_session_token: BridgeDirectRuntimeSessionToken::new(),
-            })),
+            }))
+            .with_history_unavailable(Some(crate::runtime::HistoryUnavailable::new(
+                SessionId::new(),
+            ))),
         ),
         MobEventKind::MemberSessionBindingRecovered(
             MemberSessionBindingRecoveredEvent::new(
@@ -1059,6 +1062,13 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
                     resume_from_role: None,
                 },
             })),
+            cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
+        },
+        MobEventKind::MemberRetired {
+            agent_identity: identity.clone(),
+            generation,
+            role: ProfileName::from("worker"),
+            session_archived: true,
         },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,

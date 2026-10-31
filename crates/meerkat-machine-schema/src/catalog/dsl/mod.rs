@@ -1921,7 +1921,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
-            NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
+            NamedTypeBinding::string_enum(
+                "RunStartHoldReason",
+                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+            ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
@@ -4225,6 +4228,53 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "AgentLaneMemberAdmissionKind",
                 &["Admitted", "IdentityMember"],
             ),
+            // The declared apply (0.9.9): unseated causes, host preparation
+            // causes, declared placements, verdicts, the seal's verdict and
+            // why an archived session record is let go.
+            NamedTypeBinding::string_enum(
+                "UnseatedEntryCause",
+                &["SeatOwed", "HostedOnFirstUse", "HeldCreation"],
+            ),
+            NamedTypeBinding::string_enum(
+                "HostPreparationCause",
+                &[
+                    "FirstBootRow",
+                    "RoleMigrationUndeclared",
+                    "BuildPreparationRetry",
+                ],
+            ),
+            NamedTypeBinding::string_enum("EntryPlacementKind", &["Local", "Placed", "External"]),
+            NamedTypeBinding::string_enum(
+                "IdentityEntryVerdict",
+                &[
+                    "Kept",
+                    "SeatOwed",
+                    "HostedOnFirstUse",
+                    "AwaitHeldCreation",
+                    "RuntimeModeRestamp",
+                    "RoleMigrate",
+                    "RoleRotate",
+                    "RoleMigrationHeld",
+                    "LifecycleInFlight",
+                    "RefusedNameHeldByWorker",
+                    "RefusedHostAdopted",
+                    "RefusedNonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeclaredRosterSealVerdict",
+                &["Sealed", "NonAuthoritative", "MobNotRunning"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ArchivedSessionForgetReason",
+                &["SessionAbsent", "FreshLifeRequested"],
+            ),
+            NamedTypeBinding::string_enum("FirstBootRequestKind", &["None", "Resume", "Fresh"]),
+            NamedTypeBinding::string_enum(
+                "DeclaredApplyOpenVerdict",
+                &["Opened", "Busy", "MobNotRunning"],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -4867,6 +4917,19 @@ runtime_internal_inputs!(
         // agent-lane member admission. Neither is a surface command.
         AdoptLegacyIdentityEntry,
         ResolveAgentLaneMemberAdmission,
+        // The declared apply: the handle's verdict per declared identity, the
+        // seal of a complete roster, and the release of an archived session
+        // record before a fresh seat. None is a surface command.
+        DeclareIdentityEntry,
+        SealDeclaredRoster,
+        ForgetArchivedSession,
+        // The declared apply's open fact, opened and closed around each
+        // apply by the handle. Neither is a surface command.
+        OpenDeclaredApply,
+        CloseDeclaredApply,
+        // The reset's preflight admission, probed by the actor before the
+        // reset's retirement batch. Not a surface command.
+        AdmitReset,
     ]
 );
 

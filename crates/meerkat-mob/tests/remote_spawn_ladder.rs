@@ -24,6 +24,10 @@ use meerkat_mob::AgentIdentity;
 use meerkat_mob::MobError;
 use meerkat_mob::MobSessionService as _;
 use meerkat_mob::machines::mob_machine::MobSpawnMemberAdmissionKind;
+use meerkat_mob::{
+    DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, EntryStanding, IdentityEntryOrigin,
+    IdentityEntryRead, UnseatedEntryCause,
+};
 use support::{
     HostFixtureOptions, OneShotToolCallClient, REAL_COMMS_TEST_LOCK, create_controlling_mob,
     placed_spawn_spec, spawn_host_daemon_fixture,
@@ -654,4 +658,115 @@ async fn a_host_hook_refusal_refuses_the_placed_member() {
             .any(|member| member == "placed"),
         "the refusal came from the serving host's hook"
     );
+}
+
+// ===========================================================================
+// A declared placed identity: hosted on its first use, created by a placed
+// spawn holding the entry's custody, and hosted on its first use again after
+// its retirement, across restarts
+// ===========================================================================
+
+/// The origin and standing of the identity entry `identity` is, or `None`
+/// when it is no entry.
+fn entry_of(
+    handle: &meerkat_mob::MobHandle,
+    identity: &AgentIdentity,
+) -> Option<(IdentityEntryOrigin, EntryStanding)> {
+    if let IdentityEntryRead::Entry(view) = handle
+        .identity_entry(identity)
+        .expect("the entry read answers")
+    {
+        Some((view.origin, view.standing))
+    } else {
+        None
+    }
+}
+
+/// A placed identity the host declares is hosted on its first use: the
+/// apply records the entry unseated (`HostedOnFirstUse`) and seats nothing,
+/// and the host's placed spawn holding the entry's custody creates its
+/// member on the member host, whose remote commit seats it as the Declared
+/// entry. A restart replays it Seated and Declared. Its retirement keeps the
+/// entry hosted on its next first use (its session lives on its host), and
+/// a restart replays the same.
+///
+/// RED: replay a retired placed incarnation's retirement as a local one
+/// (pass `hosted_incarnation: false` from the replay of its `MemberRetired`
+/// row): after the second restart the entry reads owed its seat
+/// (`SeatOwed`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_placed_identity_is_hosted_on_its_first_use_across_restarts() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("ladder-entry-host").with_member_build(),
+    )
+    .await
+    .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("ladder-placed-entry").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let identity = AgentIdentity::from("placed-entry");
+    let hosted = Some((
+        IdentityEntryOrigin::Declared,
+        EntryStanding::Unseated(UnseatedEntryCause::HostedOnFirstUse),
+    ));
+
+    let declared = controlling
+        .handle
+        .apply_declared_roster(DeclaredRoster::partial([DeclaredEntry::new(
+            placed_spawn_spec("worker", "placed-entry", &report.host_id),
+        )]))
+        .await
+        .expect("the apply runs");
+    assert!(
+        matches!(
+            declared.entries.get(&identity),
+            Some(DeclaredEntryOutcome::HostedOnFirstUse)
+        ),
+        "{declared:?}"
+    );
+    assert_eq!(entry_of(&controlling.handle, &identity), hosted);
+
+    controlling
+        .handle
+        .spawn_spec(
+            placed_spawn_spec("worker", "placed-entry", &report.host_id).with_entry_custody(true),
+        )
+        .await
+        .expect("the placed spawn holding the entry's custody commits");
+    assert!(
+        matches!(
+            entry_of(&controlling.handle, &identity),
+            Some((IdentityEntryOrigin::Declared, EntryStanding::Seated(_)))
+        ),
+        "the remote commit seats the entry"
+    );
+
+    let controlling = controlling.restart().await;
+    assert!(
+        matches!(
+            entry_of(&controlling.handle, &identity),
+            Some((IdentityEntryOrigin::Declared, EntryStanding::Seated(_)))
+        ),
+        "the replay seats the entry again with its placed carrier"
+    );
+
+    controlling
+        .handle
+        .retire(identity.clone())
+        .await
+        .expect("the placed member's retirement converges on its host");
+    assert_eq!(
+        entry_of(&controlling.handle, &identity),
+        hosted,
+        "the retirement keeps the entry, hosted on its next first use"
+    );
+
+    let controlling = controlling.restart().await;
+    assert_eq!(
+        entry_of(&controlling.handle, &identity),
+        hosted,
+        "the replay of the retirement keeps it so"
+    );
+
+    fixture.shutdown().await;
 }

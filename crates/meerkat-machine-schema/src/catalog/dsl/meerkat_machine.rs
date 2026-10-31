@@ -2537,6 +2537,9 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -11856,6 +11859,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -11892,6 +11898,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
             }
             to Idle
@@ -12037,6 +12046,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -12075,6 +12087,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;

@@ -4634,13 +4634,16 @@ impl MobActor {
         )
     }
 
-    /// Whether the host marked `identity` host-pending: it keeps its own
-    /// record of the identity's preparation (a rotation it re-issues).
+    /// Whether the host marked `identity` host-pending at build (a
+    /// first-boot preparation, `FirstBootRow`): it keeps its own record of
+    /// the identity's preparation (a rotation it re-issues). A role hold
+    /// (`RoleMigrationUndeclared`) is no host record.
     fn host_pending(&self, identity: &AgentIdentity) -> bool {
         self.dsl_authority
             .state()
-            .member_host_preparation_pending
-            .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+            .member_host_preparation_causes
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            == Some(&mob_dsl::HostPreparationCause::FirstBootRow)
     }
 
     /// Hold, at a start, a host-pending member's interrupted FreshSession
@@ -6248,6 +6251,7 @@ impl MobActor {
                         retiring_peer_endpoint: endpoint,
                         preserve_machine_topology: false,
                         rotation: None,
+                        cause: None,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, false)));
                 }
@@ -6504,6 +6508,7 @@ impl MobActor {
                         agent_identity: identity,
                         generation: continuation.entry.generation,
                         role: continuation.entry.role.clone(),
+                        session_archived: false,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, true)));
                 }
@@ -6765,6 +6770,14 @@ impl MobActor {
                             ),
                             preserve_machine_topology: false,
                             preservation_started: false,
+                            session_archived: false,
+                            // An externally bound member's rollback keeps its
+                            // entry hosted on its first use, as the replay of
+                            // its row does.
+                            hosted_incarnation: Self::runtime_binding_for_entry(
+                                &continuation.entry,
+                            )
+                            .is_some(),
                         },
                         "rollback_resumed_spawn_membership",
                     )

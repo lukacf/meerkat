@@ -8932,6 +8932,10 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.host_binding_generation_highwater.get_copied(host_id).get("value") >= host_binding_generation
             }
             guard "identity_not_recovered" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            // The replay runs before the created entries' scan, so no name is
+            // tombstoned yet; a member is never seated under a removed entry's
+            // name (tombstone_is_never_an_entry).
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             // Replay sees only the events after the last reset, so an
             // identity's first recovered generation can continue its
@@ -9095,6 +9099,10 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_not_recovered" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            // The replay runs before the created entries' scan, so no name is
+            // tombstoned yet; a member is never seated under a removed entry's
+            // name (tombstone_is_never_an_entry).
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             // Replay sees only the events after the last reset, so an
             // identity's first recovered generation can continue its
@@ -9418,6 +9426,10 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverRosterMemberReset { agent_identity, previous_agent_runtime_id, previous_generation, agent_runtime_id, fence_token, generation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "previous_runtime_recovered" { self.live_runtime_ids.contains(previous_agent_runtime_id) == true }
+            // The replay runs before the created entries' scan, so no name is
+            // tombstoned yet; a member is never seated under a removed entry's
+            // name (tombstone_is_never_an_entry).
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             guard "identity_recovered" { self.identity_to_runtime.get_cloned(agent_identity) == Some(previous_agent_runtime_id) }
             guard "previous_generation_matches_history" { self.identity_runtime_generations.get_copied(agent_identity) == Some(previous_generation) }
             // Replay sees only the events after the last reset, so an
@@ -30165,8 +30177,12 @@ macro_rules! mob_catalog_machine_dsl {
         // - a removed entry's row records its tombstone;
         // - a row this build cannot read, and a row whose facts contradict the
         //   replay (a Declared entry of the same name, a member where the row
-        //   says none, a placed member), reserve the name as unreadable:
-        //   nothing acts on it.
+        //   says none, a placed member) or a removed entry's tombstone (a
+        //   second row of the name), reserve the name as unreadable: nothing
+        //   acts on it.
+        // No arm but the unreadable one takes a tombstoned name, so a
+        // removed entry's name is never an entry again
+        // (tombstone_is_never_an_entry).
         transition RecoverCreatedIdentityEntrySeated {
             per_phase [Running, Stopped]
             on signal RecoverCreatedIdentityEntry { agent_identity, presence, last_session }
@@ -30178,6 +30194,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.remove(agent_identity);
@@ -30195,6 +30212,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
@@ -30215,6 +30233,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::TemplatePreparation);
@@ -30232,6 +30251,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             update {
                 self.identity_entry_tombstones.insert(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -30256,6 +30276,7 @@ macro_rules! mob_catalog_machine_dsl {
                     && self.member_placement.contains_key(agent_identity) == true)
                 || (presence != RecoveredPresence::Present
                     && self.identity_to_runtime.contains_key(agent_identity) == true)
+                || self.identity_entry_tombstones.contains(agent_identity) == true
             }
             update {
                 self.identity_entry_unreadable.insert(agent_identity);

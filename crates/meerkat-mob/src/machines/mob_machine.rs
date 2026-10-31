@@ -15046,6 +15046,49 @@ mod tests {
         );
     }
 
+    /// A removed created entry's name is never an entry or a member again,
+    /// whatever order MobMachine meets its facts in: a second row of the
+    /// name is answered unreadable and records no entry, and no replay seats
+    /// a member under it (`tombstone_is_never_an_entry`).
+    #[test]
+    fn a_tombstoned_name_never_becomes_an_entry_or_a_member() {
+        let mut authority = MobMachineAuthority::new();
+        let removed = AgentIdentity::from("created-removed-twice");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        for presence in [
+            RecoveredPresence::Present,
+            RecoveredPresence::PresentUnseated,
+            RecoveredPresence::Tombstone,
+        ] {
+            recover_created(&mut authority, &removed, presence, None);
+            let state = authority.state();
+            assert!(state.identity_entry_tombstones.contains(&removed));
+            assert!(
+                !state.identity_entry_origins.contains_key(&removed),
+                "a second {presence:?} row records no entry"
+            );
+            assert!(
+                state.identity_entry_unreadable.contains(&removed),
+                "a second {presence:?} row reserves the name unreadable"
+            );
+        }
+        assert!(
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMember {
+                    agent_identity: removed.clone(),
+                    agent_runtime_id: AgentRuntimeId::from("created-removed-twice:0"),
+                    fence_token: FenceToken(1),
+                    generation: Generation(0),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                })
+                .is_err(),
+            "no replay seats a member under a removed entry's name"
+        );
+        assert!(!authority.state().identity_to_runtime.contains_key(&removed));
+    }
+
     /// Custody of one origin never takes an entry of another, and no spawn
     /// takes a reserved name: the admission probe refuses entry custody for
     /// a Created entry and created custody for anything but a Created entry

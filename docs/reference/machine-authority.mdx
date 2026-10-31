@@ -226,7 +226,9 @@ entry unseated (`SeatOwed`) with that session as its revival record; a
 pending row records it unseated for its host's preparation
 (`TemplatePreparation`); a removed row records the name's tombstone
 (`identity_entry_tombstones`); and an unreadable row, or one the replay
-contradicts, reserves the name (`identity_entry_unreadable`). The replay
+contradicts (a tombstone of the name included), reserves the name
+(`identity_entry_unreadable`). No arm records an entry for a tombstoned
+name, and no replay seats a member under one. The replay
 reserves the name of a member row whose origin token this build does not
 know the same way. A reserved name is never an entry or a member: the
 admission probe answers `IdentityNameReserved`, the worker reconcile helpers

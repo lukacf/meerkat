@@ -9,13 +9,15 @@
 //! with its typed refusal until the next trigger (an apply, a mob set
 //! change, compose).
 //!
-//! A reconcile waits on any one call for at most a bound: one that does not
-//! answer by then stops it there, as a store failure stops it, and the
-//! health pass finishes it (see [`reconciling`]).
+//! Every holder of the declarations gate (a reconcile, an apply, a read)
+//! waits on any one call for at most a bound: one that does not answer by
+//! then stops the holder there, as a store failure stops it, and the gate is
+//! released; the health pass finishes a stopped reconcile (see [`bounded`]).
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::mob_announcements::DECLARATIONS_CALL_BOUND;
 use crate::mob_announcements::declarations::{
@@ -28,8 +30,8 @@ use crate::mob_announcements::native::{MemberRoute, NativeUnavailable};
 use crate::mob_announcements::sources::RosterFacts;
 use crate::mob_announcements::sources::{SourceChange, SourceHealthStatus, SourceState};
 use crate::mob_announcements::store::{
-    AppliedDeclarations, DeclarationMark, RoleChildStatus, RoleExpansion, RoleExpansions,
-    RoleMember, SubscriptionVerbOutcome, TemplateChildren,
+    AnnouncementStore, AppliedDeclarations, DeclarationMark, RoleChildStatus, RoleExpansion,
+    RoleExpansions, RoleMember, SubscriptionVerbOutcome, TemplateChildren,
 };
 use crate::mob_announcements::types::{
     AnnouncementStoreError, Member, MemberRouteRecord, MobId, OperationId, SubscriptionChange,
@@ -129,8 +131,9 @@ fn held_at(before: Option<&DeclarationMark>, digest: &str) -> bool {
     })
 }
 
-/// A call the declarations reconcile waits on, as a stop names it.
-#[derive(Debug, Clone, Copy)]
+/// A call a holder of the declarations gate waits on, as a stop names it.
+/// It is also the call's site: at most one call of a site runs at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Waited {
     /// A method of the store.
     Store(&'static str),
@@ -151,15 +154,16 @@ impl std::fmt::Display for Waited {
 }
 
 impl Waited {
-    /// Why a reconcile stopped at this call.
+    /// Why a holder stopped at this call: it, or an earlier call of its
+    /// site still running, did not answer within the bound.
     fn stopped_here(self) -> String {
         format!(
-            "{self} did not answer within {} s; the declarations reconcile stopped there",
+            "{self} has not answered within {} s",
             DECLARATIONS_CALL_BOUND.as_secs()
         )
     }
 
-    /// The refusal a reconcile that stopped at this call ends with: a store
+    /// The refusal a holder that stopped at this call ends with: a store
     /// failure for a store call, and native state unavailable for any other.
     fn refusal(self) -> AnnouncementError {
         let detail = self.stopped_here();
@@ -170,138 +174,216 @@ impl Waited {
     }
 }
 
+/// The sites with a call running on a task of its own for a holder of the
+/// declarations gate: at most one call each (see [`bounded`]).
+pub(super) type RunningCalls = std::sync::Mutex<BTreeSet<Waited>>;
+
+/// A holder of the declarations gate running on this task: the call it
+/// stopped at, once one did not answer within the bound, and the sites
+/// with a call running.
+struct Holder {
+    stopped: Cell<Option<Waited>>,
+    running: Arc<RunningCalls>,
+}
+
 tokio::task_local! {
-    /// The declarations reconcile running on this task, from the moment its
-    /// caller holds the declarations gate to its end: the call it stopped
-    /// at, once one did not answer within [`DECLARATIONS_CALL_BOUND`]. The
-    /// calls such a reconcile waits on are bounded ([`bounded`]); a call
-    /// made outside one waits as long as it takes.
-    static RECONCILE: Cell<Option<Waited>>;
+    /// The holder of the declarations gate running on this task, from the
+    /// moment it holds the gate to the moment it releases it. The calls it
+    /// waits on are bounded ([`bounded`]); a call made without the gate
+    /// waits as long as it takes.
+    static HOLDER: Holder;
 }
 
-/// Run the declarations reconcile `reconcile` makes, whose caller holds the
-/// declarations gate, with every call it waits on bounded. A call that does
-/// not answer within [`DECLARATIONS_CALL_BOUND`] stops it there, as a store
-/// failure stops it: it makes no further call, ends with that call's
-/// refusal whatever it returned, and leaves every record it had not reached
-/// as it was, unmarked or pending, for the health pass to finish. So a
-/// reconcile holds the gate for at most about one bound past its last
-/// answered call. It runs in a box of its own: its caller (an apply's
-/// request, the round) holds a pointer to it, not its whole state.
-async fn reconciling<T, F>(reconcile: impl FnOnce() -> F) -> Result<T, AnnouncementError>
-where
-    F: Future<Output = Result<T, AnnouncementError>>,
-{
-    RECONCILE
-        .scope(
-            Cell::new(None),
-            Box::pin(async move {
-                let result = reconcile().await;
-                stopped_at().map_or(result, |call| Err(call.refusal()))
-            }),
-        )
-        .await
+/// A call running on a task of its own for a holder of the declarations
+/// gate: its site stays taken until the task ends, whether the holder
+/// still waits for it or not.
+struct Running {
+    site: Waited,
+    running: Arc<RunningCalls>,
 }
 
-/// The call the declarations reconcile running on this task stopped at, if
-/// one runs here and it stopped.
-fn stopped_at() -> Option<Waited> {
-    RECONCILE.try_with(Cell::get).ok().flatten()
-}
-
-/// Whether a declarations reconcile runs on this task and stopped: what it
-/// would read next is not read, and a reader that logs a failed read logs
-/// nothing of it, the stop being logged once already.
-pub(super) fn reconcile_stopped() -> bool {
-    stopped_at().is_some()
-}
-
-/// Wait on `call` for at most [`DECLARATIONS_CALL_BOUND`] while a
-/// declarations reconcile runs on this task, and as long as it takes
-/// otherwise. Past the bound the reconcile stops at `waited`, logged once,
-/// and `call` is dropped where it stands, so only a call that stops cleanly
-/// there is waited on here: a store call, which the store runs to its end
-/// off its caller (on the blocking pool, or on a task of its own for a host
-/// store realm). Once the reconcile stopped, a call it would make is not
-/// made. Either way the call answers what `unanswered` makes of the stop.
-async fn bounded<T>(
-    waited: Waited,
-    call: impl Future<Output = T>,
-    unanswered: impl FnOnce(String) -> T,
-) -> T {
-    match RECONCILE.try_with(Cell::get) {
-        Err(_) => call.await,
-        Ok(Some(stopped)) => unanswered(stopped.stopped_here()),
-        Ok(None) => match tokio::time::timeout(DECLARATIONS_CALL_BOUND, call).await {
-            Ok(answer) => answer,
-            Err(_) => unanswered(stop_at(waited)),
-        },
+impl Running {
+    /// Take `site` for a call about to run, unless an earlier call of it
+    /// still runs.
+    fn start(running: Arc<RunningCalls>, site: Waited) -> Option<Self> {
+        let taken = running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(site);
+        if !taken {
+            return None;
+        }
+        Some(Self { site, running })
     }
 }
 
-/// [`bounded`] for a call that must run to its end once started: it runs on
-/// a task of its own, so past the bound only the reconcile's wait ends, and
-/// the call completes or fails by itself. A native read may run Meerkat's
-/// restore of persisted child mobs, which runs in the future of its first
-/// caller, and the schedule service writes a runner's schedule in steps:
-/// neither may be dropped half way.
-pub(super) async fn bounded_spawned<T: Send + 'static>(
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.site);
+    }
+}
+
+/// The call the holder of the declarations gate running on this task
+/// stopped at, if one runs here and it stopped.
+fn stopped_at() -> Option<Waited> {
+    HOLDER
+        .try_with(|holder| holder.stopped.get())
+        .ok()
+        .flatten()
+}
+
+/// Whether a holder of the declarations gate runs on this task and
+/// stopped: what it would read next is not read, and a reader that logs a
+/// failed read logs nothing of it, the stop being logged once already.
+pub(super) fn holder_stopped() -> bool {
+    stopped_at().is_some()
+}
+
+/// Wait on `call` for at most [`DECLARATIONS_CALL_BOUND`] while a holder
+/// of the declarations gate runs on this task, and as long as it takes
+/// otherwise.
+///
+/// In a holder the call runs on a task of its own, so past the bound only
+/// the holder's wait ends: the call completes or fails by itself and is
+/// never dropped half way (a native read may run Meerkat's restore of
+/// persisted child mobs in its first caller's future, the schedule service
+/// writes a runner's schedule in steps, and a refused put is counted in the
+/// audit after it). Its site stays taken until the call ends, so a call of
+/// the site that any holder would make meanwhile is not made: retries
+/// against a call that never answers leave that one call running, not one
+/// per retry. Past the bound, or at a site still taken, the holder stops
+/// there, logged once, and every call it would make after it is not made.
+/// Each time the call answers what `unanswered` makes of the stop.
+pub(super) async fn bounded<T: Send + 'static>(
     waited: Waited,
     call: impl Future<Output = T> + Send + 'static,
     unanswered: impl FnOnce(String) -> T,
 ) -> T {
-    match RECONCILE.try_with(Cell::get) {
-        Err(_) => call.await,
-        Ok(Some(stopped)) => unanswered(stopped.stopped_here()),
-        Ok(None) => match tokio::time::timeout(DECLARATIONS_CALL_BOUND, tokio::spawn(call)).await {
-            Ok(Ok(answer)) => answer,
-            // Its task failed: the call answered nothing.
-            Ok(Err(error)) => unanswered(format!("{waited} failed: {error}")),
-            Err(_) => unanswered(stop_at(waited)),
-        },
+    let Ok((stopped, running)) =
+        HOLDER.try_with(|holder| (holder.stopped.get(), Arc::clone(&holder.running)))
+    else {
+        return call.await;
+    };
+    if let Some(stopped) = stopped {
+        return unanswered(stopped.stopped_here());
+    }
+    let Some(started) = Running::start(running, waited) else {
+        return unanswered(stop_at(waited, true));
+    };
+    let task = tokio::spawn(async move {
+        let _started = started;
+        call.await
+    });
+    match tokio::time::timeout(DECLARATIONS_CALL_BOUND, task).await {
+        Ok(Ok(answer)) => answer,
+        // Its task failed: the call answered nothing.
+        Ok(Err(error)) => unanswered(format!("{waited} failed: {error}")),
+        Err(_) => unanswered(stop_at(waited, false)),
     }
 }
 
-/// A store call of the declarations reconcile, bounded as [`bounded`]
-/// bounds it: unanswered, it is a store failure.
-pub(super) async fn bounded_store<T>(
-    method: &'static str,
-    call: impl Future<Output = Result<T, AnnouncementStoreError>>,
-) -> Result<T, AnnouncementStoreError> {
-    bounded(Waited::Store(method), call, |detail| {
-        Err(AnnouncementStoreError::Storage(detail))
-    })
-    .await
-}
-
-/// A read of the native owner by the declarations reconcile, bounded as
-/// [`bounded_spawned`] bounds it: unanswered, the native state is
+/// A read of the native owner by a holder of the declarations gate,
+/// bounded as [`bounded`] bounds it: unanswered, the native state is
 /// unavailable.
 pub(super) async fn bounded_native<T: Send + 'static>(
     method: &'static str,
     call: impl Future<Output = Result<T, NativeUnavailable>> + Send + 'static,
 ) -> Result<T, NativeUnavailable> {
-    bounded_spawned(Waited::Native(method), call, |detail| {
+    bounded(Waited::Native(method), call, |detail| {
         Err(NativeUnavailable(detail))
     })
     .await
 }
 
-/// Stop the declarations reconcile running on this task at `waited`, which
-/// did not answer within the bound, and log it once: the reconcile makes no
+/// Stop the holder of the declarations gate running on this task at
+/// `waited`, and log that once: past the bound, or, when `earlier`, not
+/// made while an earlier call of its site still runs. The holder makes no
 /// call after it.
-fn stop_at(waited: Waited) -> String {
-    let _ = RECONCILE.try_with(|stopped| stopped.set(Some(waited)));
-    tracing::warn!(
-        call = %waited,
-        bound_secs = DECLARATIONS_CALL_BOUND.as_secs(),
-        "a call of the declarations reconcile did not answer within its bound; the reconcile \
-         stops there, and the health pass finishes it"
-    );
+fn stop_at(waited: Waited, earlier: bool) -> String {
+    let _ = HOLDER.try_with(|holder| holder.stopped.set(Some(waited)));
+    let bound_secs = DECLARATIONS_CALL_BOUND.as_secs();
+    if earlier {
+        tracing::warn!(
+            call = %waited,
+            bound_secs,
+            "a call under the declarations gate was not made: an earlier call of it still runs \
+             past its bound; the gate's holder stops there"
+        );
+    } else {
+        tracing::warn!(
+            call = %waited,
+            bound_secs,
+            "a call under the declarations gate did not answer within its bound; the gate's \
+             holder stops there"
+        );
+    }
     waited.stopped_here()
 }
 
 impl AnnouncementService {
+    /// Take the declarations gate and run `work` under it (see
+    /// [`Self::gated`]). The wait for the gate has no bound of its own:
+    /// every holder's calls have.
+    async fn under_gate<T, F>(&self, work: impl FnOnce() -> F) -> Result<T, AnnouncementError>
+    where
+        F: Future<Output = Result<T, AnnouncementError>>,
+    {
+        let _gate = self.inner.declarations_gate.lock().await;
+        self.gated(work).await
+    }
+
+    /// Run `work`, made once it runs, for a caller that holds the
+    /// declarations gate, with every call it waits on bounded. A call that
+    /// does not answer within [`DECLARATIONS_CALL_BOUND`] stops it there, as
+    /// a store failure stops it: it makes no further call and ends with that
+    /// call's refusal whatever it returned, so the gate is released at most
+    /// about one bound after its last answered call. A reconcile leaves
+    /// every record it had not reached as it was, unmarked or pending, for
+    /// the health pass to finish. `work` runs in a box of its own: its
+    /// caller (an apply's request, a read, the round) holds a pointer to it,
+    /// not its whole state.
+    async fn gated<T, F>(&self, work: impl FnOnce() -> F) -> Result<T, AnnouncementError>
+    where
+        F: Future<Output = Result<T, AnnouncementError>>,
+    {
+        let holder = Holder {
+            stopped: Cell::new(None),
+            running: Arc::clone(&self.inner.declarations_calls),
+        };
+        HOLDER
+            .scope(
+                holder,
+                Box::pin(async move {
+                    let result = work().await;
+                    stopped_at().map_or(result, |call| Err(call.refusal()))
+                }),
+            )
+            .await
+    }
+
+    /// A store call of a holder of the declarations gate, made by `call` on
+    /// the store it is given and bounded as [`bounded`] bounds it:
+    /// unanswered, it is a store failure.
+    pub(super) async fn stored<T, F>(
+        &self,
+        method: &'static str,
+        call: impl FnOnce(Arc<dyn AnnouncementStore>) -> F,
+    ) -> Result<T, AnnouncementStoreError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, AnnouncementStoreError>> + Send + 'static,
+    {
+        bounded(
+            Waited::Store(method),
+            call(Arc::clone(&self.inner.store)),
+            |detail| Err(AnnouncementStoreError::Storage(detail)),
+        )
+        .await
+    }
+
     /// This gateway's own mob: a declared record names it when it names no
     /// mob.
     fn declaring_mob(&self) -> Result<MobId, AnnouncementError> {
@@ -342,9 +424,8 @@ impl AnnouncementService {
             }
         };
         {
-            let _gate = self.inner.declarations_gate.lock().await;
             let (declarations, own) = (&declarations, &own);
-            reconciling(move || async move {
+            self.under_gate(move || async move {
                 self.record_applied(declarations, own).await?;
                 self.reconcile_applied(own).await?;
                 self.reconcile_roles().await
@@ -360,21 +441,21 @@ impl AnnouncementService {
     /// than the applied ones (at compose, the first time), the applied ones,
     /// and every role template's children.
     pub(super) async fn reconcile_declared(&self) -> Result<(), AnnouncementError> {
-        let _gate = self.inner.declarations_gate.lock().await;
-        reconciling(move || self.reconcile_declared_held()).await
+        self.under_gate(move || self.reconcile_declared_held())
+            .await
     }
 
     /// [`Self::reconcile_declared`] for a caller that holds the declarations
-    /// gate, inside [`reconciling`].
+    /// gate, inside [`Self::gated`].
     async fn reconcile_declared_held(&self) -> Result<(), AnnouncementError> {
         if let Some(own) = self.inner.native.own_mob() {
             if let Some(source) = self.inner.config.declarations.as_deref() {
                 let declarations = source.declarations();
-                let applied = bounded_store(
-                    "applied_declarations",
-                    self.inner.store.applied_declarations(),
-                )
-                .await?;
+                let applied = self
+                    .stored("applied_declarations", |store| async move {
+                        store.applied_declarations().await
+                    })
+                    .await?;
                 match applied {
                     Some(applied) if declarations.revision < applied.revision => {}
                     Some(applied) if declarations.revision == applied.revision => {
@@ -413,11 +494,11 @@ impl AnnouncementService {
         own: &MobId,
     ) -> Result<(), AnnouncementError> {
         let digest = declarations.digest(own)?;
-        let applied = bounded_store(
-            "applied_declarations",
-            self.inner.store.applied_declarations(),
-        )
-        .await?;
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?;
         if let Some(applied) = applied {
             if declarations.revision < applied.revision {
                 return Err(AnnouncementStoreError::DeclarationRollback {
@@ -435,15 +516,15 @@ impl AnnouncementService {
                 return Ok(());
             }
         }
-        bounded_store(
-            "record_declarations",
-            self.inner.store.record_declarations(AppliedDeclarations {
-                revision: declarations.revision,
-                digest,
-                applied_at_ms: self.now(),
-                declarations: declarations.clone(),
-            }),
-        )
+        let record = AppliedDeclarations {
+            revision: declarations.revision,
+            digest,
+            applied_at_ms: self.now(),
+            declarations: declarations.clone(),
+        };
+        self.stored("record_declarations", move |store| async move {
+            store.record_declarations(record).await
+        })
         .await?;
         Ok(())
     }
@@ -452,20 +533,22 @@ impl AnnouncementService {
     /// dropped records first (ended or cancelled), then sources, then
     /// subscriptions and role templates.
     async fn reconcile_applied(&self, own: &MobId) -> Result<(), AnnouncementError> {
-        let applied = bounded_store(
-            "applied_declarations",
-            self.inner.store.applied_declarations(),
-        )
-        .await?;
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?;
         let Some(applied) = applied else {
             return Ok(());
         };
-        let mut marks: BTreeMap<MarkKey, DeclarationMark> =
-            bounded_store("declaration_marks", self.inner.store.declaration_marks())
-                .await?
-                .into_iter()
-                .map(|mark| ((mark.kind, mark.id.clone()), mark))
-                .collect();
+        let mut marks: BTreeMap<MarkKey, DeclarationMark> = self
+            .stored("declaration_marks", |store| async move {
+                store.declaration_marks().await
+            })
+            .await?
+            .into_iter()
+            .map(|mark| ((mark.kind, mark.id.clone()), mark))
+            .collect();
         let declared = declared_keys(&applied.declarations);
         let dropped = marks
             .keys()
@@ -537,10 +620,9 @@ impl AnnouncementService {
             managed,
             ..base
         };
-        bounded_store(
-            "put_declaration_mark",
-            self.inner.store.put_declaration_mark(mark, now),
-        )
+        self.stored("put_declaration_mark", move |store| async move {
+            store.put_declaration_mark(mark, now).await
+        })
         .await?;
         Ok(())
     }
@@ -715,11 +797,12 @@ impl AnnouncementService {
         let managed = before.is_some_and(|mark| mark.managed);
         let applied = before
             .is_some_and(|mark| mark.digest == digest && mark.status == DeclarationStatus::Applied);
-        let found = bounded_store(
-            "source",
-            self.inner.store.source(&mob_id, &declared.source_id),
-        )
-        .await?;
+        let (mob, asked) = (mob_id.clone(), declared.source_id.clone());
+        let found = self
+            .stored("source", move |store| async move {
+                store.source(&mob, &asked).await
+            })
+            .await?;
         let Some(source) = found else {
             let operation = step_operation("create-source", &id, &digest, None)?;
             let put = self.put_source(&operation, declared.put(own, None)).await;
@@ -841,11 +924,12 @@ impl AnnouncementService {
         let managed = before.is_some_and(|mark| mark.managed);
         let applied = before
             .is_some_and(|mark| mark.digest == digest && mark.status == DeclarationStatus::Applied);
-        let found = bounded_store(
-            "role_template",
-            self.inner.store.role_template(&declared.subscription_id),
-        )
-        .await?;
+        let asked = declared.subscription_id.clone();
+        let found = self
+            .stored("role_template", move |store| async move {
+                store.role_template(&asked).await
+            })
+            .await?;
         let Some(template) = found else {
             let Some(request) = declared.template(own, None) else {
                 return Ok(());
@@ -897,7 +981,12 @@ impl AnnouncementService {
             return Ok(());
         };
         let source_id = crate::mob_announcements::types::SourceId::new(mark.id.clone())?;
-        let found = bounded_store("source", self.inner.store.source(mob_id, &source_id)).await?;
+        let (mob, asked) = (mob_id.clone(), source_id.clone());
+        let found = self
+            .stored("source", move |store| async move {
+                store.source(&mob, &asked).await
+            })
+            .await?;
         let Some(source) = found else {
             return Ok(());
         };
@@ -933,12 +1022,10 @@ impl AnnouncementService {
         };
         match dropped {
             Ok(()) => {
-                bounded_store(
-                    "remove_declaration_mark",
-                    self.inner
-                        .store
-                        .remove_declaration_mark(mark.kind, &mark.id, self.now()),
-                )
+                let (kind, id, now) = (mark.kind, mark.id.clone(), self.now());
+                self.stored("remove_declaration_mark", move |store| async move {
+                    store.remove_declaration_mark(kind, &id, now).await
+                })
                 .await?;
                 Ok(())
             }
@@ -987,7 +1074,12 @@ impl AnnouncementService {
         mark: &DeclarationMark,
     ) -> Result<(), AnnouncementError> {
         let id = crate::mob_announcements::types::SubscriptionId::new(mark.id.clone())?;
-        let found = bounded_store("role_template", self.inner.store.role_template(&id)).await?;
+        let asked = id.clone();
+        let found = self
+            .stored("role_template", move |store| async move {
+                store.role_template(&asked).await
+            })
+            .await?;
         let Some(template) = found else {
             return Ok(());
         };
@@ -1000,12 +1092,12 @@ impl AnnouncementService {
             &mark.digest,
             Some(template.revision),
         )?;
-        bounded_store(
-            "cancel_role_template",
-            self.inner
-                .store
-                .cancel_role_template(&operation, &id, template.revision, self.now()),
-        )
+        let (revision, now) = (template.revision, self.now());
+        self.stored("cancel_role_template", move |store| async move {
+            store
+                .cancel_role_template(&operation, &id, revision, now)
+                .await
+        })
         .await?;
         self.wake();
         Ok(())
@@ -1014,19 +1106,20 @@ impl AnnouncementService {
     /// Bring every live role template's children in line with its members
     /// now.
     async fn reconcile_roles(&self) -> Result<(), AnnouncementError> {
-        let templates =
-            bounded_store("role_templates", self.inner.store.role_templates(None)).await?;
+        let templates = self
+            .stored("role_templates", |store| async move {
+                store.role_templates(None).await
+            })
+            .await?;
         if templates.is_empty() {
             return Ok(());
         }
         let (roles, admitted) = self.expand_roles(&templates).await;
         let facts = self.roster_facts(admitted).await;
-        bounded_store(
-            "reconcile_role_children",
-            self.inner
-                .store
-                .reconcile_role_children(&roles, &facts, self.now()),
-        )
+        let now = self.now();
+        self.stored("reconcile_role_children", move |store| async move {
+            store.reconcile_role_children(&roles, &facts, now).await
+        })
         .await?;
         Ok(())
     }
@@ -1059,7 +1152,7 @@ impl AnnouncementService {
                 Ok(members) => members,
                 // A declarations reconcile that stopped reads no further
                 // roster, and logged its stop already.
-                Err(_) if reconcile_stopped() => break,
+                Err(_) if holder_stopped() => break,
                 Err(error) => {
                     tracing::warn!(
                         template = %template.id,
@@ -1070,7 +1163,7 @@ impl AnnouncementService {
                 }
             };
             if let Err(error) = self.ensure_hosted(&template.mobs).await {
-                if reconcile_stopped() {
+                if holder_stopped() {
                     break;
                 }
                 tracing::warn!(
@@ -1126,13 +1219,14 @@ impl AnnouncementService {
     ) -> Result<RoleTemplate, AnnouncementError> {
         self.ensure_hosted(&request.mobs).await?;
         let (children, facts) = self.readmission(&request.id).await?;
-        Ok(bounded_store(
-            "put_role_template",
-            self.inner
-                .store
-                .put_role_template(operation, request, &children, &facts, self.now()),
-        )
-        .await?)
+        let (operation, now) = (operation.clone(), self.now());
+        Ok(self
+            .stored("put_role_template", move |store| async move {
+                store
+                    .put_role_template(&operation, request, &children, &facts, now)
+                    .await
+            })
+            .await?)
     }
 
     /// The owner's verdict on the member of each live child of the template
@@ -1146,11 +1240,12 @@ impl AnnouncementService {
             revision: 0,
             members: BTreeMap::new(),
         };
-        let found = bounded_store(
-            "role_template_children",
-            self.inner.store.role_template_children(id),
-        )
-        .await?;
+        let asked = id.clone();
+        let found = self
+            .stored("role_template_children", move |store| async move {
+                store.role_template_children(&asked).await
+            })
+            .await?;
         let Some(found) = found else {
             return Ok((expansion, RosterFacts::default()));
         };
@@ -1247,15 +1342,27 @@ impl AnnouncementService {
     /// from the revision it records to the last record it writes: a read
     /// waits for a reconcile in flight (at startup, an apply, a mob set
     /// change or a retry) and never reports a revision with only the records
-    /// a reconcile in flight had reached. A reconcile waits on each call for
-    /// at most a bound (see [`reconciling`]), so a call that never answers
-    /// holds a read about that long: the reconcile stops there, and the read
-    /// reports what it left, as after a store failure, until the health pass
-    /// finishes it. No caller holds the gate when it calls this.
+    /// a reconcile in flight had reached. Its wait for the gate has no bound
+    /// of its own, but every holder of the gate, this read included, waits
+    /// on each call for at most a bound (see [`Self::gated`]): a call that
+    /// never answers stops its holder there and the gate is released. A
+    /// reconcile so stopped leaves what it left, as after a store failure,
+    /// until the health pass finishes it; a read so stopped answers the
+    /// call's failure. No caller holds the gate when it calls this.
     pub(super) async fn declared_view(&self) -> Result<DeclarationsView, AnnouncementError> {
-        let _gate = self.inner.declarations_gate.lock().await;
+        self.under_gate(move || self.declared_view_held()).await
+    }
+
+    /// [`Self::declared_view`] for a caller that holds the declarations
+    /// gate, inside [`Self::gated`].
+    async fn declared_view_held(&self) -> Result<DeclarationsView, AnnouncementError> {
         let own = self.declaring_mob()?;
-        let (revision, digest) = match self.inner.store.applied_declarations().await? {
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?;
+        let (revision, digest) = match applied {
             Some(applied) => (applied.revision, applied.digest),
             None => (
                 0,
@@ -1267,7 +1374,11 @@ impl AnnouncementService {
                 .digest(&own)?,
             ),
         };
-        let marks = self.inner.store.declaration_marks().await?;
+        let marks = self
+            .stored("declaration_marks", |store| async move {
+                store.declaration_marks().await
+            })
+            .await?;
         let deliverable = self.ensure_deliverable().err().map(|error| match error {
             AnnouncementError::GovernedRuntime => "governed_runtime".to_string(),
             other => crate::mob_announcements::rpc::refusal_kind(&other),
@@ -1313,7 +1424,12 @@ impl AnnouncementService {
             }
             records.push(record);
         }
-        for child in self.inner.store.role_children().await? {
+        let children = self
+            .stored("role_children", |store| async move {
+                store.role_children().await
+            })
+            .await?;
+        for child in children {
             if !templates.contains(child.template_id.as_str()) {
                 continue;
             }
@@ -1357,12 +1473,12 @@ impl AnnouncementService {
     /// reconcile, an apply or a read holds the gate, this pass leaves the
     /// declarations to it and the next pass looks again, so a round never
     /// waits on another gate holder. Its own check and reconcile run in the
-    /// round, each call they wait on bounded (see [`reconciling`]), so a
-    /// call that never answers holds the round for about one bound. After a
-    /// failed retry the next one waits out the slowest settle pause from
-    /// the failed retry's end, so a failure that persists is retried at
-    /// that pace, never once per round the retry's own puts wake, and a
-    /// wedged call holds at most one round per pause.
+    /// round, each call they wait on bounded (see [`Self::gated`]), so a
+    /// call that never answers holds the round for about one bound, and a
+    /// later retry that would call it again while it still runs stops at
+    /// once. After a failed retry the next one waits out the slowest settle
+    /// pause from the failed retry's end, so a failure that persists is
+    /// retried at that pace, never once per round the retry's own puts wake.
     pub(super) async fn retry_declarations(&self) {
         let now = self.now();
         let wait = self
@@ -1377,7 +1493,10 @@ impl AnnouncementService {
         let Ok(_gate) = self.inner.declarations_gate.try_lock() else {
             return;
         };
-        let owed = match reconciling(move || self.declarations_owe_a_reconcile()).await {
+        let owed = match self
+            .gated(move || self.declarations_owe_a_reconcile())
+            .await
+        {
             Ok(owed) => owed,
             Err(error) => {
                 tracing::warn!(%error, "declarations not read at the health pass");
@@ -1387,7 +1506,7 @@ impl AnnouncementService {
         if !owed {
             return;
         }
-        let retry_after = match reconciling(move || self.reconcile_declared_held()).await {
+        let retry_after = match self.gated(move || self.reconcile_declared_held()).await {
             Ok(()) => 0,
             Err(error) => {
                 tracing::warn!(
@@ -1416,8 +1535,11 @@ impl AnnouncementService {
     /// whose mark it keeps for a later trigger; one a failure stopped can
     /// leave both.
     async fn declarations_owe_a_reconcile(&self) -> Result<bool, AnnouncementError> {
-        let marks =
-            bounded_store("declaration_marks", self.inner.store.declaration_marks()).await?;
+        let marks = self
+            .stored("declaration_marks", |store| async move {
+                store.declaration_marks().await
+            })
+            .await?;
         if marks
             .iter()
             .any(|mark| mark.status == DeclarationStatus::Pending)
@@ -1428,11 +1550,11 @@ impl AnnouncementService {
         if self.inner.native.own_mob().is_none() {
             return Ok(false);
         }
-        let applied = bounded_store(
-            "applied_declarations",
-            self.inner.store.applied_declarations(),
-        )
-        .await?;
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?;
         let newer_options = self
             .inner
             .config
@@ -1464,7 +1586,13 @@ impl AnnouncementService {
             return Ok(None);
         };
         let source_id = crate::mob_announcements::types::SourceId::new(mark.id.clone())?;
-        let Some(source) = self.inner.store.source(mob_id, &source_id).await? else {
+        let mob = mob_id.clone();
+        let found = self
+            .stored("source", move |store| async move {
+                store.source(&mob, &source_id).await
+            })
+            .await?;
+        let Some(source) = found else {
             return Ok(None);
         };
         Ok(match self.health_status(&source) {

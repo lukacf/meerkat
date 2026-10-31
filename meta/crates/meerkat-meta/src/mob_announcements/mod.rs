@@ -123,13 +123,14 @@ pub use types::{
 /// declarations before it starts anyway.
 const DECLARATIONS_RECONCILE_BEFORE_START: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long a declarations reconcile waits on any one call it makes: a
-/// store call, a read of this gateway's runtime, or the schedule service's
-/// reconcile of a source's runner. A call that takes longer is taken as
-/// wedged: the reconcile stops there, as a store failure stops it, and the
-/// health pass finishes it later. The same as the dispatcher's wait for the
-/// startup reconcile, so a startup reconcile that meets such a call ends
-/// about when the dispatcher starts without it.
+/// How long a holder of the declarations gate (a reconcile, an apply or a
+/// `declarations/get`) waits on any one call it makes: a store call, a read
+/// of this gateway's runtime, or the schedule service's reconcile of a
+/// source's runner. A call that takes longer is taken as wedged: the holder
+/// stops there, as a store failure stops it, and releases the gate, and the
+/// health pass finishes a stopped reconcile later. The same as the
+/// dispatcher's wait for the startup reconcile, so a startup reconcile that
+/// meets such a call ends about when the dispatcher starts without it.
 const DECLARATIONS_CALL_BOUND: std::time::Duration = DECLARATIONS_RECONCILE_BEFORE_START;
 
 /// `runtime_options.mob_announcements`, as a host passes it at startup.

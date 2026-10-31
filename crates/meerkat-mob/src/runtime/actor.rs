@@ -52100,13 +52100,26 @@ impl MobActor {
         let (mut report, archive_disposal) =
             boxed_arm_future(|| self.dispose_member_for_destroy_steps(ctx)).await;
         if let Some(disposal) = archive_disposal {
-            boxed_arm_future(|| {
+            // A release that does not land fails this member's destroy step:
+            // the member stays seated with its delivery facts, and a retried
+            // destroy releases the target again.
+            if let Err(error) = boxed_arm_future(|| {
                 self.release_member_instruction_target_for_destroy(
                     &ctx.entry.agent_identity,
+                    ctx.entry.bridge_session_id(),
                     disposal,
                 )
             })
-            .await;
+            .await
+            {
+                report.aborted_at = Some((
+                    DisposalStep::ArchiveSession,
+                    MobError::Internal(format!(
+                        "the member's operator instruction target was not released: {error}"
+                    )),
+                ));
+                return report;
+            }
             if let Err(error) =
                 boxed_arm_future(|| self.record_destroy_member_retirement_archived(ctx, disposal))
                     .await
@@ -54745,12 +54758,23 @@ impl MobActor {
         });
         // Terminal publication is deliberately last: replay may remove the
         // roster only after runtime cleanup and, for peer-only members,
-        // supervisor revocation have reached typed terminal truth.
-        self.release_member_instruction_target_for_destroy(
-            &entry.agent_identity,
-            terminal_disposal,
-        )
-        .await;
+        // supervisor revocation have reached typed terminal truth. A member
+        // whose operator-instruction target was not released stays seated
+        // for the destroy's retry.
+        if let Err(error) = self
+            .release_member_instruction_target_for_destroy(
+                &entry.agent_identity,
+                entry.bridge_session_id(),
+                terminal_disposal,
+            )
+            .await
+        {
+            outcome.errors.push(format!(
+                "operator instruction target release failed: {error}"
+            ));
+            outcome.orphaned = true;
+            return outcome;
+        }
         if let Err(error) = self
             .record_destroy_member_retirement_archived(&ctx, terminal_disposal)
             .await

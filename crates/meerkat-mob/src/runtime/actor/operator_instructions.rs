@@ -361,16 +361,22 @@ impl MobActor {
     }
 
     /// The release verdict of a retiring member
-    /// (`ResolveMemberInstructionRelease`): the release to realize, when
-    /// MobMachine authorizes one.
+    /// (`ResolveMemberInstructionRelease`) for the session it retires from:
+    /// the release to realize, when MobMachine authorizes one. A member
+    /// without a session has no target to release.
     pub(super) fn resolve_member_instruction_release(
         &mut self,
         agent_identity: &AgentIdentity,
+        session_id: Option<&SessionId>,
         disposal: mob_dsl::MemberSessionDisposal,
     ) -> Result<Option<MemberInstructionRelease>, MobError> {
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::ResolveMemberInstructionRelease {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                session_id: mob_dsl::SessionId::from_domain(session_id),
                 disposal,
             },
             "resolve_member_instruction_release",
@@ -398,37 +404,29 @@ impl MobActor {
 
     /// A destroy's release of one member's operator-instruction target,
     /// before the member's seat clears. The wait is bounded: a destroy never
-    /// waits long on a session's turn boundary, and a release that cannot
-    /// land is logged and left.
+    /// waits long on a session's turn boundary. A release that does not land
+    /// (refused, failed or past its bound) fails the member's destroy step
+    /// typed, so the member stays seated and MobMachine keeps its facts, and
+    /// a retried destroy decides and realizes the same release again.
     pub(super) async fn release_member_instruction_target_for_destroy(
         &mut self,
         agent_identity: &AgentIdentity,
+        session_id: Option<&SessionId>,
         disposal: mob_dsl::MemberSessionDisposal,
-    ) {
-        let release = match self.resolve_member_instruction_release(agent_identity, disposal) {
-            Ok(Some(release)) => release,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    agent_identity = %agent_identity,
-                    error = %error,
-                    "a destroyed mob's member operator instruction release was not decided"
-                );
-                return;
-            }
+    ) -> Result<(), MobError> {
+        let Some(release) =
+            self.resolve_member_instruction_release(agent_identity, session_id, disposal)?
+        else {
+            return Ok(());
         };
+        let released_session = release.session_id().clone();
         let realize = self.member_instruction_release_future(agent_identity, release);
         match tokio::time::timeout(DESTROY_INSTRUCTION_RELEASE_BOUND, realize).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(
-                agent_identity = %agent_identity,
-                error = %error,
-                "a destroyed mob's member operator instruction target was not released"
-            ),
-            Err(_) => tracing::warn!(
-                agent_identity = %agent_identity,
-                "a destroyed mob's member operator instruction release did not land in time"
-            ),
+            Ok(result) => result,
+            Err(_) => Err(MobError::RetirementInProgress {
+                session_id: released_session,
+                stage: "operator_instruction_target_release".to_string(),
+            }),
         }
     }
 
@@ -451,15 +449,28 @@ impl MobActor {
             // it: the release moves the member's epoch on under its lock.
             let mut epoch = lock.lock().await;
             *epoch = epoch.wrapping_add(1);
+            let session_id = release.session_id().clone();
             match service.release_member_instruction_target(release).await {
                 Ok(_)
-                | Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
                 | Err(meerkat_core::service::SessionInstructionError::Refused(
                     InstructionWriteError::OwnedBySession | InstructionWriteError::OwnedByOtherMob,
                 ))
                 | Err(meerkat_core::service::SessionInstructionError::Session(
                     meerkat_core::service::SessionError::NotFound { .. },
                 )) => Ok(()),
+                // A service that keeps no durable document holds no target to
+                // release; so does a session service wrapper that does not
+                // forward the release (its members' deliveries were blocked
+                // the same way).
+                Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "the mob session service released no operator instruction target: it \
+                         keeps no durable session document, or a wrapper does not forward \
+                         release_member_instruction_target"
+                    );
+                    Ok(())
+                }
                 Err(error) => Err(MobError::Internal(format!(
                     "the retiring member's operator instruction target could not be released: \
                      {error}"

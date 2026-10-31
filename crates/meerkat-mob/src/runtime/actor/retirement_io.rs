@@ -2353,9 +2353,11 @@ impl MobActor {
         continuation: RetirementContinuation,
         disposal: mob_dsl::MemberSessionDisposal,
     ) {
-        let release = match self
-            .resolve_member_instruction_release(&continuation.entry.agent_identity, disposal)
-        {
+        let release = match self.resolve_member_instruction_release(
+            &continuation.entry.agent_identity,
+            continuation.entry.bridge_session_id(),
+            disposal,
+        ) {
             Ok(release) => release,
             Err(error) => {
                 self.finish_retirement(continuation, Err(error)).await;
@@ -2367,18 +2369,33 @@ impl MobActor {
                 .await;
             return;
         };
+        let released_session = release.session_id().clone();
         let realize =
             self.member_instruction_release_future(&continuation.entry.agent_identity, release);
+        // The release waits for any delivery in flight to the member and for
+        // its session's turn boundary, within the retirement's deadline: past
+        // it the retirement fails typed and retryable, its member still
+        // seated, and a re-drive releases the target again.
+        let deadline = continuation.deadline;
         // Fence scope: self-only; releases the retiring member's own session target.
         self.dispatch_retirement(
             continuation,
             "retire-instruction-target-release",
             RetirementFenceScope::SelfOnly,
             async move {
-                RetirementObservation::InstructionTargetReleased {
-                    disposal,
-                    result: realize.await,
-                }
+                let result = match tokio::time::timeout(
+                    deadline.saturating_duration_since(Instant::now()),
+                    realize,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(MobError::RetirementInProgress {
+                        session_id: released_session,
+                        stage: "operator_instruction_target_release".to_string(),
+                    }),
+                };
+                RetirementObservation::InstructionTargetReleased { disposal, result }
             },
         );
     }

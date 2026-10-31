@@ -2277,8 +2277,10 @@ macro_rules! mob_catalog_machine_dsl {
             RecordMemberInstructionTarget { agent_identity: AgentIdentity, session_id: SessionId, generation: u64 },
             RefuseMemberInstructionTarget { agent_identity: AgentIdentity, session_id: SessionId, generation: u64, block: Enum<MemberInstructionBlock> },
             // A retiring member's session disposal, before its seat clears:
-            // whether its mob releases the member session's target.
-            ResolveMemberInstructionRelease { agent_identity: AgentIdentity, disposal: Enum<MemberSessionDisposal> },
+            // whether its mob releases the target of the session the member
+            // retires from (its bound session, or the session a releasing
+            // retire moved to the runtime's pending retirement).
+            ResolveMemberInstructionRelease { agent_identity: AgentIdentity, session_id: SessionId, disposal: Enum<MemberSessionDisposal> },
         }
 
         effect MobMachineEffect {
@@ -31354,18 +31356,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "member_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                    != Some(MobMemberState::Retiring)
+            }
             update {}
             to Running
             emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::SessionUnbound }
         }
 
+        // A retiring member defers, bound or not: a releasing retire
+        // unbinds the member when it starts, a retire that keeps the
+        // session does not.
         transition PrepareMemberInstructionDeliveryRetiring {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
             guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "member_retiring" {
                 self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
                     == Some(MobMemberState::Retiring)
@@ -31506,16 +31514,24 @@ macro_rules! mob_catalog_machine_dsl {
             emit MemberInstructionTargetBlocked { agent_identity: agent_identity, generation: generation, block: block }
         }
 
-        // A retiring member's mob releases its session's target when the
+        // A retiring member's mob releases a session's target when the
         // runtime released only the member's run and the host keeps the
         // session (an archived session is the mob's and is never written
         // again; a session kept for a successor stays the mob's), the
-        // member has a session, and the mob recorded or owes it a snapshot.
+        // session is the member's (its bound session, or the session its
+        // releasing retire moved to the runtime's pending retirement: the
+        // retire unbinds the member before its session is disposed of), and
+        // the mob recorded or owes the member a snapshot.
         transition ResolveMemberInstructionReleaseAuthorized {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on signal ResolveMemberInstructionRelease { agent_identity, disposal }
+            on signal ResolveMemberInstructionRelease { agent_identity, session_id, disposal }
             guard "host_keeps_session" { disposal == MemberSessionDisposal::RuntimeReleasedOnlyHostOwned }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_is_the_members" {
+                self.member_session_bindings.get_cloned(agent_identity) == Some(session_id)
+                || (self.identity_to_runtime.contains_key(agent_identity) == true
+                    && self.runtime_retire_pending_sessions.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                        == Some(session_id))
+            }
             guard "snapshot_held" {
                 self.member_instruction_recorded.contains_key(agent_identity) == true
                 || self.member_instruction_owed.contains_key(agent_identity) == true
@@ -31524,16 +31540,19 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit MemberInstructionReleaseAuthorized {
                 agent_identity: agent_identity,
-                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+                session_id: session_id
             }
         }
 
         transition ResolveMemberInstructionReleaseNotNeeded {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on signal ResolveMemberInstructionRelease { agent_identity, disposal }
+            on signal ResolveMemberInstructionRelease { agent_identity, session_id, disposal }
             guard "no_release" {
                 disposal != MemberSessionDisposal::RuntimeReleasedOnlyHostOwned
-                || self.member_session_bindings.contains_key(agent_identity) == false
+                || (self.member_session_bindings.get_cloned(agent_identity) != Some(session_id)
+                    && (self.identity_to_runtime.contains_key(agent_identity) == false
+                        || self.runtime_retire_pending_sessions.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
+                            != Some(session_id)))
                 || (self.member_instruction_recorded.contains_key(agent_identity) == false
                     && self.member_instruction_owed.contains_key(agent_identity) == false)
             }

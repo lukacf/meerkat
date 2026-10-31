@@ -3,6 +3,7 @@ import { describe, test } from "vitest";
 
 import type { ConsoleAgent } from "../types";
 import {
+  backfillTopologyLedger,
   normalizeTopologyLineage,
   normalizeTopologyMemoryScopes,
   normalizeTopologyMemoryStore,
@@ -230,5 +231,49 @@ describe("the topology's relation reads", () => {
     assert.deepEqual(result, { routes: null, routesAccess: "denied", lineage: null, memoryScopes: null, stores: null });
     const none = await readTopologyRelations({ methods: [], methodOf: methodOf as never, execute: async () => ({}), memoryAvailable: true });
     assert.deepEqual(none, { routes: null, routesAccess: "unavailable", lineage: null, memoryScopes: null, stores: null });
+  });
+});
+
+describe("ledger backfill", () => {
+  const frame = (id: string, timestampMs: number) => ({ id, event: "run_started", identity: "billing", timestampMs, data: {} });
+
+  test("pages back until the window is covered and hands the ledger one batch", async () => {
+    const pages: Record<string, { frames: ReturnType<typeof frame>[]; nextCursor?: string }> = {
+      first: { frames: [frame("c", 3_000), frame("b", 2_500)], nextCursor: "p2" },
+      p2: { frames: [frame("a", 2_000), frame("z", 900)], nextCursor: "p3" },
+      p3: { frames: [frame("y", 500)], nextCursor: "p4" },
+    };
+    const asked: Array<string | undefined> = [];
+    const batches: string[][] = [];
+    const read = await backfillTopologyLedger({
+      query: async (before) => { asked.push(before); return pages[before ?? "first"]!; },
+      ingest: (frames) => { batches.push(frames.map((entry) => entry.id)); },
+      sinceMs: 1_000,
+    });
+    // The second page reaches past the window's start: no third read.
+    assert.deepEqual(asked, [undefined, "p2"]);
+    assert.deepEqual(batches, [["c", "b", "a", "z"]]);
+    assert.equal(read, 4);
+  });
+
+  test("stops at an exhausted history and at the page cap", async () => {
+    const batches: number[] = [];
+    await backfillTopologyLedger({
+      query: async () => ({ frames: [frame("a", 5_000)], exhausted: true, nextCursor: "more" }),
+      ingest: (frames) => { batches.push(frames.length); },
+      sinceMs: 0,
+    });
+    let calls = 0;
+    await backfillTopologyLedger({
+      query: async (before) => { calls += 1; return { frames: [frame(`f${calls}`, 5_000)], nextCursor: `${before ?? ""}x` }; },
+      ingest: (frames) => { batches.push(frames.length); },
+      sinceMs: 0,
+      maxPages: 3,
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(batches, [1, 3]);
+    // Nothing read, nothing handed over.
+    await backfillTopologyLedger({ query: async () => ({ frames: [] }), ingest: () => { batches.push(-1); }, sinceMs: 0 });
+    assert.deepEqual(batches, [1, 3]);
   });
 });

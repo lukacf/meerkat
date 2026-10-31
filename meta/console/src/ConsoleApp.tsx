@@ -128,8 +128,10 @@ import {
   topologyTeamKey,
 } from "./lib/topology";
 import {
+  backfillTopologyLedger,
   EMPTY_TOPOLOGY_RELATIONS,
   readTopologyRelations,
+  TOPOLOGY_BACKFILL_WINDOW_MS,
   topologyAgentStatus,
   topologyGrouping,
   type ConsoleTopologyRelationsState,
@@ -3480,16 +3482,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const topologyMemoryReadable = experience?.memory?.available === true && experience?.memory?.can_read === true;
   // The map counts messages from the activity ledger, which holds what the
   // console saw since it opened. The first map read of a timeline scope
-  // also counts the recent history once, so "messages in the last hour" is
-  // not only what arrived since the page loaded.
+  // also reads the recent history once, back to the map's longest window,
+  // so "messages in the last hour" is not only what arrived since the page
+  // loaded (and a message's two ends meet in one batch).
   const topologyBackfilledLedgerRef = React.useRef<object | null>(null);
   const refreshTopologyData = React.useCallback(() => panelRefreshFlight("topology", async () => {
     const ledger = timelineScopeRef.current?.ledger;
     if (ledger && topologyBackfilledLedgerRef.current !== ledger) {
       topologyBackfilledLedgerRef.current = ledger;
-      void consoleController.timeline.query({ mode: "recent", limit: 1000 })
-        .then((page) => { ledger.ingestMany(page.value.frames); })
-        .catch(() => { topologyBackfilledLedgerRef.current = null; });
+      void backfillTopologyLedger({
+        query: async (before) => (await consoleController.timeline.query({ mode: "recent", limit: 1000, before })).value,
+        ingest: (frames) => { ledger.ingestMany(frames); },
+        sinceMs: Date.now() - TOPOLOGY_BACKFILL_WINDOW_MS,
+      }).catch(() => { topologyBackfilledLedgerRef.current = null; });
     }
     try {
       const capabilities = await consoleTransport.capabilities();

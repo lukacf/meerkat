@@ -15,7 +15,7 @@ import type {
   ConsoleTopologyRoutesAccess,
   ConsoleTopologyStore,
 } from "../../../packages/console-components/src/topology/types";
-import type { ConsoleAgent, ConsoleAgentListConfig } from "../types";
+import type { ConsoleAgent, ConsoleAgentListConfig, ConsoleFrame } from "../types";
 import { AGENT_BUCKET_ORDER, bucketOf } from "./agent-buckets";
 import { agentHealth, isAgentWorking } from "./agent-status";
 import { CONSOLE_COMMAND_NAMES, type ConsoleCommandName } from "./headless";
@@ -339,4 +339,47 @@ export async function readTopologyRelations(
     memoryScopes: memory?.memoryScopes ?? null,
     stores: memory?.stores ?? null,
   };
+}
+
+/** One page of the recent timeline, newest first. */
+export interface TopologyTimelinePage {
+  frames: readonly ConsoleFrame[];
+  nextCursor?: string;
+  exhausted?: boolean;
+}
+
+/** How many pages one backfill reads at most (1000 frames each). */
+export const TOPOLOGY_BACKFILL_MAX_PAGES = 10;
+/** How far back a backfill reads: the map's longest window. */
+export const TOPOLOGY_BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Reads the recent timeline back to `sinceMs` (or `maxPages` pages) and hands
+ * it to the ledger in one batch. A message counts once only when the ledger
+ * sees its ends together (the sender's call with its receipt, the
+ * recipient's notice), so a backfill of the newest page alone splits the
+ * messages at that page's edge and counts them twice. Returns how many
+ * frames it read.
+ */
+export async function backfillTopologyLedger(options: {
+  query: (before: string | undefined) => Promise<TopologyTimelinePage>;
+  ingest: (frames: readonly ConsoleFrame[]) => void;
+  sinceMs: number;
+  maxPages?: number;
+}): Promise<number> {
+  const maxPages = options.maxPages ?? TOPOLOGY_BACKFILL_MAX_PAGES;
+  const frames: ConsoleFrame[] = [];
+  let before: string | undefined;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await options.query(before);
+    frames.push(...result.frames);
+    const oldest = result.frames.reduce(
+      (min, frame) => (typeof frame.timestampMs === "number" ? Math.min(min, frame.timestampMs) : min),
+      Number.POSITIVE_INFINITY,
+    );
+    if (result.frames.length === 0 || result.exhausted || !result.nextCursor || oldest < options.sinceMs) break;
+    before = result.nextCursor;
+  }
+  if (frames.length > 0) options.ingest(frames);
+  return frames.length;
 }

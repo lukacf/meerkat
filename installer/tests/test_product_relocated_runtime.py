@@ -167,11 +167,11 @@ def test_local_product_verification_with_a_kept_inventory_skips_only_the_archive
         artifacts.archive.sha256, artifacts.archive.size, proof["prefix_inventory_sha256"], "0" * 64,
         "1" * 64)
     inflated = []
-    original = candidates.product_prefix_entries
+    original = candidates._product_prefix_stream
     def entries(content, prefix):
         inflated.append(prefix)
         return original(content, prefix)
-    monkeypatch.setattr(candidates, "product_prefix_entries", entries)
+    monkeypatch.setattr(candidates, "_product_prefix_stream", entries)
     second = {}
     assert runtime.verify_runtime(f.selected.destination, f.version, runtime_target=target,
         sdk_python=f.python, site_packages=f.site, retained=retained, observation=second) == proof

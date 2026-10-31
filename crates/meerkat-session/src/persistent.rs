@@ -11327,9 +11327,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self
-            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::OutsideTurnBoundary)
-            .await?;
+        // An actor whose task ended with its host's runtime takes no
+        // commands, so it is neither judged nor discarded here: the caller
+        // admits its input, and the runtime's lost host runtime check
+        // degrades the registration and leaves the input to the session's
+        // next registration (see `Self::session_task_ended_with_its_runtime`).
+        if !self.session_task_ended_with_its_runtime(id).await {
+            let _ = self
+                .discard_stale_live_session_if_needed(
+                    id,
+                    LiveStalenessPosition::OutsideTurnBoundary,
+                )
+                .await?;
+        }
         // Archived state and existence are committed metadata, which a run's
         // provisional tail does not change: a session whose durable run is
         // open at a committed round is read through its committed snapshot
@@ -15204,6 +15214,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             },
             _ => true,
         }
+    }
+
+    /// Whether `id`'s session task ended with the runtime it ran on (an
+    /// embedding host's runtime that stopped), answered without degrading
+    /// anything. A surface asks it before it judges the session's live actor
+    /// ahead of an input's admission: such an actor takes no commands, so it
+    /// is not judged and the input is admitted. The runtime's own check
+    /// ([`Self::runtime_turn_lost_its_host_runtime`], asked by the pre-dequeue
+    /// handle and the apply) then degrades the registration and leaves the
+    /// input to the session's next registration. Degrading here instead
+    /// would refuse the input: admission refuses a registration that must
+    /// reload.
+    pub async fn session_task_ended_with_its_runtime(&self, id: &SessionId) -> bool {
+        self.inner.session_task_ended_with_its_runtime(id).await
     }
 
     /// Whether the session's runtime work lost its session task to the

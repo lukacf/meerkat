@@ -4880,6 +4880,59 @@ mod tests {
         );
     }
 
+    /// The envelope finding names every fact that writes a session at the
+    /// envelope (operator-instruction entries, a rewrite record that moved an
+    /// instruction activation row, a retired instruction activation body)
+    /// and how an older release refuses such a session per store kind: typed
+    /// at its envelope where it reads a head row first, and as malformed
+    /// instruction activation history where it decodes a whole document that
+    /// holds a retired body.
+    #[tokio::test]
+    async fn the_envelope_finding_names_its_causes_and_the_refusal_per_store_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "envelope-causes", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let headless_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 0, 0, '{}', ?2)",
+                rusqlite::params![
+                    headless_id.to_string(),
+                    br#"{"version":5,"messages":[]}"#.as_slice()
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert!(listed.message.contains(&headless_id.to_string()));
+        for named in [
+            "operator-instruction entries",
+            "moved an instruction activation row",
+            "retired instruction activation body",
+            "typed at its envelope",
+            "malformed instruction activation history",
+        ] {
+            assert!(
+                listed.message.contains(named),
+                "the finding names {named:?}: {}",
+                listed.message
+            );
+        }
+        assert!(
+            !listed.message.contains("carry operator instructions"),
+            "a session at the envelope need not carry operator instructions: {}",
+            listed.message
+        );
+    }
+
     /// A JSONL realm keeps its session documents in its WholeBlob runtime
     /// store: the doctor lists the documents there written at the
     /// operator-instruction envelope (a committed body, and a run's

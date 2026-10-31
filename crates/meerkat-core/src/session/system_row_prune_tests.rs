@@ -501,3 +501,54 @@ fn prune_checks_the_expected_parent_revision() {
         .expect("the prune commits");
     assert_eq!(session.messages(), &before[1..]);
 }
+
+/// A prune that removes an ordinary System row before an instruction
+/// activation row moves the activation row to another offset: the document
+/// is written at envelope 5, which a release that compares activation
+/// offsets refuses at its envelope.
+#[test]
+fn a_prune_before_an_activation_row_writes_envelope_5() {
+    let mut session = Session::new();
+    session.append_system_message(LEGACY_ONE);
+    session
+        .activate_instruction(activation("tone", "act-1", None, "Answer formally."))
+        .unwrap();
+    session.push(user("first question"));
+    assert!(!session.carries_operator_instruction_facts());
+    assert_eq!(envelope_version(&session), 4);
+
+    session
+        .prune_system_rows(request(vec![row(&session, 0)]))
+        .unwrap_or_else(|error| panic!("the row before the activation is pruned: {error}"))
+        .expect("the prune commits");
+    assert!(session.carries_operator_instruction_facts());
+    assert_eq!(envelope_version(&session), 5);
+}
+
+/// A prune that moves no activation row (the removed row stands after the
+/// last one) and retires no body writes nothing only envelope 5 reads: the
+/// document stays at envelope 4.
+#[test]
+fn a_prune_after_the_last_activation_row_stays_at_envelope_4() {
+    let mut session = Session::new();
+    session.append_system_message(LEGACY_ONE);
+    session
+        .activate_instruction(activation("tone", "act-1", None, "Answer formally."))
+        .unwrap();
+    session.push(user("first question"));
+    session.append_system_message(LEGACY_TWO);
+    session.push(user("second question"));
+    assert_eq!(envelope_version(&session), 4);
+
+    session
+        .prune_system_rows(request(vec![row(&session, 3)]))
+        .unwrap_or_else(|error| panic!("the row after the activation is pruned: {error}"))
+        .expect("the prune commits");
+    assert!(!session.carries_operator_instruction_facts());
+    assert_eq!(
+        envelope_version(&session),
+        4,
+        "nothing only envelope 5 reads"
+    );
+    assert_reloaded_graph_validates(&session);
+}

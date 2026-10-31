@@ -785,10 +785,11 @@ them.
   `rotate_member`'s fresh life of an identity no member held, naming the
   incarnation it follows; or `RespawnAfter`, the seat of a respawn of a
   member no identity entry holds, `MobHandle::respawn` or
-  `respawn_with_successor_spec`, naming the incarnation the respawn retired,
-  whose retirement held the identity's topology for it); a retirement names
-  the session its incarnation was bound to at its end, the entry it was the
-  member of (also when its end ended the entry), its cause
+  `respawn_with_successor_spec`, or of the replacement an identity reconcile
+  seats for the member it retired, naming the incarnation the respawn or the
+  reconcile retired, whose retirement held the identity's topology for it); a
+  retirement names the session its incarnation was bound to at its end, the
+  entry it was the member of (also when its end ended the entry), its cause
   (`MemberRetirementCause::Unlisted`) and the rotation whose terminal step
   retired it (`RetiredRotation`: the target and the generation and role the
   same step seated). A reader pairs a retirement with the seat that follows
@@ -929,7 +930,9 @@ them.
   `MemberLifecycleEvent::RetirementStarted::cause`,
   `MemberRetirementCause::Unlisted`, and its `Retired` fact the cause and
   the entry it ended) and the entry ended
-  (`DeclaredRosterOutcome::unlisted`); a worker is never unlisted. An
+  (`DeclaredRosterOutcome::unlisted`); an entry whose spawn is still in
+  flight is left to a later complete apply, and the answer does not name
+  it; a worker is never unlisted. An
   unlisted identity listed again comes back as the same identity on the
   session its retirement archived, Dormant at its next generation with no
   wake, and its first wake revives the session with its history; listed

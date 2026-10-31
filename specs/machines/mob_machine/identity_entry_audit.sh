@@ -81,13 +81,15 @@
 #   role hold) is owed or not, through an explicit resume (probed while
 #   the mob is still stopped and again once it runs). held: held
 #   creation and the held spawn, entries hosted on their first use, the
-#   dormant seat's refusal of both, and Stop, Resume, Complete and the forced
+#   dormant seat's refusal of both, the seal that leaves a member whose
+#   spawn is in flight unmarked, and Stop, Resume, Complete and the forced
 #   destroy (which ends the held spawn's ladder, its membership committed or
 #   not), where the declaration and the seal refuse; the declared apply's
 #   open fact. placed: one bound host and the placed spawn ladder with or
 #   without entry custody, its remote commit, its retirement and the placed
 #   end. They check every generated invariant (the declared apply's among
 #   them: unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
+#   marked_entry_has_no_spawn_in_flight,
 #   held_creation_entry_was_never_created,
 #   archived_session_record_is_unseated,
 #   placed_entry_custody_is_hosted_on_first_use,
@@ -135,10 +137,12 @@
 # per declared apply invariant and property, one per guard of the declared
 # apply that a reachable state needs, and two forced destroys, one that
 # keeps a spawn ladder whose membership committed and one that keeps the
-# startup binding request that commit recorded (see the mutants below). An
-# anchor this script expects but cannot find fails the run. Each TLC run is
-# held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
-# as TLC INCOMPLETE.
+# startup binding request that commit recorded (see the mutants below); the
+# held run's seal that marks a member whose spawn is in flight is refused by
+# its target invariant alone (write_target_cfg: no other invariant and no
+# property). An anchor this script expects but cannot find fails the run.
+# Each TLC run is held to the canonical lane's per-run cap (tlc_run_cap.sh)
+# and fails closed as TLC INCOMPLETE.
 set -euo pipefail
 
 run_mutants=false
@@ -760,6 +764,36 @@ CONSTRAINTS" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
 
+# usage: write_target_cfg <run> <file> <invariant>: the run's config with
+# <invariant> as its only invariant and no property, so a mutant run is
+# refused by exactly its target or by nothing.
+write_target_cfg() {
+  local run="$1" cfg="$2" target="$3"
+  write_cfg "${run}" "${cfg}" "" ""
+  CFG="${cfg}" TARGET="${target}" python3 - <<'PY'
+import os, re
+path, target = os.environ["CFG"], os.environ["TARGET"]
+lines = open(path).read().split("\n")
+
+def section(name):
+    """The indented lines under the section header `name`."""
+    assert lines.count(name) == 1, f"expected one {name} section in {path}"
+    start = lines.index(name) + 1
+    end = start
+    while end < len(lines) and lines[end].startswith("  "):
+        end += 1
+    assert end < len(lines) and re.fullmatch(r"[A-Z_]+( \w+)?", lines[end]), \
+        f"no section follows {name} in {path}"
+    return start, end
+
+start, end = section("INVARIANTS")
+lines[start:end] = ["  " + target]
+start, end = section("PROPERTIES")
+del lines[start - 1:end]
+open(path, "w").write("\n".join(lines))
+PY
+}
+
 # The generated model's initial predicate needs a deep JVM stack on both the
 # launcher (JDK_JAVA_OPTIONS) and the VM (JAVA_TOOL_OPTIONS); respect an
 # explicit caller policy.
@@ -901,6 +935,7 @@ for witness in \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
   "held:Action property:ApplyBusy" "held:Action property:DestroyEndsCommittedLadder" \
+  "held:Action property:SealDefersInFlightSpawn" \
   "placed:Action property:PlacedCustody" "placed:Action property:PlacedWorker" \
   "placed:Action property:PlacedCustodyAborted" "placed:Action property:PlacedEntrySeated" \
   "placed:Action property:PlacedEndHosted" \
@@ -1036,6 +1071,35 @@ PY
       exit 1
     fi
     echo "mutant ${name} refused by $(grep -oE "Error: (${violation}) is violated" "${log}" | head -1)"
+  }
+
+  # usage: mutate_target <run> <name> <invariant>; reads a python edit on
+  # stdin, as mutate does, and checks the run with <invariant> as its only
+  # invariant and no property (write_target_cfg): the mutant must be
+  # refused by exactly that invariant.
+  mutate_target() {
+    local run="$1" name="$2" target="$3"
+    if ! in_part "${run}"; then
+      cat > /dev/null
+      return 0
+    fi
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}"/*.tla "${dir}/"
+    { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
+    local cfg="${work_dir}/mutant-${name}.cfg"
+    write_target_cfg "${run}" "${cfg}" "${target}"
+    local status=0
+    (cd "${dir}" && run_tlc "${run}" "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
+    local log="${work_dir}/mutant-${name}.log"
+    if ! grep -q "Error: Invariant ${target} is violated" "${log}"; then
+      cat "${log}"
+      echo "error: mutant ${name} was not refused by ${target} (tlc exit ${status})" >&2
+      exit 1
+    fi
+    local depth
+    depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+    echo "mutant ${name} refused by ${target} in ${depth} states"
   }
 
   # A reconcile that retires an entry: the retire helper ranges over every
@@ -1487,6 +1551,24 @@ PY
   # records one; no arm of the run records a member state marker).
   mutate held destroy_keeps_startup_request "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
 keep_var("DestroyFromAny", "member_startup_binding_requested")
+PY
+
+  # The seal marks a seated member whose spawn is still in flight (the seal
+  # before its ladder guard): a seal between a spawn rollback's start row
+  # and its Retire step marks the member, and a restart there loses the
+  # mark. The guard is the one ladder test in the seal's lowered loop over
+  # identity_entry_retiring; the mutant changes nothing else, so the maps
+  # stay consistent and only the target invariant refuses it.
+  mutate_target held seal_marks_in_flight_spawn marked_entry_has_no_spawn_in_flight <<'PY'
+text = open(path).read()
+found = list(re.finditer(
+    r"^SealDeclaredRosterSealed_ForEach\d+_identity_entry_retiring\(acc, .*$", text, re.M))
+assert len(found) == 1, f"expected one lowered seal loop over identity_entry_retiring, found {len(found)}"
+line = found[0].group(0)
+guard = "((id \\in DOMAIN spawn_exec_phase) = FALSE)"
+assert line.count(guard) == 1, f"expected the ladder guard once in the seal's mark loop, found {line.count(guard)}"
+text = text[:found[0].start()] + line.replace(guard, "TRUE") + text[found[0].end():]
+open(path, "w").write(text)
 PY
 
   # A refusal answers beside the verdict's own arm in the placed run.

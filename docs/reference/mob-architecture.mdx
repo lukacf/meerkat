@@ -293,7 +293,10 @@ of a member no identity entry holds (`respawn`, `respawn_with_successor_spec`)
 is two machine steps, a retirement and then a seat: its retirement names no
 rotation, and its seat names the incarnation the respawn retired
 (`SeatRotation::RespawnAfter`, from MobMachine's respawn hold, which the
-retirement left for its successor and the seat's step takes). Any other
+retirement left for its successor and the seat's step takes). The
+replacement an identity reconcile seats for the member it retired is the
+same two steps, and its seat names the incarnation the reconcile retired
+(`SeatRotation::RespawnAfter`) too. Any other
 seat or retirement names no rotation, wherever it sits in the journal, so a
 reader pairs a retirement with the seat that follows it from the facts,
 never from their positions. A rotation's retirement records no cause: the
@@ -361,12 +364,16 @@ seated, is retired; the retirement's start row records the cause `Unlisted`
 (`MemberLifecycleEvent::RetirementStarted::cause`), and the end of the
 retirement ends the entry; the retirement's `Retired` fact names the cause
 and the entry it ended. An unlisted entry no member holds is removed at
-once. A worker is never unlisted. The answer names each unlisted entry
-(`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or `Failed`, which
-the next complete apply retries). Any other retirement keeps the entry: a
-host's `retire` of a declared identity that stays listed ends its member, and
-the next apply seats the identity again. To remove a declared identity, unlist
-it.
+once. An entry whose spawn is still in flight (its spawn ladder is open,
+before or after its membership step) is left to a later complete apply,
+and the answer does not name it: once the spawn completes, that apply
+retires the member; when the spawn fails, the entry is left unseated, and
+that apply removes it. A worker is never unlisted. The answer names each
+unlisted entry (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or
+`Failed`, which the next complete apply retries). Any other retirement
+keeps the entry: a host's `retire` of a declared identity that stays listed
+ends its member, and the next apply seats the identity again. To remove a
+declared identity, unlist it.
 
 An unlisted identity listed again comes back as the same identity. The end of
 its retirement recorded the session it archived (MobMachine's

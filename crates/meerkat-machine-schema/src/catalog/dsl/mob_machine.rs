@@ -4688,6 +4688,17 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.identity_to_runtime.contains_key(id))
         }
 
+        // A marked entry's member has no spawn in flight: the seal marks no
+        // member whose spawn ladder is open (a later seal marks it), a ladder
+        // opens only for an unseated identity, and the replay that marks an
+        // entry again opens no ladder. So no mark lands between a spawn
+        // rollback's start row and its Retire step, and the row's cause is
+        // the one a restart recovers.
+        invariant marked_entry_has_no_spawn_in_flight {
+            for_all(id in self.identity_entry_retiring,
+                self.spawn_exec_phase.contains_key(id) == false)
+        }
+
         // An entry awaiting its held creation was never created: the declared
         // apply records that cause only for an identity with no incarnation,
         // and the spawn that creates it removes the cause in its own commit.
@@ -30052,12 +30063,14 @@ macro_rules! mob_catalog_machine_dsl {
         // unlisted: a seated one is marked (identity_entry_retiring) while its
         // member is not retiring, and the shell retires the member with the
         // cause Unlisted, whose end removes the entry; an unseated one is
-        // removed at once, unless a spawn ladder is open for it (its commit
-        // seats it, and a later seal marks it). A listed entry loses its mark
-        // while its member's retirement has not started: the host listed it
-        // again. A member whose retirement started for another reason is
-        // left to that retirement, whose end keeps the entry unseated, and a
-        // later seal removes it.
+        // removed at once. Neither happens while a spawn ladder is open for
+        // the identity (marked_entry_has_no_spawn_in_flight): a later seal
+        // marks the member once its activation ends the ladder, or removes
+        // the entry its abort or its failed spawn's rollback left unseated. A
+        // listed entry loses its mark while its member's retirement has not
+        // started: the host listed it again. A member whose retirement
+        // started for another reason is left to that retirement, whose end
+        // keeps the entry unseated, and a later seal removes it.
         transition SealDeclaredRosterSealed {
             on input SealDeclaredRoster { desired }
             guard { self.lifecycle_phase == Phase::Running }
@@ -30069,7 +30082,9 @@ macro_rules! mob_catalog_machine_dsl {
                         if self.identity_to_runtime.contains_key(id) == true {
                             if self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) != Some(MobMemberState::Retiring) {
                                 if desired.contains(id) == false {
-                                    self.identity_entry_retiring.insert(id);
+                                    if self.spawn_exec_phase.contains_key(id) == false {
+                                        self.identity_entry_retiring.insert(id);
+                                    }
                                 } else {
                                     self.identity_entry_retiring.remove(id);
                                 }

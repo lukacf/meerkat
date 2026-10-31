@@ -22535,6 +22535,14 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
+        // The retire of an identity with no roster incarnation. The handle
+        // (finding none for the caller's retire) and the actor (meeting an
+        // absent member in its own retirement) both submit RetireAbsent, so
+        // MobMachine owns the answer in every phase: while the identity maps
+        // to no runtime the retire changes nothing (identity_absent), and an
+        // identity the machine still maps (a successor whose spawn committed
+        // after the caller read the roster) is refused. The input names no
+        // incarnation, so it retires and cancels nothing.
         transition RetireAbsentRunning {
             on input RetireAbsent { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
@@ -22549,6 +22557,27 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             update {}
             to Stopped
+        }
+
+        // A completed mob retired its members on the way: the retire of one of
+        // them, or of any identity it never held, retires nothing.
+        transition RetireAbsentCompleted {
+            on input RetireAbsent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Completed
+        }
+
+        // A destroyed mob still serving its destroy's retry (the destroy
+        // committed this phase before a cleanup step failed) answers the
+        // retire of an absent identity as every other phase does.
+        transition RetireAbsentDestroyed {
+            on input RetireAbsent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Destroyed
         }
 
         transition RetireAllRunning {

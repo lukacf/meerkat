@@ -684,6 +684,11 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverCreatedIdentityEntryTombstoneStopped",
             "RecoverCreatedIdentityEntryUnreadableRunning",
             "RecoverCreatedIdentityEntryUnreadableStopped",
+            // The retire of an absent identity in a completed and a
+            // destroyed mob (0.9.9), which MobMachine now answers in every
+            // phase.
+            "RetireAbsentCompleted",
+            "RetireAbsentDestroyed",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

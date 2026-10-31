@@ -561,7 +561,11 @@ fi
 # Current verdict names the identity's current runtime and fence and admits
 # a Retire of that incarnation; it requires two more witnesses and refuses
 # two more defects: the Current arm without its runtime and fence guards,
-# and the StaleFenceToken arm overlapping NoCurrentIncarnation.
+# and the StaleFenceToken arm overlapping NoCurrentIncarnation. It also
+# fires the RetireAbsent arms of a completed and a destroyed mob, checks
+# that in every phase a RetireAbsent arm is enabled exactly when the
+# identity maps to no runtime, and refuses two more defects: a completed
+# mob without that arm, and the arm without its identity_absent guard.
 member_lifecycle_audit="${workspace_root}/specs/machines/mob_machine/member_lifecycle_audit.sh"
 if [[ ! -x "${member_lifecycle_audit}" ]]; then
   echo "error: member lifecycle audit runner is missing from workspace runfiles: ${member_lifecycle_audit}" >&2

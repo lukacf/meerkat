@@ -860,13 +860,39 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     else if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => svgRef.current?.querySelector<SVGGElement>(".cc-viz-proxy")?.focus({ preventScroll: true }));
   }, [model, reveal, announce, nodeElement, useCanvas]);
 
+  const fitTo = React.useCallback((ids: readonly string[]) => {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const id of ids) {
+      const frame = layoutRef.current.frames.find((candidate) => candidate.id === id);
+      const box = boxesRef.current.get(id);
+      if (frame) {
+        x0 = Math.min(x0, frame.x);
+        y0 = Math.min(y0, frame.y);
+        x1 = Math.max(x1, frame.x + frame.w);
+        y1 = Math.max(y1, frame.y + frame.h);
+      } else if (box) {
+        x0 = Math.min(x0, box.x - Math.max(box.w / 2, 40));
+        y0 = Math.min(y0, box.y - box.h / 2 - 8);
+        x1 = Math.max(x1, box.x + Math.max(box.w / 2, 40));
+        y1 = Math.max(y1, box.y + box.h / 2 + 24);
+      }
+    }
+    if (!Number.isFinite(x0) || size.width <= 0) return;
+    const target = fitViewport({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, size.width, size.height, { minScale: ZOOM.min, maxScale: 1.6 }, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad });
+    setViewport(target, true);
+  }, [setViewport, size.width, size.height, fitBottom]);
+
   React.useImperativeHandle(ref, () => ({
     fit: doFit,
+    fitTo,
     zoomBy,
     reveal,
     focusNode,
     viewport: () => viewportRef.current,
-  }), [doFit, zoomBy, reveal, focusNode]);
+  }), [doFit, fitTo, zoomBy, reveal, focusNode]);
 
   const onZoom = (action: VizZoomAction) => {
     if (action === "in") zoomBy(ZOOM.buttonStep);

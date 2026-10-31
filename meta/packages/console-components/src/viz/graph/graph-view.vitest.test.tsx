@@ -203,6 +203,33 @@ describe("GraphView", () => {
     expect(ref.current!.viewport()).toEqual(expect.objectContaining({ scale: expect.any(Number) }));
   });
 
+  it("zooms to a node or to a goal's whole frame through the handle", () => {
+    // The graph's frame is 800 x 600; its chrome takes no room.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [800, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const nodes: VizNode[] = [
+        { id: "goal", kind: "goal", label: "Ship the 2.4 release" },
+        ...Array.from({ length: 6 }, (_, index): VizNode => ({ id: `i${index}`, kind: "item", label: `Item ${index}`, frame: "goal", status: "open" })),
+      ];
+      const edges: VizEdge[] = Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, from: `i${index}`, to: `i${index + 1}`, relation: "blocks" }));
+      const ref = React.createRef<GraphViewHandle>();
+      render(<GraphView ref={ref} nodes={nodes} edges={edges} layout="layered" ariaLabel="g" testIdPrefix="t" legend="off" />);
+      act(() => ref.current!.fitTo(["i0"]));
+      const one = ref.current!.viewport();
+      expect(one.scale).toBe(1.6);
+      act(() => ref.current!.fitTo(["goal"]));
+      const frame = ref.current!.viewport();
+      expect(frame.scale).toBeLessThan(one.scale);
+      act(() => ref.current!.fitTo(["nobody"]));
+      expect(ref.current!.viewport()).toEqual(frame);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   it("draws above 300 nodes on a canvas with one focus proxy, and switches force to clusters above 150", () => {
     const nodes: VizNode[] = Array.from({ length: 320 }, (_, index) => ({ id: `n${index}`, kind: index < 4 ? "coordinator" : "agent", label: `Agent ${index}`, lane: `g${index % 4}` }));
     const edges: VizEdge[] = nodes.slice(4).map((node, index) => ({ id: `e${index}`, from: `n${index % 4}`, to: node.id, relation: "wired" }));

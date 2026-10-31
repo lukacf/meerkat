@@ -567,6 +567,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   customizer (`MobBootstrapSpec::with_agent_customizer`, see Added). The
   builder, the stdio gateway and the bootstrap now wire their members'
   builds with one shared construction.
+- `meta/mob_announcements/declarations/get` waits for a declarations
+  reconcile in progress (at startup, at an apply, at a retry) and answers
+  with what it settled: one record per declared source and subscription.
+  Before, a host polling it right after a start could see a new revision
+  reported as applied, with every listed record applied, before the
+  subscriptions that revision adds existed: the read listed only the
+  records the reconcile had reached so far.
 
 ### Known limitations
 

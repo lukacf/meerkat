@@ -8231,6 +8231,31 @@ mod tests {
         }
     }
 
+    /// A candidate launch acts nowhere: it refuses the operator verbs that
+    /// write a member's session transcript, typed, as it refuses member
+    /// input, and an authoritative launch serves them.
+    #[test]
+    fn a_candidate_launch_refuses_the_member_transcript_writes() {
+        for method in [
+            "meta/bound_member_transcript",
+            "meta/prune_member_system_rows",
+        ] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+            assert!(
+                super::candidate_launch_refusal(true, None, method, &json!({}), json!(7)).is_none(),
+                "an authoritative launch serves {method}"
+            );
+        }
+    }
+
     /// A candidate's refusal of a session revocation sends the operator to
     /// the authoritative launch.
     #[test]

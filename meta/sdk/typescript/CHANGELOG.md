@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `WorkGraphEvidenceInput.withdraws` (optional): the ids of earlier evidence
+  on the same item that the new ref withdraws. `workGraphEvidenceInputToDict`
+  sends it, so `workgraphAddEvidence` can withdraw evidence (goal
+  confirmation refuses the field). `WorkGraphEvidenceRef.withdraws` reads it:
+  `parseWorkGraphEvidenceRef` always sets it (`[]` when the gateway sends
+  none), and the field is optional, so a ref a caller builds still
+  type-checks.
 - `ErrorCategory.LIFECYCLE_EFFECT_FAILED` and
   `ErrorCategory.LIFECYCLE_PROJECTION_OFF`, with their messages: a lifecycle
   side effect of an identity (`after_create`, an exit interview, a

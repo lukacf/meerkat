@@ -335,6 +335,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `AgentMemoryRuntimeInjector::record_identity_retired_at` write through it
   and answer the store's error.
 
+- `meta/workgraph/evidence/add` accepts `evidence.withdraws` (Meerkat 0.9.9):
+  the ids of earlier evidence on the item that the new ref withdraws. Nothing
+  is removed; a ref is withdrawn when a later ref lists its id. A withdrawal
+  of an unknown id, of the ref's own id, of another withdrawal, or of
+  confirmation or execution evidence is refused `-32602`. `goal/confirm`
+  still accepts only `kind`, `id`, `label` and `summary` in its evidence.
+  The TypeScript SDK sends it (the optional `WorkGraphEvidenceInput.withdraws`,
+  for `workgraphAddEvidence`) and reads it into the optional
+  `WorkGraphEvidenceRef.withdraws`, which `parseWorkGraphEvidenceRef` always
+  sets (`[]` when absent), so a ref a caller builds still type-checks; the
+  Python SDK passes evidence dicts through, `withdraws` included.
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's

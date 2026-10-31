@@ -1574,6 +1574,7 @@ impl WorkGraphService {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
 
         for attempt in 0..EXECUTION_PROJECTION_CAS_ATTEMPTS {
@@ -2984,6 +2985,7 @@ mod tests {
             execution_binding_id: Some(
                 crate::WorkExecutionBindingId::new("caller-supplied").expect("binding id"),
             ),
+            withdraws: BTreeSet::new(),
         });
 
         let error = service
@@ -3518,6 +3520,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: None,
+            withdraws: BTreeSet::new(),
         }
     }
 
@@ -3831,6 +3834,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(completed.binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
         let reserved_error = service
             .add_evidence(AddEvidenceRequest {
@@ -3981,5 +3985,254 @@ mod tests {
             item_id: observed.id,
             item_revision: observed.revision,
         }));
+    }
+
+    // Evidence withdrawal. Evidence is built from its wire form, so these
+    // rows also compile against a `WorkEvidenceRef` without `withdraws`.
+
+    #[tokio::test]
+    async fn projected_execution_evidence_cannot_be_withdrawn() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = service.create(create_req("execute")).await.expect("item");
+        let binding_id = WorkExecutionBindingId::new("execution_withdrawal").expect("binding id");
+        let target = WorkExecutionTarget::mob_flow(
+            "mob-test",
+            "flow-test",
+            format!("sha256:{}", "a".repeat(64)),
+            "8a0737ff-b72d-57cd-91c7-feb396c79e7f",
+            crate::WorkExecutionAuthority::TargetOwner,
+            json!({"input": "value"}),
+        )
+        .expect("target");
+        let (machine_state, _) =
+            WorkExecutionMachine::bind(&binding_id, target.run_id()).expect("machine bind");
+        let bound = service
+            .bind_execution(
+                WorkExecutionBinding {
+                    binding_id,
+                    work_ref: WorkItemRef {
+                        realm_id: item.realm_id.clone(),
+                        namespace: item.namespace.clone(),
+                        item_id: item.id.clone(),
+                    },
+                    target,
+                    idempotency_key: "attempt-1".to_string(),
+                    correlation_id: "74a2790d-a684-5211-98b6-b16e6496ae63".to_string(),
+                    supersedes: None,
+                    machine_state,
+                    created_at: Utc::now(),
+                },
+                item.revision,
+            )
+            .await
+            .expect("bind");
+        let running = service
+            .observe_execution(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                bound.binding.binding_id.clone(),
+                1,
+                WorkExecutionObservation::FlowRunning,
+            )
+            .await
+            .expect("running");
+        let completed = service
+            .observe_execution(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                running.binding.binding_id.clone(),
+                2,
+                WorkExecutionObservation::FlowCompleted,
+            )
+            .await
+            .expect("completed");
+        let projected = service
+            .project_execution_evidence(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                completed.binding.binding_id.clone(),
+                WorkExecutionEvidenceProjection {
+                    kind: WorkExecutionEvidenceKind::Completed,
+                    label: None,
+                    summary: Some("completed".to_string()),
+                },
+            )
+            .await
+            .expect("bridge evidence projection");
+
+        let error = service
+            .add_evidence(AddEvidenceRequest {
+                id: projected.id.clone(),
+                realm_id: Some(projected.realm_id.clone()),
+                namespace: Some(projected.namespace.clone()),
+                expected_revision: projected.revision,
+                evidence: serde_json::from_value(json!({
+                    "kind": "correction",
+                    "id": "retraction-1",
+                    "withdraws": [completed.binding.evidence_id()]
+                }))
+                .expect("withdrawing evidence"),
+            })
+            .await
+            .expect_err("execution evidence cannot be withdrawn");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+        assert!(
+            service
+                .execution_evidence(
+                    Some(item.realm_id.clone()),
+                    Some(item.namespace.clone()),
+                    completed.binding.binding_id.clone(),
+                )
+                .await
+                .expect("execution evidence read")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_evidence_replay_compares_withdrawals() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = service
+            .create(create_req("idempotent withdrawal"))
+            .await
+            .expect("item");
+        let request = |expected_revision: u64, evidence: serde_json::Value| AddEvidenceRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision,
+            evidence: serde_json::from_value(evidence).expect("evidence from its wire form"),
+        };
+        let evidenced = service
+            .add_evidence(request(
+                item.revision,
+                json!({ "kind": "finding", "id": "e1" }),
+            ))
+            .await
+            .expect("first evidence");
+        let withdrawal = json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] });
+        let withdrawn = service
+            .add_evidence_idempotent(request(evidenced.revision, withdrawal.clone()))
+            .await
+            .expect("withdrawal");
+        let replayed = service
+            .add_evidence_idempotent(request(withdrawn.revision, withdrawal))
+            .await
+            .expect("an exact replay");
+        assert_eq!(
+            replayed.revision, withdrawn.revision,
+            "an exact replay writes nothing"
+        );
+        let error = service
+            .add_evidence_idempotent(request(
+                withdrawn.revision,
+                json!({ "kind": "finding", "id": "e2" }),
+            ))
+            .await
+            .expect_err("the same id without the withdrawal is different content");
+        assert!(
+            matches!(error, crate::WorkGraphError::Conflict(_)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_paths_check_withdrawals_in_request_order() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let refs = |value: serde_json::Value| -> Vec<WorkEvidenceRef> {
+            serde_json::from_value(value).expect("evidence refs from their wire form")
+        };
+        let ordered = json!([
+            { "kind": "finding", "id": "e1" },
+            { "kind": "finding", "id": "e2", "withdraws": ["e1"] }
+        ]);
+        let reversed = json!([
+            { "kind": "finding", "id": "e2", "withdraws": ["e1"] },
+            { "kind": "finding", "id": "e1" }
+        ]);
+
+        let mut request = create_req("reversed withdrawal");
+        request.evidence_refs = refs(reversed.clone());
+        let error = service
+            .create(request)
+            .await
+            .expect_err("a withdrawal must follow the ref it names");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+
+        let mut request = create_req("keyed reversed withdrawal");
+        request.evidence_refs = refs(reversed);
+        let error = service
+            .create_idempotent(
+                crate::WorkAdmissionKey::new("reversed-withdrawal").expect("admission key"),
+                request,
+            )
+            .await
+            .expect_err("a keyed create checks the same order");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+
+        let mut request = create_req("ordered withdrawal");
+        request.evidence_refs = refs(ordered.clone());
+        let created = service
+            .create(request)
+            .await
+            .expect("a withdrawal of an earlier ref in the request");
+        assert_eq!(
+            serde_json::to_value(&created.evidence_refs).expect("evidence refs"),
+            ordered
+        );
+
+        // A goal create, the path a realm migration copies refs through,
+        // keeps the relation.
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000002a4")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(crate::types::GoalCreateRequest {
+                failed_child_join_policy: Default::default(),
+                cancelled_child_join_policy: Default::default(),
+                priority: Default::default(),
+                labels: Default::default(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: refs(ordered.clone()),
+                status: None,
+                realm_id: None,
+                namespace: None,
+                title: "goal withdrawal".to_string(),
+                description: None,
+                target: crate::types::GoalAttentionTarget::Session { session_id },
+                mode: crate::types::WorkAttentionMode::Pursue,
+                completion_policy: crate::types::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::types::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::types::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("a goal whose refs carry a withdrawal");
+        assert_eq!(
+            serde_json::to_value(&goal.item.evidence_refs).expect("evidence refs"),
+            ordered
+        );
     }
 }

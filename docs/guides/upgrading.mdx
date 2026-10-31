@@ -146,6 +146,17 @@ that holds no created entry row sees no change but the new read answers.
   longer refuses the adoption of another identity, and the intent list
   leaves created rows out.
 
+### WorkGraph evidence refs (Rust)
+
+`WorkEvidenceRef` is `#[non_exhaustive]` and gains the field `withdraws` (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)),
+so a struct literal outside `meerkat-workgraph` no longer compiles. Build a ref
+with `WorkEvidenceRef::new(kind, id)` and the builders `with_label`,
+`with_summary` and `with_withdraws`, or assign the public fields after `new`.
+The constructor sets no confirmation or execution provenance. A ref without
+withdrawals keeps its wire form, so stored items, keyed-create digests and
+attention continuation keys do not change.
+
 ### Downgrading to 0.9.8
 
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
@@ -183,6 +194,18 @@ re-seats the entry on the session that retirement archived. A host store is
 different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
+
+0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
+ignores `withdraws` and drops the field when it rewrites such an item (any
+mutation of the item, including a host sweep such as a lease-expiry
+observation). The withdrawing refs stay as ordinary evidence, and the refs
+they withdrew read as current again. Two more effects reach only requests and
+items that carry withdrawals. 0.9.8 digests a keyed create without the field,
+so replaying a key whose request carried `withdraws` answers `Conflict`
+instead of `Replayed`. An item with withdrawals projects without the field, so
+its attention continuation key changes once and a continuation recorded under
+0.9.9 does not match it. Keys, items and continuations without withdrawals
+are unaffected.
 
 ## Upgrading to 0.9.8
 

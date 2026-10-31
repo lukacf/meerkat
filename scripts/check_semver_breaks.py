@@ -347,6 +347,10 @@ STRUCTURAL_EXTRACTORS = {
     # "enum {{name}} in <file>:<line>" (v0.51.0 template; first seen on the
     # 0.9.0 readiness report for TokenStoreError). Names only the enum.
     "enum_marked_non_exhaustive": _symbols_enum_missing,
+    # "struct {{name}} in <file>:<line>", the struct twin of the enum shape
+    # (expected on the 0.9.9 report for WorkEvidenceRef). Names only the
+    # struct.
+    "struct_marked_non_exhaustive": _symbols_struct_missing,
     # "variant Enum:Variant in <file>:<line>" (single colon, v0.50.0
     # template; first seen on the 0.9.4 report for
     # `MemberShutdownOutcome:UnregisterPending`). Names enum and variant.

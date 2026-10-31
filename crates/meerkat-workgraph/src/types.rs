@@ -681,8 +681,12 @@ impl WorkEvidenceKind {
     }
 }
 
+/// A typed pointer to evidence for a work item. Evidence is append-only:
+/// nothing edits or removes a ref, and a later ref can withdraw earlier ones
+/// by listing their ids in `withdraws`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct WorkEvidenceRef {
     /// Opaque provenance/display label for the evidence. It is parsed into the
     /// typed confirmation classification at the ingress boundary only; no
@@ -710,9 +714,62 @@ pub struct WorkEvidenceRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub execution_binding_id: Option<WorkExecutionBindingId>,
+    /// Ids of earlier evidence refs on the same item that this ref withdraws.
+    /// A ref is withdrawn when a later ref on the item lists its id; nothing
+    /// is edited or removed. A withdrawal names only earlier refs, never its
+    /// own id or another withdrawal; confirmation and execution evidence can
+    /// neither be withdrawn nor withdraw. Omitted when empty, so a ref without
+    /// withdrawals keeps its encoding.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub withdraws: BTreeSet<String>,
 }
 
 impl WorkEvidenceRef {
+    /// Generic evidence of `kind` with `id`: no label, summary or
+    /// withdrawals, and no confirmation or execution provenance.
+    ///
+    /// The struct is `#[non_exhaustive]`, so code outside this crate builds a
+    /// ref here and sets the rest with the `with_*` builders or the public
+    /// fields. Generic evidence paths refuse confirmation and execution
+    /// provenance; only the trusted goal-confirm and execution-bridge
+    /// producers set them. [`WorkItem::is_evidence_withdrawn`] reads
+    /// withdrawals.
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+            label: None,
+            summary: None,
+            confirmation_kind: None,
+            confirming_owner_key: None,
+            execution_binding_id: None,
+            withdraws: BTreeSet::new(),
+        }
+    }
+
+    /// Set the human label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Set the short explanation.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    /// Set the ids of earlier evidence on the same item that this ref
+    /// withdraws (see [`WorkEvidenceRef::withdraws`]).
+    pub fn with_withdraws<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.withdraws = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// The effective typed confirmation classification carried by this evidence,
     /// considering BOTH carriers: the typed [`WorkEvidenceRef::confirmation_kind`]
     /// field (authoritative when set) and the reserved confirmation literals that
@@ -1240,6 +1297,25 @@ impl<'de> Deserialize<'de> for WorkItem {
     }
 }
 
+impl WorkItem {
+    /// Whether the evidence ref at `index` in [`WorkItem::evidence_refs`] is
+    /// withdrawn: a later ref on this item lists its id in
+    /// [`WorkEvidenceRef::withdraws`]. The read is positional. A withdrawal
+    /// covers every earlier ref with the id, and a ref added after it with
+    /// the same id is not withdrawn, so adding evidence again reinstates it.
+    /// A withdrawn ref stays in `evidence_refs`. `false` for an index past the
+    /// end.
+    pub fn is_evidence_withdrawn(&self, index: usize) -> bool {
+        let Some(evidence) = self.evidence_refs.get(index) else {
+            return false;
+        };
+        self.evidence_refs
+            .iter()
+            .skip(index + 1)
+            .any(|later| later.withdraws.contains(&evidence.id))
+    }
+}
+
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for WorkItem {
     // NOTE (K21): this manual schema inlines the composite field shapes
@@ -1470,6 +1546,11 @@ impl schemars::JsonSchema for WorkItem {
                             },
                             "execution_binding_id": {
                                 "type": ["string", "null"]
+                            },
+                            "withdraws": {
+                                "type": "array",
+                                "uniqueItems": true,
+                                "items": { "type": "string" }
                             }
                         }
                     }
@@ -2429,5 +2510,107 @@ mod tests {
             err.to_string().contains("machine_state"),
             "fail-closed error must cite the missing machine_state authority, got: {err}"
         );
+    }
+
+    #[test]
+    fn evidence_ref_constructor_sets_no_provenance_and_keeps_the_encoding() {
+        let evidence = WorkEvidenceRef::new("finding", "e1");
+        assert!(evidence.label.is_none() && evidence.summary.is_none());
+        assert!(evidence.confirmation_kind.is_none());
+        assert!(evidence.confirming_owner_key.is_none());
+        assert!(evidence.execution_binding_id.is_none());
+        assert!(evidence.withdraws.is_empty());
+        assert_eq!(
+            serde_json::to_value(&evidence).expect("serialize evidence"),
+            serde_json::json!({ "kind": "finding", "id": "e1" }),
+            "a ref that withdraws nothing encodes as before the field existed"
+        );
+
+        let withdrawing = WorkEvidenceRef::new("finding", "e3")
+            .with_label("correction")
+            .with_summary("replaces two readings")
+            .with_withdraws(["e2", "e1", "e2"]);
+        assert_eq!(
+            serde_json::to_value(&withdrawing).expect("serialize evidence"),
+            serde_json::json!({
+                "kind": "finding",
+                "id": "e3",
+                "label": "correction",
+                "summary": "replaces two readings",
+                "withdraws": ["e1", "e2"]
+            })
+        );
+    }
+
+    fn item_with_evidence(evidence_refs: Vec<WorkEvidenceRef>) -> WorkItem {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                title: "withdrawal reads".to_string(),
+                evidence_refs,
+                ..Default::default()
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            Utc::now(),
+        )
+        .expect("machine create_item")
+        .0
+    }
+
+    #[test]
+    fn evidence_withdrawal_reads_by_position() {
+        let finding = |id: &str| WorkEvidenceRef::new("finding", id);
+        let withdrawal = |id: &str| WorkEvidenceRef::new("finding", id).with_withdraws(["e1"]);
+        let withdrawn = |item: &WorkItem| -> Vec<bool> {
+            (0..=item.evidence_refs.len())
+                .map(|index| item.is_evidence_withdrawn(index))
+                .collect()
+        };
+
+        // A withdrawal covers every earlier ref with the id and no later one:
+        // adding the id again reinstates it. The index past the end reads
+        // false.
+        let item = item_with_evidence(vec![
+            finding("e1"),
+            finding("e1"),
+            withdrawal("w1"),
+            finding("e1"),
+        ]);
+        assert_eq!(withdrawn(&item), [true, true, false, false, false]);
+
+        // Two withdrawals of one id: the ref reads withdrawn, and neither
+        // withdrawal does.
+        let item = item_with_evidence(vec![finding("e1"), withdrawal("w1"), withdrawal("w2")]);
+        assert_eq!(withdrawn(&item), [true, false, false, false]);
+    }
+
+    /// Guard: the hand-written `WorkItem` schema inlines the evidence shape,
+    /// and the SDK generator reuses the derived `WorkEvidenceRef` type for it
+    /// only while the two agree (otherwise it mints a `WorkItem*` twin). The
+    /// inline properties are the derived ones, and `withdraws` has the
+    /// derived shape.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn manual_work_item_schema_inlines_the_derived_evidence_shape() {
+        let derived =
+            serde_json::to_value(schemars::schema_for!(WorkEvidenceRef)).expect("derived schema");
+        let manual = serde_json::to_value(schemars::schema_for!(WorkItem)).expect("manual schema");
+        let inline = &manual["properties"]["evidence_refs"]["items"];
+        let property_names = |schema: &serde_json::Value| -> BTreeSet<String> {
+            schema["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(property_names(inline), property_names(&derived));
+
+        let mut derived_withdraws = derived["properties"]["withdraws"].clone();
+        derived_withdraws
+            .as_object_mut()
+            .expect("derived withdraws schema")
+            .remove("description");
+        assert_eq!(inline["properties"]["withdraws"], derived_withdraws);
     }
 }

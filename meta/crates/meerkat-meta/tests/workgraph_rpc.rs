@@ -386,6 +386,58 @@ async fn claim_accepts_flat_owner_wire_form() {
     runtime.mob_handle().stop().await.expect("stop");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn evidence_add_records_and_refuses_withdrawals() {
+    let runtime = build_runtime().await;
+    let item = create_item(&runtime, "evidence withdrawal").await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/evidence/add",
+        json!({
+            "id": item["id"],
+            "expected_revision": item["revision"],
+            "evidence": { "kind": "note", "id": "e1", "summary": "first reading" },
+        }),
+    )
+    .await;
+    let item = result(&response)["item"].clone();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/evidence/add",
+        json!({
+            "id": item["id"],
+            "expected_revision": item["revision"],
+            "evidence": {
+                "kind": "note",
+                "id": "e2",
+                "summary": "corrected reading",
+                "withdraws": ["e1"],
+            },
+        }),
+    )
+    .await;
+    let item = result(&response)["item"].clone();
+    assert_eq!(
+        item["evidence_refs"][1]["withdraws"],
+        json!(["e1"]),
+        "{item:#?}"
+    );
+
+    // A withdrawal must name earlier evidence on the same item.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/evidence/add",
+        json!({
+            "id": item["id"],
+            "expected_revision": item["revision"],
+            "evidence": { "kind": "note", "id": "e3", "withdraws": ["e9"] },
+        }),
+    )
+    .await;
+    assert_eq!(error_code(&response), -32602, "{response:#?}");
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
 // ---------------------------------------------------------------------------
 // Error taxonomy
 // ---------------------------------------------------------------------------

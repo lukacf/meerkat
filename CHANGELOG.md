@@ -708,6 +708,23 @@ them.
   host-store realms keep their documents in the host's store and are not
   listed.
 
+- `meerkat-workgraph`: `WorkEvidenceRef` gains the public field `withdraws`
+  (`BTreeSet<String>`, the ids of earlier evidence on the same item that the
+  ref withdraws; see Added), so code that builds the struct literally must
+  set it; outside the crate the struct is now built with
+  `WorkEvidenceRef::new` (next entry). Serde reads a ref without the field as
+  one that withdraws nothing and writes nothing for an empty set, so every
+  existing ref keeps its encoding.
+
+- `meerkat-workgraph`: `WorkEvidenceRef` (re-exported by `meerkat`) is now
+  `#[non_exhaustive]`, so code outside the crate can no longer build it with
+  a struct literal or destructure it without `..`. Build it with the new
+  constructor `WorkEvidenceRef::new(kind, id)`, which leaves the label, the
+  summary, the confirmation and execution provenance and `withdraws` empty,
+  and the builders `with_label`, `with_summary` and `with_withdraws`; the
+  fields stay public for reading and assignment. A field added later is then
+  not a break.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1397,6 +1414,34 @@ them.
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
   and the fold source.
+
+- `meerkat-workgraph`: typed evidence withdrawal. An evidence ref withdraws
+  earlier evidence on the same item by listing the earlier ids in its new
+  `withdraws` field; the `workgraph_add_evidence` tool advertises it
+  (`evidence.withdraws`, with one description sentence on how a withdrawal
+  reads), and every create and add path accepts it. Nothing is edited or
+  removed: a ref is withdrawn when a later ref on the item lists its id, and
+  the new `WorkItem::is_evidence_withdrawn(index)` reads that by position (a
+  withdrawal covers every earlier ref with the id, and adding the id again
+  later reinstates it). One validator at the machine seams
+  (`WorkGraphMachine::add_evidence` and `create_item_with_admission`, so
+  goal-confirm evidence is checked as stamped) refuses with `InvalidInput`,
+  writing nothing, a withdrawal that names no earlier ref, its own id or
+  another withdrawal, one that names confirmation evidence (a reserved
+  confirmation kind or classification) or execution evidence
+  (`execution_binding_id` set), and a withdrawing ref that carries either;
+  withdrawing an id again is allowed. These rules keep a withdrawal out of
+  every machine decision: completion-policy accounting and the execution
+  bridge do not change, and a withdrawal added to an item counts as one more
+  evidence addition (refs given at creation are not counted). Withdrawal
+  needs no permission of its own: whoever may add evidence to an item may
+  withdraw its ordinary evidence, including evidence a host or another agent
+  added. A ref without withdrawals keeps its encoding, so the keyed-create
+  admission digests and attention continuation keys of existing items do not
+  change; the manual `WorkItem` schema carries the field. A release before
+  this one ignores the field and drops it when it rewrites the item (the
+  upgrade guide lists the other downgrade effects). The `workgraph-workflow`
+  skill says how to withdraw and how a withdrawal reads.
 
 ### Changed
 

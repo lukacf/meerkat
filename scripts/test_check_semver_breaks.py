@@ -380,6 +380,12 @@ Failed in:
                 "enum TokenStoreError in crates/meerkat-core/src/auth/token_store.rs:607",
                 ("TokenStoreError",),
             ),
+            # The struct twin of enum_marked_non_exhaustive, expected on the
+            # 0.9.9 report for WorkEvidenceRef. Names only the struct.
+            "struct_marked_non_exhaustive": (
+                "struct WorkEvidenceRef in crates/meerkat-workgraph/src/types.rs:695",
+                ("WorkEvidenceRef",),
+            ),
             "type_marked_deprecated": (
                 "Struct PeersTool in crates/meerkat-tools/src/builtin/comms/tools.rs:115",
                 ("PeersTool",),
@@ -429,6 +435,36 @@ Failed in:
         self.assertEqual(len(errors), 1)
         self.assertIn("missing: `DslRejectionKind`", errors[0])
         declared = "`TokenStoreError` is `#[non_exhaustive]`; `DslRejectionKind` gains a tuple variant."
+        self.assertEqual(gate.check_named(parsed, section(declared)), [])
+
+    def test_struct_marked_non_exhaustive_requires_the_struct_name(self) -> None:
+        # The struct twin of the enum shape above (template "struct {{name}}
+        # in <file>:<line>"): read in full, so it passes check_recognized, and
+        # the struct itself must be declared.
+        report = """\
+    Checking meerkat-workgraph v0.9.8 -> v0.9.9 (assume patch change)
+--- failure struct_marked_non_exhaustive: struct marked #[non_exhaustive] ---
+Failed in:
+  struct WorkEvidenceRef in crates/meerkat-workgraph/src/types.rs:695
+     Summary semver requires new major version: 1 major and 0 minor checks failed
+    Finished [   0.100s] meerkat-workgraph
+"""
+        parsed = gate.parse_report(report)
+        self.assertEqual(
+            [(f.lint_id, f.symbols, f.structural) for f in parsed.findings],
+            [("struct_marked_non_exhaustive", ("WorkEvidenceRef",), True)],
+        )
+        self.assertEqual(gate.check_recognized(parsed), [])
+
+        def section(body: str) -> "gate.Section":
+            return gate.Section(
+                "## [9.9.9] - 2026-01-01", "9.9.9", " - 2026-01-01", f"\n### Breaking\n\n- {body}\n"
+            )
+
+        errors = gate.check_named(parsed, section("`WorkItem` gains a method."))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing: `WorkEvidenceRef`", errors[0])
+        declared = "`WorkEvidenceRef` is now `#[non_exhaustive]`; build it with `WorkEvidenceRef::new`."
         self.assertEqual(gate.check_named(parsed, section(declared)), [])
 
     def test_variant_marked_non_exhaustive_requires_the_variant(self) -> None:

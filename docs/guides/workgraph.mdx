@@ -160,6 +160,29 @@ completion.
 Evidence refs point to external or Meerkat-owned artifacts. WorkGraph stores the
 reference, not the artifact bytes.
 
+To withdraw evidence, add a new ref that lists the earlier ids in `withdraws`:
+
+```json
+{
+  "id": "work_prepare_visit_reminder",
+  "namespace": "default",
+  "expected_revision": 5,
+  "evidence": {
+    "kind": "notification",
+    "id": "reminder-draft-2",
+    "label": "Reminder corrected",
+    "summary": "Replaces the first draft, which named the wrong date.",
+    "withdraws": ["sms-draft-l-2026-05-19"]
+  }
+}
+```
+
+Nothing is removed: the earlier ref stays on the item and reads as withdrawn
+because a later ref lists its id. A withdrawal names only earlier refs on the
+same item, never its own id or another withdrawal, and confirmation or
+execution evidence cannot be withdrawn. See
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence).
+
 ## Close Or Release
 
 Use `workgraph_close` only when terminal truth exists.
@@ -168,7 +191,7 @@ Use `workgraph_close` only when terminal truth exists.
 {
   "id": "work_prepare_visit_reminder",
   "namespace": "default",
-  "expected_revision": 5,
+  "expected_revision": 6,
   "status": "completed"
 }
 ```

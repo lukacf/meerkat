@@ -72,7 +72,7 @@ console additionally gated by `can_mutate`):
 | `meta/workgraph/close` | `{id, expected_revision, status?("completed" default\|"cancelled"\|"failed"), namespace?}` | `{item}` |
 | `meta/workgraph/block` | `{id, expected_revision, namespace?}` (verified upstream: `block(realm_id, namespace, id, expected_revision)` — no blocker-linkage field; use `link` with kind=`blocks` for blocker edges) | `{item}` |
 | `meta/workgraph/link` | `{kind, from_id, to_id, namespace?}` | `{edge: WorkEdge}` (upstream returns a bare `WorkEdge`; meta wraps it) |
-| `meta/workgraph/evidence/add` | `{id, expected_revision, evidence: {kind, id, label?, summary?}, namespace?}` | `{item}` |
+| `meta/workgraph/evidence/add` | `{id, expected_revision, evidence: {kind, id, label?, summary?, withdraws?}, namespace?}`; `withdraws` lists the ids of earlier evidence on the item that the new ref withdraws (serde passthrough to upstream; an invalid withdrawal is upstream `InvalidInput`, `-32602`) | `{item}` |
 | `meta/workgraph/policy/escalate` | `{binding_id, id, expected_revision, completion_policy, namespace?}` — witness (`AttentionContextProjection`) fetched SERVER-SIDE from `binding_id` | `{item}` |
 | `meta/workgraph/goal/create` | `{title, description?, target: {kind:"session", session_id} \| {kind:"identity", identity} \| {kind:"owner", owner_key:{kind,id}}, mode?("pursue" default), completion_policy?, delegated_authority?, namespace?}` — `identity` lowered via `lower_agent_identity_attention_target` with the runtime's mob id | `{item, attention}` |
 | `meta/workgraph/goal/confirm` | `{binding_id, expected_revision, evidence?: {kind, id, label?, summary?}, namespace?}` — console surface promotes authenticated principal via `with_trusted_principal` | `{item, attention}` |

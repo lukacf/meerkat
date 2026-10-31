@@ -1033,3 +1033,37 @@ fn half_present_admission_identity_is_a_typed_refusal_not_a_guard_failure() {
             .expect("paired or absent identity creates");
     }
 }
+
+/// Guard: a keyed create whose evidence refs withdraw nothing encodes, and so
+/// digests, exactly as it did before evidence refs could carry `withdraws`,
+/// so a key admitted by an earlier release still replays instead of
+/// conflicting. The encoding and the digest are pinned byte for byte.
+#[test]
+fn keyed_create_digest_is_unchanged_for_evidence_without_withdrawals() {
+    let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+    let mut keyed = request("digest guard");
+    keyed.realm_id = Some(service.default_realm_id().to_string());
+    keyed.namespace = Some(service.default_namespace().clone());
+    keyed.evidence_refs = serde_json::from_value(serde_json::json!([
+        { "kind": "note", "id": "e1", "label": "first", "summary": "first finding" }
+    ]))
+    .expect("evidence refs from their wire form");
+    assert_eq!(
+        serde_json::to_string(&keyed).expect("encode the request"),
+        concat!(
+            r#"{"realm_id":"default","namespace":"default","title":"digest guard","#,
+            r#""priority":"medium","completion_policy":{"kind":"self_attest"},"#,
+            r#""failed_child_join_policy":"require_success","#,
+            r#""cancelled_child_join_policy":"require_success","#,
+            r#""evidence_refs":[{"kind":"note","id":"e1","label":"first","#,
+            r#""summary":"first finding"}]}"#,
+        )
+    );
+    let identity = service
+        .admission_identity(key("digest-guard"), keyed)
+        .expect("admission identity");
+    assert_eq!(
+        identity.request_digest,
+        "sha256:444f53aedddbf7abce9cce6e3780dd30b9550d502f8f48da31b53ceb59588fae"
+    );
+}

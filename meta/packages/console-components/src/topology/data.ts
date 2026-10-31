@@ -169,8 +169,14 @@ const LINEAGE_LABELS: Array<{ key: string; kind: ConsoleTopologyLineageKind }> =
 ];
 
 const PEER_TOOL_NAMES = new Set(["send_request", "send_message", "send_response"]);
-const MESSAGE_COMMS_KINDS = new Set(["message", "request", "response"]);
-/** A receiver-side delivery and the sender's tool call within this span are one message. */
+/** Comms notice kinds that carry a message (a reply's notice reads response_terminal). */
+const MESSAGE_COMMS_KINDS = new Set(["message", "request", "response", "response_terminal"]);
+/** The frames that carry a tool call's result (live, and the session's saved copy). */
+const TOOL_RESULT_EVENTS = new Set(["tool_result_received", "tool_execution_completed", "tool_result"]);
+/**
+ * A receiver-side delivery and a sender's call that no id ties to anything
+ * (no receipt) within this span are one message.
+ */
 const MESSAGE_MATCH_MS = 15_000;
 
 function textOf(value: unknown): string {
@@ -744,6 +750,39 @@ function peerToolCalls(data: Record<string, unknown> | null): PeerToolCall[] {
   return calls.filter((call) => PEER_TOOL_NAMES.has(call.name));
 }
 
+interface PeerCallOutcome {
+  /** The call refused or failed: nothing was sent. */
+  refused: boolean;
+  /** The envelope id the call's receipt names: the recipient's delivery id. */
+  envelope: string;
+}
+
+/** A tool result frame's call id and outcome (refusal, or the receipt's envelope id). */
+function peerCallOutcome(data: Record<string, unknown> | null): { id: string; outcome: PeerCallOutcome } | null {
+  if (!data) return null;
+  const id = textOf(data.tool_call_id) || textOf(data.id);
+  if (!id) return null;
+  const texts = [
+    typeof data.result === "string" ? data.result : "",
+    ...(Array.isArray(data.content) ? data.content.map((block) => textOf(recordOf(block)?.text)) : []),
+  ];
+  let refused = data.is_error === true;
+  let envelope = "";
+  for (const text of texts) {
+    if (!text.startsWith("{")) continue;
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = recordOf(JSON.parse(text));
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) continue;
+    if (parsed.error) refused = true;
+    envelope = envelope || textOf(recordOf(parsed.receipt)?.envelope_id);
+  }
+  return { id, outcome: { refused, envelope } };
+}
+
 function commsBlocks(data: Record<string, unknown> | null): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   if (!data) return blocks;
@@ -811,13 +850,27 @@ export function deriveTopologyTraffic(
   sinceMs = 0,
 ): TopologyTrafficResult {
   const registry = new Map<string, string>();
-  for (const frame of frames) capturePeers(registry, frame, frameData(frame));
+  // Each send call's outcome, by call id: a refused call sent nothing, and a
+  // receipt's envelope id is the delivery id of the recipient's notice.
+  const outcomes = new Map<string, PeerCallOutcome>();
+  for (const frame of frames) {
+    const data = frameData(frame);
+    capturePeers(registry, frame, data);
+    if (!TOOL_RESULT_EVENTS.has(frame.event)) continue;
+    const result = peerCallOutcome(data);
+    if (!result) continue;
+    const known = outcomes.get(result.id);
+    outcomes.set(result.id, {
+      refused: Boolean(known?.refused) || result.outcome.refused,
+      envelope: known?.envelope || result.outcome.envelope,
+    });
+  }
   const peerName = (value: unknown): string => {
     const raw = textOf(value);
     return registry.get(raw) || raw;
   };
 
-  interface Message { id: string; from: string; to: string; atMs: number; side: "delivery" | "call" }
+  interface Message { id: string; from: string; to: string; atMs: number; side: "delivery" | "call"; envelope?: string }
   const deliveries = new Map<string, Message>();
   const calls = new Map<string, Message>();
   for (const frame of frames) {
@@ -858,21 +911,42 @@ export function deriveTopologyTraffic(
           if (recipient) break;
         }
         if (!recipient || recipient === self) continue;
+        const outcome = call.id ? outcomes.get(call.id) : undefined;
+        if (outcome?.refused) continue;
         const key = call.id ? `call:${call.id}` : `call:${frame.id}:${recipient}`;
         const existing = calls.get(key);
-        if (!existing || existing.atMs > atMs) calls.set(key, { id: key, from: self, to: recipient, atMs, side: "call" });
+        if (!existing || existing.atMs > atMs) {
+          calls.set(key, { id: key, from: self, to: recipient, atMs, side: "call", envelope: outcome?.envelope || undefined });
+        }
       }
     }
   }
 
   const messages: Message[] = [...deliveries.values()];
+  // Ends tie by ids first: a call's receipt names the delivery id of the
+  // recipient's notice. A receipted call whose notice is not in view still
+  // counts once; it never takes another delivery.
+  const claimed = new Set<string>();
+  const unreceipted: Message[] = [];
+  for (const call of calls.values()) {
+    if (!call.envelope) {
+      unreceipted.push(call);
+      continue;
+    }
+    if (claimed.has(call.envelope)) continue;
+    claimed.add(call.envelope);
+    if (!deliveries.has(call.envelope)) messages.push({ ...call, id: call.envelope });
+  }
+  // Only the ends no id ties pair by time: a call without a receipt and a
+  // delivery no call claimed, the same pair, within the span.
   const deliveredByPair = new Map<string, number[]>();
   for (const message of deliveries.values()) {
+    if (claimed.has(message.id)) continue;
     const key = `${message.from}>${message.to}`;
     if (!deliveredByPair.has(key)) deliveredByPair.set(key, []);
     deliveredByPair.get(key)!.push(message.atMs);
   }
-  for (const call of calls.values()) {
+  for (const call of unreceipted) {
     const times = deliveredByPair.get(`${call.from}>${call.to}`) || [];
     const matched = times.findIndex((at) => Math.abs(at - call.atMs) <= MESSAGE_MATCH_MS);
     if (matched >= 0) {

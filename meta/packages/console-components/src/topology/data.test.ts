@@ -327,6 +327,48 @@ describe("topology traffic from frames", () => {
     assert.deepEqual(result.traffic, [{ from: "dispatch", to: "qa-review", count: 1, lastAtMs: 5_000 }]);
   });
 
+  test("a call's receipt ties it to its notice by id; a refused send counts nothing", () => {
+    const call = (id: string, identity: string, at: number, peerId: string): ConsoleFrame => ({
+      id: `call-${id}`,
+      event: "tool_call_requested",
+      identity,
+      timestampMs: at,
+      data: { name: "send_message", tool_call_id: id, args: { peer_id: peerId } },
+    });
+    const result = (id: string, identity: string, at: number, text: string, isError = false): ConsoleFrame => ({
+      id: `result-${id}`,
+      event: "tool_result_received",
+      identity,
+      timestampMs: at,
+      data: { tool_call_id: id, name: "send_message", is_error: isError, content: [{ type: "text", text }] },
+    });
+    const receipt = (envelope: string) => JSON.stringify({ kind: "peer_message", receipt: { envelope_id: envelope }, status: "sent" });
+    const frames: ConsoleFrame[] = [
+      comms("dispatch", 100, "lifecycle", "ops/reviewer/qa-review", "uuid-qa", "kickoff-1"),
+      comms("billing", 100, "lifecycle", "ops/specialist/returns", "uuid-returns", "kickoff-2"),
+      // Delivered a minute after the call: the receipt ties them, not the time.
+      call("c1", "dispatch", 1_000, "uuid-qa"),
+      result("c1", "dispatch", 1_010, receipt("env-1")),
+      comms("qa-review", 61_000, "message", "ops/coordinator/dispatch", "uuid-dispatch", "env-1"),
+      // A receipted call whose notice is not in view counts once.
+      call("c2", "dispatch", 2_000, "uuid-qa"),
+      result("c2", "dispatch", 2_010, receipt("env-2")),
+      // Refused by policy (flagged, and the saved copy says so in its text only).
+      call("c3", "billing", 3_000, "uuid-returns"),
+      result("c3", "billing", 3_010, JSON.stringify({ error: "access_denied", message: "Tool 'send_message' is not allowed by policy" })),
+      call("c4", "billing", 4_000, "uuid-returns"),
+      result("c4", "billing", 4_010, "{\"error\":\"failed\"}", true),
+      // A reply reads response_terminal on the recipient's side.
+      comms("billing", 5_000, "response_terminal", "ops/specialist/returns", "uuid-returns", "env-9"),
+    ];
+    const traffic = deriveTopologyTraffic(frames, graph.resolve, 0);
+    assert.deepEqual(
+      traffic.traffic.map((entry) => [entry.from, entry.to, entry.count]),
+      [["dispatch", "qa-review", 2], ["returns", "billing", 1]],
+    );
+    assert.deepEqual(traffic.messages.map((message) => message.id).sort(), ["env-1", "env-2", "env-9"]);
+  });
+
   test("a message from an unknown peer is left out", () => {
     const frames = [comms("dispatch", 1_000, "message", "elsewhere/x/stranger", "uuid-x", "d9")];
     assert.deepEqual(deriveTopologyTraffic(frames, graph.resolve, 0).traffic, []);

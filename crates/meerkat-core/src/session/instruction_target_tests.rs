@@ -1079,3 +1079,45 @@ fn a_release_before_any_run_start_still_revokes_what_was_in_effect() {
         Some(tone) if tone.effect() == InstructionEffect::Absent
     ));
 }
+
+/// A mob's delivery to a member seated over a session whose own host holds
+/// the target (an attach) takes the target over: the session-document
+/// authority rebinds it to the mob, then records the snapshot, which
+/// replaces it. A plain record is refused, and another mob's target is never
+/// taken.
+#[test]
+fn a_mob_delivery_adopts_a_target_the_sessions_own_host_holds() {
+    let mut session = conversed_session();
+    session
+        .set_session_instruction(activate("style", 1, "Use short sentences."))
+        .unwrap();
+    let snapshot = || mob_record("mob-1", 2, vec![("tone", 1, Some("Be brief."))]);
+    let refused = session.record_instruction_target(snapshot()).unwrap_err();
+    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedBySession);
+
+    let receipt = session.adopt_instruction_target(snapshot()).unwrap();
+    assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+    assert_eq!(receipt.target_generation, 2);
+    let state = session.instruction_target_state().unwrap().unwrap();
+    assert_eq!(state.owner(), &mob_owner());
+    let keys = state
+        .slots()
+        .iter()
+        .map(|slot| slot.key.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        vec!["tone".to_string()],
+        "the snapshot replaces the target the host held"
+    );
+
+    let repeated = session.adopt_instruction_target(snapshot()).unwrap();
+    assert_eq!(
+        repeated.disposition,
+        InstructionRecordDisposition::AlreadyRecorded
+    );
+    let refused = session
+        .adopt_instruction_target(mob_record("mob-2", 9, Vec::new()))
+        .unwrap_err();
+    assert_eq!(code(&refused), InstructionSetErrorCode::OwnedByOtherMob);
+}

@@ -16,7 +16,7 @@ use meerkat_machine_schema::catalog::dsl::dsl_mob_machine;
 use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation, InstructionEffect,
     InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
-    MemberSessionDisposal, MobMachineAuthority, MobMachineEffect, MobMachineInput,
+    MemberSessionDisposal, MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput,
     MobMachineMutator, MobMachineSignal, MobMachineState, MobMachineTransition,
     MobMachineTransitionError, MobPhase, OperatorInstructionRefusal,
     PlacedCompletionLifecycleIntentKind, SessionId, SpawnPolicyRuntimeMode,
@@ -764,6 +764,7 @@ fn a_release_is_authorized_only_for_a_host_owned_session_the_mob_wrote() {
     seat(&mut authority, "member", "alpha");
     let release = |disposal| Signal::ResolveMemberInstructionRelease {
         agent_identity: identity("member"),
+        session_id: session_of("member"),
         disposal,
     };
     let not_needed = [Effect::MemberInstructionReleaseNotNeeded {
@@ -788,6 +789,98 @@ fn a_release_is_authorized_only_for_a_host_owned_session_the_mob_wrote() {
         &[Effect::MemberInstructionReleaseAuthorized {
             agent_identity: identity("member"),
             session_id: session_of("member"),
+        }],
+    );
+    // A session that is not the member's is never released for it.
+    assert_verdict_only(
+        &mut authority,
+        Signal::ResolveMemberInstructionRelease {
+            agent_identity: identity("member"),
+            session_id: session_of("someone-else"),
+            disposal: MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+        },
+        &not_needed,
+    );
+}
+
+/// A releasing retire unbinds its member before the member's session is
+/// disposed of: the release verdict authorizes the release of the session
+/// the retire moved to its runtime's pending retirement, and the delivery
+/// of a retiring member that is owed defers as retiring.
+#[test]
+fn a_releasing_retire_authorizes_the_release_of_the_session_it_retires_from() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "member", "alpha");
+    signal(&mut authority, set(SLOT, 1, DIGEST_A, 10, Target::Mob));
+    signal(&mut authority, record("member", 1));
+    // The member is Dormant: its releasing retire is archive-only.
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("oi-region".to_string()),
+            agent_runtime_id: runtime_of("member"),
+            agent_identity: identity("member"),
+            generation: Generation(1),
+            releasing: Some(session_of("member")),
+            session_id: Some(session_of("member")),
+        },
+    )
+    .expect("the member's releasing retire is admitted");
+    let state = authority.state();
+    assert!(
+        !state
+            .member_session_bindings
+            .contains_key(&identity("member")),
+        "the releasing retire unbound the member"
+    );
+    assert_eq!(
+        state
+            .runtime_retire_pending_sessions
+            .get(&runtime_of("member")),
+        Some(&session_of("member"))
+    );
+    assert_verdict_only(
+        &mut authority,
+        Signal::ResolveMemberInstructionRelease {
+            agent_identity: identity("member"),
+            session_id: session_of("member"),
+            disposal: MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+        },
+        &[Effect::MemberInstructionReleaseAuthorized {
+            agent_identity: identity("member"),
+            session_id: session_of("member"),
+        }],
+    );
+    let not_needed = [Effect::MemberInstructionReleaseNotNeeded {
+        agent_identity: identity("member"),
+    }];
+    assert_verdict_only(
+        &mut authority,
+        Signal::ResolveMemberInstructionRelease {
+            agent_identity: identity("member"),
+            session_id: session_of("someone-else"),
+            disposal: MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+        },
+        &not_needed,
+    );
+    assert_verdict_only(
+        &mut authority,
+        Signal::ResolveMemberInstructionRelease {
+            agent_identity: identity("member"),
+            session_id: session_of("member"),
+            disposal: MemberSessionDisposal::Archived,
+        },
+        &not_needed,
+    );
+    // A write owes the retiring member, whose delivery defers as retiring.
+    signal(&mut authority, set(SLOT, 2, DIGEST_B, 10, Target::Mob));
+    assert_eq!(owed(&authority, "member"), Some(2));
+    assert_verdict_only(
+        &mut authority,
+        prepare("member"),
+        &[Effect::MemberInstructionDeliveryDeferred {
+            agent_identity: identity("member"),
+            reason: MemberInstructionDeferReason::Retiring,
         }],
     );
 }

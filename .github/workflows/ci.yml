@@ -1231,6 +1231,7 @@ jobs:
           evidence = Path(os.environ["RUNNER_TEMP"]) / "governed-jsonl"
           evidence.mkdir()
           expected = sorted([
+              "governed_jsonl::tests::a_governed_input_runs_its_staged_session_on_the_runtime_that_admits_it",
               "governed_jsonl::tests::governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_completed_native_run",
               "governed_jsonl::tests::governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes",
               "governed_jsonl::tests::governed_jsonl_rejects_ungoverned_bundle_and_unsupported_wire_before_setup",

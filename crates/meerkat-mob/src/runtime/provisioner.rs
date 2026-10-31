@@ -8405,11 +8405,124 @@ impl RuntimeTurnFinalizationBoundaryLease {
     }
 }
 
+/// The runtime of the task that asks for a member, which is the mob actor's
+/// and so the host's: the member's session actor is materialized on it, and
+/// the host's member registration hooks are called on it.
+///
+/// The owned create and recovery tails below run on the process-wide cleanup
+/// runtime, so their custody of the transaction survives the caller. The
+/// actor they materialize must not live there: the session task is spawned
+/// on the runtime that runs the materialization, and every turn of the
+/// member, its tool calls and whatever those spawn would then run on the
+/// cleanup runtime's two workers, with that runtime's stack instead of the
+/// host's. Host-supplied hook code must not run there either. So the
+/// materialization, and each hook call, runs as a task on the caller's
+/// runtime and the cleanup task awaits it, keeping its custody: a task that
+/// ends without an answer (its runtime shut down, or it panicked) fails the
+/// create and takes the same cleanup as a failed one, and is never recorded
+/// as a host refusal.
+#[cfg(feature = "runtime-adapter")]
+pub(super) struct MemberHostRuntime {
+    /// `None` outside a Tokio runtime. wasm32 has one event loop for every
+    /// task, so the work runs in the calling task there.
+    #[cfg(not(target_arch = "wasm32"))]
+    handle: Option<tokio::runtime::Handle>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl MemberHostRuntime {
+    /// The runtime of the calling task.
+    fn of_caller() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            handle: tokio::runtime::Handle::try_current().ok(),
+        }
+    }
+
+    /// Call host-supplied member registration hook code on this runtime and
+    /// await it. The outer `Err` means the call ended without an answer; the
+    /// hook's own answer is the inner result.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn run_hook<T, F>(&self, call: F) -> Result<Result<T, MobError>, MobError>
+    where
+        F: std::future::Future<Output = Result<T, MobError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        match self.handle.as_ref() {
+            Some(handle) => handle.spawn(call).await.map_err(|error| {
+                Self::ended_without_an_answer("a member registration hook call", &error)
+            }),
+            None => Ok(call.await),
+        }
+    }
+
+    /// The error a task on this runtime that ended without an answer gives
+    /// its caller: whether it panicked or was cancelled, read from the join
+    /// error's kind. The task's own report, a panic's payload included, goes
+    /// to the host's log only.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ended_without_an_answer(work: &str, error: &tokio::task::JoinError) -> MobError {
+        let ended = if error.is_panic() {
+            "panicked"
+        } else {
+            "was cancelled: the host's runtime stopped"
+        };
+        tracing::error!(%error, "{work} on the host's runtime {ended}");
+        MobError::Internal(format!(
+            "{work} on the host's runtime {ended}; inspect host logs"
+        ))
+    }
+
+    /// Call host-supplied member registration hook code in the calling task:
+    /// wasm32 has one event loop for every task.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) async fn run_hook<T, F>(&self, call: F) -> Result<Result<T, MobError>, MobError>
+    where
+        F: std::future::Future<Output = Result<T, MobError>>,
+    {
+        Ok(call.await)
+    }
+
+    /// Materialize the member's session actor on this runtime and await the
+    /// service's answer. `Err` means the materialization task ended without
+    /// one.
+    async fn materialize(
+        &self,
+        session_service: Arc<dyn MobSessionService>,
+        req: meerkat_core::service::CreateSessionRequest,
+        route: super::session_service::SessionActorMaterializationRoute,
+        actor_witness_slot: meerkat_session::LiveSessionActorWitnessSlot,
+    ) -> Result<Result<meerkat_core::RunResult, SessionError>, MobError> {
+        let materialization = async move {
+            super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
+                session_service.as_ref(),
+                req,
+                route,
+                &actor_witness_slot,
+            )
+            .await
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(handle) = self.handle.as_ref() {
+                return handle.spawn(materialization).await.map_err(|error| {
+                    Self::ended_without_an_answer(
+                        "the member's session actor materialization",
+                        &error,
+                    )
+                });
+            }
+        }
+        Ok(materialization.await)
+    }
+}
+
 /// Reconstruct the service-owned actor for one already-serving exact executor
 /// attachment. The complete create -> witness publication -> machine commit
 /// runs in the process-owned cleanup runtime while retaining B and exact M, so
 /// caller cancellation may lose the response but cannot leave a half-published
-/// actor or replace the executor attachment.
+/// actor or replace the executor attachment. The actor itself is materialized
+/// on the caller's runtime ([`MemberHostRuntime`]).
 #[cfg(feature = "runtime-adapter")]
 struct AttachedSessionActorRecoveryContext {
     session_id: SessionId,
@@ -8459,22 +8572,23 @@ async fn create_attached_session_actor_recovery_owned(
     };
     let cleanup_spawner = meerkat_runtime::RuntimeCleanupTaskSpawner::acquire()
         .map_err(|error| MobError::Internal(error.to_string()))?;
+    let host_runtime = MemberHostRuntime::of_caller();
     let wait_session_id = session_id.clone();
     let (result_tx, result_rx) = oneshot::channel();
     cleanup_spawner.spawn_detached(async move {
         let _boundary = boundary;
-        let create_result =
-            super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
-                session_service.as_ref(),
+        let create_result = host_runtime
+            .materialize(
+                Arc::clone(&session_service),
                 req,
                 super::session_service::SessionActorMaterializationRoute::AttachedActorRecovery {
                     preparation,
                 },
-                &actor_witness_slot,
+                actor_witness_slot.clone(),
             )
             .await;
         let result = match create_result {
-            Ok(created) if created.session_id != session_id => {
+            Ok(Ok(created)) if created.session_id != session_id => {
                 let cleanup = match actor_witness_slot.witness() {
                     Some(actor_witness) => session_service
                         .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
@@ -8495,7 +8609,7 @@ async fn create_attached_session_actor_recovery_owned(
                     ),
                 }))
             }
-            Ok(created) => {
+            Ok(Ok(created)) => {
                 let actor_witness = match actor_witness_slot.witness() {
                     Some(actor_witness) => actor_witness,
                     None => {
@@ -8517,7 +8631,8 @@ async fn create_attached_session_actor_recovery_owned(
                 let verified = match &surface_check {
                     Some((hook, identity)) => {
                         super::registration_hook::verify_member_surface(
-                            hook.as_ref(),
+                            &host_runtime,
+                            hook,
                             session_service.as_ref(),
                             &session_id,
                             identity,
@@ -8564,7 +8679,25 @@ async fn create_attached_session_actor_recovery_owned(
                     }
                 }
             }
-            Err(error) => Err(MobError::from(error)),
+            Ok(Err(error)) => Err(MobError::from(error)),
+            // The materialization task ended without an answer. An actor it
+            // published before then is discarded like an unexpected one:
+            // nothing will commit it.
+            Err(lost) => match actor_witness_slot.witness() {
+                Some(actor_witness) => {
+                    let cleanup = session_service
+                        .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
+                        .await
+                        .map(|_| ());
+                    Err(match cleanup {
+                        Ok(()) | Err(SessionError::NotFound { .. }) => lost,
+                        Err(cleanup_error) => MobError::Internal(format!(
+                            "{lost}; exact recovered-actor cleanup also failed: {cleanup_error}"
+                        )),
+                    })
+                }
+                None => Err(lost),
+            },
         };
         // A lost response after successful commit is an ambiguous distributed
         // outcome. The actor and attachment remain one valid resumable
@@ -8865,7 +8998,9 @@ impl PreparedServiceActorTransaction {
     /// runtime while that task owns Prepared+B+the actor witness slot. If the
     /// caller disappears, the owned task finishes every possibly detached
     /// durable write before exact volatile cleanup. A completed durable create
-    /// remains discoverable and may be explicitly resumed.
+    /// remains discoverable and may be explicitly resumed. The actor itself is
+    /// materialized on the caller's runtime ([`MemberHostRuntime`]), so the
+    /// member's session task, and every turn it runs, lives there.
     ///
     /// A held setup's `held_bound` is observed in this task too: after its
     /// registration witness wait, after each host registration hook returns,
@@ -8887,6 +9022,7 @@ impl PreparedServiceActorTransaction {
         restored: Option<RestoredMemberRefusalCleanup>,
     ) -> Result<(meerkat_core::RunResult, Self), MobError> {
         let cleanup_spawner = self.cleanup_spawner.clone();
+        let host_runtime = MemberHostRuntime::of_caller();
         let session_id = self.session_id.clone();
         let wait_session_id = session_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
@@ -8942,8 +9078,9 @@ impl PreparedServiceActorTransaction {
                             return Err(stop);
                         }
                         let identity = super::registration_hook::install_selected_destination(
+                            &host_runtime,
                             &machine,
-                            hook.as_ref(),
+                            &hook,
                             &registration,
                             &req,
                             refusals,
@@ -8955,8 +9092,9 @@ impl PreparedServiceActorTransaction {
                         // The agent the registration acts as is bound before
                         // its agent and configured servers are built.
                         super::registration_hook::install_selected_agent_mandate(
+                            &host_runtime,
                             &machine,
-                            hook.as_ref(),
+                            &hook,
                             &registration,
                             &identity,
                             refusals,
@@ -8999,14 +9137,15 @@ impl PreparedServiceActorTransaction {
                     if let Some(stop) = held_stop() {
                         return Err(stop);
                     }
-                    let created = super::session_service::execute_session_actor_materialization_under_runtime_turn_boundary(
-                        transaction.session_service.as_ref(),
-                        req,
-                        route,
-                        transaction.actor_witness_slot(),
-                    )
-                    .await
-                    .map_err(MobError::SessionError)?;
+                    let created = host_runtime
+                        .materialize(
+                            Arc::clone(&transaction.session_service),
+                            req,
+                            route,
+                            transaction.actor_witness_slot().clone(),
+                        )
+                        .await?
+                        .map_err(MobError::SessionError)?;
                     // The member is built but not yet published, and its
                     // first turn is deferred: the host checks the actual
                     // surface before anything can use it. This check
@@ -9017,7 +9156,8 @@ impl PreparedServiceActorTransaction {
                     // is checked between the creation and it.
                     if let Some((hook, identity)) = surface_check {
                         super::registration_hook::verify_member_surface(
-                            hook.as_ref(),
+                            &host_runtime,
+                            &hook,
                             transaction.session_service.as_ref(),
                             &created.session_id,
                             &identity,
@@ -13430,11 +13570,51 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
     }
 }
 
+/// A member's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the member's session service checks that the member's session
+/// task did not end with the host's runtime. A realization reconfigures the
+/// live actor, so for a member whose host's runtime stopped it would fail,
+/// and the runtime loop's cleanup would then end the queued inputs as
+/// stopped; the check degrades the registration first, so the loop leaves
+/// them to the session's next registration.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+struct MemberHostRuntimeCheck {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_runtime::PreDequeueHostRuntimeCheck for MemberHostRuntimeCheck {
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.session_service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+            .then(|| {
+                format!(
+                    "member session '{}' lost its session task to the runtime it ran on; its \
+                     queued work is left to the session's next registration",
+                    self.session_id
+                )
+            })
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn runtime_llm_reconfigure_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Option<meerkat_runtime::SessionLlmReconfigureRequest> {
     let metadata = primitive.turn_metadata()?;
+    // A resumed run continues under the LLM identity its first dispatch
+    // applied: that reconfigure saved the session with it before the run's
+    // first round commit, and the resumed actor, seeded from the run's
+    // provisional tail, carries it. Until the run commits, that actor reads
+    // as ahead of the committed boundary, so the reconfigure's live reads
+    // and its save cannot run for it.
+    if metadata.execution_kind == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun) {
+        return None;
+    }
     if metadata.model.is_none()
         && metadata.provider.is_none()
         && metadata.self_hosted_server_id.is_none()
@@ -13511,7 +13691,8 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         }))
     }
 
-    /// The one shared realization handle.
+    /// The one shared realization handle, with the member's lost host runtime
+    /// check as its precondition.
     ///
     /// Mob members are ordinary runtime-backed sessions; a member that stages a
     /// permanent switch must get the same cross-run realization the top-level
@@ -13531,10 +13712,16 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(meerkat_runtime::persistent_runtime_pre_dequeue_handle(
-            Arc::clone(&self.runtime_adapter),
-            self.bridge_session_id.clone(),
-        ))
+        Some(
+            meerkat_runtime::persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                Arc::clone(&self.runtime_adapter),
+                self.bridge_session_id.clone(),
+                Arc::new(MemberHostRuntimeCheck {
+                    session_service: Arc::clone(&self.session_service),
+                    session_id: self.bridge_session_id.clone(),
+                }),
+            ),
+        )
     }
 
     /// Typed system notices (such as an interrupted-run notice after an
@@ -13559,6 +13746,26 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
             ));
+        }
+        // A member whose session task ended with the host's runtime cannot
+        // run this turn, and the steps ahead of the service apply (the
+        // per-turn LLM reconfigure) would fail on the lost actor and record
+        // the run as failed. The session service degrades the member's
+        // registration first, so the runtime loop leaves the run to the
+        // session's next registration, as the service apply does for a turn
+        // the stop cut short. A resumed run runs no such step (see
+        // `runtime_llm_reconfigure_request_from_primitive`); for it this
+        // check is a backstop ahead of the service apply's own.
+        if self
+            .session_service
+            .runtime_turn_lost_its_host_runtime(&self.bridge_session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "member session '{}' lost its session task to the runtime it ran on; run \
+                 {run_id} is left to the session's next registration",
+                self.bridge_session_id
+            )));
         }
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();

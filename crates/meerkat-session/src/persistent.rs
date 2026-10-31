@@ -11327,9 +11327,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self
-            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::OutsideTurnBoundary)
-            .await?;
+        // An actor whose task ended with its host's runtime takes no
+        // commands, so it is neither judged nor discarded here: the caller
+        // admits its input, and the runtime's lost host runtime check
+        // degrades the registration and leaves the input to the session's
+        // next registration (see `Self::session_task_ended_with_its_runtime`).
+        if !self.session_task_ended_with_its_runtime(id).await {
+            let _ = self
+                .discard_stale_live_session_if_needed(
+                    id,
+                    LiveStalenessPosition::OutsideTurnBoundary,
+                )
+                .await?;
+        }
         // Archived state and existence are committed metadata, which a run's
         // provisional tail does not change: a session whose durable run is
         // open at a committed round is read through its committed snapshot
@@ -14756,6 +14766,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await;
         match result {
             Err((error, admission)) => {
+                if self
+                    .runtime_turn_lost_its_host_runtime(id, Some(&discarded_run_id))
+                    .await
+                {
+                    self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                        .await;
+                    return Err((error, admission));
+                }
                 let tail = self
                     .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error, resumed)
                     .await;
@@ -15198,6 +15216,83 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Whether `id`'s session task ended with the runtime it ran on (an
+    /// embedding host's runtime that stopped), answered without degrading
+    /// anything. A surface asks it before it judges the session's live actor
+    /// ahead of an input's admission: such an actor takes no commands, so it
+    /// is not judged, and the input goes on to its admission unless the
+    /// surface refuses it on its own account (an input to a help session,
+    /// which is never rebuilt from storage, for example). The runtime's own
+    /// check ([`Self::runtime_turn_lost_its_host_runtime`], asked by the
+    /// pre-dequeue handle and the apply) then degrades the registration and
+    /// leaves the input to the session's next registration. Degrading here
+    /// instead would refuse the input: admission refuses a registration that
+    /// must reload.
+    pub async fn session_task_ended_with_its_runtime(&self, id: &SessionId) -> bool {
+        self.inner.session_task_ended_with_its_runtime(id).await
+    }
+
+    /// Whether the session's runtime work lost its session task to the
+    /// runtime the task ran on: an embedding host's runtime, stopped in the
+    /// middle of a turn or while the session was idle. That is a crash of the
+    /// host's runtime, not a failure of the session's work, and the runtime
+    /// loop serving the session lives on a runtime the process owns, which
+    /// outlives the host's: it must write nothing more for the session. So
+    /// the session's registration is degraded here to require a cold reload
+    /// from durable state, as an undiscardable failed-run tail degrades it,
+    /// and `true` is answered. The loop's failure handling then finds no
+    /// driver authority and ends without a failed run, a replay, a stop
+    /// terminal or an unregister: the session's inputs stay as the store
+    /// holds them, and the session's next registration recovers and resumes
+    /// them, as after a process crash.
+    ///
+    /// The runtime apply asks it when a turn fails, before it discards the
+    /// run's tail. A runtime executor asks it before the steps it runs ahead
+    /// of the apply that need the live actor (a per-turn LLM reconfigure, the
+    /// realization of a committed model-routing handoff), which would
+    /// otherwise fail on the lost actor and record the work as failed. A
+    /// registration that cannot be degraded (one that keeps no durable
+    /// state) answers `false`, and the work fails as before.
+    pub async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        id: &SessionId,
+        run_id: Option<&RunId>,
+    ) -> bool {
+        if !self.inner.session_task_ended_with_its_runtime(id).await {
+            return false;
+        }
+        let adapter = match self.canonical_runtime_adapter() {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                tracing::error!(
+                    session_id = %id,
+                    run_id = ?run_id,
+                    %error,
+                    "the session's runtime is unavailable to degrade for a session task its runtime took"
+                );
+                return false;
+            }
+        };
+        let reason = match run_id {
+            Some(run_id) => {
+                format!("the session task of run {run_id} ended with the runtime it ran on")
+            }
+            None => "the session task ended with the runtime it ran on".to_string(),
+        };
+        adapter
+            .require_session_durability_reload(id, "session_task_runtime_stopped", reason)
+            .await;
+        let degraded = adapter.durability_reload_required(id).await.is_some();
+        if degraded {
+            tracing::warn!(
+                session_id = %id,
+                run_id = ?run_id,
+                "the session task ended with the runtime it ran on; the session's work is left to its next registration"
+            );
+        }
+        degraded
+    }
+
     async fn require_runtime_reload_after_tail_discard(
         &self,
         id: &SessionId,
@@ -15471,6 +15566,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await;
         match result {
             Err(error) => {
+                if self
+                    .runtime_turn_lost_its_host_runtime(id, Some(&discarded_run_id))
+                    .await
+                {
+                    self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                        .await;
+                    return Err(error);
+                }
                 let tail = self
                     .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error, resumed)
                     .await;

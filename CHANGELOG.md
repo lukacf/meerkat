@@ -95,6 +95,43 @@ them.
   placeholder text must match the new form; the prompt still contains
   `CONTEXT COMPACTION`.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`, `meerkat-rpc`,
+  `meerkat`, `meerkat-session`: every turn of a runtime-backed mob member,
+  and of a session an RPC `SessionRuntime` serves, now runs on the host's
+  runtime instead of one of Core's process-wide runtimes. A member's turns
+  run on the runtime of the task that provisions it (the mob actor's), and
+  an RPC session's on the runtime the `SessionRuntime` is built on: its
+  first turn after a deferred create, its next turn after a rebuild from
+  durable state, a staged session's governed admission, and the sessions of
+  the mobs it attaches. The experimental GPT live mirror host opens a
+  channel's replacement session on the runtime it is built on. Before, the
+  actors of these sessions were created on `meerkat-machine-cleanup` or
+  `meerkat-runtime-serving` and ran every turn there. The agent loop, model
+  streaming, tool calls and whatever those tools spawn now use the host's
+  worker threads and the stack it gives them, so size them for the tools
+  you compose. A member tool that blocks its thread holds one of the host's
+  workers, and on a `current_thread` runtime it stops the host's only
+  thread. The host's member registration hooks
+  (`MemberRuntimeRegistrationHook`) are called on the host's runtime too.
+  These turns end when the host's runtime stops. A stop in the middle of a
+  turn is crash-equivalent: the interrupted input and the queued ones stay
+  non-terminal, nothing is written for them after the stop, and the next
+  start resumes them. An input that reaches an idle session after the stop,
+  from a part of the process that outlives the host's runtime, waits for the
+  next start the same way. Once the session's runtime takes such an input
+  up, as after a stop in the middle of a turn, the session's registration
+  waits for its reload, and a later input is refused until the next start,
+  with nothing kept for it (an RPC session runtime refuses it with
+  `host_runtime_stopped`, `-32032`; two inputs to the same session within
+  milliseconds of each other right after the stop can see the second
+  refused untyped instead, `-32603`, with nothing kept). On an RPC session
+  runtime, a governed input is refused instead of waiting, and so is an
+  input to a help session (`help_session_not_resumable`), which is never
+  rebuilt from storage. A turn whose session task panicked, or whose actor
+  the service retired, still fails with its error, and so does a turn its
+  caller drives directly rather than through the runtime (see Upgrade notes
+  and Fixed).
+
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds kept governed work that waits
   for its host to supply its controller client again (see Fixed).
@@ -197,6 +234,44 @@ them.
 
 ### Added
 
+- `meerkat-session`, `meerkat-mob`, `meerkat`:
+  `PersistentSessionService::runtime_turn_lost_its_host_runtime` answers
+  whether a session's task ended with the runtime it ran on, and then degrades
+  the session's registration to a cold reload, so the runtime loop leaves the
+  session's work to its next registration. `MobSessionService` gains the same
+  method, provided and answering `false`; the stock persistent service
+  overrides it, and a member's runtime executor asks it before the steps ahead
+  of a turn that need the live actor (see Fixed and Upgrade notes).
+  `PersistentSessionService::session_task_ended_with_its_runtime` answers the
+  same question without degrading anything. The live staleness judgement and
+  the turn reservation (`reserve_runtime_turn_admission`) ask it ahead of an
+  input's admission and leave such a session's actor unjudged, since it takes
+  no commands: the input is admitted, and the runtime loop's check leaves it
+  to the session's next registration. The RPC session runtime's check that
+  refuses an input which would rebuild a help session asks it as well, and
+  counts such a session as not live, so an input to a help session whose
+  actor ended that way is refused there (`help_session_not_resumable`). Its
+  executor attachment asks it too: an input to such a session whose
+  registration already waits for its reload is refused there, typed
+  (`-32032`, `data.kind` `host_runtime_stopped`), and otherwise such an actor
+  counts as not live, so the attachment does not ask it.
+
+- `meerkat-runtime`, `meerkat`:
+  `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the
+  shared pre-dequeue realization handle with a surface's
+  `PreDequeueHostRuntimeCheck` as its precondition, and `meerkat::surface`
+  re-exports both. Before it realizes committed model-routing handoffs, the
+  handle asks the check whether the session's task ended with the host's
+  runtime it ran on. If it did, the check degrades the session's registration
+  to a cold reload and answers a refusal, which the handle returns as
+  `CoreExecutorError::control_failed_runtime` without realizing anything, so
+  the runtime loop leaves the queued inputs to the session's next
+  registration; otherwise the handle realizes as before.
+  `persistent_runtime_pre_dequeue_handle` is unchanged. The RPC session
+  executors, a mob member's runtime executor, the facade's
+  `PersistentRuntimeExecutor` and the CLI's runtime executor pass a check that
+  asks their session service's `runtime_turn_lost_its_host_runtime`.
+
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
   with the same notice record as `PromptInput::detached_job_completed`.
@@ -267,6 +342,20 @@ them.
   only past the bounds; its prepared path does not wait.
 
 ### Fixed
+
+- `meerkat-mob`, `meerkat-rpc`: a mob member's run kept open at a committed
+  round, by a requeue stop or a crash, whose input carries a per-turn LLM
+  selection (a model, provider, self-hosted server, provider params or auth
+  binding) now resumes at the next start, under the LLM identity that
+  selection saved with the session before the run's first round (a field
+  the member's profile lists in `resume_overrides` takes the profile's
+  value, as on any member resume). Before, the member's runtime executor
+  applied the selection again ahead of the resumed dispatch; the resumed
+  session reads as ahead of its committed boundary until the run commits,
+  so that step was refused before the turn on every attempt, and the run's
+  input never completed. A fresh run's selection is applied as before. The
+  RPC session runtime applies the same rule: it does not swap the session's
+  LLM client for a resumed run whose actor is live.
 
 - `meerkat-core`: a pending or approved human consent (R3) is now kept
   across unrelated authorization changes and past the end of its decision's
@@ -371,6 +460,67 @@ them.
   media unchanged, as before. Summaries written before this fix keep their
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
+
+- `meerkat-mob`, `meerkat-rpc`, `meerkat`: a runtime-backed member's session
+  actor is materialized on the runtime of the task that provisions the member
+  (the mob actor's, which is the host's), so the member's turns, its tool
+  calls and whatever those spawn run there, on the host's workers and with
+  their stack. Before, the actor was materialized from the owned create tail
+  on the process-wide `meerkat-machine-cleanup` runtime, and its session task,
+  and with it every turn of the member, ran on that runtime's two workers: a
+  member tool that blocked its thread stalled every session's cleanup in the
+  process, and member work that needed more stack than those threads had
+  aborted the process with a stack overflow on `meerkat-machine-cleanup`. The
+  create tail itself stays on the cleanup runtime and keeps custody of the
+  create: a materialization that ends without an answer, because its runtime
+  shut down or it panicked, fails the create and is cleaned up like any failed
+  create; the caller's error says which, and the task's own report, a panic's
+  payload included, goes to the host's log. The host's member registration
+  hooks, which the create and recovery tails called inline on the cleanup
+  runtime, are called as tasks on the host's runtime the same way, and a call
+  that ends without an answer is not recorded as a host refusal. The recovery
+  of an attached member's actor materializes on its caller's runtime the same
+  way, and so does the actor of a staged RPC session that a governed admission
+  materializes: the admission stays on the cleanup runtime, and a
+  materialization that ends without an answer is reported as a failed one. An
+  RPC `SessionRuntime` records the runtime it is built on and creates there
+  the actor of a deferred session's first turn and of a session rebuilt from
+  durable state on its next turn: the session's runtime loop applies those
+  turns from Core's `meerkat-runtime-serving` runtime, and the actor, with
+  every turn of the session, used to land there. The experimental GPT live
+  mirror host does the same for the session a channel's replacement opens. No
+  session actor is created on Core's process-wide runtimes any more, unless an
+  RPC `SessionRuntime` is built outside a Tokio runtime (see Upgrade notes).
+  Size the workers of the runtime a mob or a session runtime runs on for its
+  sessions' turns, as for the turns of the sessions the host creates directly.
+
+- `meerkat-session`, `meerkat-rpc`, `meerkat-mob`, `meerkat`: a host runtime
+  that stops in the middle of a runtime-backed session's turn, or while the
+  session is idle, is now crash-equivalent. The session's task runs on the
+  host's runtime (a member's, a session an RPC session runtime serves, or one
+  the host creates directly through a runtime-backed service), but its runtime
+  loop runs on Core's `meerkat-runtime-serving` runtime and outlives the
+  host's. The loop met the lost task as a failed apply and, after the host was
+  gone, recorded a failed run, replayed the run's inputs until it abandoned
+  them (`MaxAttemptsExhausted`) and discarded the run's provisional tail; an
+  input that reached an idle session after the stop met the same end when a
+  step ahead of its turn needed the live actor (a per-turn LLM reconfigure or
+  hot swap, the realization of a committed model-routing handoff). An executor
+  stop would not have kept the inputs either: it ends every non-terminal input
+  as stopped. Now the session service, the runtime executors before those
+  steps, and the RPC session runtime for a turn it promotes or rebuilds
+  degrade the session's registration to require a cold reload from durable
+  state before the loop sees the lost task, the degradation an undiscardable
+  failed-run tail already takes. The loop's failure handling then finds no
+  driver authority and ends within its bound without writing anything for the
+  session: no failed run, replay, stop terminal or unregister, and no tail
+  discard; the teardown watcher checks for that degradation before an
+  unregister the loop asks for. The interrupted and queued inputs stay
+  non-terminal, and the session's next registration, in this process (the same
+  machine reloads the degraded registration) or in the next one, recovers and
+  resumes the run once. A turn whose session task panicked, or whose actor the
+  service retired, still fails with its error, and so does a turn its caller
+  drives directly rather than through the runtime.
 
 - `meerkat-runtime`: an admitted governed resume of retained work (for
   example a consent notice) that a graceful requeue stop kept, or that a
@@ -494,18 +644,57 @@ them.
   runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
   16 MiB again when `RKAT_WORKER_STACK_BYTES` is unset, or `RUST_MIN_STACK`
   when that asks for more. Since 0.8.39 they took the 8 MiB host worker
-  budget. The cleanup runtime polls the turns of runtime-backed mob members,
+  budget. The cleanup runtime polled the turns of runtime-backed mob members,
   with the tools an embedding host gives them and whatever those spawn, so a
-  host whose own workers run 16 MiB ran that work on half that stack, and
-  the process aborted with a stack overflow on a `meerkat-machine-cleanup`
-  thread once the work needed more than 8 MiB. `RKAT_WORKER_STACK_BYTES`
-  still sets their stack exactly, below 16 MiB included, and an invalid value
-  is refused as before, its message now naming the default these threads
-  take once it is unset. The host binaries' own workers and main future keep
-  the 8 MiB budget. The added size is virtual address space; pages are
-  committed only when touched.
+  host whose own workers run 16 MiB ran that work on half that stack, and the
+  process aborted with a stack overflow on a `meerkat-machine-cleanup` thread
+  once the work needed more than 8 MiB. Those turns now run on the host's
+  runtime (see the entry on a member's session actor above), and the two
+  runtimes keep 16 MiB for the cleanup and runtime-loop work they still run.
+  `RKAT_WORKER_STACK_BYTES` still sets their stack exactly, below 16 MiB
+  included, and an invalid value is refused as before, its message now naming
+  the default these threads take once it is unset. The host binaries' own
+  workers and main future keep the 8 MiB budget. The added size is virtual
+  address space; pages are committed only when touched.
+
+### Upgrade notes
+
+- Size the worker stacks of the runtime your mobs and RPC session runtimes
+  run on for the tools you compose: the turns of mob members and of the
+  sessions an RPC `SessionRuntime` serves now run on that runtime, as the
+  turns of the sessions you create directly through a session service
+  already did, and a tool's frames sit on top of the turn's (see Breaking).
+  Core's own host binaries run their workers on 8 MiB, and
+  `RKAT_WORKER_STACK_BYTES` sets that size for them (and for an embedding
+  that runs its main future through `meerkat_runtime::host_stack::run_host`).
+  A Tokio runtime built with default settings gives its workers 2 MiB; an
+  embedder that builds its own runtime sets the size with that runtime's
+  builder (`tokio::runtime::Builder::thread_stack_size`).
+
+- If you wrap a `MobSessionService`, forward
+  `runtime_turn_lost_its_host_runtime` to the service you wrap, as you forward
+  `live_session_actor_registered`. The provided default answers `false`, and a
+  member of a stopped host runtime served through a wrapper that keeps it
+  would have an input that reaches it after the stop recorded as a failed run.
+
+- Build an RPC `SessionRuntime` inside the Tokio runtime its sessions should
+  run on, and keep that runtime running while you serve them: the session
+  runtime records the runtime it is built on. Built outside a Tokio runtime
+  it records none, and the actor of a deferred or rebuilt session is then
+  created on Core's serving runtime, as before. Stopping the runtime ends
+  the turns that run on it, as a crash would (see Breaking).
 
 ### Known limitations
+
+- `meerkat-runtime`, `meerkat-session`: the registration a stopped host
+  runtime's session leaves degraded stays in its machine until that machine
+  reloads it, at the session's next registration there, or the process exits.
+  With realm persistence, whose hosting claims are file locks, that
+  registration keeps the session's lock: any other machine, in this process or
+  in another process, is refused the session (`ServedElsewhere`) until this
+  machine reloads it or this process exits. The stopped host's other in-memory
+  objects (its session service and machine) stay in the process until it
+  exits.
 
 - `meerkat-runtime`: a governed input admitted under its own authority
   association (a governed prompt, for example) that a graceful requeue stop
@@ -1934,7 +2123,9 @@ them.
   since 0.8.39. A tool that blocks its thread holds one of those workers, and
   with both blocked every member's turn and every session's cleanup in the
   process waits: keep member tools non-blocking (move blocking work off the
-  worker, for example with `tokio::task::spawn_blocking`).
+  worker, for example with `tokio::task::spawn_blocking`). Resolved in
+  0.9.9: a member's turns run on the runtime that provisions the member,
+  which is the host's.
 
 - `meerkat-mob`: the lift of a stopped mob (`MobHandle::resume`) applies the
   0.9.6 recovery rules to the members it rebuilds: it waits for a held hosting

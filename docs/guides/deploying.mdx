@@ -287,22 +287,40 @@ when the shared variable is unset.
 
 Meerkat also keeps two small Tokio runtimes of its own for the whole process,
 in a host binary and in a Rust embedding alike: the machine cleanup runtime
-(threads named `meerkat-machine-cleanup`) and the runtime-loop serving
-runtime (`meerkat-runtime-serving`). They run session and mob work as well,
-including work an embedding host composes: the turns of runtime-backed mob
-members, with the host's tools and whatever those spawn, run on the cleanup
-runtime. So these threads must not have less stack than the host's own
-workers: when `RKAT_WORKER_STACK_BYTES` is unset they take 16 MiB, twice the
-budget, or `RUST_MIN_STACK` when that asks for more. They follow the same
-variable as the host: `RKAT_WORKER_STACK_BYTES` sets their thread stack
-exactly, below 16 MiB included, so the diagnosis sweep reaches them too.
-Their threads have an explicit size, so Rust itself would never apply
-`RUST_MIN_STACK` to them; this way an embedding whose workers or debug build
-need more than 16 MiB raises these threads with the same `RUST_MIN_STACK` it
-gives its own. An invalid `RKAT_WORKER_STACK_BYTES` fails every operation
-that needs one of these runtimes until it is corrected, with the refusal a
-host binary gives at startup. `RKAT_RPC_WORKER_STACK_BYTES` does not reach
-them.
+(threads named `meerkat-machine-cleanup`) and the runtime-loop serving runtime
+(`meerkat-runtime-serving`). They run Core's own session and mob work: machine
+cleanup, the custody of a session's creation and recovery, and the runtime
+loops that apply each session's turns. The turns themselves, with the host's
+tools and whatever those spawn, run on the host's runtime: a mob member's
+turns on the runtime of the task that provisions it, the turns of a session an
+RPC session runtime serves on the runtime that session runtime is built on,
+and those of a session the host creates directly on the runtime that creates
+it. Size the workers of that runtime for the tools you compose. A host runtime
+that stops in the middle of a turn ends the turn as a crash would: the
+interrupted input and the queued ones stay non-terminal, nothing more is
+written for them, and the session's next start resumes them. An input that
+reaches an idle session after the stop waits for that start too. Once the
+session's runtime takes such an input up, as after a stop in the middle of a
+turn, the session's registration waits for its reload, and a later input is
+refused until the next start, with nothing kept for it; an RPC session runtime
+refuses it with `host_runtime_stopped` (two inputs to the same session within
+milliseconds of each other right after the stop can see the second refused
+untyped instead, `-32603`, with nothing kept). On an RPC session runtime two
+more inputs are refused instead of waiting: a governed input, and an input to a
+help session, which is never rebuilt from storage and is refused with
+`help_session_not_resumable`. A turn whose task
+panicked, or whose session the service retired, fails with its error, as does
+a turn its caller drives directly. When `RKAT_WORKER_STACK_BYTES` is unset the
+two process runtimes' threads take 16 MiB, twice the budget, or
+`RUST_MIN_STACK` when that asks for more. They follow the same variable as the
+host: `RKAT_WORKER_STACK_BYTES` sets their thread stack exactly, below 16 MiB
+included, so the diagnosis sweep reaches them too. Their threads have an
+explicit size, so Rust itself would never apply `RUST_MIN_STACK` to them; this
+way an embedding whose workers or debug build need more than 16 MiB raises
+these threads with the same `RUST_MIN_STACK` it gives its own. An invalid
+`RKAT_WORKER_STACK_BYTES` fails every operation that needs one of these
+runtimes until it is corrected, with the refusal a host binary gives at
+startup. `RKAT_RPC_WORKER_STACK_BYTES` does not reach them.
 
 ## Worker Threads
 

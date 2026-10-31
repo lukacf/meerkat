@@ -70,8 +70,11 @@ with the resumable session identity in `details`.
 
 Branch on `error.data` kinds, not message text: `session_served_elsewhere`,
 `session_hosting_unavailable`, `runtime_teardown_in_progress`,
-`durable_resume_hold`, and auth `reason` values. Ordinary REST errors use
-`{"error", "code", "details"?}` with route-specific codes (`BAD_REQUEST`,
+`durable_resume_hold`, the JSON-RPC session runtime's -32032 kinds
+`runtime_shutting_down` (its shutdown began) and `host_runtime_stopped` (the
+session's host runtime stopped and its registration waits for its reload; send
+the input again after the next start), and auth `reason` values. Ordinary REST
+errors use `{"error", "code", "details"?}` with route-specific codes (`BAD_REQUEST`,
 `NOT_FOUND`, `CONFLICT`, `DUPLICATE_REQUEST_ID`, `SERVICE_UNAVAILABLE`, ...);
 REST routes that project the canonical code use the HTTP status above. A failed
 SDK call raises (Python) or rejects with (TypeScript) a `MeerkatError` that has

@@ -1008,6 +1008,13 @@ pub struct ExperimentalGptLiveContextMirrorHost<
     replacements: tokio::sync::Mutex<
         std::collections::HashMap<SessionId, ExperimentalLiveReplacementRequired>,
     >,
+    /// The runtime this mirror host was built on: the host's. The runtime
+    /// asks for an ambiguous delivery's replacement from its own serving
+    /// runtime, and the replacement open may create the session's actor,
+    /// whose session task, and every turn it runs, lives on the runtime that
+    /// creates it. So the open runs on this runtime. `None` when built
+    /// outside a Tokio runtime.
+    host_runtime: Option<tokio::runtime::Handle>,
 }
 
 #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -1031,10 +1038,49 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
             controls: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             control_changed: tokio::sync::Notify::new(),
             replacements: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            host_runtime: tokio::runtime::Handle::try_current().ok(),
         });
         runtime.set_live_context_mirror_host(Arc::clone(&host)
             as Arc<dyn meerkat_runtime::live_context_mirror::LiveContextMirrorHost>);
         host
+    }
+
+    /// Run a replacement open on the host's runtime and await it. Dropping
+    /// the returned future aborts the open, as dropping the open itself
+    /// would. An open that ends without an answer fails by that kind only:
+    /// its own report goes to the host's log.
+    async fn open_replacement_on_host_runtime(
+        &self,
+        open: impl std::future::Future<Output = Result<ExperimentalLiveReplacementRequired, String>>
+        + Send
+        + 'static,
+    ) -> Result<ExperimentalLiveReplacementRequired, String> {
+        struct AbortOnDrop(
+            tokio::task::JoinHandle<Result<ExperimentalLiveReplacementRequired, String>>,
+        );
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let Some(handle) = self.host_runtime.as_ref() else {
+            return open.await;
+        };
+        let mut task = AbortOnDrop(handle.spawn(open));
+        match (&mut task.0).await {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                let ended = if error.is_panic() {
+                    "panicked"
+                } else {
+                    "was cancelled: the host's runtime stopped"
+                };
+                tracing::error!(%error, "a live replacement open on the host's runtime {ended}");
+                Err(format!(
+                    "the live replacement open on the host's runtime {ended}; inspect host logs"
+                ))
+            }
+        }
     }
 
     /// Read the pending client renegotiation bootstrap for this session. The
@@ -1453,11 +1499,16 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
             .lock()
             .await
             .remove(&(session_id.clone(), authority.closing_channel_id().clone()));
+        let member_host = Arc::clone(&self.member_host);
+        let open_authority = Arc::clone(&self.open_authority);
         let replacement = self
-            .member_host
-            .open_live_context_replacement(self.open_authority.as_ref(), authority)
-            .await
-            .map_err(|error| error.to_string())?;
+            .open_replacement_on_host_runtime(async move {
+                member_host
+                    .open_live_context_replacement(open_authority.as_ref(), authority)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
         self.publish_replacement(session_id, replacement).await
     }
 
@@ -1470,11 +1521,16 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
             .lock()
             .await
             .remove(&(session_id.clone(), authority.closing_channel_id().clone()));
+        let member_host = Arc::clone(&self.member_host);
+        let open_authority = Arc::clone(&self.open_authority);
         let replacement = self
-            .member_host
-            .open_live_result_replacement(self.open_authority.as_ref(), authority)
-            .await
-            .map_err(|error| error.to_string())?;
+            .open_replacement_on_host_runtime(async move {
+                member_host
+                    .open_live_result_replacement(open_authority.as_ref(), authority)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
         self.publish_replacement(session_id, replacement).await
     }
 

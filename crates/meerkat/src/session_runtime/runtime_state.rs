@@ -520,6 +520,12 @@ mod ops {
         ///
         /// Every fact is read body-free, so a provisional tail standing ahead
         /// of the committed boundary never fails the judgement:
+        /// - a live actor whose task ended with its host's runtime is not
+        ///   judged: it takes no commands, so the judgement leaves the input
+        ///   to the caller's admission, and the runtime's lost host runtime
+        ///   check degrades the registration and leaves an admitted input to
+        ///   the session's next registration
+        ///   (`PersistentSessionService::session_task_ended_with_its_runtime`);
         /// - an archived session is never stale, and a session with no
         ///   committed source has nothing to be stale against;
         /// - a live actor that continues the store's standing tail of a run
@@ -542,6 +548,13 @@ mod ops {
             _recovery_ctx: &RecoveryContext<'_>,
             position: LiveStalenessPosition,
         ) -> Result<bool, SessionError> {
+            if self
+                .service
+                .session_task_ended_with_its_runtime(session_id)
+                .await
+            {
+                return Ok(false);
+            }
             let durable_present = match self.service.observe_live_durable_source(session_id).await?
             {
                 LiveDurableSourceObservation::Archived => return Ok(false),

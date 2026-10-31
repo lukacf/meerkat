@@ -15952,13 +15952,14 @@ mod tests {
 
         /// With neither stack knob set, the two process-owned runtimes fit a
         /// frame deeper than the 8 MiB host worker budget: their default is
-        /// 16 MiB. The machine cleanup runtime polls the turns of
+        /// 16 MiB. The machine cleanup runtime used to poll the turns of
         /// runtime-backed mob members, with the tools an embedding host
-        /// gives them and whatever those spawn, so its threads must not have
-        /// less stack than the host's own workers. With the 8 MiB budget as
-        /// their default, an embedding host whose workers run 16 MiB ran its
-        /// member work on half that, and aborted with a stack overflow on
-        /// `meerkat-machine-cleanup` once that work needed more than 8 MiB.
+        /// gives them and whatever those spawn. With the 8 MiB budget as its
+        /// default, an embedding host whose workers run 16 MiB ran that
+        /// member work on half that stack, and aborted with a stack overflow
+        /// on `meerkat-machine-cleanup` once the work needed more than 8 MiB.
+        /// Those turns now run on the host's runtime; the default keeps the
+        /// margin for the work these runtimes still run.
         #[test]
         fn process_owned_runtimes_default_to_more_stack_than_the_host_worker_budget() {
             let mut refused = Vec::new();
@@ -15988,9 +15989,9 @@ mod tests {
         /// 24 MiB frame fits 32 MiB from either variable, and overflows the
         /// default: the control, without which the raised cases prove
         /// nothing. When these threads had an explicit size that neither
-        /// variable reached, an embedding whose mob member work needed more
-        /// aborted on `meerkat-machine-cleanup` however it set
-        /// `RUST_MIN_STACK`.
+        /// variable reached, an embedding whose mob member work needed more,
+        /// while the cleanup runtime still ran it, aborted on
+        /// `meerkat-machine-cleanup` however it set `RUST_MIN_STACK`.
         #[test]
         fn process_owned_runtimes_size_their_threads_from_the_host_stack_knobs() {
             for (runtime, thread) in [

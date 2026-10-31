@@ -1848,9 +1848,22 @@ pub fn persistent_runtime_post_stop_cleanup_handle_for_actor_slot<
 /// It lives there because the handle needs only the `MeerkatMachine` and the
 /// session id, and because the mob provisioner must return the SAME handle
 /// while depending on the runtime rather than on this crate's `session-store`
-/// feature. Keeping this name here preserves the one helper every surface
-/// calls.
+/// feature. Keeping this name here, with its `_with_host_runtime_check`
+/// variant below, preserves the one helper every surface calls.
 pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle;
+
+/// Build the same shared pre-dequeue realization handle with a surface's
+/// lost host runtime check as its precondition.
+///
+/// Re-exported from `meerkat_runtime` beside the handle it builds: the one
+/// implementation asks the check before it realizes anything, so a surface
+/// whose sessions run on the host's runtime supplies the check instead of
+/// wrapping the handle.
+pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle_with_host_runtime_check;
+
+/// A surface's lost host runtime check for the shared pre-dequeue handle,
+/// re-exported from `meerkat_runtime`.
+pub use meerkat_runtime::PreDequeueHostRuntimeCheck;
 
 /// Build the endpoint that records typed system notices in one session's
 /// durable transcript without a turn.
@@ -2311,6 +2324,37 @@ fn start_turn_request_from_primitive(
     })
 }
 
+/// A session's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the session service checks that the session's task did not end
+/// with the host's runtime it ran on. A realization reconfigures the live
+/// actor, so for a session whose host's runtime stopped it would fail, and the
+/// runtime loop's cleanup would then end the queued inputs as stopped; the
+/// check degrades the registration first, so the loop leaves them to the
+/// session's next registration.
+struct PersistentSessionHostRuntimeCheck<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> PreDequeueHostRuntimeCheck
+    for PersistentSessionHostRuntimeCheck<B>
+{
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+            .then(|| {
+                format!(
+                    "session '{}' lost its session task to the runtime it ran on; its queued work \
+                     is left to the session's next registration",
+                    self.session_id
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecutor<B> {
     fn supports_work_authorization(&self) -> bool {
@@ -2361,13 +2405,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         ))
     }
 
+    /// The one shared realization handle, with the session's lost host
+    /// runtime check as its precondition.
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(persistent_runtime_pre_dequeue_handle(
-            Arc::clone(&self.adapter),
-            self.session_id.clone(),
-        ))
+        Some(
+            persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                Arc::clone(&self.adapter),
+                self.session_id.clone(),
+                Arc::new(PersistentSessionHostRuntimeCheck {
+                    service: Arc::clone(&self.service),
+                    session_id: self.session_id.clone(),
+                }),
+            ),
+        )
     }
 
     fn transcript_notice_handle(
@@ -2384,6 +2436,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        // A session whose task ended with the host's runtime cannot run this
+        // turn: the session service degrades its registration, so the runtime
+        // loop leaves the run to the session's next registration instead of
+        // recording a step that fails on the lost actor as a failed run.
+        if self
+            .service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "session {} lost its session task to the runtime it ran on; run {run_id} is \
+                 left to the session's next registration",
+                self.session_id
+            )));
+        }
         validate_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive).await?;
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(

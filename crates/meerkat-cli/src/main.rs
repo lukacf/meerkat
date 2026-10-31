@@ -12299,6 +12299,37 @@ impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for CliRuntimeInterrup
     }
 }
 
+/// A CLI session's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the session service checks that the session's task did not end
+/// with the runtime it ran on. A realization reconfigures the live actor, so
+/// for a session whose runtime stopped it would fail, and the runtime loop's
+/// cleanup would then end the queued inputs as stopped; the check degrades the
+/// registration first, so the loop leaves them to the session's next
+/// registration.
+#[cfg(feature = "session-store")]
+struct CliSessionHostRuntimeCheck {
+    service: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[cfg(feature = "session-store")]
+#[async_trait::async_trait]
+impl meerkat::surface::PreDequeueHostRuntimeCheck for CliSessionHostRuntimeCheck {
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+            .then(|| {
+                format!(
+                    "session '{}' lost its session task to the runtime it ran on; its queued work \
+                     is left to the session's next registration",
+                    self.session_id
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     /// Every turn forwards the primitive's native work context into the
@@ -12394,7 +12425,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         }
     }
 
-    /// The one shared facade-owned realization handle.
+    /// The one shared facade-owned realization handle, with the session's
+    /// lost host runtime check as its precondition.
     ///
     /// Gated on `session-store` for the same reason the boundary handle is: a
     /// CLI build without durable sessions has no committed handoff log to read,
@@ -12404,10 +12436,14 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
         #[cfg(feature = "session-store")]
         {
-            self.persistent_service.as_ref().map(|_| {
-                meerkat::surface::persistent_runtime_pre_dequeue_handle(
+            self.persistent_service.as_ref().map(|persistent| {
+                meerkat::surface::persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
                     Arc::clone(&self.runtime_adapter),
                     self.session_id.clone(),
+                    Arc::new(CliSessionHostRuntimeCheck {
+                        service: Arc::clone(persistent),
+                        session_id: self.session_id.clone(),
+                    }),
                 )
             })
         }
@@ -17969,6 +18005,16 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             session_id,
         )
         .await
+    }
+
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&meerkat_core::lifecycle::RunId>,
+    ) -> bool {
+        self.inner
+            .runtime_turn_lost_its_host_runtime(session_id, run_id)
+            .await
     }
 
     async fn suspend_run_with_machine_authority(

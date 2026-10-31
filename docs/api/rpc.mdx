@@ -1308,10 +1308,12 @@ input or its readiness is unavailable (the typed detail is in `data`),
 `-32001` when the runtime driver has no runtime under the session's id,
 `-32002` when another runtime owner hosts the session or its runtime
 teardown is still running, `-32032` when its runtime authority is
-unavailable, and `-32600` when the runtime's lifecycle state admits no new
-input (a retired runtime, or the destroyed runtime of a session that is
-gone; the message names the state). Only a mechanical failure is
-`-32603`.
+unavailable (`data.kind` `runtime_shutting_down` once the session runtime's
+shutdown began, `host_runtime_stopped` once the host's runtime the session ran
+on stopped and its registration waits for its reload), and `-32600` when the
+runtime's lifecycle state admits no new input (a retired runtime, or the
+destroyed runtime of a session that is gone; the message names the state).
+Only a mechanical failure is `-32603`.
 
 <ParamField body="session_id" type="string" required>
   Session ID to continue.
@@ -3426,7 +3428,7 @@ and `data`, never on the message text.
 | -32029 | Member reload required | Member registration is durability-degraded; only an explicit registration reload repairs it |
 | -32030 | Input refused | The native owner declined an unaccepted input |
 | -32031 | Input not ready | Native input readiness is currently unavailable; `data` is `{"type": "not_ready", "reason": {"kind": ...}}`. Since 0.9.4 the kind `original_admission_pending` means an original the input names is still waiting on its source owner's admission: retry later |
-| -32032 | Session runtime unavailable | Runtime authority is unavailable before a session operation starts |
+| -32032 | Session runtime unavailable | Runtime authority is unavailable before a session operation starts. On the session runtime, `data.kind` `runtime_shutting_down` refuses work that reaches admission or registration after the runtime's shutdown began, and `host_runtime_stopped` refuses an input to a session whose task ended with the host's runtime it ran on once the session's registration waits for its reload. Nothing of the request was admitted, so nothing is kept; send it again after the next start |
 | -32033 | Approval store unavailable | The approval store committed nothing; a fresh retry is valid |
 | -32034 | Approval conflict | Another owner changed the approval first; reconcile it before reuse |
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |

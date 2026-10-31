@@ -345,6 +345,9 @@ struct Receiver {
     second_request: Notify,
     finish: Notify,
     authorized_requests: AtomicUsize,
+    /// The name of the thread each model request's authorization ran on:
+    /// the thread of the turn that sent the request.
+    authorization_threads: Mutex<Vec<Option<String>>>,
     /// Answers taken in order, before any other answer, one per request.
     #[cfg(feature = "mcp")]
     script: Mutex<std::collections::VecDeque<ScriptedAnswer>>,
@@ -554,6 +557,11 @@ impl HttpAuthorizer for FixtureAuthorizer {
         request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), meerkat_core::AuthError> {
         self.0.authorized_requests.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .authorization_threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().name().map(str::to_owned));
         request.headers.push((
             "Authorization".into(),
             "Bearer synthetic-e1-loopback-only".into(),
@@ -1488,6 +1496,98 @@ fn finish_scenario(
         }
         Ok(Ok(())) => assert!(cleanup_failures.is_empty(), "{cleanup_failures:?}"),
     }
+}
+
+/// The name of the host runtime's threads in
+/// [`a_governed_input_runs_its_staged_session_on_the_runtime_that_admits_it`].
+const GOVERNED_HOST_WORKER_THREAD: &str = "governed-host-worker";
+
+/// A governed input to a staged session materializes the session's actor on
+/// the runtime of the caller that admits the input, so the session's turn
+/// runs on that runtime's workers. The admission itself runs on Core's
+/// process-wide machine cleanup runtime; the actor used to be materialized
+/// there too, which put every turn of the session on that runtime's two
+/// workers. The model request's authorization, which the turn awaits,
+/// records the thread the turn runs on.
+#[test]
+fn a_governed_input_runs_its_staged_session_on_the_runtime_that_admits_it() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name(GOVERNED_HOST_WORKER_THREAD)
+        .thread_stack_size(meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET)
+        .enable_all()
+        .build()
+        .expect("host runtime");
+    let threads = host.block_on(async {
+        let mut http = Server::start().await;
+        http.receiver.direct_answer.store(true, Ordering::SeqCst);
+        let Fixture {
+            setup, permissions, ..
+        } = fixture_with(&http, "actual-jsonl-authentication", cfg!(feature = "mcp")).await;
+        let (client_io, server_io) = tokio::io::duplex(1 << 20);
+        let (reader, writer) = tokio::io::split(server_io);
+        let (mut server, runtime) = construct(BufReader::new(reader), writer, setup).unwrap();
+        let server_task = tokio::spawn(async move { server.run().await });
+        let (reader, mut writer) = tokio::io::split(client_io);
+        let mut reader = BufReader::new(reader);
+        let effects: Arc<Mutex<Vec<String>>> = Arc::default();
+        let scenario = async {
+            send(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":1,"method":"session/create","params":{
+                    "prompt":"deferred-seed-host-runtime", "initial_turn":"deferred"
+                }}),
+            )
+            .await;
+            let created = response(&mut reader, &mut writer, 1, &effects).await;
+            assert!(created.get("error").is_none(), "{created}");
+            let sid = SessionId::parse(created["result"]["session_id"].as_str().unwrap()).unwrap();
+            assert!(
+                runtime.runtime_actor_witness_slot(&sid).witness().is_none(),
+                "the deferred session has no actor before its first governed input"
+            );
+            permissions.lock().unwrap().push(InvocationPermission {
+                runtime: LogicalRuntimeId::for_session(&sid),
+                requester: principal("requester"),
+                ingress: principal("ingress"),
+            });
+            send(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":2,"method":"turn/start","params":{
+                    "session_id":sid.to_string(), "prompt":"turn-prompt-host-runtime"
+                }}),
+            )
+            .await;
+            let finished = response(&mut reader, &mut writer, 2, &effects).await;
+            assert!(finished.get("error").is_none(), "{finished}");
+            assert_eq!(finished["result"]["text"], FINISHED);
+        };
+        let result =
+            std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(25), scenario))
+                .catch_unwind()
+                .await;
+        let cleanup_failures = cleanup_jsonl(reader, &mut writer, server_task, &mut http).await;
+        finish_scenario(result, cleanup_failures);
+        http.receiver.authorization_threads.lock().unwrap().clone()
+    });
+    host.shutdown_timeout(Duration::from_secs(10));
+    assert_eq!(
+        threads.len(),
+        1,
+        "the turn authorized one model request: {threads:?}"
+    );
+    let thread = threads[0].as_deref();
+    assert_ne!(
+        thread,
+        Some("meerkat-machine-cleanup"),
+        "the staged session's turn ran on Core's machine cleanup runtime instead of the \
+         runtime that admitted its governed input"
+    );
+    assert_eq!(
+        thread,
+        Some(GOVERNED_HOST_WORKER_THREAD),
+        "the staged session's turn runs on a worker of the runtime that admitted its input"
+    );
 }
 
 // Exercise the exported API independently of the private construct fixture.

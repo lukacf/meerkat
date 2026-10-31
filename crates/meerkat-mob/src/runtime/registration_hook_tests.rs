@@ -44,6 +44,8 @@ struct SelectingHost {
     /// `Some` refuses the destination of this one member only, as `refuse`
     /// refuses every member's.
     refuse_member: std::sync::Mutex<Option<String>>,
+    /// The thread each selection and surface check ran on, in call order.
+    hook_threads: std::sync::Mutex<Vec<(&'static str, Option<String>)>>,
 }
 
 impl SelectingHost {
@@ -68,7 +70,15 @@ impl SelectingHost {
             pause,
             refuse: AtomicBool::new(refuse),
             refuse_member: Default::default(),
+            hook_threads: Default::default(),
         })
+    }
+
+    fn record_hook_thread(&self, call: &'static str) {
+        self.hook_threads
+            .lock()
+            .unwrap()
+            .push((call, std::thread::current().name().map(str::to_owned)));
     }
 
     /// A host that refuses the destination of `member` only.
@@ -121,6 +131,7 @@ impl crate::MemberRuntimeRegistrationHook for SelectingHost {
         &self,
         identity: &MemberRuntimeBuildIdentity,
     ) -> Result<MemberDestinationSelection, MobError> {
+        self.record_hook_thread("select_destination");
         self.seen.lock().unwrap().push(identity.clone());
         self.entered.add_permits(1);
         if self.pause {
@@ -163,6 +174,7 @@ impl crate::MemberRuntimeRegistrationHook for SelectingHost {
         &self,
         _identity: &MemberRuntimeBuildIdentity,
     ) -> Result<Option<SessionAgentMandate>, MobError> {
+        self.record_hook_thread("select_agent_mandate");
         if self.refuse_mandate.load(Ordering::SeqCst) {
             return Err(MobError::WiringError(
                 "host refused to select the member's agent".into(),
@@ -184,6 +196,7 @@ impl crate::MemberRuntimeRegistrationHook for SelectingHost {
         identity: &MemberRuntimeBuildIdentity,
         surface: &[meerkat_core::ToolDef],
     ) -> Result<(), MobError> {
+        self.record_hook_thread("verify_member_surface");
         self.surfaces
             .lock()
             .unwrap()
@@ -361,6 +374,46 @@ async fn assert_bound_at(machine: &MeerkatMachine, session: &SessionId, generati
             .await
             .is_err(),
         "the retired binding is no longer current"
+    );
+}
+
+/// The name of the host runtime's threads in
+/// [`a_members_registration_hooks_run_on_the_runtime_that_provisions_it`].
+const HOOK_HOST_WORKER_THREAD: &str = "hook-host-worker";
+
+/// A member's registration hooks run on the runtime of the task that
+/// provisions the member, the host's, each as a task its create transaction
+/// awaits. The transaction runs on Core's process-wide machine cleanup
+/// runtime, and the hooks used to run there too, on its two workers. Each
+/// hook records the thread it runs on.
+#[test]
+fn a_members_registration_hooks_run_on_the_runtime_that_provisions_it() {
+    let host_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name(HOOK_HOST_WORKER_THREAD)
+        .thread_stack_size(meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET)
+        .enable_all()
+        .build()
+        .expect("host runtime");
+    let threads = host_runtime.block_on(async {
+        let (backend, _service, _machine, host) = backend(false, false);
+        backend
+            .provision_member(fresh_request(Session::new()))
+            .await
+            .expect("provision the member");
+        host.hook_threads.lock().unwrap().clone()
+    });
+    host_runtime.shutdown_timeout(Duration::from_secs(10));
+    let on_host = Some(HOOK_HOST_WORKER_THREAD.to_owned());
+    assert_eq!(
+        threads,
+        vec![
+            ("select_destination", on_host.clone()),
+            ("select_agent_mandate", on_host.clone()),
+            ("verify_member_surface", on_host),
+        ],
+        "every registration hook runs on a worker of the runtime that provisions the member, \
+         not on Core's machine cleanup runtime"
     );
 }
 

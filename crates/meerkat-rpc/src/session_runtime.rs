@@ -103,6 +103,12 @@ const RUNTIME_REGISTRATION_CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// [`SessionRuntime::refuse_admission_after_shutdown`]).
 pub(crate) const RUNTIME_SHUTTING_DOWN_KIND: &str = "runtime_shutting_down";
 
+/// `data.kind` of the refusal of an input to a session whose task ended with
+/// the host's runtime it ran on, once the session's registration waits for
+/// its reload: the input is not admitted, and the session's next start
+/// serves new input (see `SessionRuntime::host_runtime_stopped_rpc`).
+pub(crate) const HOST_RUNTIME_STOPPED_KIND: &str = "host_runtime_stopped";
+
 /// The admission and registration fence a runtime's shutdown closes (see
 /// [`SessionRuntime::refuse_admission_after_shutdown`]). The runtime shares it
 /// with its mob session service, which registers member sessions on the same
@@ -2418,6 +2424,16 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn runtime_turn_lost_its_host_runtime(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&RunId>,
+    ) -> bool {
+        self.service
+            .runtime_turn_lost_its_host_runtime(session_id, run_id)
+            .await
+    }
+
     async fn suspend_run_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -2937,6 +2953,14 @@ pub struct SessionRuntime {
     /// in the service. The first `start_turn` call promotes them through
     /// `staged_sessions.begin_promotion()`.
     staged_sessions: Arc<StagedSessionRegistry>,
+    /// The runtime this runtime was built on: the host's. A staged session's
+    /// first turn and a recovered session's next turn are applied by the
+    /// runtime loop, on Core's private serving runtime, and their actor is
+    /// created from that apply. It is created on this runtime instead, so
+    /// every turn of the session runs on the host's workers and ends when
+    /// this runtime stops, for the next start's recovery to resume. `None`
+    /// when built outside a Tokio runtime.
+    host_runtime: Option<tokio::runtime::Handle>,
     /// Event streams opened while a deferred session is still staged. The
     /// first materializing turn fans out events here, then bridges the stream
     /// to the live session service after promotion.
@@ -4115,6 +4139,7 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
+            host_runtime: tokio::runtime::Handle::try_current().ok(),
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -4291,6 +4316,7 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
+            host_runtime: tokio::runtime::Handle::try_current().ok(),
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
@@ -5445,6 +5471,12 @@ impl SessionRuntime {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         let pre_turn_hook = self.pending_promotion_pre_turn_hook_callback();
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
+        // The promotion task, and the actor it creates, run on the host's
+        // runtime, not on the runtime loop's that applies this turn.
+        let _host_runtime = self
+            .host_runtime
+            .as_ref()
+            .map(tokio::runtime::Handle::enter);
         meerkat::session_runtime::staged_promotion::spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
             Arc::clone(&self.staged_sessions),
@@ -5478,6 +5510,12 @@ impl SessionRuntime {
     ) -> ServiceApplyRuntimeTurnResultReceiver {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
+        // The recovery task, and the actor it creates, run on the host's
+        // runtime, not on the runtime loop's that applies this turn.
+        let _host_runtime = self
+            .host_runtime
+            .as_ref()
+            .map(tokio::runtime::Handle::enter);
         meerkat::session_runtime::staged_promotion::spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
             Arc::clone(&self.runtime_adapter),
@@ -5494,18 +5532,55 @@ impl SessionRuntime {
         )
     }
 
+    /// Await a promotion or recovery task's runtime turn. The task runs on
+    /// the host's runtime, and one that runtime took with it when it stopped
+    /// is a crash of the host's runtime, not a failure of the turn: the
+    /// session's registration is degraded to require a cold reload from
+    /// durable state before the runtime loop sees the error, as the session
+    /// service does for a turn whose session task its runtime took, so the
+    /// loop writes nothing more for the run and the session's next
+    /// registration recovers and resumes it.
     async fn await_service_apply_runtime_turn(
+        &self,
         session_id: &SessionId,
         result_rx: ServiceApplyRuntimeTurnResultReceiver,
     ) -> Result<CoreApplyOutput, RpcError> {
-        result_rx.await.map_err(|_| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!(
-                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-            ),
-            data: None,
-        })?
-        .map_err(staged_apply_runtime_turn_error_to_rpc)
+        let Ok(result) = result_rx.await else {
+            if self.host_runtime_stopped() {
+                self.runtime_adapter
+                    .require_session_durability_reload(
+                        session_id,
+                        "session_task_runtime_stopped",
+                        "the runtime turn's promotion task ended with the host's runtime",
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    "a runtime turn's promotion task ended with the host's runtime; the run is \
+                     left to the session's next registration"
+                );
+            }
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+                ),
+                data: None,
+            });
+        };
+        result.map_err(staged_apply_runtime_turn_error_to_rpc)
+    }
+
+    /// Whether the runtime this session runtime was built on has shut down.
+    /// A runtime that is shutting down cancels every task spawned on it
+    /// before `spawn` returns, so the probe answers at once; a live runtime
+    /// has not run the probe yet, or ran it.
+    fn host_runtime_stopped(&self) -> bool {
+        use futures::FutureExt as _;
+        self.host_runtime.as_ref().is_some_and(|handle| {
+            let probe = tokio::task::unconstrained(handle.spawn(std::future::ready(())));
+            matches!(probe.now_or_never(), Some(Err(error)) if error.is_cancelled())
+        })
     }
 
     async fn await_service_apply_runtime_turn_with_recoverable_admission(
@@ -6389,12 +6464,22 @@ impl SessionRuntime {
     /// Refuse an input that would rebuild a help session from storage, before
     /// the input is admitted: a session that is neither live nor staged is
     /// rebuilt from its stored state.
+    ///
+    /// A session whose task ended with the host's runtime it ran on is not
+    /// live: an input admitted for it waits for the session's next
+    /// registration, which rebuilds it from storage. That is asked first,
+    /// without the actor: the live read asks the lost actor, and fails.
     async fn refuse_cold_help_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let live = self
+        let task_ended_with_its_runtime = self
             .service
-            .has_live_session(session_id)
-            .await
-            .map_err(session_error_to_rpc)?;
+            .session_task_ended_with_its_runtime(session_id)
+            .await;
+        let live = !task_ended_with_its_runtime
+            && self
+                .service
+                .has_live_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?;
         if live || self.staged_sessions.contains(session_id).await {
             return Ok(());
         }
@@ -8278,6 +8363,30 @@ impl SessionRuntime {
         }
     }
 
+    /// The typed refusal of an input to a session whose task ended with the
+    /// host's runtime it ran on, once the session's registration waits for
+    /// its reload: `-32032` (session runtime unavailable) with `data.kind`
+    /// `host_runtime_stopped`. The first such input was admitted and its
+    /// pre-dequeue check degraded the registration; the registration admits
+    /// nothing until it reloads, and a reload in this process would only meet
+    /// the stopped runtime again. Nothing of the input was admitted, so
+    /// nothing is kept for it: it is sent again after the session's next
+    /// start.
+    fn host_runtime_stopped_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            message: format!(
+                "session {session_id} lost its session task to the runtime it ran on, and its \
+                 registration waits for a reload at the session's next start; the input was not \
+                 admitted"
+            ),
+            data: Some(serde_json::json!({
+                "kind": HOST_RUNTIME_STOPPED_KIND,
+                "session_id": session_id.to_string(),
+            })),
+        }
+    }
+
     /// Refuse a request that reaches admission after this runtime's shutdown
     /// began ([`Self::runtime_shutting_down_rpc`]).
     ///
@@ -8692,11 +8801,20 @@ impl SessionRuntime {
         match self.runtime_actor_witness(session_id) {
             Ok(actor_witness) => Ok(RpcExecutorActorAuthority::PersistentWitness(actor_witness)),
             Err(missing_authority) => {
-                let live_actor_exists = match self.service.has_live_session(session_id).await {
-                    Ok(exists) => exists,
-                    Err(SessionError::NotFound { .. }) => false,
-                    Err(error) => return Err(session_error_to_rpc(error)),
-                };
+                // An actor whose task ended with the host's runtime it ran on
+                // is not live: it takes no commands, and the live read asks
+                // it and fails. The executor attached here meets it at its
+                // pre-dequeue check, which leaves the input to the session's
+                // next registration.
+                let live_actor_exists = !self
+                    .service
+                    .session_task_ended_with_its_runtime(session_id)
+                    .await
+                    && match self.service.has_live_session(session_id).await {
+                        Ok(exists) => exists,
+                        Err(SessionError::NotFound { .. }) => false,
+                        Err(error) => return Err(session_error_to_rpc(error)),
+                    };
                 if live_actor_exists {
                     return Err(missing_authority);
                 }
@@ -8786,6 +8904,22 @@ impl SessionRuntime {
         {
             return Err(Self::runtime_shutting_down_rpc(session_id));
         }
+        // A session whose task ended with the host's runtime it ran on, and
+        // whose registration already waits for its reload, takes no input in
+        // this process: the registration admits nothing until it reloads, and
+        // a reload here would only meet the stopped runtime again. Refused,
+        // typed, before anything is attached (see `host_runtime_stopped_rpc`).
+        if self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && adapter
+                .durability_reload_required(session_id)
+                .await
+                .is_some()
+        {
+            return Err(Self::host_runtime_stopped_rpc(session_id));
+        }
         // An executor means agent work can run, and agent work can author
         // schedules against this runtime's store — the firing host must be
         // live in the same process (see arm_schedule_host_for_agent_tools).
@@ -8834,11 +8968,20 @@ impl SessionRuntime {
             .await?
             .is_some();
         let adapter_registration_exists = adapter.contains_session(session_id).await;
-        let live_session_exists = match self.service.has_live_session(session_id).await {
-            Ok(exists) => exists,
-            Err(SessionError::NotFound { .. }) => false,
-            Err(error) => return Err(session_error_to_rpc(error)),
-        };
+        // An actor whose task ended with the host's runtime it ran on is not
+        // live: the live read asks it and fails. A registration that already
+        // waited for its reload was refused above; for any other, the attach
+        // below proceeds, and the attached loop's pre-dequeue check leaves the
+        // input to the session's next registration.
+        let live_session_exists = !self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && match self.service.has_live_session(session_id).await {
+                Ok(exists) => exists,
+                Err(SessionError::NotFound { .. }) => false,
+                Err(error) => return Err(session_error_to_rpc(error)),
+            };
         let session_exists = adapter_registration_exists
             || self.staged_sessions.contains(session_id).await
             || live_session_exists
@@ -9983,6 +10126,27 @@ impl SessionRuntime {
         pre_admission: Option<RpcRuntimePreAdmission>,
         llm_reconfigure_boundary: LlmReconfigureBoundaryOwnership,
     ) -> Result<CoreApplyOutput, RpcError> {
+        // A session whose task ended with the host's runtime cannot run this
+        // turn, and the steps ahead of the service apply (the per-turn LLM
+        // hot swap, the live staleness read) would fail on the lost actor and
+        // record the run as failed. The session service degrades the
+        // session's registration first, so the runtime loop leaves the run to
+        // the session's next registration, as the service apply does for a
+        // turn the stop cut short.
+        if self
+            .service
+            .runtime_turn_lost_its_host_runtime(session_id, Some(&run_id))
+            .await
+        {
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session {session_id} lost its session task to the runtime it ran on; run \
+                     {run_id} is left to the session's next registration"
+                ),
+                data: None,
+            });
+        }
         // The configured native owner must hand this executor both the admitted
         // work context and the exact-input capacity/seed claim. A missing or
         // unresolved claim must never fall through to ordinary live/cold setup.
@@ -10084,8 +10248,19 @@ impl SessionRuntime {
                 }
                 None => self.reserve_active_turn(session_id).await?.into_admission(),
             };
-            // Hot-swap LLM client if model/provider overrides are present.
-            if let Some(ref ov) = overrides
+            // Hot-swap LLM client if model/provider overrides are present. A
+            // resumed run continues under the LLM identity its first dispatch
+            // swapped to: that swap saved the session with it before the
+            // run's first round commit, and the resumed actor, seeded from
+            // the run's provisional tail, carries it. Until the run commits,
+            // that actor reads as ahead of the committed boundary, so the
+            // swap's live reads and its save cannot run for it.
+            let resumed_run = primitive
+                .turn_metadata()
+                .and_then(|metadata| metadata.execution_kind)
+                == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
+            if !resumed_run
+                && let Some(ref ov) = overrides
                 && (ov.model.is_some()
                     || ov.provider.is_some()
                     || ov.self_hosted_server_id.is_some()
@@ -10405,7 +10580,9 @@ impl SessionRuntime {
                 build_config.keep_alive,
                 generated_machine_archived_resume_admission,
             );
-            let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await;
+            let output = self
+                .await_service_apply_runtime_turn(session_id, output_rx)
+                .await;
             self.bridge_pending_session_event_streams(session_id).await;
             return output;
         }
@@ -10565,7 +10742,9 @@ impl SessionRuntime {
             active_turn,
             keep_alive,
         );
-        let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await?;
+        let output = self
+            .await_service_apply_runtime_turn(session_id, output_rx)
+            .await?;
         Ok(output)
     }
 
@@ -27675,6 +27854,670 @@ mod tests {
             .expect("runtime-routed turn");
     }
 
+    /// The name of the host runtime's threads in the rows below.
+    const RPC_HOST_WORKER_THREAD: &str = "rpc-host-worker";
+
+    /// The runtime a host builds its session runtime on, with named workers,
+    /// so a turn can tell whose worker it runs on.
+    fn rpc_host_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name(RPC_HOST_WORKER_THREAD)
+            .thread_stack_size(meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET)
+            .enable_all()
+            .build()
+            .expect("host runtime")
+    }
+
+    static TURN_THREAD_ANSWERS: MockLlmClient = MockLlmClient;
+
+    /// Answers like [`MockLlmClient`] and records the name of the thread each
+    /// model request is made on: the thread the session's turn runs on.
+    #[derive(Default)]
+    struct TurnThreadLlmClient {
+        threads: StdMutex<Vec<Option<String>>>,
+    }
+
+    impl TurnThreadLlmClient {
+        fn threads(&self) -> Vec<Option<String>> {
+            self.threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for TurnThreadLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(std::thread::current().name().map(str::to_owned));
+            TURN_THREAD_ANSWERS.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A deferred session's first turn creates the session's actor on the
+    /// runtime the session runtime was built on, the host's, so the turn runs
+    /// on the host's workers. The runtime loop that applies the turn runs on
+    /// Core's private serving runtime; the actor used to be created from that
+    /// apply, which put every turn of the session on that runtime's workers.
+    #[test]
+    fn a_deferred_sessions_first_turn_runs_on_the_runtime_its_host_built_on() {
+        let host = rpc_host_runtime();
+        let threads = host.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let recorder = Arc::new(TurnThreadLlmClient::default());
+            let runtime = make_runtime(temp_factory(&temp), 10);
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "first turn").await;
+            runtime.shutdown().await;
+            recorder.threads()
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            threads.len(),
+            1,
+            "the first turn made one model request: {threads:?}"
+        );
+        let thread = threads[0].as_deref();
+        assert_ne!(
+            thread,
+            Some("meerkat-runtime-serving"),
+            "the deferred session's first turn ran on Core's serving runtime"
+        );
+        assert_eq!(
+            thread,
+            Some(RPC_HOST_WORKER_THREAD),
+            "the deferred session's first turn runs on a worker of the host's runtime"
+        );
+    }
+
+    /// A session rebuilt from durable state on its next turn, as after a
+    /// restart, gets its new actor on the host's runtime too. The rebuild
+    /// runs from the runtime loop's apply, on Core's private serving runtime,
+    /// as a deferred session's first turn does.
+    #[test]
+    fn a_rebuilt_sessions_turn_runs_on_the_runtime_its_host_built_on() {
+        let host = rpc_host_runtime();
+        let (threads, actor_rebuilt) = host.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let recorder = Arc::new(TurnThreadLlmClient::default());
+            let runtime = make_runtime(temp_factory(&temp), 10);
+            // The rebuild makes its agent from durable state, which does not
+            // carry the build's client override: it uses the default client.
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "before the restart").await;
+            restart_session(&runtime, &session_id).await;
+            let actor_before = runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await;
+            runtime_turn(&runtime, &session_id, "after the restart").await;
+            let actor_after = runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await;
+            runtime.shutdown().await;
+            (recorder.threads(), (actor_before, actor_after))
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            actor_rebuilt,
+            (false, true),
+            "the turn after the restart rebuilt the session's actor"
+        );
+        assert_eq!(
+            threads.len(),
+            2,
+            "each turn made one model request: {threads:?}"
+        );
+        let thread = threads[1].as_deref();
+        assert_ne!(
+            thread,
+            Some("meerkat-runtime-serving"),
+            "the rebuilt session's turn ran on Core's serving runtime"
+        );
+        assert_eq!(
+            thread,
+            Some(RPC_HOST_WORKER_THREAD),
+            "the rebuilt session's turn runs on a worker of the host's runtime"
+        );
+    }
+
+    /// A session runtime built on a host's runtime, with a deferred session
+    /// whose first turn ran there; then the host's runtime stops while the
+    /// session is idle, and the process keeps running. The session's actor
+    /// ended with the stopped runtime; its registration and runtime loop,
+    /// which run on Core's serving runtime, live on.
+    fn a_session_whose_hosts_runtime_stopped(
+        realm: &GracefulShutdownRealm,
+        recorder: &Arc<RecordingMessagesLlmClient>,
+    ) -> (Arc<SessionRuntime>, SessionId) {
+        let host = rpc_host_runtime();
+        let started = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(recorder.clone()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "the first turn").await;
+            (runtime, session_id)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        started
+    }
+
+    /// The session's durable inputs that carry `needle` and have not ended,
+    /// each as its phase, its stage attempts, and whether it was ever staged
+    /// onto a run. An input refused before its admission has no row.
+    async fn open_inputs_carrying(
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        session_id: &SessionId,
+        needle: &str,
+    ) -> Vec<(meerkat_runtime::InputLifecycleState, u32, bool)> {
+        runtime_store
+            .load_input_states_strict(&meerkat_runtime::LogicalRuntimeId::for_session(session_id))
+            .await
+            .expect("the session's durable input rows are readable")
+            .into_iter()
+            .filter(|row| {
+                row.seed.terminal_outcome.is_none()
+                    && format!("{:?}", row.state.persisted_input).contains(needle)
+            })
+            .map(|row| {
+                (
+                    row.seed.phase,
+                    row.seed.attempt_count,
+                    row.seed.last_run_id.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    /// Whether the session's input `input_id` is consumed within the rows'
+    /// bound.
+    async fn input_consumed(
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> bool {
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
+            loop {
+                let phase = runtime_store
+                    .load_input_state(&runtime_id, input_id)
+                    .await
+                    .expect("the input's durable row is readable")
+                    .map(|row| row.seed.phase);
+                if phase == Some(meerkat_runtime::InputLifecycleState::Consumed) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// The runtime a session runtime was built on stops while its session is
+    /// idle, and the process keeps running. Another runtime of the process
+    /// then sends the session a turn with a per-turn model override.
+    ///
+    /// The session's actor ended with the stopped runtime, so the turn cannot
+    /// run there: the stop is a crash for the session, not a failure of the
+    /// turn. The turn is admitted all the same: its input stays durably
+    /// admitted and open, never staged onto a run, the runtime's lost host
+    /// runtime check degrades the session's registration to wait for a
+    /// reload, and a session runtime started again over the same stores runs
+    /// the input once. The session runtime's reads ahead of the admission
+    /// (the live staleness judgement, and the one the turn's reservation
+    /// makes) must not ask the lost actor: such a read fails, and the turn
+    /// would be refused before its admission with nothing left owed.
+    #[test]
+    fn a_turn_after_its_hosts_runtime_stopped_waits_for_the_next_start() {
+        const OVERRIDE_PROMPT: &str = "a turn sent after the host's runtime stopped";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id) = a_session_whose_hosts_runtime_stopped(&realm, &recorder);
+        let override_requests = || {
+            recorder
+                .requests()
+                .iter()
+                .filter(|request| {
+                    let dump = format!("{request:?}");
+                    dump.contains(OVERRIDE_PROMPT) && !dump.contains(AFTER_RESTART)
+                })
+                .count()
+        };
+        let process = process_runtime_outliving_the_host();
+        let observed = process.block_on(async {
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    OVERRIDE_PROMPT.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    Some(crate::handlers::turn::TurnOverrides {
+                        model: Some("claude-opus-4-8".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await;
+            let turn_failed = matches!(turn, Ok(Err(_)));
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let left_open =
+                open_inputs_carrying(&realm.runtime_store, &session_id, OVERRIDE_PROMPT).await;
+            let before_restart = override_requests();
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(recorder.clone()));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = override_requests();
+            restarted.shutdown().await;
+            (
+                turn_failed,
+                reload_required,
+                left_open,
+                before_restart,
+                after_restart,
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                true,
+                true,
+                vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                0,
+                1
+            ),
+            "a turn sent after the host's runtime stopped waits for the next start: its input \
+             is admitted and left queued, never staged onto a run, the surviving runtime loop \
+             records no failed run, and the restarted session runtime runs it once"
+        );
+    }
+
+    /// Another runtime of the same process, which outlives the host's.
+    fn process_runtime_outliving_the_host() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the process's other runtime")
+    }
+
+    /// The same stop, and then an external event sent to the idle session
+    /// from another runtime of the process.
+    ///
+    /// The event is admitted all the same, and the session runtime's live
+    /// staleness judgement ahead of the admission must not ask the lost actor
+    /// for it, or the event would be refused with nothing left owed. It is
+    /// admitted without a wake, so nothing runs it in the stopped host's
+    /// process: it stays durably admitted and queued, never staged onto a
+    /// run, and a session runtime started again over the same stores runs it
+    /// once.
+    #[test]
+    fn an_external_event_after_its_hosts_runtime_stopped_waits_for_the_next_start() {
+        const EVENT_BODY: &str = "an external event sent after the host's runtime stopped";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id) = a_session_whose_hosts_runtime_stopped(&realm, &recorder);
+        let event_requests = || {
+            recorder
+                .requests()
+                .iter()
+                .filter(|request| format!("{request:?}").contains(EVENT_BODY))
+                .count()
+        };
+        let process = process_runtime_outliving_the_host();
+        let observed = process.block_on(async {
+            let accepted = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.accept_external_event_via_runtime(
+                    &session_id,
+                    "host.runtime.stopped".to_string(),
+                    serde_json::json!({ "body": EVENT_BODY }),
+                    None,
+                ),
+            )
+            .await;
+            let event_id = match accepted {
+                Ok(Ok(meerkat_runtime::AcceptOutcome::Accepted { input_id, .. })) => Some(input_id),
+                _ => None,
+            };
+            let left_open =
+                open_inputs_carrying(&realm.runtime_store, &session_id, EVENT_BODY).await;
+            let before_restart = event_requests();
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(recorder.clone()));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let consumed = match &event_id {
+                Some(event_id) => input_consumed(&realm.runtime_store, &session_id, event_id).await,
+                None => false,
+            };
+            let transcript_rows = restarted
+                .load_persisted_session(&session_id)
+                .await
+                .expect("load the persisted session")
+                .expect("the session is persisted")
+                .messages()
+                .iter()
+                .filter(|message| format!("{message:?}").contains(EVENT_BODY))
+                .count();
+            restarted.shutdown().await;
+            (
+                event_id.is_some(),
+                left_open,
+                before_restart,
+                consumed,
+                transcript_rows,
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                true,
+                vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                0,
+                true,
+                1
+            ),
+            "an external event sent after the host's runtime stopped waits for the next start: \
+             it is admitted and left queued, never staged onto a run, and the restarted session \
+             runtime runs it once"
+        );
+    }
+
+    /// The same stop, with a help session that `help/ask` ran on the host's
+    /// runtime, and then a turn sent to it from another runtime of the
+    /// process.
+    ///
+    /// A help session continues only on the live session that ran it and is
+    /// never rebuilt from storage. Its actor ended with the stopped runtime,
+    /// so the turn could only wait for the session's next registration, which
+    /// refuses to rebuild it: the turn is refused before its admission with
+    /// the typed `help_session_not_resumable`, as after a restart, and
+    /// nothing is left owed. The session runtime's read of whether the
+    /// session is live must not ask the lost actor: such a read fails, and
+    /// the turn would be refused with that error instead.
+    #[test]
+    fn a_turn_to_a_help_session_after_its_hosts_runtime_stopped_is_refused_as_not_resumable() {
+        const PROMPT: &str = "a help question sent after the host's runtime stopped";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let host = rpc_host_runtime();
+        let (runtime, help_session) = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let help_session = rpc_help_ask(&runtime).await;
+            (runtime, help_session)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        let process = process_runtime_outliving_the_host();
+        let (refusal, observed) = process.block_on(async {
+            let refusal = run_rpc_turn(&runtime, &help_session, PROMPT).await.err();
+            let refused_as = refusal.as_ref().map(|refusal| {
+                (
+                    refusal.code,
+                    refusal.data.as_ref().map(|data| data["kind"].clone()),
+                )
+            });
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&help_session)
+                .await
+                .is_some();
+            let left_open = open_inputs_carrying(&realm.runtime_store, &help_session, PROMPT).await;
+            let prompt_requests = recorder
+                .requests()
+                .iter()
+                .filter(|request| format!("{request:?}").contains(PROMPT))
+                .count();
+            drop(runtime);
+            (
+                refusal,
+                (refused_as, reload_required, left_open, prompt_requests),
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                Some((
+                    error::SESSION_NOT_RUNNING,
+                    Some(serde_json::json!("help_session_not_resumable"))
+                )),
+                false,
+                Vec::new(),
+                0
+            ),
+            "a turn sent to a help session after the host's runtime stopped is refused as not \
+             resumable before its admission, and nothing is left owed: {refusal:?}"
+        );
+    }
+
+    /// The same stop, and then three inputs sent to the idle session from
+    /// another runtime of the process: a turn, a second turn and an external
+    /// event.
+    ///
+    /// The first turn waits for the next start, as above: it is admitted and
+    /// left queued, and the runtime's lost host runtime check degrades the
+    /// session's registration to wait for its reload. A later input meets
+    /// that registration. It cannot be admitted there, and a reload in this
+    /// process would only meet the stopped runtime again, so it is refused
+    /// before its admission with the typed `host_runtime_stopped` (`-32032`)
+    /// and nothing is kept for it. The session runtime must not ask the lost
+    /// actor for it either: that read fails, and the input would be refused
+    /// with that error instead. The restarted session runtime runs the first
+    /// turn once, and neither later input.
+    #[test]
+    fn a_later_input_after_its_hosts_runtime_stopped_is_refused_as_host_runtime_stopped() {
+        const FIRST: &str = "the first turn sent after the host's runtime stopped";
+        const SECOND: &str = "a second turn sent after the host's runtime stopped";
+        const EVENT_BODY: &str = "an external event sent after the second turn";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id) = a_session_whose_hosts_runtime_stopped(&realm, &recorder);
+        let requests_carrying = |needle: &str| {
+            recorder
+                .requests()
+                .iter()
+                .filter(|request| {
+                    let dump = format!("{request:?}");
+                    dump.contains(needle) && !dump.contains(AFTER_RESTART)
+                })
+                .count()
+        };
+        let refused_as = |error: &RpcError| {
+            (
+                error.code,
+                error.data.as_ref().map(|data| data["kind"].clone()),
+            )
+        };
+        let process = process_runtime_outliving_the_host();
+        let (refusals, observed) = process.block_on(async {
+            let (first_event_tx, _first_event_rx) = mpsc::channel(100);
+            let first = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    FIRST.into(),
+                    Vec::new(),
+                    first_event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            let first_failed = matches!(first, Ok(Err(_)));
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let (second_event_tx, _second_event_rx) = mpsc::channel(100);
+            let second = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    SECOND.into(),
+                    Vec::new(),
+                    second_event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("the second turn is answered within its bound");
+            let event = tokio::time::timeout(
+                Duration::from_secs(60),
+                runtime.accept_external_event_via_runtime(
+                    &session_id,
+                    "host.runtime.stopped".to_string(),
+                    serde_json::json!({ "body": EVENT_BODY }),
+                    None,
+                ),
+            )
+            .await
+            .expect("the event is answered within its bound");
+            let refusals = (
+                second.as_ref().err().map(|error| error.message.clone()),
+                event.as_ref().err().map(|error| error.message.clone()),
+            );
+            let refused = (
+                second.as_ref().err().map(refused_as),
+                event.as_ref().err().map(refused_as),
+            );
+            let left_open = (
+                open_inputs_carrying(&realm.runtime_store, &session_id, FIRST).await,
+                open_inputs_carrying(&realm.runtime_store, &session_id, SECOND).await,
+                open_inputs_carrying(&realm.runtime_store, &session_id, EVENT_BODY).await,
+            );
+            let before_restart = (
+                requests_carrying(FIRST),
+                requests_carrying(SECOND),
+                requests_carrying(EVENT_BODY),
+            );
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(recorder.clone()));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = (
+                requests_carrying(FIRST),
+                requests_carrying(SECOND),
+                requests_carrying(EVENT_BODY),
+            );
+            restarted.shutdown().await;
+            (
+                refusals,
+                (
+                    (first_failed, reload_required),
+                    refused,
+                    left_open,
+                    before_restart,
+                    after_restart,
+                ),
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        let host_runtime_stopped = Some((
+            meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            Some(serde_json::json!("host_runtime_stopped")),
+        ));
+        assert_eq!(
+            observed,
+            (
+                (true, true),
+                (host_runtime_stopped.clone(), host_runtime_stopped),
+                (
+                    vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                    Vec::new(),
+                    Vec::new()
+                ),
+                (0, 0, 0),
+                (1, 0, 0)
+            ),
+            "once the first input after the host's runtime stopped degraded the session's \
+             registration, a later turn and a later event are refused as host_runtime_stopped \
+             before their admission, nothing is kept for them, and the restarted session \
+             runtime runs only the first turn: {refusals:?}"
+        );
+    }
+
     /// The live open consumes the staged prompt and persists that with its
     /// row, so the persisted pending flag is clear after the first turn, and
     /// a restart does not deliver the prompt again: the transcript keeps
@@ -32849,8 +33692,9 @@ mod tests {
             admission.into_admission(),
             false,
         );
-        let rejected =
-            SessionRuntime::await_service_apply_runtime_turn(&session_id, result_rx).await;
+        let rejected = runtime
+            .await_service_apply_runtime_turn(&session_id, result_rx)
+            .await;
         assert!(
             rejected
                 .as_ref()

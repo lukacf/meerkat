@@ -230,7 +230,8 @@ presence and the replayed facts:
 - A row this build cannot read (a later build's format, a field it does not
   know, a broken seal), or one the journal contradicts (a declared entry of
   the name, a member where the row records none, a placed member, a removed
-  entry of the name), reserves the name as unreadable: nothing acts on it.
+  entry of the name, a spawn under way for the name), reserves the name as
+  unreadable: nothing acts on it.
 
 A store read that fails fails the start: a name the store may reserve is
 never read as free. A member row whose stored origin this build does not know

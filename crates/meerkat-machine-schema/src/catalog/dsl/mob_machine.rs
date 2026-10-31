@@ -30177,12 +30177,13 @@ macro_rules! mob_catalog_machine_dsl {
         // - a removed entry's row records its tombstone;
         // - a row this build cannot read, and a row whose facts contradict the
         //   replay (a Declared entry of the same name, a member where the row
-        //   says none, a placed member) or a removed entry's tombstone (a
-        //   second row of the name), reserve the name as unreadable: nothing
-        //   acts on it.
-        // No arm but the unreadable one takes a tombstoned name, so a
-        // removed entry's name is never an entry again
-        // (tombstone_is_never_an_entry).
+        //   says none, a placed member), a removed entry's tombstone (a
+        //   second row of the name) or a spawn ladder open for the name,
+        //   reserve the name as unreadable: nothing acts on it.
+        // No arm but the unreadable one takes a tombstoned name or one a
+        // spawn ladder acts for, so a removed entry's name is never an entry
+        // again (tombstone_is_never_an_entry), and no ladder's custody
+        // outlives the entry it was opened for (entry_custodies_are_disjoint).
         transition RecoverCreatedIdentityEntrySeated {
             per_phase [Running, Stopped]
             on signal RecoverCreatedIdentityEntry { agent_identity, presence, last_session }
@@ -30195,6 +30196,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.remove(agent_identity);
@@ -30213,6 +30215,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
@@ -30234,6 +30237,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::TemplatePreparation);
@@ -30252,6 +30256,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_tombstones.insert(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -30277,6 +30282,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || (presence != RecoveredPresence::Present
                     && self.identity_to_runtime.contains_key(agent_identity) == true)
                 || self.identity_entry_tombstones.contains(agent_identity) == true
+                || self.spawn_exec_phase.contains_key(agent_identity) == true
             }
             update {
                 self.identity_entry_unreadable.insert(agent_identity);

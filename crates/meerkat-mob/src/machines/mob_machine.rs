@@ -15089,6 +15089,54 @@ mod tests {
         assert!(!authority.state().identity_to_runtime.contains_key(&removed));
     }
 
+    /// A created entry row of a name a spawn ladder acts for is answered
+    /// unreadable: it ends neither the entry nor the ladder's custody, so no
+    /// custody outlives the entry it was opened for
+    /// (`entry_custodies_are_disjoint`) and no ladder seats a removed
+    /// entry's name (`tombstone_is_never_an_entry`).
+    #[test]
+    fn a_created_row_of_a_name_under_an_open_ladder_is_answered_unreadable() {
+        let mut authority = MobMachineAuthority::new();
+        let member = SeatedMember {
+            identity: AgentIdentity::from("created-ladder-open"),
+            runtime_id: AgentRuntimeId::from("created-ladder-open:0"),
+            session_id: SessionId::from("created-ladder-open-session"),
+            fence_token: FenceToken(11),
+        };
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            Some(&member.session_id),
+        );
+        begin_seat_ladder(&mut authority, &member, Generation(0), false, true)
+            .expect("created custody opens the ladder of the entry owed its seat");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Tombstone,
+            None,
+        );
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_tombstones.contains(&member.identity),
+            "the row records no tombstone"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&member.identity),
+            Some(&IdentityEntryOrigin::Created),
+            "the entry stays"
+        );
+        assert!(
+            state.spawn_exec_created_custody.contains(&member.identity),
+            "its ladder keeps its custody"
+        );
+        assert!(
+            state.identity_entry_unreadable.contains(&member.identity),
+            "the row reserves the name as unreadable"
+        );
+    }
+
     /// Custody of one origin never takes an entry of another, and no spawn
     /// takes a reserved name: the admission probe refuses entry custody for
     /// a Created entry and created custody for anything but a Created entry

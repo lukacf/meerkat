@@ -594,3 +594,168 @@ fn a_retiring_prune_that_cannot_record_envelope_5_changes_nothing() {
         "nor records a rewrite"
     );
 }
+
+/// A prune's one commit spans from the first removed row to the last
+/// retired one, so on a transcript whose stale prompt opens it, the span
+/// holds user, assistant (a tool use with its assistant message id) and
+/// tool-result rows. Every row of the span but the removed one and the
+/// retired one stays byte for byte, ids included; the reloaded graph
+/// validates, and the commit's parent body is the transcript before it.
+#[test]
+fn a_prune_span_with_conversation_rows_keeps_them() {
+    use crate::types::{
+        AssistantBlock, AssistantMessageId, BlockAssistantMessage, StopReason, ToolResult,
+    };
+
+    let mut session = Session::new();
+    session.append_system_message(LEGACY_ONE);
+    session.append_system_message(CURRENT);
+    session.push(user("first question"));
+    let mut tool_use = BlockAssistantMessage::new(
+        vec![AssistantBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "lookup".into(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        StopReason::ToolUse,
+    );
+    tool_use.assistant_message_id = Some(AssistantMessageId::mint());
+    session.push(Message::BlockAssistant(tool_use));
+    session.push(Message::ToolResults {
+        results: vec![ToolResult::new(
+            "call-1".to_string(),
+            "found".to_string(),
+            false,
+        )],
+        created_at: crate::types::message_timestamp_now(),
+    });
+    let mut answer = BlockAssistantMessage::new(
+        vec![AssistantBlock::Text {
+            text: "the answer".to_string(),
+            meta: None,
+        }],
+        StopReason::EndTurn,
+    );
+    answer.assistant_message_id = Some(AssistantMessageId::mint());
+    session.push(Message::BlockAssistant(answer));
+    session
+        .activate_instruction(activation("calendar", "act-1", None, CALENDAR_ONE))
+        .unwrap();
+    session.push(user("second question"));
+    session
+        .activate_instruction(activation("calendar", "act-2", Some("act-1"), CALENDAR_TWO))
+        .unwrap();
+    session.push(user("third question"));
+    // [legacy, current, user, tool use, tool results, answer, act-1, user,
+    //  act-2, user]
+    let before = session.messages().to_vec();
+    let superseded = 6;
+    let Message::System(superseded_row) = &before[superseded] else {
+        panic!("act-1 is a System row");
+    };
+    let retired_row = super::retired_activation_row(superseded_row)
+        .expect("a live activation row has a retired form");
+
+    let mut retiring = request(vec![row(&session, 0)]);
+    retiring.retire_superseded_activation_bodies = true;
+    let pruned = session
+        .prune_system_rows(retiring)
+        .unwrap_or_else(|error| panic!("the prune commits: {error}"))
+        .expect("the prune commits");
+    assert_eq!((pruned.removed_rows, pruned.retired_bodies), (1, 1));
+    let after = session.messages().to_vec();
+    assert_eq!(after.len(), before.len() - 1);
+    for (offset, row_before) in before.iter().enumerate().skip(1) {
+        let row_after = &after[offset - 1];
+        if offset == superseded {
+            assert_eq!(
+                row_after,
+                &Message::System(retired_row.clone()),
+                "act-1 holds its exact retired form"
+            );
+        } else {
+            assert_eq!(row_after, row_before, "row {offset} is kept byte for byte");
+        }
+    }
+    assert_reloaded_graph_validates(&session);
+    let history = session
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("a rewrite graph");
+    let commit = history.commits().last().expect("the prune's commit");
+    assert_eq!(
+        history.materialize_rewrite_parent(commit).unwrap().messages,
+        before,
+        "the commit's parent body is the transcript before the prune"
+    );
+}
+
+/// A prune keeps a compaction's pending projection intent: the intent stays
+/// in the document, still backed by its commit in the rewrite graph, on the
+/// session and after a reload.
+#[test]
+fn a_prune_keeps_pending_compaction_projection_intents() {
+    let mut session = Session::new();
+    session.append_system_message(LEGACY_ONE);
+    session.append_system_message(CURRENT);
+    session.push(user("first question"));
+    session.push(user("second question"));
+    session.push(user("third question"));
+    let rows = session.messages().to_vec();
+    // [legacy, current, summary, third question]
+    let (_, intent) = session
+        .stage_validated_compaction_for_test(
+            vec![
+                rows[0].clone(),
+                rows[1].clone(),
+                Message::User(UserMessage::compaction_summary("summary")),
+                rows[4].clone(),
+            ],
+            1,
+        )
+        .expect("the compaction commits with its projection intent");
+
+    let pruned = session
+        .prune_system_rows(request(vec![row(&session, 0)]))
+        .unwrap_or_else(|error| panic!("the prune commits: {error}"))
+        .expect("the prune commits");
+    assert_eq!(pruned.removed_rows, 1);
+    let intents = session
+        .validated_compaction_projection_intents()
+        .expect("the pending intents still validate against the graph");
+    assert_eq!(intents.len(), 1, "the prune keeps the pending intent");
+    assert_eq!(intents[0].projection, intent.projection);
+    let reloaded = Session::from_persisted_bytes(&session.to_persisted_bytes().unwrap())
+        .expect("the document reloads");
+    assert_eq!(
+        reloaded
+            .validated_compaction_projection_intents()
+            .expect("the reloaded intents validate")
+            .len(),
+        1
+    );
+}
+
+/// Each refusal cause reads the same in the error message (`as_str`) and in
+/// the structured data (serde), so a host never sees two names for one
+/// cause.
+#[test]
+fn each_refusal_cause_reads_the_same_in_its_message_and_its_data() {
+    for cause in [
+        SystemRowPruneRefusal::OutOfBounds,
+        SystemRowPruneRefusal::DuplicateIndex,
+        SystemRowPruneRefusal::NotASystemRow,
+        SystemRowPruneRefusal::PromptVersionRow,
+        SystemRowPruneRefusal::InstructionActivationRow,
+        SystemRowPruneRefusal::OperatorInstructionEntryRow,
+        SystemRowPruneRefusal::DigestMismatch,
+        SystemRowPruneRefusal::BeforeOperatorInstructionEntry,
+    ] {
+        assert_eq!(
+            serde_json::to_value(cause).unwrap(),
+            serde_json::json!(cause.as_str()),
+            "{cause:?}"
+        );
+    }
+}

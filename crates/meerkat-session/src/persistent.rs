@@ -57713,6 +57713,150 @@ mod tests {
                 .expect("active turn should complete after the refusal");
         }
 
+        const CALENDAR_ONE: &str = "CALENDAR-ONE: book meetings in the morning only.";
+        const CALENDAR_TWO: &str = "CALENDAR-TWO: book meetings in the afternoon only.";
+
+        /// Commit one activation of the `calendar` key on the live session
+        /// `id`, under its turn finalization boundary.
+        async fn activate<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+            activation: &str,
+            supersedes: Option<&str>,
+            body: &str,
+        ) {
+            let boundary = service.acquire_runtime_turn_finalization_guard(id).await;
+            service
+                .activate_instruction_under_runtime_turn_boundary(
+                    id,
+                    InstructionActivationRequest {
+                        revision: InstructionRevisionRef {
+                            namespace: InstructionNamespace::new("app.skills").unwrap(),
+                            key: InstructionKey::new("calendar").unwrap(),
+                            revision_id: InstructionRevisionId::new(format!("rev-{activation}"))
+                                .unwrap(),
+                            content_sha256: InstructionContentDigest::for_body(body),
+                        },
+                        activation_id: meerkat_core::InstructionActivationId::new(activation)
+                            .unwrap(),
+                        expectation: supersedes.map_or(
+                            InstructionActivationExpectation::Absent,
+                            |previous| {
+                                InstructionActivationExpectation::Effective(
+                                    meerkat_core::InstructionActivationId::new(previous).unwrap(),
+                                )
+                            },
+                        ),
+                        supersedes: supersedes.map(|previous| {
+                            meerkat_core::InstructionActivationId::new(previous).unwrap()
+                        }),
+                        body: body.to_string(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("commit activation {activation}: {error}"));
+            drop(boundary);
+        }
+
+        /// A retiring prune through the service: a live idle session holding
+        /// `[legacy one, legacy two, current, question, answer, act-1,
+        /// act-2]` prunes the first legacy row and retires act-1's body in
+        /// one commit, whose span runs over the conversation rows. The
+        /// authoritative document holds the retired row with its marker at
+        /// envelope 5 and reloads; the live session converges on it.
+        async fn a_retiring_prune_persists_at_envelope_5(
+            service: &PersistentSessionService<CountingBuilder>,
+            runtime_store: &dyn RuntimeStore,
+        ) -> SessionId {
+            let id = seeded_session(service, runtime_store).await;
+            activate(service, &id, "act-1", None, CALENDAR_ONE).await;
+            activate(service, &id, "act-2", Some("act-1"), CALENDAR_TWO).await;
+            assert!(
+                service.has_live_session(&id).await.unwrap(),
+                "the session is live and idle"
+            );
+            let before = history(service, &id).await;
+            let mut retiring = request(vec![system_row(&before, 0)]);
+            retiring.retire_superseded_activation_bodies = true;
+            let result = service
+                .prune_system_rows(&id, retiring)
+                .await
+                .unwrap_or_else(|error| panic!("the retiring prune commits: {error}"));
+            let SystemRowPruneResult::Pruned {
+                removed_rows,
+                retired_bodies,
+                ..
+            } = result
+            else {
+                panic!("the prune commits: {result:?}");
+            };
+            assert_eq!((removed_rows, retired_bodies), (1, 1));
+
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            let retired = stored
+                .messages()
+                .iter()
+                .find_map(|message| match message {
+                    Message::System(system)
+                        if system
+                            .instruction_activation
+                            .as_ref()
+                            .is_some_and(|identity| identity.activation_id.as_str() == "act-1") =>
+                    {
+                        Some(system.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the superseded activation row stays");
+            assert!(
+                retired.retired_instruction_body.is_some()
+                    && !retired.content.contains(CALENDAR_ONE),
+                "the stored row holds the retired form: {}",
+                retired.content
+            );
+            assert_eq!(
+                stored.persisted_envelope_version(),
+                5,
+                "a retired body is written at envelope 5"
+            );
+            let reloaded = Session::from_persisted_bytes(&stored.to_persisted_bytes().unwrap())
+                .expect("the document reloads");
+            assert_eq!(reloaded.messages(), stored.messages());
+            let live = service
+                .export_live_session(&id)
+                .await
+                .expect("the live session converged on the retired row");
+            assert_eq!(live.messages(), stored.messages());
+            id
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_whole_blob() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_head_canonical() {
+            let directory = tempfile::tempdir().expect("prune test directory");
+            let (service, runtime_store, _builds) = head_canonical_service(&directory);
+            let id =
+                a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+            let store =
+                meerkat_store::SqliteSessionStore::open(directory.path().join("runtime.sqlite3"))
+                    .expect("a second handle on the head-canonical session store");
+            let head = meerkat_core::session_store::IncrementalSessionStore::load_head(&store, &id)
+                .await
+                .expect("the head reads")
+                .expect("the head row");
+            assert_eq!(head.version, 5, "the head row is at envelope 5");
+        }
+
         /// A stale `expected_parent_revision` reaches the host typed, with the
         /// revision it passed and the current one, and nothing is written.
         #[tokio::test]

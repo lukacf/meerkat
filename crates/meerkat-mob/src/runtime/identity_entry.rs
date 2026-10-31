@@ -62,7 +62,7 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
 use crate::MobError;
-use crate::event::{MobEvent, MobEventKind};
+use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, Generation, MobId, ProfileName};
 use crate::machines::mob_machine as mob_dsl;
 
@@ -527,6 +527,81 @@ impl SeatRotation {
             }
         }
     }
+
+    /// The stored form of the seat rotation on a seat's journal row
+    /// (`seat_rotation`).
+    pub(crate) fn to_stored(self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(match self {
+            Self::Successor {
+                predecessor,
+                target,
+            } => StoredSeatRotation {
+                kind: "successor".to_string(),
+                predecessor,
+                target: Some(rotation_target_token(target).to_string()),
+            },
+            Self::FreshLifeAfter { predecessor } => StoredSeatRotation {
+                kind: "fresh_life_after".to_string(),
+                predecessor,
+                target: None,
+            },
+        })
+    }
+
+    /// The seat rotation a stored form names. One this build cannot read as
+    /// one (a kind or a target a later release wrote) reads as none: the row
+    /// is an ordinary seat here, and the replay reads none of it. A malformed
+    /// form fails the decode.
+    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
+        let stored: StoredSeatRotation = serde_json::from_value(value)?;
+        let predecessor = stored.predecessor;
+        Ok(match stored.kind.as_str() {
+            "successor" => stored
+                .target
+                .as_deref()
+                .and_then(rotation_target_from_token)
+                .map(|target| Self::successor(predecessor, target)),
+            "fresh_life_after" => Some(Self::fresh_life_after(predecessor)),
+            _ => None,
+        })
+    }
+}
+
+/// The stored form of a [`SeatRotation`]: its kind, the incarnation it
+/// follows and, for a rotation's terminal step, its target's token.
+#[derive(Serialize, Deserialize)]
+struct StoredSeatRotation {
+    kind: String,
+    predecessor: Generation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+}
+
+/// The stored form of a [`RetiredRotation`], with its target's token.
+#[derive(Serialize, Deserialize)]
+struct StoredRetiredRotation {
+    target: String,
+    successor: Generation,
+    successor_role: ProfileName,
+}
+
+/// The stored token of a rotation target: its serde form, as the rotation
+/// record of a retirement start row stores it.
+fn rotation_target_token(target: super::RotationTarget) -> &'static str {
+    match target {
+        super::RotationTarget::FreshSession => "fresh_session",
+        super::RotationTarget::SameSession => "same_session",
+    }
+}
+
+/// The rotation target a stored token names; `None` for a token this build
+/// does not know (a later release's target).
+fn rotation_target_from_token(token: &str) -> Option<super::RotationTarget> {
+    match token {
+        "fresh_session" => Some(super::RotationTarget::FreshSession),
+        "same_session" => Some(super::RotationTarget::SameSession),
+        _ => None,
+    }
 }
 
 /// The rotation whose terminal step retired a member incarnation: the
@@ -560,6 +635,25 @@ impl RetiredRotation {
             successor,
             successor_role,
         }
+    }
+
+    /// The stored form of the rotation on a retirement's journal row
+    /// (`retired_rotation`).
+    pub(crate) fn to_stored(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(StoredRetiredRotation {
+            target: rotation_target_token(self.target).to_string(),
+            successor: self.successor,
+            successor_role: self.successor_role.clone(),
+        })
+    }
+
+    /// The rotation a stored form names. One whose target this build does
+    /// not know (a later release's) reads as none: the replay reads none of
+    /// it. A malformed form fails the decode.
+    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
+        let stored: StoredRetiredRotation = serde_json::from_value(value)?;
+        Ok(rotation_target_from_token(&stored.target)
+            .map(|target| Self::new(target, stored.successor, stored.successor_role)))
     }
 }
 
@@ -940,8 +1034,13 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             role: spawned.role.clone(),
             identity_entry: spawned.identity_entry(),
             history_unavailable: spawned.history_unavailable().cloned(),
-            session_id: None,
-            rotation: None,
+            // The session the seat's journal effect named, which its row
+            // records as the member's binding.
+            session_id: spawned
+                .bridge_member_ref()
+                .and_then(MemberRef::bridge_session_id)
+                .cloned(),
+            rotation: spawned.seat_rotation(),
         }),
         MobEventKind::MemberSessionBindingRecovered(recovered) => {
             recovered
@@ -968,15 +1067,16 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             agent_identity,
             generation,
             role,
+            facts,
             ..
         } => Some(MemberLifecycleEvent::Retired {
             agent_identity: agent_identity.clone(),
             generation: *generation,
             role: role.clone(),
-            session_id: None,
-            identity_entry: None,
-            cause: None,
-            rotation: None,
+            session_id: facts.session_id.clone(),
+            identity_entry: facts.identity_entry,
+            cause: facts.cause,
+            rotation: facts.rotation.clone(),
         }),
         MobEventKind::MemberReset {
             agent_identity,

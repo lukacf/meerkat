@@ -230,7 +230,13 @@ impl<'de> Deserialize<'de> for MemberRef {
 // of an unlisted identity entry's retirement, and a stored `MemberSpawned`
 // the internal `history_unavailable` notice of a seat on a fresh session whose
 // identity's archived session is gone; a reader that predates them ignores
-// them.
+// them. A stored `MemberRetired` may also carry the internal facts of the
+// member lifecycle journal read (`retired_session`, `retired_cause`,
+// `retired_entry`, `retired_rotation`), and a stored `MemberSpawned` the
+// internal `seat_rotation`; the replay reads none of them, and a reader that
+// predates them ignores them. A cause, a rotation or a seat rotation this
+// build cannot read decodes as none, and an entry origin it does not know
+// keeps its token.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1287,6 +1293,18 @@ impl MemberSpawnedEvent {
         self.history_unavailable.as_ref()
     }
 
+    pub(crate) fn with_seat_rotation(
+        mut self,
+        seat_rotation: Option<crate::runtime::SeatRotation>,
+    ) -> Self {
+        self.seat_rotation = seat_rotation;
+        self
+    }
+
+    pub(crate) fn seat_rotation(&self) -> Option<crate::runtime::SeatRotation> {
+        self.seat_rotation
+    }
+
     pub(crate) fn with_resume_from_role(mut self, resume_from_role: Option<ProfileName>) -> Self {
         self.resume_from_role = resume_from_role;
         self
@@ -1566,6 +1584,95 @@ pub struct MemberRetiredFacts {
     pub(crate) rotation: Option<crate::runtime::RetiredRotation>,
 }
 
+impl MemberRetiredFacts {
+    pub(crate) fn new(
+        session_id: Option<SessionId>,
+        cause: Option<crate::runtime::MemberRetirementCause>,
+        identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+        rotation: Option<crate::runtime::RetiredRotation>,
+    ) -> Self {
+        Self {
+            session_id,
+            cause,
+            identity_entry,
+            unknown_identity_entry: None,
+            rotation,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MemberRetiredFacts {
+    /// Write the facts into a stored `MemberRetired` row's kind object, each
+    /// under its own key; an absent fact writes no key.
+    fn encode_stored(
+        &self,
+        kind: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(session_id) = &self.session_id {
+            kind.insert(
+                "retired_session".to_string(),
+                serde_json::to_value(session_id)?,
+            );
+        }
+        if let Some(cause) = self.cause {
+            kind.insert(
+                "retired_cause".to_string(),
+                Value::String(cause.as_stored().to_string()),
+            );
+        }
+        // The entry's origin, or the token of an origin this build does not
+        // know, written back as it was stored.
+        if let Some(token) = self
+            .identity_entry
+            .map(|origin| origin.as_stored().to_string())
+            .or_else(|| self.unknown_identity_entry.clone())
+        {
+            kind.insert("retired_entry".to_string(), Value::String(token));
+        }
+        if let Some(rotation) = &self.rotation {
+            kind.insert("retired_rotation".to_string(), rotation.to_stored()?);
+        }
+        Ok(())
+    }
+
+    /// Take the facts out of a stored `MemberRetired` row's kind object. A
+    /// row written before them reads them absent. A cause or a rotation this
+    /// build cannot read (a later release's) reads as none, and an entry
+    /// origin it does not know keeps its token for the next encode.
+    fn take_stored(kind: &mut serde_json::Map<String, Value>) -> Result<Self, serde_json::Error> {
+        let session_id = kind
+            .remove("retired_session")
+            .map(serde_json::from_value::<SessionId>)
+            .transpose()?;
+        let cause = kind
+            .remove("retired_cause")
+            .map(serde_json::from_value::<String>)
+            .transpose()?
+            .and_then(|token| crate::runtime::MemberRetirementCause::from_stored(&token));
+        let entry = kind
+            .remove("retired_entry")
+            .map(serde_json::from_value::<String>)
+            .transpose()?;
+        let identity_entry = entry
+            .as_deref()
+            .and_then(crate::runtime::IdentityEntryOrigin::from_stored);
+        let unknown_identity_entry = entry.filter(|_| identity_entry.is_none());
+        let rotation = kind
+            .remove("retired_rotation")
+            .map(crate::runtime::RetiredRotation::from_stored)
+            .transpose()?
+            .flatten();
+        Ok(Self {
+            session_id,
+            cause,
+            identity_entry,
+            unknown_identity_entry,
+            rotation,
+        })
+    }
+}
+
 pub(crate) fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
     matches!(intent, crate::runtime::SpawnContinuityIntent::Ephemeral)
 }
@@ -1833,6 +1940,22 @@ impl MobEventKind {
             )),
         }
     }
+
+    /// The facts a `MemberRetired` row records for the member lifecycle
+    /// journal read.
+    pub(crate) fn retired_facts(&self) -> Option<&MemberRetiredFacts> {
+        match self {
+            Self::MemberRetired { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retired_facts_mut(&mut self) -> Option<&mut MemberRetiredFacts> {
+        match self {
+            Self::MemberRetired { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -2047,6 +2170,17 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
         kind.insert("session_archived".to_string(), Value::Bool(true));
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(seat_rotation) = member_spawned.seat_rotation()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("seat_rotation".to_string(), seat_rotation.to_stored()?);
+    }
+    if let Some(facts) = event.kind.retired_facts()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        facts.encode_stored(kind)?;
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -2349,6 +2483,29 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<bool>)
         .transpose()?
         .unwrap_or(false);
+    // What seated a MemberSpawned row's incarnation when a rotation did, and
+    // a MemberRetired row's facts, for the member lifecycle journal read: a
+    // row written before them reads them absent, and one this build cannot
+    // read (a later release's) reads as none. The replay reads none of them.
+    let spawned_seat_rotation = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_rotation")
+            } else {
+                None
+            }
+        })
+        .map(crate::runtime::SeatRotation::from_stored)
+        .transpose()?
+        .flatten();
+    let retired_facts = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .filter(|kind| kind.get("type").and_then(Value::as_str) == Some("member_retired"))
+        .map(MemberRetiredFacts::take_stored)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2447,6 +2604,16 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     }
     if retired_session_archived {
         event.kind.set_retired_session_archived(true)?;
+    }
+    if let Some(seat_rotation) = spawned_seat_rotation
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.seat_rotation = Some(seat_rotation);
+    }
+    if let Some(facts) = retired_facts
+        && let Some(stored) = event.kind.retired_facts_mut()
+    {
+        *stored = facts;
     }
     Ok(event)
 }

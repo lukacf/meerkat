@@ -20,6 +20,10 @@ class SavedStateStartupTests(unittest.TestCase):
         self.default = self.base / ".studio"
         self.enterContext(patch.object(startup_state, "_selected", None))
         self.enterContext(patch.dict(os.environ, {}, clear=True))
+        # Other test files in the same process may already have imported the
+        # application; each selection here starts from a launcher before it.
+        self.enterContext(patch.dict(sys.modules))
+        sys.modules.pop("launchkit.server", None)
 
     def test_selected_original_keeps_existing_databases_without_default(self):
         history = self.original / "guided-setups.sqlite3"

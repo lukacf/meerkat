@@ -236,7 +236,7 @@ async def prepared_recovery(registry, monkeypatch, request):
     await original.implementation.shutdown()
 
     store = GuideStore(original.store.root)
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(original.implementation.root.parent, guide)
     service = DeploymentService(original.service.root.parent, guide, implementation)
     registry_owner = LocalApplicationRegistry(guide_store=store, implementation=implementation,

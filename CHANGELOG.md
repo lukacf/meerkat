@@ -645,6 +645,37 @@ them.
   host-store realms keep their documents in the host's store and are not
   listed.
 
+- `meerkat-core`, `meerkat-contracts`: a compaction retires superseded
+  instruction activation bodies in place (see Added). `SystemMessage` gains
+  the public field `retired_instruction_body: Option<RetiredInstructionBody>`,
+  so code that builds a `SystemMessage` literally must set it (`None` keeps
+  the previous behaviour). `WireSessionMessage::System` gains the read-only
+  field `retired_instruction_body: Option<RetiredInstructionBody>`, so code
+  that builds the variant literally or destructures it without `..` must
+  name it.
+
+- `meerkat-core`: `ForkInstructionRefusalCause` gains `HeadBodyRetired` (wire
+  kind `head_body_retired`), appended last: the refusal of a
+  `reactivate_inherited` fork whose copied head a compaction of the source
+  retired (see Added). The Rust enum is `#[non_exhaustive]`; the generated
+  Python, TypeScript and Web SDK types gain the kind in their closed
+  refusal-cause unions, so SDK code that handles every cause must handle it.
+
+- `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  `SessionDocumentMachine` decides which superseded instruction activation
+  bodies a compaction retires (see Added). The generated session-document
+  authority (`meerkat_core::generated::session_document`), the catalog
+  (`meerkat_machine_schema::catalog::dsl::session_document`) and the kernel
+  `generated::session_document` gain, appended last, the inputs
+  `RecoverSessionActivationBodies` and `AuthorizeActivationBodyRetirement`,
+  the effect `ActivationBodyRetirementAuthorized` and the transitions
+  `RecoverSessionActivationBodies` and `AuthorizeActivationBodyRetirement`
+  that decide them; the machine state gains the maps
+  `session_activation_rows`, `session_activation_retired` and
+  `session_activation_head_origin`; and the enum `ActivationHeadOrigin` is
+  new. Exhaustive matches must add the new variants, and code that builds
+  the state struct literally must set the new fields.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1296,6 +1327,31 @@ them.
   slot limit, the active budget, application, deferral, the entry sequence
   and the fold source.
 
+- `meerkat-core`: a compaction retires the body of every instruction
+  activation row that a later activation row of its key follows.
+  `SessionDocumentMachine` decides which rows; the newest row of every key
+  keeps its body, so a key's effective activation is never retired. The
+  retired row keeps its activation identity, timestamp, place and activation
+  ordinal; its content becomes the retired header
+  (`[meerkat-retired-instruction-v1]`, which names the key, the revision,
+  `status=superseded` and the body's length), and it carries the typed
+  marker `RetiredInstructionBody` (`render_version`, `body_bytes`;
+  `RETIRED_INSTRUCTION_RENDER_VERSION_V1`), which a history read carries
+  beside the row's activation identity. The model, the summarizer and a host
+  curator read the retired header, never the superseded body. The 1 MiB
+  activation budget counts live bodies only: a retired body stops counting
+  at the compaction that retires it. An exact retry of a retired activation
+  answers `recorded_but_not_effective`, as for a live superseded row, and a
+  retired revision stays bound to its digest. A compactor's own rebuild
+  still keeps every activation row byte for byte, and a generic rewrite or
+  restore cannot retire or revive a body. A fork child reads a copied
+  retired row as its inherited header, and its first compaction retires the
+  copied rows its own activations supersede; `reactivate_inherited` refuses
+  a fork whose copied head was retired with the cause `head_body_retired`
+  before anything is committed (a fork at a later boundary copies the
+  superseding row with its body). A document that holds a retired body is
+  written at session envelope 5 (see Upgrade notes).
+
 ### Changed
 
 - `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
@@ -1653,6 +1709,29 @@ them.
   `LlmClient::authored_cache_breakpoints` requires; the request itself is
   unchanged.
 
+- `meerkat-core`: a keyed system-prompt update, a generic transcript rewrite
+  and a restore keep each instruction activation row at its place among the
+  conversation rows (the same rows, in order, each after the same number of
+  non-System rows) instead of at its transcript offset. Before, a keyed
+  prompt update was refused once an activation row followed the prompt's
+  current version, because the update inserts the later version right after
+  the current one, before the activation row, and so moved the row's
+  offset; so was any rewrite that added or removed an ordinary System row
+  before an activation row.
+  Moving an activation across a conversation row, and minting, altering,
+  erasing or reordering one, are still refused. A rewrite record that moved
+  an activation row to another offset is written at session envelope 5 (see
+  Upgrade notes).
+
+- `meerkat-core`, `meerkat`: a resume whose explicit prompt is exactly the
+  newest System row the model reads as a prompt (one without an append
+  identity, an instruction activation or an operator-instruction entry, that
+  is not a superseded prompt version) appends nothing. Before, every such
+  resume appended another identical System row. A different prompt, and an
+  earlier prompt sent again after a change, still append, a bare resume
+  still appends nothing, and `StartTurnRequest.system_prompt` keeps its
+  per-turn append.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
@@ -1679,6 +1758,20 @@ them.
   decision waits for its owner to settle the permit (record the commit, or
   release or refuse the permit). Back the file up with the state root, as a
   WAL-complete copy.
+
+- A downgrade to 0.9.8 is refused for every session whose document 0.9.9
+  writes at session envelope 5: a session that carries operator-instruction
+  facts (an entry row, current or retained in its rewrite graph, or the
+  recorded instruction state), a session in which a 0.9.9 compaction retired
+  a superseded instruction activation body (and a fork child that copied
+  such a row), and a session whose rewrite graph retains a record that moved
+  an instruction activation row to another offset. 0.9.8 refuses such a
+  document typed at its envelope where it reads a store's head row first;
+  where it decodes the whole document, it refuses a retired activation row
+  as malformed instruction activation history. Every other session stays at
+  envelope 4, byte for byte, and still reads on 0.9.8.
+  `rkat storage doctor` lists the sessions at envelope 5 (Info finding
+  `operator-instruction-envelope`) before a rollback.
 
 ### Known limitations
 

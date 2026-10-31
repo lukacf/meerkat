@@ -995,14 +995,21 @@ inherited key, in namespace and key order:
   these rows by reproducing them, not by their ids.
 - **Timestamp:** the last copied message's timestamp.
 - **Rules:** the rows pass the ordinary activation rules: the body digest, 256
-  KiB per body, and the 1 MiB budget of retained activation bodies across the
-  session lineage. Each re-activation adds its body to the lineage again, so
-  forks of forks of a member with large bodies reach that budget after a few
-  generations and are refused with `lineage_body_budget_exceeded`.
+  KiB per body, and the 1 MiB budget of live activation bodies in the
+  session's transcript, copied rows included. Each re-activation adds its body
+  again until the child's first compaction retires the copied rows it
+  supersedes, so a chain of forks of a member with large bodies that does not
+  compact between forks can reach that budget and is refused with
+  `lineage_body_budget_exceeded`.
 - **Only what the source activated itself:** each head must be an activation the
   source session wrote itself. A head the source only inherited from an
   earlier fork, and never activated, refuses the fork with
   `not_effective_in_source`.
+- **Only a body the source still holds:** a compaction retires the body of
+  every activation row that a later row of its key superseded. A fork whose
+  prefix ends between such a row and the row that superseded it has no body
+  to carry and is refused with `head_body_retired`. A fork at the tail always
+  copies each key's newest row, which keeps its body.
 
 ### What `reactivate_inherited` trusts
 
@@ -1054,7 +1061,8 @@ API. Its structured data:
 |---|---|
 | `policy_refuses` | The policy refuses a child that inherits activation rows: `refuse`, or `require_explicit_activation` for a fork that starts its own first turn. |
 | `not_effective_in_source` | `reactivate_inherited`, but a copied key's head was never activated by the source itself. |
-| `lineage_body_budget_exceeded` (with `max_bytes`) | Re-activating would exceed the lineage's retained activation-body budget. |
+| `head_body_retired` | `reactivate_inherited`, but a compaction of the source retired the body of a copied key's head: the fork's prefix ends before the later row of that key that superseded it. A fork at a later boundary copies that row, with its body. |
+| `lineage_body_budget_exceeded` (with `max_bytes`) | Re-activating would exceed the session's budget of live activation bodies. |
 | `activation` (with `code`) | The activation rules refused a re-activation row. |
 | `member_host_unsupported` | `reactivate_inherited`, but the member host that holds a placed source is older than 0.9.4 and cannot apply the policy. Upgrade member hosts before their controller. |
 

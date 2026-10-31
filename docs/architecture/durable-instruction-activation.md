@@ -127,10 +127,38 @@ the first line becomes `[meerkat-inherited-instruction-v2]`,
 after `body_bytes=<decimal>`, with no body. A body reaches a model only from
 a row effective in that session: its own activation or re-activation. The
 projection exists at the model boundary only; the stored row keeps the
-envelope above, which stays the exact form of every persisted
-`render_version = 1` row, and a row whose bytes do not match its identity
-fails the projection and refuses the model request. Releases up to 0.9.4
-rendered a v1 projection that kept the body.
+envelope above, or the retired form below, and a row whose bytes do not
+match its identity fails the projection and refuses the model request.
+Releases up to 0.9.4 rendered a v1 projection that kept the body.
+
+A compaction retires the body of a superseded row (see "Rewrite,
+compaction, restore, and fork"). The retired row keeps its typed identity,
+its timestamp and its place, carries the typed marker
+`retired_instruction_body { render_version, body_bytes }`, and stores, and
+its origin session's model reads, the retired header: the v1 header lines,
+`status=superseded`, and `body_bytes`, with no blank line and no body:
+
+```text
+[meerkat-retired-instruction-v1]
+namespace=<json-string>
+key=<json-string>
+revision=<json-string>
+activation=<json-string>
+supersedes=<json-string-or-null>
+origin_session_id=<json-string>
+content_sha256=sha256:<64-lowercase-hex>
+status=superseded
+body_bytes=<decimal>
+```
+
+The identity is unchanged, so its digest still binds the retired body, and
+the marker keeps the body's length. The marker is valid only beside an
+activation identity, its `render_version` is `1` (additive and permanently
+ratcheted, like the activation render versions), and deserialization
+re-renders the header from the identity and the marker and requires byte
+equality. A fork child reads a copied retired row through the same v2
+projection as a live copy, taking `body_bytes` from the marker, so its
+requests do not depend on whether the source compacted before the fork.
 
 The sealed identity contains:
 
@@ -147,7 +175,8 @@ The digest is canonical lowercase `sha256:<64 hex digits>` over the exact UTF-8
 bytes of the approved body. Requests enforce configured body and identifier
 bounds. Meerkat verifies the digest before mutation. Within one retained
 session lineage, one `(namespace, key, revision_id)` can bind only one digest
-and body. Global cross-session artifact immutability remains application-owned;
+and body; a row whose body a compaction retired keeps the digest, which binds
+the body, and the body's length. Global cross-session artifact immutability remains application-owned;
 Meerkat is not an artifact registry.
 
 The System row's semantic carriers must be mutually exclusive. An ordinary
@@ -300,11 +329,20 @@ Activation rows are immutable transcript-boundary anchors.
 
 - Ordinary append and prompt-update APIs cannot mint or adopt them.
 - Generic same-session rewrite and prompt update require exact equality of
-  every activation row at its transcript index; they cannot mint, alter, move,
-  erase, or restore an activation across conversational content.
-- Same-session restore requires every activation row to remain byte-for-byte
-  equal at its exact transcript index. It cannot move an activation across
-  conversational content or restore an erased activation boundary.
+  every activation row at its place among the conversation rows: the same
+  rows, byte for byte, in the same order, each with the same number of
+  non-System rows before it. They may add, remove or reorder ordinary System
+  rows around an activation row (a keyed prompt update inserts a later
+  version before one); they cannot mint, alter, move, erase, or restore an
+  activation across conversational content, and cannot retire a body.
+- Same-session restore requires the same of every activation row. It cannot
+  move an activation across conversational content, restore an erased
+  activation boundary, or bring a retired body back.
+- A rewrite record that moves an activation row to another offset is written
+  at session envelope 5: releases before 0.9.9 compared activation rows at
+  their offsets and would refuse the record, so they refuse the document
+  typed at its envelope instead. Records those releases wrote keep
+  validating.
 - Deserialization validates current rows and every retained revision body.
 - Fork-at may copy only exact activation rows from the selected source prefix.
   Generic fork replacement rejects every activation-bearing replacement, so it
@@ -336,30 +374,75 @@ Activation rows are immutable transcript-boundary anchors.
     its prefix and its id. The id prefix is presentation only; a verifier
     recognizes the rows by reproducing them. A head the source only inherited
     and never activated is refused (`not_effective_in_source`), since
-    re-activating it would grant authority the source never ran under.
+    re-activating it would grant authority the source never ran under. A
+    head whose body a compaction of the source retired is refused
+    (`head_body_retired`) before anything is committed: a fork whose prefix
+    ends between a retired row and the row that superseded it has no body to
+    carry. A fork at the tail always copies each key's newest row, which
+    keeps its body; a host can also fork at a later boundary or activate the
+    key in the child.
 - Re-activation adds each effective body to the lineage again, so it counts
-  against the 1 MiB retained-body budget, and a fork that would cross it is
-  refused (`lineage_body_budget_exceeded`). Nested forks of members with large
-  bodies reach the budget after a few generations.
+  against the 1 MiB budget of live bodies, and a fork that would cross it is
+  refused (`lineage_body_budget_exceeded`). The child's first compaction
+  retires the copied rows its own activations supersede, so nested forks do
+  not carry every superseded copy.
 - A fork does not repeat the lowering check that activation runs at its source.
   The child's first model call stays the final fail-closed guard, as it is for
   the copied historical rows.
 
-Meerkat's current compactor retains System rows. V1 deliberately follows that
-existing rule: every activation anchor and exact body stays in the live ordered
-transcript, while ordinary conversation may be summarized around it.
-Compaction never invents, reorders, edits, or deletes an activation and the
-model-boundary projection preserves every retained anchor in place. This keeps
-idempotency, revision immutability, rollback evidence, and replay independent
-of a second retained-history lookup.
+Meerkat's compactors retain System rows, and every activation anchor stays in
+the live ordered transcript at its place, while ordinary conversation may be
+summarized around it. Compaction never invents, reorders, moves or deletes an
+activation. It retires the body of every superseded row: a row that a later
+activation row of its key follows. The newest row of every key keeps its
+body, so the session's effective activation of a key is never retired, and
+in a fork child the copied rows of a key the child activated itself are
+retired at the child's first compaction. A retired row keeps its identity,
+timestamp, place and activation ordinal, and becomes the retired form above;
+retirement is absorbing.
 
-This is safe but not free: activation bodies accumulate for the life of the
-lineage. The 256 KiB per-body limit and 1 MiB total retained activation-body
-budget bound v1 growth. An exact retry of the current activation remains legal
-at the budget because it appends nothing. Growth beyond the budget is a stable
-typed refusal. Retiring an old body is a future schema change that must first
-define a typed summary/witness mapping and make duplicate and
-immutable-revision checks consult retained audit history.
+`SessionDocumentMachine` decides which rows. Before a compaction the session
+recovers the machine's activation-body region from its transcript: per key,
+how many activation rows there are (every origin), how many of them, oldest
+first, carry a retired body, and whether the newest row is the session's own.
+The machine refuses a torn projection, and the compaction then fails closed
+and keeps its history; otherwise it retires every superseded row, never
+lowers a recovered count, and never retires an own newest row. The session
+maps each key's retired count onto that key's oldest rows; the row validator
+holds that a key's retired rows precede its live ones, so the mapping is
+exact. No compactor can retire a body: a compactor's own rebuild must keep
+every activation row byte for byte, and only the core fold step that follows
+puts the authorized rows in their retired form, validated row by row against
+the source (the exact retired form, never a key's newest row). A generic
+rewrite or restore that retires or revives a body is refused. The rewrite
+graph accepts a record whose activation row is the exact retirement of a
+live parent row that a later row of its key follows in the revision, and
+never requires one, so records earlier releases wrote keep validating.
+
+The witness is on the row, not in retained history (the graph keeps old
+bodies for a bounded number of rewrites only): the unchanged identity
+carries the digest, and the marker carries the body's length. An exact retry
+of a retired activation's id compares the stored header with the retired
+render of the requested identity and body length, and answers
+`recorded_but_not_effective`, as a live superseded row does; any other
+request with that id answers `activation_identity_conflict`. A revision
+binds one digest and body length, so a retired revision id with another body
+is `immutable_revision_conflict`. Rollback is unchanged: the caller supplies
+the body, and the digest proves it. No summarizer, host curator or compactor
+input reads a body the compaction retires; it reads the retired header, so a
+summary never restates a superseded body.
+
+The 256 KiB per-body limit and the 1 MiB budget bound growth. The budget
+counts live bodies only: a retired body stops counting at the commit that
+retires it. Between compactions superseded bodies still count, so a burst of
+activations can meet the typed refusal before the next compaction. An exact
+retry of the current activation remains legal at the budget because it
+appends nothing. A document that holds a retired body is written at session
+envelope 5 (the session records its instruction state, as a fork that copies
+a retired row does), so releases before 0.9.9 refuse it: typed at its
+envelope where they read a store's head row first, and as malformed
+instruction activation history where they decode the whole document, since
+0.9.8 checks activation rows before the envelope version there.
 
 ## Typed public contract
 
@@ -464,6 +547,7 @@ errors. They do not classify state or rebuild receipts.
 | Active-turn boundary | MeerkatMachine admission plus runtime facade | Wait behind the finalization boundary, then commit |
 | Model/live compatibility | Resolved Meerkat runtime capabilities | Typed refusal before append |
 | Same-lineage activation audit | Transcript plus retained revision graph | Load fails closed on malformed state |
+| Which superseded bodies a compaction retires | `SessionDocumentMachine` activation-body region | A torn projection fails the compaction closed; the history stays |
 | Rollback | Later typed activation | No deletion or restore |
 
 ## Release binding and delivery
@@ -491,7 +575,8 @@ lane does not independently merge, tag, or publish either repository.
 ## Dogma check
 
 - The ordered transcript remains the sole model-context authority.
-- No new activation machine, queue, or ledger is introduced.
+- No new activation machine, queue, or ledger is introduced; the retirement
+  decision is a region of the existing `SessionDocumentMachine`.
 - RuntimeStore alone proves physical currentness.
 - Provider capability and live state fail closed before mutation.
 - Typed core code owns semantics; surfaces stay thin.

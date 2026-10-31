@@ -136,6 +136,15 @@ retirement. Entries the apply holds unseated, role holds (with the run-start
 holds they place) and held creations live in memory only, so 0.9.8 sees none
 of them.
 
+A session whose document 0.9.9 writes at session envelope 5 does not
+downgrade: one that carries operator-instruction facts, one in which a
+compaction retired a superseded instruction activation body (or a fork child
+that copied such a row), and one whose rewrite graph holds a record that
+moved an instruction activation row to another offset. 0.9.8 refuses such a
+session; `rkat storage doctor` lists them (Info finding
+`operator-instruction-envelope`) before you roll back. Every other session
+stays at envelope 4 and reads on 0.9.8 unchanged.
+
 ## Upgrading to 0.9.8
 
 This section is for systems running 0.9.7. The full list of changes is in

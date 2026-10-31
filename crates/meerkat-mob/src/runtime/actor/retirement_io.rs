@@ -6249,6 +6249,15 @@ impl MobActor {
                                 "spawn rollback retirement journal has an invalid session: {error}"
                             ))
                         })?;
+                    // The cause the seal's mark gives this retirement, read
+                    // from the machine state before its step through the
+                    // helper a plain retirement's start row reads it with: a
+                    // restarted mob marks the identity again from the row, so
+                    // the end of the retirement ends the entry, as live.
+                    let cause = super::super::identity_entry::stored_retirement_cause(
+                        self.dsl_authority.state(),
+                        &identity,
+                    );
                     let desired = MobEventKind::MemberRetirementStarted {
                         agent_identity: identity,
                         agent_runtime_id: continuation.entry.agent_runtime_id.clone(),
@@ -6265,7 +6274,7 @@ impl MobActor {
                         retiring_peer_endpoint: endpoint,
                         preserve_machine_topology: false,
                         rotation: None,
-                        cause: None,
+                        cause,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, false)));
                 }

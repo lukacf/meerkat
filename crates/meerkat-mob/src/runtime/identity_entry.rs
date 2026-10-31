@@ -549,85 +549,78 @@ impl SeatRotation {
     }
 
     /// The stored form of the seat rotation on a seat's journal row
-    /// (`seat_rotation`).
+    /// (`seat_rotation`): its kind, the incarnation it follows and, for a
+    /// rotation's terminal step, its target in the target's own serde form.
     pub(crate) fn to_stored(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(match self {
             Self::Successor {
                 predecessor,
                 target,
             } => StoredSeatRotation {
-                kind: "successor".to_string(),
+                kind: "successor",
                 predecessor: *predecessor,
-                target: Some(rotation_target_token(*target).to_string()),
+                target: Some(*target),
             },
             Self::FreshLifeAfter { predecessor } => StoredSeatRotation {
-                kind: "fresh_life_after".to_string(),
+                kind: "fresh_life_after",
                 predecessor: *predecessor,
                 target: None,
             },
             Self::RespawnAfter { predecessor } => StoredSeatRotation {
-                kind: "respawn_after".to_string(),
+                kind: "respawn_after",
                 predecessor: *predecessor,
                 target: None,
             },
         })
     }
 
-    /// The seat rotation a stored form names. One this build cannot read as
-    /// one (a kind or a target a later release wrote) reads as none: the row
-    /// is an ordinary seat here, and the replay reads none of it. A malformed
-    /// form fails the decode.
-    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
-        let stored: StoredSeatRotation = serde_json::from_value(value)?;
-        let predecessor = stored.predecessor;
-        Ok(match stored.kind.as_str() {
-            "successor" => stored
-                .target
-                .as_deref()
-                .and_then(rotation_target_from_token)
-                .map(|target| Self::successor(predecessor, target)),
-            "fresh_life_after" => Some(Self::fresh_life_after(predecessor)),
-            "respawn_after" => Some(Self::respawn_after(predecessor)),
+    /// The seat rotation a stored form names, read kind first. A form this
+    /// build cannot read (a kind, a target or a shape a later release
+    /// wrote) reads as none, so its row decodes as an ordinary seat: the
+    /// rotation is journal-only, and the replay reads none of it.
+    pub(crate) fn from_stored(value: &serde_json::Value) -> Option<Self> {
+        let kind = value.get("kind")?.as_str()?;
+        let predecessor = || stored_field::<Generation>(value, "predecessor");
+        match kind {
+            "successor" => Some(Self::successor(
+                predecessor()?,
+                stored_field(value, "target")?,
+            )),
+            "fresh_life_after" => Some(Self::fresh_life_after(predecessor()?)),
+            "respawn_after" => Some(Self::respawn_after(predecessor()?)),
             _ => None,
-        })
+        }
     }
 }
 
 /// The stored form of a [`SeatRotation`]: its kind, the incarnation it
-/// follows and, for a rotation's terminal step, its target's token.
-#[derive(Serialize, Deserialize)]
+/// follows and, for a rotation's terminal step, its target, under the
+/// target's own serde form (the token a retirement start's rotation record
+/// stores too, and the one map from a target to its token).
+#[derive(Serialize)]
 struct StoredSeatRotation {
-    kind: String,
+    kind: &'static str,
     predecessor: Generation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<super::RotationTarget>,
 }
 
-/// The stored form of a [`RetiredRotation`], with its target's token.
-#[derive(Serialize, Deserialize)]
-struct StoredRetiredRotation {
-    target: String,
+/// The stored form of a [`RetiredRotation`], its target under the target's
+/// own serde form.
+#[derive(Serialize)]
+struct StoredRetiredRotation<'a> {
+    target: super::RotationTarget,
     successor: Generation,
-    successor_role: ProfileName,
+    successor_role: &'a ProfileName,
 }
 
-/// The stored token of a rotation target: its serde form, as the rotation
-/// record of a retirement start row stores it.
-fn rotation_target_token(target: super::RotationTarget) -> &'static str {
-    match target {
-        super::RotationTarget::FreshSession => "fresh_session",
-        super::RotationTarget::SameSession => "same_session",
-    }
-}
-
-/// The rotation target a stored token names; `None` for a token this build
-/// does not know (a later release's target).
-fn rotation_target_from_token(token: &str) -> Option<super::RotationTarget> {
-    match token {
-        "fresh_session" => Some(super::RotationTarget::FreshSession),
-        "same_session" => Some(super::RotationTarget::SameSession),
-        _ => None,
-    }
+/// The field `key` of a journal-only fact's stored form, read as `T`: none
+/// when the field is absent or in a form this build cannot read.
+fn stored_field<T: serde::de::DeserializeOwned>(value: &serde_json::Value, key: &str) -> Option<T> {
+    value
+        .get(key)
+        .cloned()
+        .and_then(|field| serde_json::from_value(field).ok())
 }
 
 /// The rotation whose terminal step retired a member incarnation: the
@@ -667,19 +660,22 @@ impl RetiredRotation {
     /// (`retired_rotation`).
     pub(crate) fn to_stored(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(StoredRetiredRotation {
-            target: rotation_target_token(self.target).to_string(),
+            target: self.target,
             successor: self.successor,
-            successor_role: self.successor_role.clone(),
+            successor_role: &self.successor_role,
         })
     }
 
-    /// The rotation a stored form names. One whose target this build does
-    /// not know (a later release's) reads as none: the replay reads none of
-    /// it. A malformed form fails the decode.
-    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
-        let stored: StoredRetiredRotation = serde_json::from_value(value)?;
-        Ok(rotation_target_from_token(&stored.target)
-            .map(|target| Self::new(target, stored.successor, stored.successor_role)))
+    /// The rotation a stored form names. A form this build cannot read (a
+    /// target or a shape a later release wrote) reads as none, so its row
+    /// decodes with its other facts: the rotation is journal-only, and the
+    /// replay reads none of it.
+    pub(crate) fn from_stored(value: &serde_json::Value) -> Option<Self> {
+        Some(Self::new(
+            stored_field(value, "target")?,
+            stored_field(value, "successor")?,
+            stored_field(value, "successor_role")?,
+        ))
     }
 }
 

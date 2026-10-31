@@ -1581,9 +1581,10 @@ impl MemberSessionBindingRecoveredEvent {
 /// The internal event codec stores them (`retired_session`, `retired_cause`,
 /// `retired_entry`, `retired_rotation`) and the public event payload never
 /// carries them; a row written before them decodes them as absent (the
-/// default), as do the rows that close a spawn with no retirement step of the
+/// default), and a fact in a form this build cannot read decodes as absent
+/// on its own. The rows that close a spawn with no retirement step of the
 /// machine (a membership step that failed after the spawn row was durable,
-/// and a resumed spawn's rollback).
+/// and a resumed spawn's rollback) record none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MemberRetiredFacts {
@@ -1677,39 +1678,37 @@ impl MemberRetiredFacts {
     }
 
     /// Take the facts out of a stored `MemberRetired` row's kind object. A
-    /// row written before them reads them absent. A cause or a rotation this
-    /// build cannot read (a later release's) reads as none, and an entry
-    /// origin it does not know keeps its token for the next encode.
-    fn take_stored(kind: &mut serde_json::Map<String, Value>) -> Result<Self, serde_json::Error> {
+    /// row written before them reads them absent. Each fact this build
+    /// cannot read (a later release's value, or a shape it does not know)
+    /// reads as absent on its own, and the row decodes: the facts are
+    /// journal-only, and the replay reads none of them. An entry origin
+    /// token this build does not know keeps its token for the next encode.
+    fn take_stored(kind: &mut serde_json::Map<String, Value>) -> Self {
         let session_id = kind
             .remove("retired_session")
-            .map(serde_json::from_value::<SessionId>)
-            .transpose()?;
+            .and_then(|session| serde_json::from_value::<SessionId>(session).ok());
         let cause = kind
             .remove("retired_cause")
-            .map(serde_json::from_value::<String>)
-            .transpose()?
-            .and_then(|token| crate::runtime::MemberRetirementCause::from_stored(&token));
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(crate::runtime::MemberRetirementCause::from_stored);
         let entry = kind
             .remove("retired_entry")
-            .map(serde_json::from_value::<String>)
-            .transpose()?;
+            .and_then(|entry| entry.as_str().map(str::to_string));
         let identity_entry = entry
             .as_deref()
             .and_then(crate::runtime::IdentityEntryOrigin::from_stored);
         let unknown_identity_entry = entry.filter(|_| identity_entry.is_none());
         let rotation = kind
             .remove("retired_rotation")
-            .map(crate::runtime::RetiredRotation::from_stored)
-            .transpose()?
-            .flatten();
-        Ok(Self {
+            .and_then(|rotation| crate::runtime::RetiredRotation::from_stored(&rotation));
+        Self {
             session_id,
             cause,
             identity_entry,
             unknown_identity_entry,
             rotation,
-        })
+        }
     }
 }
 
@@ -2534,8 +2533,9 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .unwrap_or(false);
     // What seated a MemberSpawned row's incarnation when a rotation did, and
     // a MemberRetired row's facts, for the member lifecycle journal read: a
-    // row written before them reads them absent, and one this build cannot
-    // read (a later release's) reads as none. The replay reads none of them.
+    // row written before them reads them absent, and a fact this build
+    // cannot read (a later release's value or shape) reads as absent, so the
+    // row decodes. The replay reads none of them.
     let spawned_seat_rotation = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2546,9 +2546,7 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
                 None
             }
         })
-        .map(crate::runtime::SeatRotation::from_stored)
-        .transpose()?
-        .flatten();
+        .and_then(|seat_rotation| crate::runtime::SeatRotation::from_stored(&seat_rotation));
     // The session a MemberSpawned row's seat effect named when its member
     // ref carries none (a placed member's), for the journal read only: a
     // form this build cannot read reads as absent.
@@ -2567,8 +2565,7 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .get_mut("kind")
         .and_then(Value::as_object_mut)
         .filter(|kind| kind.get("type").and_then(Value::as_str) == Some("member_retired"))
-        .map(MemberRetiredFacts::take_stored)
-        .transpose()?;
+        .map(MemberRetiredFacts::take_stored);
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()

@@ -78,6 +78,24 @@ impl ActivationRetirement {
             .any(|row| row.instruction_activation.as_ref() == Some(identity))
     }
 
+    /// How many bodies the retirement retires.
+    pub(crate) fn retired_bodies(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// `messages`, the transcript the retirement was authorized on, with
+    /// each row whose body it retires in its retired form.
+    pub(crate) fn applied_to(&self, messages: &[Message]) -> Vec<Message> {
+        messages
+            .iter()
+            .enumerate()
+            .map(|(offset, message)| match self.rows.get(&offset) {
+                Some(retired) => Message::System(retired.clone()),
+                None => message.clone(),
+            })
+            .collect()
+    }
+
     /// A retirement of exactly `rows`, for the compaction validator's own
     /// rows; production retirements come from the authority.
     #[cfg(test)]

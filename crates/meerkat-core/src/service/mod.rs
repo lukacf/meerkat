@@ -3711,9 +3711,16 @@ pub enum SystemRowPruneResult {
 
 impl TranscriptEditError {
     /// Convert a typed edit validation failure into a surface-friendly session
-    /// error without widening the `SessionService` error enum.
+    /// error without widening the `SessionService` error enum. A system-row
+    /// prune's refusal keeps its row index and typed cause in the error's
+    /// structured data ([`SessionError::system_row_prune_refusal`]).
     pub fn into_session_error(self) -> SessionError {
-        SessionError::Agent(crate::error::AgentError::ConfigError(self.to_string()))
+        match self {
+            Self::SystemRowPruneRefused { index, cause } => {
+                SessionError::system_row_prune_refused(index, cause)
+            }
+            other => SessionError::Agent(crate::error::AgentError::ConfigError(other.to_string())),
+        }
     }
 }
 

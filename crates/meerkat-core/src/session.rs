@@ -485,6 +485,23 @@ pub enum TranscriptEditError {
     },
 }
 
+/// What a same-session rewrite commit checks of the instruction rows, beside
+/// the shape validation every commit runs.
+#[derive(Debug, Clone, Copy)]
+enum RewriteCommitGuard<'a> {
+    /// A generic rewrite, a keyed prompt update or a restore: every
+    /// instruction activation row and operator-instruction entry row keeps
+    /// its place, byte for byte.
+    Generic,
+    /// A system-row prune that retires the superseded activation bodies the
+    /// session-document authority authorized: as [`Self::Generic`], except
+    /// that each authorized row takes its exact retired form.
+    Retiring(&'a ActivationRetirement),
+    /// The validated compaction rebuild, bound to the revision its authority
+    /// minted; its own validation owns the instruction rows.
+    Compaction { expected_revision: &'a str },
+}
+
 /// Where the rows of a same-session rewrite replacement come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RewriteReplacementProvenance {
@@ -5588,7 +5605,9 @@ impl Session {
             TranscriptRewriteReason::new("compaction"),
             Some("meerkat-core".to_string()),
             Some(authority.parent_revision().to_string()),
-            Some(authority.revision()),
+            RewriteCommitGuard::Compaction {
+                expected_revision: authority.revision(),
+            },
         )?;
         Ok(Some(commit))
     }
@@ -9119,16 +9138,18 @@ impl Session {
             reason,
             actor,
             expected_parent_revision,
-            None,
+            RewriteCommitGuard::Generic,
         )
     }
 
-    /// [`Self::commit_transcript_rewrite_authorized`] with an additional
-    /// expected digest for the FULL rewritten transcript. The compaction
-    /// authority passes its minted revision here, so the rebuilt side of the
-    /// token binds against the one digest this commit computes anyway
-    /// instead of a second whole-document hash at the authorization seam. A
-    /// mismatch fails closed before any state is touched.
+    /// [`Self::commit_transcript_rewrite_authorized`] under `guard`. The
+    /// compaction authority passes its minted revision
+    /// ([`RewriteCommitGuard::Compaction`]), so the rebuilt side of the token
+    /// binds against the one digest this commit computes anyway instead of a
+    /// second whole-document hash at the authorization seam; a mismatch fails
+    /// closed before any state is touched. A system-row prune passes the
+    /// activation bodies the session-document authority authorized it to
+    /// retire ([`RewriteCommitGuard::Retiring`]).
     fn commit_transcript_rewrite_bound(
         &mut self,
         selection: TranscriptRewriteSelection,
@@ -9136,7 +9157,7 @@ impl Session {
         reason: TranscriptRewriteReason,
         actor: Option<String>,
         expected_parent_revision: Option<String>,
-        expected_revision: Option<&str>,
+        guard: RewriteCommitGuard<'_>,
     ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
         let parent_revision = self
             .transcript_revision()
@@ -9179,6 +9200,10 @@ impl Session {
         // activation rows at their offsets, so they refuse the record of such
         // a rewrite: its document is written at envelope 5 (below).
         let mut shifts_activation_offsets = false;
+        let expected_revision = match guard {
+            RewriteCommitGuard::Compaction { expected_revision } => Some(expected_revision),
+            RewriteCommitGuard::Generic | RewriteCommitGuard::Retiring(_) => None,
+        };
         if expected_revision.is_none() {
             // Instruction activation rows are compared by place: the same
             // rows, byte for byte, in the same order, each with the same
@@ -9186,10 +9211,18 @@ impl Session {
             // may add, remove or reorder ordinary System rows around one (a
             // keyed prompt update inserts a later version before it), but
             // cannot mint, alter, move, erase or restore one across
-            // conversational content.
-            if instruction_activation_places(self.messages())
-                != instruction_activation_places(&rewritten)
-            {
+            // conversational content. A system-row prune's rows are compared
+            // with the source as its authorized retirement leaves it, so it
+            // may retire exactly the bodies the session-document authority
+            // authorized, and nothing else.
+            let retired_parent = match guard {
+                RewriteCommitGuard::Retiring(retirement) => {
+                    Some(retirement.applied_to(self.messages()))
+                }
+                RewriteCommitGuard::Generic | RewriteCommitGuard::Compaction { .. } => None,
+            };
+            let parent = retired_parent.as_deref().unwrap_or(self.messages());
+            if instruction_activation_places(parent) != instruction_activation_places(&rewritten) {
                 return Err(TranscriptEditError::InvalidTranscriptShape(
                     "same-session transcript rewrite cannot mint, alter, move, erase, or restore instruction activation boundaries"
                         .to_string(),

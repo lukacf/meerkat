@@ -15862,9 +15862,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_retiring = EmptySet;
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.spawn_exec_entry_custody = EmptySet;
-                // A reset aborts every spawn ladder; the tombstoned and
-                // unreadable names are the identity store's, which a reset
-                // keeps, so it keeps them too.
+                // The reset drops created custody: a spawn ladder still open
+                // acts for no entry any more. The tombstoned and unreadable
+                // names are the identity store's, which a reset keeps, so it
+                // keeps them too.
                 self.spawn_exec_created_custody = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;

@@ -838,6 +838,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "AdoptLegacyIdentityEntryNotSeated",
                             "AdoptLegacyIdentityEntryAlreadyAnEntry",
                             "AdoptLegacyIdentityEntryNonAuthoritative",
+                            "AdoptLegacyIdentityEntryOtherCustody",
                             "ResolveAgentLaneMemberAdmissionAdmittedRunning",
                             "ResolveAgentLaneMemberAdmissionIdentityMemberRunning",
                             "ResolveAgentLaneMemberAdmissionUnreadableNameRunning",

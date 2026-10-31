@@ -16,7 +16,8 @@
 //! A created entry owed its seat (a build that predates created entries
 //! retired its member) is seated again once the mob runs, Dormant, on its
 //! archived session, under created custody, with the role, runtime mode,
-//! labels, overrides, continuity and wiring of its member's last spawn row:
+//! overrides, continuity and wiring of its member's last spawn row and no
+//! roster labels, so no label-based authority reaches a created identity:
 //! the same member comes back on the same session, history kept, and wakes
 //! on its first delivery. An entry with no archived session, or whose
 //! archived session cannot be revived, stays owed its seat, and its reads
@@ -154,13 +155,13 @@ pub(super) fn reserve_unknown_origin_name(
 }
 
 /// The spec that seats a created entry owed its seat again: its member's
-/// last spawn row's role, runtime mode, labels, overrides, continuity and
-/// wiring, resuming `session_id`, its archived session, under created
-/// custody.
+/// last spawn row's role, runtime mode, overrides, continuity and wiring,
+/// resuming `session_id`, its archived session, under created custody. It
+/// carries no roster labels, whatever the row carried: a created seat
+/// carries none, so no label-based authority reaches a created identity.
 fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnMemberSpec {
     let mut spec = super::SpawnMemberSpec::new(row.role.clone(), row.agent_identity.clone());
     spec.runtime_mode = Some(row.runtime_mode);
-    spec.labels = Some(row.labels.clone());
     spec.override_profile = row.effective_profile_override.clone();
     spec.model_override = row.effective_model_override.clone();
     spec.definition_wiring = row.definition_wiring;

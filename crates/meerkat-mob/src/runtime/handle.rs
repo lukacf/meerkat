@@ -10295,9 +10295,12 @@ impl MobHandle {
     /// incarnation, read from the member binding history. An adopted member
     /// is an identity entry from then on: its adoption is journaled, a
     /// restart restores it from that row, and the label is never read for it
-    /// again. An identity that is an entry already answers
+    /// again. A declared entry whose name is not reserved already answers
     /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] without
-    /// reading its spawn row. A worker holding the name answers
+    /// reading its spawn row; a created entry's name, a removed one and an
+    /// unreadable one (a declared entry's included) answer
+    /// [`super::LegacyIdentityEntryAdoption::NotAdoptable`]. A worker
+    /// holding the name answers
     /// [`super::LegacyIdentityEntryAdoption::NameHeldByWorker`]; a placed
     /// member, a member bound to no session or a retiring one
     /// [`super::LegacyIdentityEntryAdoption::NotAdoptable`]; an identity no
@@ -10306,8 +10309,8 @@ impl MobHandle {
     /// [`super::LegacyIdentityEntryAdoption::NonAuthoritative`]. None of
     /// these changes anything.
     ///
-    /// Refused typed unless the mob is Running, except that an identity that
-    /// is an entry already answers
+    /// Refused typed unless the mob is Running, except that a declared
+    /// entry whose name is not reserved answers
     /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] in any
     /// lifecycle phase. The handle's principal must hold
     /// [`crate::ControlScope::Retire`]; the adoption is a host verb, so the
@@ -10333,11 +10336,16 @@ impl MobHandle {
         )
         .await?;
         // The adoption ran: the spawn row is not read again. A created
-        // entry's name is no host's to adopt, which MobMachine answers.
-        let already_an_entry = super::identity_entry::machine_entry_origin(
-            &self.machine_state_watch_rx.borrow(),
-            identity,
-        ) == Some(super::IdentityEntryOrigin::Declared);
+        // entry's name, and a reserved one (a declared entry's included), is
+        // no host's to adopt, which MobMachine answers.
+        let already_an_entry = {
+            let state = self.machine_state_watch_rx.borrow();
+            super::identity_entry::machine_entry_origin(&state, identity)
+                == Some(super::IdentityEntryOrigin::Declared)
+                && !state
+                    .identity_entry_unreadable
+                    .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+        };
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }

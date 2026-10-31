@@ -49,6 +49,10 @@ use super::types::{
 #[path = "owner_declarations.rs"]
 mod declarations_engine;
 
+use declarations_engine::{
+    Waited, bounded_native, bounded_spawned, bounded_store, reconcile_stopped,
+};
+
 /// The owner's error for a member a put cannot subscribe.
 fn member_problem(member: &Member, problem: MemberProblem) -> AnnouncementError {
     match problem {
@@ -523,7 +527,9 @@ struct Inner {
     /// reading the applied declarations and marks as they stand then, and
     /// holding the gate from the revision it records to the last record it
     /// writes. `declarations/get` reads under it too, so it never sees a
-    /// reconcile between its writes. The health pass only tries it.
+    /// reconcile between its writes. The health pass only tries it. A
+    /// reconcile waits on any one call for at most a bound, so a call that
+    /// never answers holds the gate, and whatever waits for it, that long.
     declarations_gate: tokio::sync::Mutex<()>,
     /// The clock reading before which the health pass does not retry the
     /// declarations: the slowest settle pause after a retry that failed, 0
@@ -759,7 +765,8 @@ impl AnnouncementService {
     }
 
     /// What the declarations manage now (contract 4.6), once a reconcile in
-    /// flight has finished.
+    /// flight has finished, or stopped at a call that did not answer within
+    /// its bound.
     pub async fn declarations(
         &self,
     ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
@@ -1095,12 +1102,7 @@ impl AnnouncementService {
         &self,
         mobs: &BTreeSet<MobId>,
     ) -> Result<BTreeSet<MobId>, AnnouncementError> {
-        let presence = self
-            .inner
-            .native
-            .mob_presence(mobs)
-            .await
-            .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?;
+        let presence = self.mob_presence(mobs).await?;
         let gone = mobs
             .iter()
             .filter(|mob_id| presence.get(*mob_id) != Some(&MobPresence::Hosted))
@@ -1111,6 +1113,46 @@ impl AnnouncementService {
         } else {
             Err(AnnouncementError::UnknownMobs(gone))
         }
+    }
+
+    /// Whether each of `mobs` is hosted here, from the mob owner's own
+    /// records. In a declarations reconcile the read is bounded and runs on
+    /// a task of its own (see `declarations_engine::bounded_spawned`).
+    async fn mob_presence(
+        &self,
+        mobs: &BTreeSet<MobId>,
+    ) -> Result<BTreeMap<MobId, MobPresence>, AnnouncementError> {
+        let (native, mobs) = (Arc::clone(&self.inner.native), mobs.clone());
+        bounded_native(
+            "mob_presence",
+            async move { native.mob_presence(&mobs).await },
+        )
+        .await
+        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))
+    }
+
+    /// The native owner's check of `member` on `route`. In a declarations
+    /// reconcile it is bounded and runs on a task of its own.
+    async fn check_member(&self, member: &Member, route: MemberRoute) -> Result<(), MemberProblem> {
+        let (native, member) = (Arc::clone(&self.inner.native), member.clone());
+        bounded_spawned(
+            Waited::Native("check_member"),
+            async move { native.check_member(&member, route).await },
+            |detail| Err(MemberProblem::Unavailable(detail)),
+        )
+        .await
+    }
+
+    /// The current cursor of the event log of `mob_id`, a mob a member
+    /// created. In a declarations reconcile the read is bounded and runs on
+    /// a task of its own.
+    async fn member_mob_cursor(&self, mob_id: &MobId) -> Result<u64, AnnouncementError> {
+        let (native, mob_id) = (Arc::clone(&self.inner.native), mob_id.clone());
+        bounded_native("member_mob_cursor", async move {
+            native.member_mob_cursor(&mob_id).await
+        })
+        .await
+        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))
     }
 
     /// Announce into a mob hosted here.
@@ -1183,11 +1225,11 @@ impl AnnouncementService {
         self.ensure_authoritative()?;
         self.ensure_hosted(&BTreeSet::from([request.mob_id.clone()]))
             .await?;
-        let source = self
-            .inner
-            .store
-            .put_source(operation, request, self.now())
-            .await?;
+        let source = bounded_store(
+            "put_source",
+            self.inner.store.put_source(operation, request, self.now()),
+        )
+        .await?;
         self.reconcile_runner(&source).await;
         Ok(source)
     }
@@ -1202,18 +1244,18 @@ impl AnnouncementService {
         change: SourceChange,
     ) -> Result<AnnouncementSource, AnnouncementError> {
         self.ensure_authoritative()?;
-        let source = self
-            .inner
-            .store
-            .change_source(
+        let source = bounded_store(
+            "change_source",
+            self.inner.store.change_source(
                 operation,
                 mob_id,
                 source_id,
                 expected_revision,
                 change,
                 self.now(),
-            )
-            .await?;
+            ),
+        )
+        .await?;
         self.reconcile_runner(&source).await;
         Ok(source)
     }
@@ -1280,8 +1322,25 @@ impl AnnouncementService {
     /// its record as it stands now, if a schedule authority is installed.
     /// The record is read again under the gate, so the reconciles of racing
     /// changes end on the last of them. A failure is logged: the change is
-    /// committed, and the next change or install reconciles again.
+    /// committed, and the next change or install reconciles again. In a
+    /// declarations reconcile it runs on a task of its own, the gate
+    /// included, and is waited on for at most the reconcile's bound: past
+    /// it the schedule service still finishes, and the next runner reconcile
+    /// waits for that one at the gate.
     async fn reconcile_runner(&self, changed: &AnnouncementSource) {
+        let service = self.clone();
+        let (mob_id, source_id) = (changed.mob_id.clone(), changed.source_id.clone());
+        bounded_spawned(
+            Waited::Runners,
+            async move { service.reconcile_runner_now(&mob_id, &source_id).await },
+            |_| (),
+        )
+        .await;
+    }
+
+    /// [`Self::reconcile_runner`]'s reconcile, of the source `source_id`
+    /// of `mob_id`.
+    async fn reconcile_runner_now(&self, mob_id: &MobId, source_id: &SourceId) {
         let _gate = self.inner.runners_gate.lock().await;
         let runners = self
             .inner
@@ -1292,20 +1351,15 @@ impl AnnouncementService {
         let Some(runners) = runners else {
             return;
         };
-        let outcome = match self
-            .inner
-            .store
-            .source(&changed.mob_id, &changed.source_id)
-            .await
-        {
+        let outcome = match self.inner.store.source(mob_id, source_id).await {
             Ok(Some(source)) => runners.reconcile(&source).await,
             Ok(None) => Ok(()),
             Err(error) => Err(error.to_string()),
         };
         if let Err(error) = outcome {
             tracing::warn!(
-                mob_id = %changed.mob_id,
-                source_id = %changed.source_id,
+                mob_id = %mob_id,
+                source_id = %source_id,
                 %error,
                 "a source's runner schedule was not reconciled"
             );
@@ -1406,8 +1460,17 @@ impl AnnouncementService {
     /// The member's roster facts, or none when its roster cannot be read
     /// now: the store then covers it by member grants alone.
     async fn member_facts(&self, member: &Member) -> Option<MemberFacts> {
-        match self.inner.native.member_facts(member).await {
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        match bounded_native(
+            "member_facts",
+            async move { native.member_facts(&asked).await },
+        )
+        .await
+        {
             Ok(facts) => facts,
+            // A declarations reconcile that stopped reads nothing more, and
+            // logged its stop already.
+            Err(_) if reconcile_stopped() => None,
             Err(error) => {
                 tracing::warn!(
                     %member,
@@ -1455,21 +1518,10 @@ impl AnnouncementService {
         // completion or reset the check does not see is in the log after it
         // and ends the subscription.
         request.member_mob_cursor = match route.route {
-            MemberRoute::Child => Some(
-                self.inner
-                    .native
-                    .member_mob_cursor(&request.member.mob_id)
-                    .await
-                    .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?,
-            ),
+            MemberRoute::Child => Some(self.member_mob_cursor(&request.member.mob_id).await?),
             MemberRoute::Local | MemberRoute::Peer => None,
         };
-        if let Err(problem) = self
-            .inner
-            .native
-            .check_member(&request.member, route.route)
-            .await
-        {
+        if let Err(problem) = self.check_member(&request.member, route.route).await {
             return Err(member_problem(&request.member, problem));
         }
         request.route = Some(route);
@@ -1479,21 +1531,30 @@ impl AnnouncementService {
         // A topic a source owns takes the member only if its audience
         // covers it, as the member's roster facts say.
         let facts = self.member_facts(&request.member).await;
-        let subscription = self
-            .inner
-            .store
-            .put_subscription_with_facts(operation, request, facts, self.now())
-            .await
-            .map_err(|error| match error {
-                // Another put kept the member on another route meanwhile.
-                AnnouncementStoreError::RouteKept { .. } => {
-                    AnnouncementError::AmbiguousMob(member_mob)
-                }
-                other => AnnouncementError::Store(other),
-            })?;
+        // On a task of its own in a declarations reconcile: a refused put
+        // is counted in the audit after it, so neither is dropped half way.
+        let (store, operation, now) =
+            (Arc::clone(&self.inner.store), operation.clone(), self.now());
+        let subscription = bounded_spawned(
+            Waited::Store("put_subscription_with_facts"),
+            async move {
+                store
+                    .put_subscription_with_facts(&operation, request, facts, now)
+                    .await
+            },
+            |detail| Err(AnnouncementStoreError::Storage(detail)),
+        )
+        .await
+        .map_err(|error| match error {
+            // Another put kept the member on another route meanwhile.
+            AnnouncementStoreError::RouteKept { .. } => AnnouncementError::AmbiguousMob(member_mob),
+            other => AnnouncementError::Store(other),
+        })?;
         // A mob destroyed between the check and the commit would otherwise
         // stay named until the mob set changes again.
-        if let Err(error) = self.drop_ended(&mobs).await {
+        if let Err(error) = self.drop_ended(&mobs).await
+            && !reconcile_stopped()
+        {
             tracing::warn!(%error, "destroyed mobs not reconciled after a subscription change");
         }
         self.wake();
@@ -1506,13 +1567,17 @@ impl AnnouncementService {
     /// created again first ends there and loses its kept route; a member
     /// whose mob id would now route another way is refused as ambiguous.
     async fn member_route(&self, member: &Member) -> Result<MemberRouteRecord, AnnouncementError> {
-        let current = self
-            .inner
-            .native
-            .route_for(member)
-            .await
-            .map_err(|problem| member_problem(member, problem))?;
-        let Some(kept) = self.inner.store.member_route(member).await? else {
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        let current = bounded_spawned(
+            Waited::Native("route_for"),
+            async move { native.route_for(&asked).await },
+            |detail| Err(MemberProblem::Unavailable(detail)),
+        )
+        .await
+        .map_err(|problem| member_problem(member, problem))?;
+        let Some(kept) =
+            bounded_store("member_route", self.inner.store.member_route(member)).await?
+        else {
             return Ok(current);
         };
         if kept == current {
@@ -1526,17 +1591,17 @@ impl AnnouncementService {
         } else {
             "destroyed"
         };
-        let ended = self
-            .inner
-            .store
-            .unbind_member_route(
+        let ended = bounded_store(
+            "unbind_member_route",
+            self.inner.store.unbind_member_route(
                 member,
                 SubscriptionEnd::MemberMobEnded {
                     why: why.to_string(),
                 },
                 self.now(),
-            )
-            .await?;
+            ),
+        )
+        .await?;
         tracing::info!(
             member = %member,
             why,
@@ -1703,12 +1768,7 @@ impl AnnouncementService {
         if mobs.is_empty() {
             return Ok(Vec::new());
         }
-        let presence = self
-            .inner
-            .native
-            .mob_presence(mobs)
-            .await
-            .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?;
+        let presence = self.mob_presence(mobs).await?;
         let gone = mobs
             .iter()
             .filter(|mob_id| presence.get(*mob_id) == Some(&MobPresence::Gone))
@@ -1717,7 +1777,11 @@ impl AnnouncementService {
         if gone.is_empty() {
             return Ok(Vec::new());
         }
-        let changed = self.inner.store.drop_ended_mobs(&gone, self.now()).await?;
+        let changed = bounded_store(
+            "drop_ended_mobs",
+            self.inner.store.drop_ended_mobs(&gone, self.now()),
+        )
+        .await?;
         if !changed.is_empty() {
             self.wake();
         }
@@ -1861,11 +1925,17 @@ impl AnnouncementService {
         change: SubscriptionChange,
     ) -> Result<SubscriptionChangeOutcome, AnnouncementError> {
         self.ensure_authoritative()?;
-        let outcome = self
-            .inner
-            .store
-            .change_subscription(operation, id, expected_revision, change, self.now())
-            .await?;
+        let outcome = bounded_store(
+            "change_subscription",
+            self.inner.store.change_subscription(
+                operation,
+                id,
+                expected_revision,
+                change,
+                self.now(),
+            ),
+        )
+        .await?;
         self.wake();
         Ok(outcome)
     }
@@ -1874,7 +1944,7 @@ impl AnnouncementService {
         &self,
         id: &SubscriptionId,
     ) -> Result<Option<Subscription>, AnnouncementError> {
-        Ok(self.inner.store.subscription(id).await?)
+        Ok(bounded_store("subscription", self.inner.store.subscription(id)).await?)
     }
 
     pub async fn subscriptions(

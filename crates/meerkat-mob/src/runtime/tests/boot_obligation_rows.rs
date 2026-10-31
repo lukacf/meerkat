@@ -352,3 +352,127 @@ async fn work_a_dormant_member_of_a_stopped_mob_owes_is_delivered_at_the_lift() 
         }
     }
 }
+
+/// The template the creator's host allows it to create identities from.
+const CREATION_TEMPLATE: &str = "boot-rows-template";
+
+/// Row (RED): a creator whose runtime still owed a background
+/// operation completion at a crash is restored by the start that follows,
+/// and that restore build keeps its identity creation. The build reaches the
+/// host's member build hook with the witness of the mob runtime performing
+/// it, so the hook, which holds no mob handle, mints the creation scope in
+/// that build (authority only: the creator's profile disables mob tools).
+/// The creation check over the authority the hook minted admits the
+/// creator's template in the mob as it runs, and no other template. The
+/// session service here builds no agent: it binds the build's authority to
+/// the build's external tools as the agent factory does, so the runtime's
+/// receiver gets it and the runtime's creator check admits the restored
+/// creator too (the factory's own binding is covered by
+/// `a_creation_only_creator_is_admitted_through_the_runtime_receiver`). The
+/// restored creator then delivers the completion.
+///
+/// RED on the old tree: a build carried no witness (the build options had no
+/// `mob_incarnation`; the row does not compile there), so a hook without the
+/// mob's handle minted nothing in the boot's restore build, and the check
+/// refused the creator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creator_restored_at_boot_with_pending_work_keeps_creation_in_that_build() {
+    use meerkat_runtime::mob_operator_authority::{
+        IdentityCreationScopeRefusal, admit_identity_creation_from_template,
+        identity_creation_only_mob_operator_authority,
+    };
+
+    let mob = CrashedStoreMob::new("boot-rows-creator-keeps-creation", 3).await;
+    let creator = mob.session(1);
+    mob.store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::for_session(&creator),
+            &undelivered_completion(&creator),
+        )
+        .await
+        .expect("the completion is durable");
+    // The host's member build hook holds no mob handle: it mints from the
+    // build alone.
+    mob.service
+        .set_member_build_hook(Arc::new(|req: &mut CreateSessionRequest| {
+            let Some(build) = req.build.as_mut() else {
+                return;
+            };
+            let (Some(member), Some(witness)) =
+                (build.mob_member_binding.as_ref(), build.mob_incarnation)
+            else {
+                return;
+            };
+            let creation = identity_creation_only_mob_operator_authority(
+                member.mob_id.clone(),
+                witness,
+                [CREATION_TEMPLATE],
+            )
+            .expect("mint the creation scope in the build");
+            build.mob_tool_authority_context = Some(creation);
+            build.mob_operator_authority_only = true;
+        }));
+
+    let handle = mob.resume().await;
+    assert_eq!(
+        handle.status().await.expect("the mob's phase"),
+        MobState::Running
+    );
+    assert_eq!(
+        mob.materialized().await,
+        vec![creator.clone()],
+        "the start restored exactly the creator, which owes the completion"
+    );
+    let build = mob
+        .service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .find(|record| record.session_id == creator)
+        .expect("the creator's restore build");
+    assert_eq!(
+        build
+            .mob_incarnation
+            .map(meerkat_core::service::LiveMobIncarnation::incarnation),
+        Some(handle.incarnation()),
+        "the restore build carries the witness of the runtime performing it"
+    );
+    assert!(
+        build.mob_operator_authority_only,
+        "the hook bound the creation scope authority only"
+    );
+    let admit = |template: &str| {
+        admit_identity_creation_from_template(
+            build.mob_tool_authority_context.as_ref(),
+            handle.mob_id().as_str(),
+            handle.live_incarnation(),
+            template,
+        )
+    };
+    assert_eq!(
+        admit(CREATION_TEMPLATE),
+        Ok(()),
+        "the creator keeps creation in that build"
+    );
+    assert_eq!(
+        admit("another-template"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&creator, CREATION_TEMPLATE),
+        Ok(()),
+        "the runtime received the restored creator's authority"
+    );
+    assert_eq!(
+        handle.admit_member_identity_creation(&creator, "another-template"),
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+    );
+
+    tokio::time::timeout(ROW_STEP, async {
+        while !mob.service.has_started_turn_for(&creator).await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the restored creator's runtime delivers the completion as a turn");
+}

@@ -905,6 +905,17 @@ pub struct AgentBuildConfig {
     pub override_workgraph: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: ToolCategoryOverride,
+    /// Bind this build's mob operator authority without mounting any mob
+    /// operator tool surface ("authority only"); see
+    /// `SessionBuildOptions::mob_operator_authority_only`. The build's mob
+    /// tool category resolves to `Disable`, so the factory mounts no mob
+    /// tools, and a generated `mob_tool_authority_context` is still bound to
+    /// the session's external tools, where a host's own tools read it. A
+    /// build that enables mob tools (`override_mob` is `Enable`, as a mob
+    /// runtime sets it for a member whose profile enables them) refuses the
+    /// flag with [`BuildAgentError::AuthorityOnlyWithMobTools`]. `false`, the
+    /// default, binds an authority only to a build with mob tools enabled.
+    pub mob_operator_authority_only: bool,
     /// Per-build override for factory-level comms tooling.
     /// `Inherit` defers to the factory/runtime default.
     pub override_comms: ToolCategoryOverride,
@@ -964,6 +975,11 @@ pub struct AgentBuildConfig {
     /// member's session. Persisted onto `SessionMetadata.mob_member_binding`,
     /// where mob ownership routing reads it directly on resume/restart.
     pub mob_member_binding: Option<meerkat_core::MobMemberBinding>,
+    /// The witness of the mob runtime performing this member build (a fresh
+    /// spawn, a restore or a wake), set only by that runtime; see
+    /// `SessionBuildOptions::mob_incarnation`, which carries it to a host's
+    /// member build hook. Never persisted, and not consumed by the build.
+    pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -1195,6 +1211,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
             .field("override_mob", &self.override_mob)
+            .field(
+                "mob_operator_authority_only",
+                &self.mob_operator_authority_only,
+            )
             .field("override_comms", &self.override_comms)
             .field("override_image_generation", &self.override_image_generation)
             .field("override_web_search", &self.override_web_search)
@@ -1205,6 +1225,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
+            .field("mob_incarnation", &self.mob_incarnation)
             .field("mob_tools", &self.mob_tools.is_some())
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
@@ -1305,6 +1326,7 @@ impl AgentBuildConfig {
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
+            mob_operator_authority_only: false,
             override_comms: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::Inherit,
@@ -1320,6 +1342,7 @@ impl AgentBuildConfig {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: None,
+            mob_incarnation: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -1440,12 +1463,20 @@ impl AgentBuildConfig {
         self.override_schedule = build.override_schedule;
         self.override_workgraph = build.override_workgraph;
         self.override_comms = build.override_comms;
-        let (override_mob, mob_tool_authority_context) =
+        let (override_mob, mob_tool_authority_context) = if build.mob_operator_authority_only {
+            // Authority only: the build itself refuses a requested `Enable`
+            // and resolves any other category to `Disable`, so the request
+            // is kept as given, and so is the authority, for the build to
+            // restore and bind.
+            (build.override_mob, build.mob_tool_authority_context.clone())
+        } else {
             meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
                 build.override_mob,
                 build.mob_tool_authority_context.clone(),
-            );
+            )
+        };
         self.override_mob = override_mob;
+        self.mob_operator_authority_only = build.mob_operator_authority_only;
         self.override_image_generation = build.override_image_generation;
         self.override_web_search = build.override_web_search;
         self.schedule_tools = build.schedule_tools.clone();
@@ -1462,6 +1493,7 @@ impl AgentBuildConfig {
         // AgentBuildConfig so surfaces can drive binding selection per-request.
         self.auth_binding = build.auth_binding.clone();
         self.mob_member_binding = build.mob_member_binding.clone();
+        self.mob_incarnation = build.mob_incarnation;
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -1532,6 +1564,7 @@ impl AgentBuildConfig {
             override_schedule: self.override_schedule,
             override_workgraph: self.override_workgraph,
             override_mob: self.override_mob,
+            mob_operator_authority_only: self.mob_operator_authority_only,
             override_image_generation: self.override_image_generation,
             override_web_search: self.override_web_search,
             // The facade build pipeline exposes no comms-override API surface;
@@ -1550,6 +1583,7 @@ impl AgentBuildConfig {
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
             mob_member_binding: self.mob_member_binding.clone(),
+            mob_incarnation: self.mob_incarnation,
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -2009,6 +2043,20 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+
+    /// The build sets `mob_operator_authority_only` while it enables mob
+    /// tools (`override_mob` is `Enable`, as a mob runtime sets it for a
+    /// member whose profile enables them). Authority only binds an authority
+    /// with mob tools disabled; a member with mob tools has its own mob
+    /// operator tools composed already, which a creation-only authority
+    /// would leave listed. Such a creator takes its full mob operator
+    /// authority, with the identity creation scope granted into it. The
+    /// build fails before it binds or mounts anything.
+    #[error(
+        "mob_operator_authority_only cannot be set on a build that enables mob tools; \
+         grant the identity creation scope into the build's mob operator authority instead"
+    )]
+    AuthorityOnlyWithMobTools,
 }
 
 /// Authoritative, side-effect-free-with-respect-to-session-state LLM
@@ -7429,6 +7477,18 @@ impl AgentFactory {
         );
         build_config.resume_override_mask.override_comms |=
             !matches!(build_config.override_comms, ToolCategoryOverride::Inherit);
+        // An authority-only build mounts no mob tool surface: its mob tool
+        // category is Disable, which resumed metadata cannot override. A
+        // build that enables mob tools (a member whose profile enables them,
+        // whose own mob operator tools the mob runtime has composed) refuses
+        // the flag before it binds anything: such a creator takes its full
+        // mob operator authority, with the creation scope granted into it.
+        if build_config.mob_operator_authority_only {
+            if matches!(build_config.override_mob, ToolCategoryOverride::Enable) {
+                return Err(BuildAgentError::AuthorityOnlyWithMobTools);
+            }
+            build_config.override_mob = ToolCategoryOverride::Disable;
+        }
         let has_explicit_mob_authority_context = build_config
             .mob_tool_authority_context
             .as_ref()
@@ -7567,14 +7627,18 @@ impl AgentFactory {
         // tools for a member), bound here before anything composes them. A
         // session with no generated authority, or with mob tools disabled,
         // binds none, and those dispatchers then hide their tools and deny
-        // every call.
+        // every call. An authority-only build binds its authority with mob
+        // tools disabled: a host's own tools read it, and the build mounts
+        // no mob tool surface of its own.
         let session_mob_authority = build_config
             .mob_tool_authority_context
             .as_ref()
             .filter(|authority| authority.is_generated_authority_context())
             .map(|authority| Arc::new(std::sync::RwLock::new(authority.clone())));
         if let Some(external_tools) = build_config.external_tools.as_ref() {
-            let bound = if matches!(build_config.override_mob, ToolCategoryOverride::Disable) {
+            let bound = if matches!(build_config.override_mob, ToolCategoryOverride::Disable)
+                && !build_config.mob_operator_authority_only
+            {
                 None
             } else {
                 session_mob_authority.clone()
@@ -8359,7 +8423,9 @@ impl AgentFactory {
 
         #[cfg(feature = "comms")]
         {
-            let mob_operator_tools_available = build_config.mob_tool_authority_context.is_some()
+            // An authority-only build mounts no mob operator tools.
+            let mob_operator_tools_available = !build_config.mob_operator_authority_only
+                && build_config.mob_tool_authority_context.is_some()
                 && (build_config.mob_tools.is_some() || self.mob_tools.is_some());
             if mob_operator_tools_available
                 && self.enable_comms
@@ -9035,7 +9101,9 @@ impl AgentFactory {
         // with mob tools disabled mounts no mob surface even when it carries a
         // generated authority context (an embedder can set both directly):
         // the mob operator dispatchers in its external tools were bound to no
-        // authority above, so they hide and deny, and this surface agrees.
+        // authority above, so they hide and deny, and this surface agrees. An
+        // authority-only build bound its authority above for a host's own
+        // tools and mounts no mob surface either.
         let effective_mob = !matches!(build_config.override_mob, ToolCategoryOverride::Disable)
             && build_config
                 .mob_tool_authority_context

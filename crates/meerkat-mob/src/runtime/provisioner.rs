@@ -2213,6 +2213,16 @@ pub trait MobProvisioner: Send + Sync {
         None
     }
 
+    /// The live mob operator authority of every member session this
+    /// provisioner built in a local session, which an agent creator's commit
+    /// check reads (see `MemberSessionAuthorities`). A provisioner that builds
+    /// no local member session has none.
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        None
+    }
+
     /// Settle the adapter-local operation binding of the session an explicit
     /// resume just repointed a member away from (its snapshot was lost and a
     /// persisted successor session was selected).
@@ -2429,6 +2439,10 @@ pub struct SessionBackend {
     // the backend binds it on the exact registration of each durable worker
     // it provisions (a host's placed-member materialization binds none).
     durable_resume: Option<super::durable_resume::DurableResumeBinding>,
+    // The live mob operator authority of every member session this backend
+    // provisions, shared by its clones: each member build carries a receiver
+    // for its session (see `provision_member_until_created`).
+    member_session_authorities: Arc<super::member_session_authority::MemberSessionAuthorities>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -6428,6 +6442,7 @@ impl SessionBackend {
             member_runtime_registration_hook: None,
             member_surface_gate_routes: Default::default(),
             durable_resume: None,
+            member_session_authorities: Arc::default(),
         }
     }
 
@@ -13825,6 +13840,23 @@ impl SessionBackend {
                 workgraph.clone(),
             )));
         }
+        // Every member build carries its external tools inside this runtime's
+        // receiver for its session, whatever the member's mob tools: the
+        // agent factory binds the session's live mob operator authority to
+        // the session's external tools, and an agent creator's commit check
+        // reads only what the receiver recorded (`MemberSessionAuthorities`).
+        // The receiver forwards everything else to the tools it wraps.
+        if let Some(build) = req.create_session.build.as_mut()
+            && let Some(session_id) = build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone())
+        {
+            let receiver = backend
+                .member_session_authorities
+                .receiver(session_id, build.external_tools.take());
+            build.external_tools = Some(Arc::new(receiver));
+        }
         let session_origin = req.session_origin;
         let mut requested_materialization = match session_origin {
             ProvisionSessionOrigin::Fresh => {
@@ -14958,6 +14990,11 @@ impl MobProvisioner for SessionBackend {
         &self,
     ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
         self.composition_signal_dispatcher.clone()
+    }
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        Some(Arc::clone(&self.member_session_authorities))
     }
     async fn record_reload_publication(
         &self,
@@ -18233,6 +18270,11 @@ impl MobProvisioner for MultiBackendProvisioner {
         &self,
     ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
         self.session.composition_signal_dispatcher.clone()
+    }
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        Some(Arc::clone(&self.session.member_session_authorities))
     }
     async fn record_reload_publication(
         &self,

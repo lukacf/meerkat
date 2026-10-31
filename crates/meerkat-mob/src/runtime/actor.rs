@@ -16440,6 +16440,10 @@ impl MobActor {
             registered_tool_bundles: Arc::new(self.tool_bundles.keys().cloned().collect()),
             realm_profile_store: self.realm_profile_store.clone(),
             boot_set_basis: self.boot_set_basis.clone(),
+            member_session_authorities: self
+                .provisioner
+                .member_session_authorities()
+                .unwrap_or_default(),
         }
     }
 

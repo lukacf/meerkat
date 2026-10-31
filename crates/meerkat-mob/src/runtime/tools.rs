@@ -1214,8 +1214,9 @@ enum SessionAuthorityBinding {
         authority: Arc<std::sync::RwLock<MobToolAuthorityContext>>,
         listed: bool,
     },
-    /// The session holds no mob operator authority: the tools are hidden and
-    /// every call is denied.
+    /// The session holds no mob operator authority, or none in this mob (no
+    /// manage scope and no spawn-profile scope for it): the tools are hidden
+    /// and every call is denied.
     Removed,
 }
 
@@ -2024,7 +2025,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
 
     /// A local member's tools admit against the session authority bound
     /// here, and are hidden when it is `None` or binds no incarnation of this
-    /// mob instance. A fixed-context dispatcher ignores it.
+    /// mob instance. An authority that holds neither manage scope nor a
+    /// spawn-profile entry for this mob (one that holds only identity
+    /// creation scope here, or none) holds no mob operator right in it: the
+    /// tools are removed, hidden with every call denied, as for `None`. Every
+    /// authority that binds this mob through manage or spawn-profile scope
+    /// keeps its binding as before. A fixed-context dispatcher ignores it.
     fn bind_session_mob_tool_authority(
         &self,
         authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
@@ -2034,16 +2040,24 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         };
         let bound = match authority {
             Some(authority) => {
-                let listed = {
+                let (operator_scoped, listed) = {
                     let context = authority
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mob_id = self.handle.definition().id.as_str();
                     let incarnation = self.handle.incarnation();
-                    context.is_generated_authority_context()
-                        && context.mob_incarnations().get(mob_id) == Some(&incarnation)
+                    (
+                        context.managed_mob_scope().contains(mob_id)
+                            || context.spawn_profile_scope().contains_key(mob_id),
+                        context.is_generated_authority_context()
+                            && context.mob_incarnations().get(mob_id) == Some(&incarnation),
+                    )
                 };
-                SessionAuthorityBinding::Bound { authority, listed }
+                if operator_scoped {
+                    SessionAuthorityBinding::Bound { authority, listed }
+                } else {
+                    SessionAuthorityBinding::Removed
+                }
             }
             None => SessionAuthorityBinding::Removed,
         };

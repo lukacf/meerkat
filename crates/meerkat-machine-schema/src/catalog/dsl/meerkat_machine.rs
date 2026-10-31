@@ -1217,6 +1217,17 @@ pub enum MobOperatorAccessRequestKind {
     Disable,
 }
 
+/// The generated verdict of the identity creation check
+/// (`ResolveMobOperatorIdentityCreation`): whether a mob operator authority
+/// may create identities from one template in one mob at one incarnation.
+/// The default is the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobOperatorIdentityCreationVerdict {
+    #[default]
+    TemplateNotAllowed,
+    Admitted,
+}
+
 /// Typed runtime notice classifier for the `RuntimeNotice` effect. Closed set
 /// of per-transition runtime lifecycle markers (drain exited, runtime reset,
 /// executor stopped/exited, runtime recovered) emitted by the runtime-control
@@ -3966,6 +3977,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_operator_can_mutate_profiles: bool,
             mob_operator_managed_mob_scope: Set<String>,
             mob_operator_spawn_profile_scope: Map<String, Set<String>>,
+            // The identity creation scope: per mob id, the templates an agent
+            // holding this authority may create identities from. The host
+            // mints it at the creator's build from its creation policy, and
+            // the creation commit checks it (ResolveMobOperatorIdentityCreation).
+            mob_operator_identity_creation_scope: Map<String, Set<String>>,
             // The mob incarnation each scoped mob id is bound to. A grant
             // names the incarnation the mob was created at, which its
             // restarts keep, so it never reaches a later mob created under
@@ -4832,6 +4848,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_operator_can_mutate_profiles = false,
             mob_operator_managed_mob_scope = EmptySet,
             mob_operator_spawn_profile_scope = EmptyMap,
+            mob_operator_identity_creation_scope = EmptyMap,
             mob_operator_mob_incarnations = EmptyMap,
             mob_operator_caller_provenance = None,
             mob_operator_audit_invocation_id = None,
@@ -5464,6 +5481,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 can_mutate_profiles: bool,
                 managed_mob_scope: Set<String>,
                 spawn_profile_scope: Map<String, Set<String>>,
+                identity_creation_scope: Map<String, Set<String>>,
                 #[redacted]
                 mob_incarnations: Map<String, MobIncarnationId>,
                 caller_provenance: Option<MobToolCallerProvenance>,
@@ -7341,6 +7359,26 @@ macro_rules! meerkat_catalog_machine_dsl {
             // boundary applies the gated names a live grant opens.
             ReplaceToolGrantGate { gated: Set<ToolName> },
             ApplyToolGrantOpenSet { open: Set<ToolName> },
+            // The identity creation scope of a mob operator authority: the
+            // templates an agent creator may create identities from in one
+            // mob, bound to the mob's incarnation like the other scopes. The
+            // host mints it at the creator's build from its creation policy
+            // and mints it again when the policy changes: a grant at the
+            // bound incarnation replaces the templates. The creation commit
+            // asks ResolveMobOperatorIdentityCreation of the creator's
+            // restored authority before it writes anything.
+            SetMobOperatorIdentityCreationInMob {
+                mob_id: String,
+                #[redacted]
+                mob_incarnation: MobIncarnationId,
+                templates: Set<String>,
+            },
+            ResolveMobOperatorIdentityCreation {
+                mob_id: String,
+                #[redacted]
+                mob_incarnation: MobIncarnationId,
+                template: String,
+            },
         }
 
         surface_only [
@@ -8717,6 +8755,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // runtime plans again, and the input may stage, or the run it is
             // bound to resume.
             InputControllerReleased,
+            // The identity creation check's verdict
+            // (ResolveMobOperatorIdentityCreation): the creation commit
+            // writes nothing unless it is Admitted.
+            MobOperatorIdentityCreationResolved {
+                verdict: Enum<MobOperatorIdentityCreationVerdict>,
+            },
         }
 
         // =====================================================================
@@ -8999,6 +9043,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The runtime loop that releases a kept input's controller hold
         // reads the wake from its own transition and plans again.
         disposition InputControllerReleased => local seam SurfaceResultAlignment,
+        // The creation commit refuses `template_not_allowed` unless the
+        // verdict is Admitted.
+        disposition MobOperatorIdentityCreationResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Helpers
@@ -9579,6 +9626,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             for_all(mob_id in self.mob_operator_managed_mob_scope,
                 self.mob_operator_mob_incarnations.contains_key(mob_id))
             && for_all(mob_id in self.mob_operator_spawn_profile_scope.keys(),
+                self.mob_operator_mob_incarnations.contains_key(mob_id))
+            && for_all(mob_id in self.mob_operator_identity_creation_scope.keys(),
                 self.mob_operator_mob_incarnations.contains_key(mob_id))
         }
 
@@ -12241,6 +12290,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.mob_operator_can_mutate_profiles = true;
                 self.mob_operator_managed_mob_scope = EmptySet;
                 self.mob_operator_spawn_profile_scope = EmptyMap;
+                self.mob_operator_identity_creation_scope = EmptyMap;
                 self.mob_operator_mob_incarnations = EmptyMap;
                 self.mob_operator_caller_provenance = caller_provenance;
                 self.mob_operator_audit_invocation_id = audit_invocation_id;
@@ -12261,6 +12311,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.mob_operator_can_mutate_profiles = false;
                 self.mob_operator_managed_mob_scope = EmptySet;
                 self.mob_operator_spawn_profile_scope = EmptyMap;
+                self.mob_operator_identity_creation_scope = EmptyMap;
                 self.mob_operator_mob_incarnations = EmptyMap;
                 self.mob_operator_caller_provenance = None;
                 self.mob_operator_audit_invocation_id = None;
@@ -12271,13 +12322,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition RestoreMobOperatorAuthority {
             on input RestoreMobOperatorAuthority {
                 principal_token, can_create_mobs, can_mutate_profiles,
-                managed_mob_scope, spawn_profile_scope, mob_incarnations,
-                caller_provenance, audit_invocation_id
+                managed_mob_scope, spawn_profile_scope, identity_creation_scope,
+                mob_incarnations, caller_provenance, audit_invocation_id
             }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "scoped_mobs_are_bound" {
                 for_all(mob_id in managed_mob_scope, mob_incarnations.contains_key(mob_id))
                 && for_all(mob_id in spawn_profile_scope.keys(),
+                    mob_incarnations.contains_key(mob_id))
+                && for_all(mob_id in identity_creation_scope.keys(),
                     mob_incarnations.contains_key(mob_id))
             }
             update {
@@ -12287,6 +12340,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.mob_operator_can_mutate_profiles = can_mutate_profiles;
                 self.mob_operator_managed_mob_scope = managed_mob_scope;
                 self.mob_operator_spawn_profile_scope = spawn_profile_scope;
+                self.mob_operator_identity_creation_scope = identity_creation_scope;
                 self.mob_operator_mob_incarnations = mob_incarnations;
                 self.mob_operator_caller_provenance = caller_provenance;
                 self.mob_operator_audit_invocation_id = audit_invocation_id;
@@ -12334,8 +12388,8 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // A manage grant for a new incarnation of a mob id (the mob was
         // destroyed and created again) replaces the old binding.
-        // Spawn-profile scope held for the old incarnation is dropped: it
-        // never carries over to the new mob.
+        // Spawn-profile and identity creation scope held for the old
+        // incarnation is dropped: it never carries over to the new mob.
         transition RebindMobOperatorManageMob {
             on input GrantMobOperatorManageMob { mob_id, mob_incarnation }
             guard { self.lifecycle_phase == Phase::Initializing }
@@ -12347,6 +12401,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.mob_operator_managed_mob_scope.insert(mob_id);
                 self.mob_operator_spawn_profile_scope.remove(mob_id);
+                self.mob_operator_identity_creation_scope.remove(mob_id);
                 self.mob_operator_mob_incarnations.insert(mob_id, mob_incarnation);
             }
             to Initializing
@@ -12369,8 +12424,8 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // A spawn-profile grant for a new incarnation of a mob id (the mob
         // was destroyed and created again) replaces the old binding. Manage
-        // scope held for the old incarnation is dropped: a spawn grant for
-        // the new mob never revives it.
+        // and identity creation scope held for the old incarnation is
+        // dropped: a spawn grant for the new mob never revives it.
         transition RebindMobOperatorSpawnProfilesInMob {
             on input SetMobOperatorSpawnProfilesInMob { mob_id, mob_incarnation, profiles }
             guard { self.lifecycle_phase == Phase::Initializing }
@@ -12382,9 +12437,113 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.mob_operator_managed_mob_scope.remove(mob_id);
                 self.mob_operator_spawn_profile_scope.insert(mob_id, profiles);
+                self.mob_operator_identity_creation_scope.remove(mob_id);
                 self.mob_operator_mob_incarnations.insert(mob_id, mob_incarnation);
             }
             to Initializing
+        }
+
+        // The identity creation scope in a mob: the templates an agent
+        // creator holding this authority may create identities from there.
+        // A grant at the bound incarnation replaces the templates, so the
+        // host mints the scope again from its policy when the policy
+        // changes; an empty set keeps the binding and allows no template.
+        transition SetMobOperatorIdentityCreationInMob {
+            on input SetMobOperatorIdentityCreationInMob { mob_id, mob_incarnation, templates }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            guard "mob_unbound_or_same_incarnation" {
+                !self.mob_operator_mob_incarnations.contains_key(mob_id)
+                || self.mob_operator_mob_incarnations.get_cloned(mob_id) == Some(mob_incarnation)
+            }
+            update {
+                self.mob_operator_identity_creation_scope.insert(mob_id, templates);
+                self.mob_operator_mob_incarnations.insert(mob_id, mob_incarnation);
+            }
+            to Initializing
+        }
+
+        // An identity creation grant for a new incarnation of a mob id (the
+        // mob was destroyed and created again) replaces the old binding.
+        // Manage and spawn-profile scope held for the old incarnation is
+        // dropped: a creation grant for the new mob never revives it.
+        transition RebindMobOperatorIdentityCreationInMob {
+            on input SetMobOperatorIdentityCreationInMob { mob_id, mob_incarnation, templates }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            guard "mob_bound_to_another_incarnation" {
+                self.mob_operator_mob_incarnations.contains_key(mob_id)
+                && self.mob_operator_mob_incarnations.get_cloned(mob_id) != Some(mob_incarnation)
+            }
+            update {
+                self.mob_operator_managed_mob_scope.remove(mob_id);
+                self.mob_operator_spawn_profile_scope.remove(mob_id);
+                self.mob_operator_identity_creation_scope.insert(mob_id, templates);
+                self.mob_operator_mob_incarnations.insert(mob_id, mob_incarnation);
+            }
+            to Initializing
+        }
+
+        // The identity creation check: a creation commit for an agent
+        // creator restores the creator's sealed authority and asks this
+        // before it writes anything. Exactly one arm answers each question.
+        // Admitted only when the authority is present, the mob is bound to
+        // the incarnation the commit acts on, and the template is in the
+        // mob's identity creation scope. The check changes no scope.
+        transition ResolveMobOperatorIdentityCreationAdmitted {
+            on input ResolveMobOperatorIdentityCreation { mob_id, mob_incarnation, template }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            guard "mob_bound_to_the_incarnation" {
+                self.mob_operator_mob_incarnations.get_cloned(mob_id) == Some(mob_incarnation)
+            }
+            guard "template_in_scope" {
+                self.mob_operator_identity_creation_scope.contains_key(mob_id)
+                && self.mob_operator_identity_creation_scope.get_cloned(mob_id).get("value").contains(template)
+            }
+            update {}
+            to Initializing
+            emit MobOperatorIdentityCreationResolved {
+                verdict: MobOperatorIdentityCreationVerdict::Admitted
+            }
+        }
+
+        // No authority, no scope in the mob, or scope held for another
+        // incarnation of it: a grant for an earlier mob under the same id
+        // never admits a creation in a later one.
+        transition ResolveMobOperatorIdentityCreationUnbound {
+            on input ResolveMobOperatorIdentityCreation { mob_id, mob_incarnation, template }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "absent_or_not_bound_to_the_incarnation" {
+                !self.mob_operator_authority_present
+                || self.mob_operator_mob_incarnations.get_cloned(mob_id) != Some(mob_incarnation)
+            }
+            update {}
+            to Initializing
+            emit MobOperatorIdentityCreationResolved {
+                verdict: MobOperatorIdentityCreationVerdict::TemplateNotAllowed
+            }
+        }
+
+        // The mob is bound to the incarnation, through any of its scopes,
+        // and its identity creation scope does not hold the template: manage
+        // or spawn-profile scope never admits a creation.
+        transition ResolveMobOperatorIdentityCreationTemplateNotInScope {
+            on input ResolveMobOperatorIdentityCreation { mob_id, mob_incarnation, template }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            guard "mob_bound_to_the_incarnation" {
+                self.mob_operator_mob_incarnations.get_cloned(mob_id) == Some(mob_incarnation)
+            }
+            guard "template_not_in_scope" {
+                !self.mob_operator_identity_creation_scope.contains_key(mob_id)
+                || !self.mob_operator_identity_creation_scope.get_cloned(mob_id).get("value").contains(template)
+            }
+            update {}
+            to Initializing
+            emit MobOperatorIdentityCreationResolved {
+                verdict: MobOperatorIdentityCreationVerdict::TemplateNotAllowed
+            }
         }
 
         // 2b. Two-phase unregister (D1, 0.7.2 disciplined shell inputs).

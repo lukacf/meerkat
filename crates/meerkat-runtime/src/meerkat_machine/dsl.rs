@@ -3018,7 +3018,7 @@ pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     UnregisterQueuedInputsDisposition,
 };
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
-    EmptyResumeRetirementVerdict, SessionResidencyOwner,
+    EmptyResumeRetirementVerdict, MobOperatorIdentityCreationVerdict, SessionResidencyOwner,
 };
 
 /// Bridging copy of the catalog-owned delegation result disposition.

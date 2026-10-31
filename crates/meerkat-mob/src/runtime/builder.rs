@@ -9324,6 +9324,11 @@ impl MobBuilder {
                 registered_tool_bundles: Arc::new(tool_bundles.keys().cloned().collect()),
                 realm_profile_store: storage.realm_profiles.clone(),
                 boot_set_basis: wiring.boot_set_basis.clone(),
+                // The receiver of the recovered runtime's provisioner, which
+                // the restores and the eventual actor share.
+                member_session_authorities: runtime_provisioner
+                    .member_session_authorities()
+                    .unwrap_or_default(),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
@@ -10991,6 +10996,9 @@ impl MobBuilder {
                 registered_tool_bundles: Arc::new(tool_bundles.keys().cloned().collect()),
                 realm_profile_store: realm_profile_store.clone(),
                 boot_set_basis: boot_set_basis.clone(),
+                member_session_authorities: provisioner
+                    .member_session_authorities()
+                    .unwrap_or_default(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;

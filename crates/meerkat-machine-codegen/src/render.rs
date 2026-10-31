@@ -525,6 +525,11 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ApplyToolGrantOpenSetUnchangedRunning",
     "ApplyToolGrantOpenSetUnchangedRetired",
     "ApplyToolGrantOpenSetUnchangedStopped",
+    "SetMobOperatorIdentityCreationInMob",
+    "RebindMobOperatorIdentityCreationInMob",
+    "ResolveMobOperatorIdentityCreationAdmitted",
+    "ResolveMobOperatorIdentityCreationUnbound",
+    "ResolveMobOperatorIdentityCreationTemplateNotInScope",
 ];
 
 // Append-only emission tails for the other machines, whose public

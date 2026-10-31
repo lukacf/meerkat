@@ -2291,6 +2291,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MobOperatorAccessRequestKind",
                 &["Inherit", "Enable", "Disable"],
             ),
+            NamedTypeBinding::string_enum(
+                "MobOperatorIdentityCreationVerdict",
+                &["TemplateNotAllowed", "Admitted"],
+            ),
             NamedTypeBinding::type_path(
                 "MobIncarnationId",
                 "meerkat_core::service::MobIncarnationId",
@@ -3408,6 +3412,11 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // The identity creation scope: the mob operator authority ladder
+        // mints it, and the creation commit asks the check of a creator's
+        // restored authority. No caller can ask for either.
+        SetMobOperatorIdentityCreationInMob,
+        ResolveMobOperatorIdentityCreation,
     ]
 );
 

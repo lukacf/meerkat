@@ -908,7 +908,13 @@ run_machine_verify() {
 # run 40721495692 and push run 40721504088 (2026-10-28), the faster runner's
 # first; the two runners of one shard differed by 1.2-1.5x:
 # audits-a = live unregister cleanup 234-324, mob operator grant with
-# --mutants 180-235: 414-559 s;
+# --mutants 180-235: 414-559 s. The grant audit gained the identity creation
+# scope and its check (2026-10-30): two witnesses and two mutants more, and
+# its restores start from the initial state only, which keeps its safety run
+# at the same cost. Locally, with 4 TLC workers at bound 5 with --mutants, it
+# took 115 s where it took 91 s, and 137 s once it gained a witness that
+# needs the creation bind arm and a mutant of the restore guard's creation
+# conjunct; the hosted shard has not been measured again;
 # audits-b = durable in-turn steer with its per-kind goal runs 368-535 (368
 # on the push; cut off after 451 on the pull request's runner, 1.45x slower
 # on the rest of its shard), live delegation steer 37-51: 405-586 s;

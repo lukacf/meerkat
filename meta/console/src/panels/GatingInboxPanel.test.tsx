@@ -1,7 +1,9 @@
-import { cleanup, fireEvent, render, within } from "@testing-library/react";
+import React from "react";
+import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GatingInboxPanel } from "./GatingInboxPanel";
-import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
+import { createPendingApprovalResource, normalizePendingApproval, type PendingApprovalResource, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
+import { CONSOLE_RPC_METHODS } from "../lib/contract";
 
 afterEach(cleanup);
 const request = normalizePendingApproval({ pending_id: "p1", action_id: "a1", action: "Deploy release", rationale: "Publish reviewed changes" })!;
@@ -329,6 +331,51 @@ describe("GatingInboxPanel host-provided attention", () => {
       hostAttention={{ status: "ready", items: [item], failedSources: [] }} />);
     expect(view.getByText(status === "forbidden" ? "Approval access denied" : "Approvals are not available for this connection")).toBeTruthy();
     expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
+  });
+  it("fills each source's decide link for a read-only session and drops a cross-origin one", () => {
+    const encoded = normalizePendingApproval({ ...request.raw, pending_id: "p 1/2" })!;
+    const sources = [
+      { id: "host", label: "Host", url: "/host/attention", decide_href: "/host/decide/{decision_id}" },
+      { id: "remote", label: "Remote", url: "/host/attention", decide_href: "https://evil.example/{decision_id}" },
+      { id: "plain", label: "Plain", url: "/host/attention" },
+    ];
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} readOnly hostDecideSources={sources}
+      resource={{ ...snapshot("ready"), requests: [encoded] }} />);
+    const links = view.getAllByRole("link", { name: /^Decide in / });
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(["/host/decide/p%201%2F2"]);
+    expect(view.queryByRole("button", { name: "Approve" }) === null).toBe(true);
+  });
+  it("keeps the disabled buttons for a read-only session when no source gives a usable link", () => {
+    const sources = [
+      { id: "remote", label: "Remote", url: "/host/attention", decide_href: "https://evil.example/{decision_id}" },
+      { id: "plain", label: "Plain", url: "/host/attention" },
+    ];
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} readOnly hostDecideSources={sources} resource={snapshot("ready")} />);
+    expect(view.queryByRole("link", { name: /^Decide in / }) === null).toBe(true);
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByText("Read-only access")).toBeTruthy();
+  });
+  it("links the host's decide page once a decision is refused for the session's access", async () => {
+    const resource = createPendingApprovalResource({
+      scopeKey: "scope",
+      load: async () => ({ pending: [{ pending_id: "p1", action_id: "a1", action: "Deploy release" }] }),
+      decide: async () => { throw Object.assign(new Error("decide unavailable"), { kind: "console-capability-unavailable", method: CONSOLE_RPC_METHODS.gatingDecide, availableMethods: [CONSOLE_RPC_METHODS.gatingPending] }); },
+    });
+    function Inbox({ owner }: { owner: PendingApprovalResource }) {
+      const current = React.useSyncExternalStore(owner.subscribe, owner.getSnapshot);
+      return <GatingInboxPanel pending={[]} audit={[]} resource={current} onDecide={(id, action) => { void owner.decide(id, action); }}
+        hostDecideSources={[{ id: "host", label: "Host", url: "/host/attention", decide_href: "/host/decide/{decision_id}" }]} />;
+    }
+    const view = render(<Inbox owner={resource} />);
+    try {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(view.queryByRole("link", { name: /^Decide in / }) === null).toBe(true);
+      await act(async () => { fireEvent.click(view.getByRole("button", { name: "Approve" })); await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(resource.getSnapshot().readOnly).toBe(true);
+      expect(view.getByRole("link", { name: "Decide in Host: Deploy release" }).getAttribute("href")).toBe("/host/decide/p1");
+    } finally {
+      resource.dispose();
+    }
   });
   it("shows nothing extra without host items", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}

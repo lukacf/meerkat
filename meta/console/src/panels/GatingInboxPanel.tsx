@@ -2,7 +2,7 @@ import React from "react";
 import { ApprovalCard, HostAttentionCard } from "../../../packages/console-components/src/conversation/approval-card";
 import { normalizeGatingAuditEntry } from "../../../packages/console-core/src/control-plane";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
-import type { HostAttentionSnapshot } from "../../../packages/console-core/src/host-attention";
+import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import {
   Button,
@@ -51,6 +51,8 @@ interface GatingInboxPanelProps {
   selectedPendingId?: string;
   /** Host-provided attention items, listed on Pending after the approvals. */
   hostAttention?: HostAttentionSnapshot;
+  /** Attention sources whose `decide_href` a read-only session links to. */
+  hostDecideSources?: readonly HostAttentionSourceConfig[];
 }
 
 type Tab = "pending" | "auto" | "audit" | "policies";
@@ -259,6 +261,7 @@ export function GatingInboxPanel({
   auditError,
   selectedPendingId,
   hostAttention,
+  hostDecideSources,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
   const tabIds = React.useId();
@@ -335,6 +338,7 @@ export function GatingInboxPanel({
                   resourceStatus={resource.status}
                   decision={resource.decisions[request.pendingId]}
                   readOnly={readOnly || resource.readOnly}
+                  decideLinks={readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : undefined}
                   onDecide={onDecide}
                 />
               </div>

@@ -225,7 +225,7 @@ them.
 
 ### Added
 
-- `meerkat-session`, `meerkat-mob`:
+- `meerkat-session`, `meerkat-mob`, `meerkat`:
   `PersistentSessionService::runtime_turn_lost_its_host_runtime` answers
   whether a session's task ended with the runtime it ran on, and then degrades
   the session's registration to a cold reload, so the runtime loop leaves the
@@ -233,6 +233,12 @@ them.
   method, provided and answering `false`; the stock persistent service
   overrides it, and a member's runtime executor asks it before the steps ahead
   of a turn that need the live actor (see Fixed and Upgrade notes).
+  `PersistentSessionService::session_task_ended_with_its_runtime` answers the
+  same question without degrading anything. The live staleness judgement and
+  the turn reservation (`reserve_runtime_turn_admission`) ask it ahead of an
+  input's admission and leave such a session's actor unjudged, since it takes
+  no commands: the input is admitted, and the runtime loop's check leaves it
+  to the session's next registration.
 
 - `meerkat-runtime`, `meerkat`:
   `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the
@@ -246,9 +252,9 @@ them.
   the runtime loop leaves the queued inputs to the session's next
   registration; otherwise the handle realizes as before.
   `persistent_runtime_pre_dequeue_handle` is unchanged. The RPC session
-  executors and a mob member's runtime executor pass a check that asks their
-  session service's `runtime_turn_lost_its_host_runtime`, instead of wrapping
-  the handle.
+  executors, a mob member's runtime executor, the facade's
+  `PersistentRuntimeExecutor` and the CLI's runtime executor pass a check that
+  asks their session service's `runtime_turn_lost_its_host_runtime`.
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,

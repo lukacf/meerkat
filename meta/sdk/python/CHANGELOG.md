@@ -4,6 +4,17 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.prune_member_system_rows(identity, remove, *,
+  retire_superseded_activation_bodies=False, expected_parent_revision=None,
+  note=None)` calls `meta/prune_member_system_rows`: it removes the
+  ordinary System rows the host names from a member's current session, each
+  by its index and content digest as a member history read showed it,
+  without waking the member. A refused row raises
+  `SystemRowPruneRefusedError` (`index`, `cause`; the constants
+  `SYSTEM_ROW_PRUNE_REFUSED_KIND` and the closed
+  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES`), and a stale
+  `expected_parent_revision` raises `TranscriptRevisionConflictError`
+  (`expected`, `actual`; `TRANSCRIPT_REVISION_CONFLICT_KIND`).
 - `ErrorCategory.LIFECYCLE_EFFECT_FAILED` and
   `ErrorCategory.LIFECYCLE_PROJECTION_OFF`, with their messages: a lifecycle
   side effect of an identity (`after_create`, an exit interview, a

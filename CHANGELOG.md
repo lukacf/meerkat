@@ -1386,7 +1386,11 @@ them.
   `TranscriptEditError::SystemRowPruneRefused` (`SystemRowPruneRefusal`),
   which a session service keeps typed as
   `SessionError::system_row_prune_refused` structured data
-  (`SessionError::system_row_prune_refusal`); nothing is written. With
+  (`SessionError::system_row_prune_refusal`); nothing is written. A stale
+  `expected_parent_revision` writes nothing either, and the persistent
+  service keeps it typed as `SessionError::transcript_revision_conflict`
+  (kind `transcript_revision_conflict`, with the expected and the actual
+  revision; `SessionError::transcript_revision_conflict_revisions`). With
   `retire_superseded_activation_bodies` the same commit retires every
   superseded instruction activation body in place, as a compaction does; a
   key's newest body is never retired. A running session answers `Busy`; a

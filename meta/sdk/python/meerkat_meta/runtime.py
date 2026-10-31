@@ -40,6 +40,7 @@ from .errors import (
     FLOW_ROLE_TARGETS_REFUSED_KIND,
     FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
     SYSTEM_ROW_PRUNE_REFUSED_KIND,
+    TRANSCRIPT_REVISION_CONFLICT_KIND,
     WORKGRAPH_CONFLICT_CODE,
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
@@ -53,6 +54,7 @@ from .errors import (
     FlowRunIdempotencyConflictError,
     MemberReloadRequiredError,
     SystemRowPruneRefusedError,
+    TranscriptRevisionConflictError,
     CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE,
     ConsoleTimelineReplayUnavailableError,
     RegisteredSpecChangedError,
@@ -461,6 +463,17 @@ def _rpc_error_from_payload(
         and data.get("kind") == SYSTEM_ROW_PRUNE_REFUSED_KIND
     ):
         return SystemRowPruneRefusedError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if (
+        code == -32602
+        and isinstance(data, dict)
+        and data.get("kind") == TRANSCRIPT_REVISION_CONFLICT_KIND
+    ):
+        return TranscriptRevisionConflictError(
             message,
             request_id=request_id,
             method=method,
@@ -1838,8 +1851,18 @@ class MetaRuntime:
         nothing was named and there was nothing to retire.
 
         Raises :class:`SystemRowPruneRefusedError` (``-32602``) for a refused
-        row, with its ``index`` and ``cause``; nothing was written. A member
+        row, with its ``index`` and ``cause``, and
+        :class:`TranscriptRevisionConflictError` (``-32602``) for a stale
+        ``expected_parent_revision``, with ``expected`` and ``actual``;
+        nothing was written. Chaining calls on the returned ``revision``
+        fails whenever a turn ran in between: the per-row digest is the guard
+        to rely on, and a conflict means read the history again. A member
         running a turn raises ``RpcError`` ``-32015``: retry when it is idle.
+        A session Core holds raises :class:`IdentityWakeHeldError` (its
+        ``kind`` and ``durable_resume_hold`` name the hold). Any other
+        failure is ``RpcError`` ``-32000``, its message naming the cause (no
+        current session, a member placed on another host, an archived
+        session, a malformed document).
         """
         params: dict[str, Any] = {"identity": identity, "remove": list(remove)}
         if retire_superseded_activation_bodies:

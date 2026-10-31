@@ -1207,11 +1207,17 @@ pub(super) async fn handle_bound_member_transcript(
 /// is `false` when the request names no row and there is no body to retire.
 /// A running member answers `-32015` (retry when it is idle); a refused row
 /// answers `-32602` with `data {kind: "system_row_prune_refused", index,
-/// cause}`, nothing written. A member placed on another host has no session
-/// in this gateway's transcript service: it answers `-32000`, as for
-/// `meta/bound_member_transcript`, since no operator verb has a typed
+/// cause}`, and a stale `expected_parent_revision` `-32602` with `data
+/// {kind: "transcript_revision_conflict", expected, actual}` (read the
+/// history again), nothing written. Chaining calls on the returned
+/// `revision` fails whenever a turn ran in between, so the digest is the
+/// guard to rely on. A session Core holds answers as a held wake does
+/// (`prune_member_system_rows_error`). A member placed on another host has
+/// no session in this gateway's transcript service: it answers `-32000`, as
+/// for `meta/bound_member_transcript`, since no operator verb has a typed
 /// placed-member refusal yet; a typed answer waits for the member-host
-/// bridge to carry the request.
+/// bridge to carry the request. Every other failure is that catch-all
+/// `-32000` too, its message naming the cause.
 pub(super) async fn handle_prune_member_system_rows(
     runtime: &UnifiedRuntime,
     ctx: &IdentityFirstContext,
@@ -1354,42 +1360,85 @@ pub(super) async fn handle_prune_member_system_rows(
 
 /// The answer of `meta/prune_member_system_rows` when the transcript edit
 /// door refuses or fails for the member `identity` on `session_id`.
+///
+/// Typed: a running member (`-32015`), a refused row and a stale
+/// `expected_parent_revision` (`-32602` with their data), and a session Core
+/// holds (the code and data Meta answers a held wake with). Every other
+/// failure is the catch-all `-32000`, its message naming it: no current
+/// session, an archived session, a malformed document.
 fn prune_member_system_rows_error(
     response_id: Value,
-    _identity: &AgentIdentity,
-    _session_id: &meerkat_core::SessionId,
+    identity: &AgentIdentity,
+    session_id: &meerkat_core::SessionId,
     err: SessionError,
 ) -> JsonRpcResponse {
-    if let SessionError::Busy { id } = &err {
-        return rpc_error(
-            response_id,
+    let (code, message, data) = if let SessionError::Busy { id } = &err {
+        (
             OPERATOR_SESSION_BUSY_CODE,
             format!(
                 "session {id} is running a turn; prune_member_system_rows refuses while work \
                  is active - retry when the member is idle"
             ),
-        );
-    }
-    match err.system_row_prune_refusal() {
-        Some((index, cause)) => JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: response_id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32602,
-                message: err.to_string(),
-                data: Some(serde_json::json!({
-                    "kind": meerkat_core::SessionError::SYSTEM_ROW_PRUNE_REFUSED_KIND,
-                    "index": index,
-                    "cause": cause,
-                })),
-            }),
-        },
-        None => rpc_error(
-            response_id,
+            None,
+        )
+    } else if let Some((index, cause)) = err.system_row_prune_refusal() {
+        (
+            -32602,
+            err.to_string(),
+            Some(serde_json::json!({
+                "kind": meerkat_core::SessionError::SYSTEM_ROW_PRUNE_REFUSED_KIND,
+                "index": index,
+                "cause": cause,
+            })),
+        )
+    } else if let Some((expected, actual)) = err.transcript_revision_conflict_revisions() {
+        (
+            -32602,
+            format!(
+                "{err}; the transcript changed since that revision: read the member history \
+                 again and retry"
+            ),
+            Some(serde_json::json!({
+                "kind": meerkat_core::SessionError::TRANSCRIPT_REVISION_CONFLICT_KIND,
+                "expected": expected,
+                "actual": actual,
+            })),
+        )
+    } else if let Some(hold) = err.durable_resume_hold() {
+        // A session Core holds answers as a held wake does: the same kind,
+        // code and data (`mob_member_session_resume_held`, or
+        // `mob_member_session_repair_required` with its operator path), so a
+        // host classifies it the same way.
+        let held = crate::identity_first::IdentityRuntimeError::WakeHeld {
+            identity: identity.clone(),
+            session_id: session_id.clone(),
+            hold: crate::identity_first::WakeHold::DurableResume(hold),
+            detail: err.to_string(),
+        };
+        (
+            crate::rpc::identity_error_code(&held),
+            format!(
+                "prune_member_system_rows: Core holds session {session_id} ({hold}); the session \
+                 is kept and nothing was written"
+            ),
+            held.structured_data(),
+        )
+    } else {
+        (
             -32000,
             format!("prune_member_system_rows failed: {err}"),
-        ),
+            None,
+        )
+    };
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        id: response_id,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message,
+            data,
+        }),
     }
 }
 

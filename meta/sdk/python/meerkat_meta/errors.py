@@ -67,6 +67,10 @@ SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: frozenset[str] = frozenset(
         "before_operator_instruction_entry",
     }
 )
+# ``meta/prune_member_system_rows`` refused a stale ``expected_parent_revision``
+# (JSON-RPC invalid params, ``-32602``); nothing was written. The error data is
+# ``{"kind": TRANSCRIPT_REVISION_CONFLICT_KIND, "expected", "actual"}``.
+TRANSCRIPT_REVISION_CONFLICT_KIND: str = "transcript_revision_conflict"
 # The refusal kinds, a closed vocabulary: a new kind is a breaking change.
 FLOW_ROLE_TARGET_REFUSAL_KINDS: frozenset[str] = frozenset(
     {
@@ -714,6 +718,38 @@ class SystemRowPruneRefusedError(RpcError):
         )
         self.index = _data_int(data, "index")
         self.cause = _data_str(data, "cause")
+
+
+class TranscriptRevisionConflictError(RpcError):
+    """Raised when ``meta/prune_member_system_rows`` refused a stale
+    ``expected_parent_revision``; nothing was written.
+
+    The gateway answers invalid params (``-32602``) with data ``kind``
+    ``"transcript_revision_conflict"``; both must match, and any other
+    ``-32602`` answer stays a plain :class:`RpcError`. ``expected`` is the
+    revision you passed and ``actual`` the session's current one (each
+    ``None`` when the gateway sent none). The transcript changed since you
+    read it, because a turn ran or another edit committed: read the member
+    history again before you name rows or a revision.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            -32602,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        self.expected = _data_str(data, "expected")
+        self.actual = _data_str(data, "actual")
 
 
 class FlowRunIdempotencyConflictError(RpcError):

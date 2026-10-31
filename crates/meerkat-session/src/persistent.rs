@@ -19024,9 +19024,15 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         let _mutation_guard = self.transcript_edit_mutation_guard(id).await?;
         let mut source = self.source_session_for_transcript_edit_locked(id).await?;
         source = self.normalized_session_for_persistence(source).await?;
-        let Some(pruned) = source
-            .prune_system_rows(req)
-            .map_err(meerkat_core::TranscriptEditError::into_session_error)?
+        // A stale expected revision answers typed, with both revisions, so
+        // the host reads again; every other refusal maps as on the shared
+        // rewrite path.
+        let Some(pruned) = source.prune_system_rows(req).map_err(|error| match error {
+            meerkat_core::TranscriptEditError::RevisionConflict { expected, actual } => {
+                SessionError::transcript_revision_conflict(expected, actual)
+            }
+            other => other.into_session_error(),
+        })?
         else {
             let revision = source.transcript_revision().map_err(|err| {
                 SessionError::Agent(AgentError::InternalError(format!(
@@ -57705,6 +57711,48 @@ mod tests {
                 .await
                 .expect("active turn task should join")
                 .expect("active turn should complete after the refusal");
+        }
+
+        /// A stale `expected_parent_revision` reaches the host typed, with the
+        /// revision it passed and the current one, and nothing is written.
+        #[tokio::test]
+        async fn a_stale_expected_revision_reaches_the_host_typed() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            let SystemRowPruneResult::NothingToPrune {
+                revision: read_revision,
+                ..
+            } = service
+                .prune_system_rows(&id, request(Vec::new()))
+                .await
+                .expect("an empty prune answers the revision")
+            else {
+                panic!("an empty prune writes nothing");
+            };
+            let before = history(&service, &id).await;
+            let SystemRowPruneResult::Pruned {
+                revision: current, ..
+            } = service
+                .prune_system_rows(&id, request(vec![system_row(&before, 0)]))
+                .await
+                .expect("a later write")
+            else {
+                panic!("the prune commits");
+            };
+            let after = history(&service, &id).await;
+
+            let mut stale = request(vec![system_row(&after, 0)]);
+            stale.expected_parent_revision = Some(read_revision.clone());
+            let error = service
+                .prune_system_rows(&id, stale)
+                .await
+                .expect_err("a stale revision refuses the prune");
+            assert_eq!(
+                error.transcript_revision_conflict_revisions(),
+                Some((read_revision, current)),
+                "{error:?}"
+            );
+            assert_eq!(history(&service, &id).await, after, "nothing is written");
         }
 
         /// A refused row reaches the host typed (the row's index and cause in

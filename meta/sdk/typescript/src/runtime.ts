@@ -38,6 +38,7 @@ import {
   FLOW_ROLE_TARGETS_REFUSED_KIND,
   FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
+  TRANSCRIPT_REVISION_CONFLICT_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -51,6 +52,7 @@ import {
   FlowRunIdempotencyConflictError,
   MemberReloadRequiredError,
   SystemRowPruneRefusedError,
+  TranscriptRevisionConflictError,
   ConsoleTimelineReplayUnavailableError,
   RegisteredSpecChangedError,
   StaleScopeError,
@@ -979,6 +981,14 @@ function rpcErrorFromPayload(
     (err.data as Record<string, unknown>).kind === SYSTEM_ROW_PRUNE_REFUSED_KIND
   ) {
     return new SystemRowPruneRefusedError(message, rid, method, err.data);
+  }
+  if (
+    code === -32602 &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).kind === TRANSCRIPT_REVISION_CONFLICT_KIND
+  ) {
+    return new TranscriptRevisionConflictError(message, rid, method, err.data);
   }
   if (code === WORKGRAPH_UNAVAILABLE_CODE) {
     return new WorkGraphUnavailableError(message, rid, method, err.data);
@@ -2591,8 +2601,16 @@ export class MetaRuntime {
    * `pruned`); `pruned` is `false` when nothing was named and there was
    * nothing to retire. A refused row rejects with
    * {@link SystemRowPruneRefusedError} (`-32602`, with its `index` and
-   * `cause`), nothing written; a member running a turn rejects with an RPC
-   * error `-32015`: retry when it is idle.
+   * `cause`) and a stale `expectedParentRevision` with
+   * {@link TranscriptRevisionConflictError} (`-32602`, with `expected` and
+   * `actual`), nothing written. Chaining calls on the returned `revision`
+   * fails whenever a turn ran in between: the per-row digest is the guard to
+   * rely on, and a conflict means read the history again. A member running a
+   * turn rejects with an RPC error `-32015`: retry when it is idle. A
+   * session Core holds rejects with `IdentityWakeHeldError` (its `kind` and
+   * `durableResumeHold` name the hold). Any other failure is an RPC error
+   * `-32000`, its message naming the cause (no current session, a member
+   * placed on another host, an archived session, a malformed document).
    */
   async pruneMemberSystemRows(
     identity: string,

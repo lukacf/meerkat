@@ -2521,7 +2521,9 @@ Params:
   newest body is never retired.
 - `expected_parent_revision` (optional): an extra compare-and-swap on the
   transcript head. The per-row digest is the main guard: a row that changed
-  since the read is refused.
+  since the read is refused. A stale revision is refused too (see Errors),
+  so chaining calls on the `revision` a previous call returned fails
+  whenever a turn ran in between: read the history again rather than chain.
 - `note` (optional): the audit note. The commit's reason kind is always
   `system-row-prune`; there is no caller-supplied reason.
 
@@ -2532,6 +2534,11 @@ Meerkat 0.9.8 refuses, while a prune of rows after the last activation row
 with nothing retired leaves it at envelope 4. The session's pending
 compaction projection intents carry forward unchanged, as for every
 same-session rewrite, so an unsettled projection does not refuse the prune.
+The commit replaces one range, from the first removed row to the last
+retired one, and its rewrite record keeps that range's earlier rows for
+the session's rewrite retention: with the retire option on a transcript
+whose stale prompts open it, that is most of the transcript, a one-time
+growth of the stored document.
 
 Result: `identity`, `session_id`, `pruned`, `removed_rows`,
 `retired_bodies`, `message_count`, `revision`, and `parent_revision` when
@@ -2547,18 +2554,32 @@ Errors:
   `operator_instruction_entry_row`, `digest_mismatch` (the transcript changed
   since your read: read it again) or `before_operator_instruction_entry` (an
   operator-instruction entry follows the row in its group of System rows,
-  and removing the row would move the entry). `SystemRowPruneRefusedError`
-  in both SDKs.
+  and removing the row would move the entry; a group of System rows is a
+  run of consecutive System rows, which any other row, a system notice
+  included, ends). `SystemRowPruneRefusedError` in both SDKs.
+- `-32602` with `data {kind: "transcript_revision_conflict", expected,
+  actual}`: `expected_parent_revision` is not the session's current
+  revision `actual`, because a turn ran or another edit committed since the
+  read; nothing was written. Read the history again.
+  `TranscriptRevisionConflictError` in both SDKs.
 - `-32015`: the member is running a turn or holds an active runtime
-  admission. Retry when it is idle. Other session states answer as
-  themselves.
+  admission. Retry when it is idle.
+- `-32603` with the data a held wake answers: a session Core holds (a
+  durable tail held for recovery, a refused recovery, quarantined
+  evidence) answers `{kind: "mob_member_session_resume_held",
+  durable_resume_hold, ...}`, and one whose committed document fails its
+  audited-endpoint check `{kind: "mob_member_session_repair_required",
+  operator_path, ...}`; the session is kept and nothing was written.
+  `IdentityWakeHeldError` in both SDKs.
 - `-32047` `candidate_launch` on a candidate launch.
 - `-32016` when the gateway has no concrete transcript-edit service.
-- `-32000` for an identity with no current session, and for a member placed
-  on another host: the gateway's transcript service holds no session for it,
-  as for `meta/bound_member_transcript`. No operator verb has a typed
-  refusal for a placed member yet; one waits for the member-host bridge to
-  carry the request.
+- `-32000`, the catch-all, `prune_member_system_rows failed: <cause>` or a
+  message naming the state: an identity with no current session, a member
+  placed on another host (the gateway's transcript service holds no session
+  for it, as for `meta/bound_member_transcript`; no operator verb has a
+  typed refusal for a placed member yet, and one waits for the member-host
+  bridge to carry the request), an archived session, or a malformed session
+  document. Read the history again before you retry.
 
 ### `meta/member_activate_instruction`
 

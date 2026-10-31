@@ -344,13 +344,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `data.kind` `system_row_prune_refused` with the row's `index` and `cause`)
   and nothing is written. `retire_superseded_activation_bodies` also retires
   the bodies of superseded instruction activations in the same commit. A
-  running member answers `-32015`, and a candidate launch refuses the verb
-  (`-32047` `candidate_launch`). The SDKs add
-  `MetaRuntime.prune_member_system_rows` (Python) and
+  stale `expected_parent_revision` is refused typed too (`-32602`,
+  `data.kind` `transcript_revision_conflict` with `expected` and `actual`);
+  the per-row digest is the guard to rely on, since a revision the verb
+  returned is stale once a turn ran. A running member answers `-32015`, a
+  session Core holds answers as a held wake does (`-32603`,
+  `mob_member_session_resume_held` or `mob_member_session_repair_required`),
+  any other failure is the catch-all `-32000` with a message naming it, and
+  a candidate launch refuses the verb (`-32047` `candidate_launch`). The
+  SDKs add `MetaRuntime.prune_member_system_rows` (Python) and
   `MetaRuntime.pruneMemberSystemRows` (TypeScript), the typed
-  `SystemRowPruneRefusedError` with its `index` and `cause`, and the
-  constants `SYSTEM_ROW_PRUNE_REFUSED_KIND` and
-  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary).
+  `SystemRowPruneRefusedError` with its `index` and `cause` and
+  `TranscriptRevisionConflictError` with `expected` and `actual`, and the
+  constants `SYSTEM_ROW_PRUNE_REFUSED_KIND`,
+  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary) and
+  `TRANSCRIPT_REVISION_CONFLICT_KIND`.
 
 ### Changed
 

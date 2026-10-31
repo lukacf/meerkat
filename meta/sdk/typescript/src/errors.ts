@@ -245,6 +245,12 @@ export const SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: ReadonlySet<string> = new Set([
   "digest_mismatch",
   "before_operator_instruction_entry",
 ]);
+/**
+ * `meta/prune_member_system_rows` refused a stale `expected_parent_revision`
+ * (JSON-RPC invalid params, `-32602`); nothing was written. The error data is
+ * `{kind: TRANSCRIPT_REVISION_CONFLICT_KIND, expected, actual}`.
+ */
+export const TRANSCRIPT_REVISION_CONFLICT_KIND = "transcript_revision_conflict" as const;
 /** The refusal kinds, a closed vocabulary: a new kind is a breaking change. */
 export const FLOW_ROLE_TARGET_REFUSAL_KINDS: ReadonlySet<string> = new Set([
   "role_not_in_flow",
@@ -665,16 +671,6 @@ export class FlowRoleTargetsRefusedError extends RpcError {
 }
 
 /**
- * `meta/run_flow` refused an `idempotency_key` that already admitted a run
- * with other activation params or another binding; the first run stands and
- * no second run was admitted.
- *
- * The gateway answers invalid params (`-32602`) with data `kind`
- * `"flow_run_idempotency_conflict"`; both must match, and any other `-32602`
- * answer stays a plain {@link RpcError}. `runId` names the run the key
- * admitted and `flowId` its flow, each `null` when the gateway sent none.
- */
-/**
  * `meta/prune_member_system_rows` refused a row it names; nothing was
  * written.
  *
@@ -706,6 +702,49 @@ export class SystemRowPruneRefusedError extends RpcError {
   }
 }
 
+/**
+ * `meta/prune_member_system_rows` refused a stale `expected_parent_revision`;
+ * nothing was written.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"transcript_revision_conflict"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `expected` is the revision you
+ * passed and `actual` the session's current one, each `null` when the
+ * gateway sent none. The transcript changed since you read it, because a
+ * turn ran or another edit committed: read the member history again before
+ * you name rows or a revision.
+ */
+export class TranscriptRevisionConflictError extends RpcError {
+  readonly expected: string | null;
+  readonly actual: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "TranscriptRevisionConflictError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    this.expected = typeof payload.expected === "string" ? payload.expected : null;
+    this.actual = typeof payload.actual === "string" ? payload.actual : null;
+  }
+}
+
+/**
+ * `meta/run_flow` refused an `idempotency_key` that already admitted a run
+ * with other activation params or another binding; the first run stands and
+ * no second run was admitted.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"flow_run_idempotency_conflict"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `runId` names the run the key
+ * admitted and `flowId` its flow, each `null` when the gateway sent none.
+ */
 export class FlowRunIdempotencyConflictError extends RpcError {
   readonly runId: string | null;
   readonly flowId: string | null;

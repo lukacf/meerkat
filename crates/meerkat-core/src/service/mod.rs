@@ -623,6 +623,46 @@ impl SessionError {
         Some((index, cause))
     }
 
+    /// Structured-data `kind` of [`Self::transcript_revision_conflict`].
+    pub const TRANSCRIPT_REVISION_CONFLICT_KIND: &'static str = "transcript_revision_conflict";
+
+    /// A transcript edit's `expected_parent_revision` is not the session's
+    /// current revision `actual`: the transcript changed since the caller
+    /// read it (a turn ran, or another edit committed). Nothing was written;
+    /// the caller reads again and retries. The structured data carries both
+    /// revisions, so a host never reads the message.
+    pub fn transcript_revision_conflict(expected: String, actual: String) -> Self {
+        Self::FailedWithData {
+            message: TranscriptEditError::RevisionConflict {
+                expected: expected.clone(),
+                actual: actual.clone(),
+            }
+            .to_string(),
+            data: serde_json::json!({
+                "kind": Self::TRANSCRIPT_REVISION_CONFLICT_KIND,
+                "expected": expected,
+                "actual": actual,
+            }),
+        }
+    }
+
+    /// The expected and the actual revision of a
+    /// [`Self::transcript_revision_conflict`]. Unknown or malformed
+    /// structured data fails closed as `None`.
+    pub fn transcript_revision_conflict_revisions(&self) -> Option<(String, String)> {
+        let Self::FailedWithData { data, .. } = self.primary_error() else {
+            return None;
+        };
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::TRANSCRIPT_REVISION_CONFLICT_KIND)
+        {
+            return None;
+        }
+        let expected = data.get("expected")?.as_str()?.to_string();
+        let actual = data.get("actual")?.as_str()?.to_string();
+        Some((expected, actual))
+    }
+
     /// Whether this error is a [`Self::runtime_teardown_in_progress`].
     pub fn is_runtime_teardown_in_progress(&self) -> bool {
         matches!(
@@ -4293,6 +4333,9 @@ pub trait SessionServiceTranscriptEditExt: SessionService {
     /// operator-instruction entry follows in its group of System rows)
     /// refuses the whole prune with its typed cause
     /// ([`SessionError::system_row_prune_refusal`]), and nothing is written.
+    /// A stale `expected_parent_revision` writes nothing either; the
+    /// persistent service answers it with both revisions
+    /// ([`SessionError::transcript_revision_conflict_revisions`]).
     async fn prune_system_rows(
         &self,
         id: &SessionId,

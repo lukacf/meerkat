@@ -29,6 +29,13 @@ const PROBE_TOOL: &str = "resumed_run_probe";
 const ROOT_ENV: &str = "MEERKAT_RPC_RESUMED_RUN_ROOT";
 /// The child incarnation's libtest path.
 const CHILD_TEST: &str = "session_runtime::resumed_run_tests::rpc_resumed_run_child_incarnation";
+/// The libtest path of the child incarnation whose second turn carries a
+/// per-turn model override.
+const OVERRIDE_CHILD_TEST: &str =
+    "session_runtime::resumed_run_tests::rpc_resumed_run_with_a_model_override_child_incarnation";
+/// The model the override child's second turn selects: one the session's
+/// provider owns, other than [`MODEL`].
+const OVERRIDE_MODEL: &str = "claude-opus-4-8";
 
 /// What the scripted model answers to one request.
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +52,8 @@ enum Step {
 struct ScriptedModel {
     steps: StdMutex<VecDeque<Step>>,
     requests: AtomicUsize,
+    /// The model each request named, in order.
+    models: StdMutex<Vec<String>>,
     kill_marker: Option<PathBuf>,
 }
 
@@ -53,8 +62,16 @@ impl ScriptedModel {
         Arc::new(Self {
             steps: StdMutex::new(steps.into_iter().collect()),
             requests: AtomicUsize::new(0),
+            models: StdMutex::new(Vec::new()),
             kill_marker,
         })
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -76,6 +93,10 @@ impl LlmClient for ScriptedModel {
         let n = self
             .requests
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.model.clone());
         let step = self
             .steps
             .lock()
@@ -176,6 +197,16 @@ async fn run_turn(
     id: &SessionId,
     prompt: &str,
 ) -> Result<RunResult, RpcError> {
+    run_turn_with_overrides(runtime, id, prompt, None).await
+}
+
+/// [`run_turn`], with the request's per-turn `overrides`.
+async fn run_turn_with_overrides(
+    runtime: &Arc<SessionRuntime>,
+    id: &SessionId,
+    prompt: &str,
+    overrides: Option<crate::handlers::turn::TurnOverrides>,
+) -> Result<RunResult, RpcError> {
     let (event_tx, mut event_rx) = mpsc::channel(256);
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let result = runtime
@@ -187,7 +218,7 @@ async fn run_turn(
             None,
             None,
             None,
-            None,
+            overrides,
         )
         .await;
     let _ = drain.await;
@@ -251,13 +282,55 @@ async fn rpc_resumed_run_child_incarnation() {
     std::future::pending::<()>().await;
 }
 
-/// Kill the child incarnation at its kill point and return the session it
-/// recorded.
+/// The child incarnation of the override row: as
+/// [`rpc_resumed_run_child_incarnation`], but its second turn carries a
+/// per-turn model override. The turn swaps the session's LLM client to the
+/// overriding model, and saves the session with it, before its first round.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_resumed_run_with_a_model_override_child_incarnation() {
+    let Some(root) = std::env::var_os(ROOT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let runtime = sqlite_runtime(&root).await;
+    let model = ScriptedModel::new(
+        [Step::Text("first answer"), Step::Tool, Step::KillPoint],
+        Some(root.join("killed")),
+    );
+    // The swap builds the session's new client from the runtime's default
+    // one: the same scripted model.
+    runtime.set_default_llm_client(Some(model.clone()));
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(model),
+        ..AgentBuildConfig::new(MODEL)
+    };
+    let session_id = runtime
+        .create_session(build_config, None, None, Vec::new())
+        .await
+        .expect("create the session");
+    std::fs::write(root.join("session-id"), session_id.to_string()).expect("record the session");
+    run_turn(&runtime, &session_id, "first")
+        .await
+        .expect("the first turn completes");
+    let _held = run_turn_with_overrides(
+        &runtime,
+        &session_id,
+        "second",
+        Some(crate::handlers::turn::TurnOverrides {
+            model: Some(OVERRIDE_MODEL.to_string()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    std::future::pending::<()>().await;
+}
+
+/// Kill the child incarnation `child_test` at its kill point and return the
+/// session it recorded.
 #[allow(clippy::disallowed_methods)]
-async fn kill_child_at_its_kill_point(root: &std::path::Path) -> SessionId {
+async fn kill_child_at_its_kill_point(root: &std::path::Path, child_test: &str) -> SessionId {
     let log = std::fs::File::create(root.join("child.log")).expect("child log");
     let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
-        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+        .args(["--exact", child_test, "--nocapture", "--test-threads=1"])
         .env(ROOT_ENV, root)
         .stdout(log.try_clone().expect("child log"))
         .stderr(log)
@@ -300,7 +373,7 @@ async fn kill_child_at_its_kill_point(root: &std::path::Path) -> SessionId {
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_run_resumed_after_a_kill_at_a_committed_round_completes() {
     let root = tempfile::tempdir().expect("tempdir");
-    let session_id = kill_child_at_its_kill_point(root.path()).await;
+    let session_id = kill_child_at_its_kill_point(root.path(), CHILD_TEST).await;
 
     let runtime = sqlite_runtime(root.path()).await;
     runtime.set_default_llm_client(Some(ScriptedModel::new(
@@ -336,5 +409,57 @@ async fn rpc_run_resumed_after_a_kill_at_a_committed_round_completes() {
     assert!(
         committed_text(&runtime, &session_id, "first answer").await,
         "the resumed run continues the committed history"
+    );
+}
+
+/// JSON-RPC: a run whose input carries a per-turn model override, killed at
+/// a committed round, resumes at the next start and completes once, on the
+/// overriding model, keeping the round the killed run committed.
+///
+/// The override's swap ran, and saved the session with its model, before
+/// the run's first round commit, so the resumed run continues under it. The
+/// session runtime must not swap the LLM client again ahead of the resumed
+/// dispatch: the resumed actor continues the run's provisional tail, which
+/// the swap's live reads refuse until the run commits, so the dispatch would
+/// be refused before its turn on every attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_run_with_a_model_override_resumed_after_a_kill_completes_on_that_model() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_id = kill_child_at_its_kill_point(root.path(), OVERRIDE_CHILD_TEST).await;
+
+    let runtime = sqlite_runtime(root.path()).await;
+    let model = ScriptedModel::new([Step::Text("resumed answer")], None);
+    runtime.set_default_llm_client(Some(model.clone()));
+    let open_run = tail_run(&runtime, &session_id)
+        .await
+        .expect("the killed run's round commit stands as the provisional tail");
+
+    let attached = runtime.ensure_runtime_executor(&session_id).await;
+    assert!(
+        attached.is_ok(),
+        "the restarted runtime attaches the session whose run it resumes: {attached:?}"
+    );
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let completed = loop {
+        if committed_text(&runtime, &session_id, "resumed answer").await
+            && tail_run(&runtime, &session_id).await.is_none()
+        {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let observed = (
+        completed,
+        committed_probe_call(&runtime, &session_id).await,
+        model.models().first().cloned(),
+    );
+    assert_eq!(
+        observed,
+        (true, true, Some(OVERRIDE_MODEL.to_string())),
+        "the resumed run {open_run} completes and commits its boundary, keeps the round the \
+         killed run committed, and asks the overriding model"
     );
 }

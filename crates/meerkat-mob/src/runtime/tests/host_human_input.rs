@@ -5584,6 +5584,7 @@ async fn a_resumed_run_after_its_host_runtime_stopped_waits_for_the_next_start()
         .await
         .expect("mob shutdown finishes")
         .expect("mob shutdown");
+    let resumed_requests = restarted_client.requests();
     let run_failures = stop_events(&root_path, &session_id)
         .await
         .iter()
@@ -5594,10 +5595,136 @@ async fn a_resumed_run_after_its_host_runtime_stopped_waits_for_the_next_start()
             (kept_across_stop, resumable_at_stop, actor_at_stop),
             (loop_ended, reload_required, running_left_open),
             (consumed, run_failures),
+            (
+                resumed_requests
+                    .first()
+                    .map(|request| request.model.clone()),
+                requests_carrying(&resumed_requests, HUMAN),
+            ),
         ),
-        ((true, true, true), (true, true, true), (true, 0)),
+        (
+            (true, true, true),
+            (true, true, true),
+            (true, 0),
+            (Some(OVERRIDE_MODEL.to_string()), 1),
+        ),
         "a resumed run after the host runtime stopped waits for the next start: the member \
-         executor's check leaves it to the next registration, and the third host resumes it once"
+         executor's check leaves it to the next registration, and the third host resumes it \
+         once, on the overriding model"
+    );
+}
+
+/// A run that a requeue stop kept open, its input carrying a per-turn model
+/// override, resumes once at the next start, on the model the override
+/// selected. No host runtime stops here.
+///
+/// The override was applied, and the session saved with its model, before
+/// the run's first round commit, so the resumed run continues under it. The
+/// member executor must not apply it again ahead of the resumed dispatch:
+/// the resumed actor continues the run's provisional tail, which the
+/// reconfigure's live reads refuse until the run commits, so the dispatch
+/// would be refused before its turn on every attempt and the input would
+/// never be consumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_run_with_a_model_override_resumes_once_at_the_next_start() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let (_root, root_path) = stop_root();
+    // The first process runs the turn, with the override, to a committed
+    // round and keeps it open across a requeue stop.
+    let client = ScriptedClient::new(true);
+    let host =
+        open_stop_host_composed(&root_path, &client, Some("kept-override-run"), &[], true).await;
+    let mob_id = host.handle.mob_id().clone();
+    let (identity, session_id, entry) = spawn_stop_member(&host).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    client.block();
+    client.call_a_tool_next();
+    let requests_before = client.requests().len();
+    let running_key = delivery("kept-override-run-running");
+    let running = host
+        .handle
+        .start_host_human_input_with_options_bounded(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkSpec::new(HUMAN, WorkOrigin::External),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    OVERRIDE_MODEL,
+                )),
+                ..Default::default()
+            },
+            running_key.clone(),
+            deadline(),
+        )
+        .await
+        .expect("running human admission");
+    client.wait_for_requests(requests_before + 2).await;
+    let running_id = admitted_input_id(&host.runtime_store, &session_id, &running_key).await;
+    tokio::time::timeout(
+        WAIT,
+        host.handle
+            .shutdown_with_report(requeue_options(crate::RequeueMaxAge::DEFAULT)),
+    )
+    .await
+    .expect("the requeue stop finishes")
+    .expect("requeue stop");
+    let kept_across_stop = stop_answer(running, &session_id).await
+        == StopAnswer::RequeuedAcrossStop(running_id.clone());
+    drop(host);
+    await_supervisor_route_release(&mob_id).await;
+
+    // The next process resumes the kept run.
+    let restarted_client = ScriptedClient::new(true);
+    let restarted = open_stop_host_composed(&root_path, &restarted_client, None, &[], true).await;
+    tokio::time::timeout(WAIT, restarted.handle.ensure_member_live(&identity))
+        .await
+        .expect("the member's wake finishes")
+        .expect("wake the member on the next host");
+    let consumed = tokio::time::timeout(WAIT, async {
+        loop {
+            let phase = restarted
+                .runtime_store
+                .load_input_state(&runtime_id, &running_id)
+                .await
+                .expect("runtime-owned input read")
+                .expect("the input keeps its durable row")
+                .seed
+                .phase;
+            if phase == InputLifecycleState::Consumed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    // The log is complete once the shutdown returns (see the crash row).
+    tokio::time::timeout(WAIT, restarted.handle.shutdown())
+        .await
+        .expect("mob shutdown finishes")
+        .expect("mob shutdown");
+    let resumed_requests = restarted_client.requests();
+    let run_failures = stop_events(&root_path, &session_id)
+        .await
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::RunFailed { .. }))
+        .count();
+    assert_eq!(
+        (
+            (kept_across_stop, consumed),
+            (
+                resumed_requests
+                    .first()
+                    .map(|request| request.model.clone()),
+                requests_carrying(&resumed_requests, HUMAN),
+            ),
+            run_failures,
+        ),
+        ((true, true), (Some(OVERRIDE_MODEL.to_string()), 1), 0),
+        "a kept run whose input carries a per-turn model override resumes once at the next \
+         start, on the overriding model, and records no failed run"
     );
 }
 

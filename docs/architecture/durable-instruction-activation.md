@@ -435,7 +435,13 @@ summary never restates a superseded body.
 The 256 KiB per-body limit and the 1 MiB budget bound growth. The budget
 counts live bodies only: a retired body stops counting at the commit that
 retires it. Between compactions superseded bodies still count, so a burst of
-activations can meet the typed refusal before the next compaction. An exact
+activations can meet the typed refusal before the next compaction; a host
+can retire them on demand, without waking the session, through the
+system-row prune's `retire_superseded_activation_bodies`
+(`SessionServiceTranscriptEditExt::prune_system_rows`), whose one commit
+takes the same `SessionDocumentMachine` decision a compaction does and is
+checked the same way: the rewrite guard compares the activation rows with
+the source as the authorized retirement leaves it. An exact
 retry of the current activation remains legal at the budget because it
 appends nothing. A document that holds a retired body is written at session
 envelope 5 (the session records its instruction state, as a fork that copies

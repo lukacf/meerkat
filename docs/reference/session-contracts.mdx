@@ -124,6 +124,20 @@ never infer a System message from current host configuration. A host that
 wants to add an instruction supplies it through the admitted update path,
 where it becomes a new ordered System row rather than an overwrite.
 
+A host that wants earlier ordinary System rows gone (prompts that earlier
+boots wrote, for example) names them to the system-row prune,
+`SessionServiceTranscriptEditExt::prune_system_rows`: one audited rewrite,
+reason kind `system-row-prune`, removes exactly the named rows. Each row is
+named as a history read showed it, by its 0-based message index and
+`sha256:<64 lowercase hex>` over its content as UTF-8 text; Core never picks
+rows, and a stale reference is refused typed with nothing written. Only
+ordinary System rows are removable: a keyed prompt version, an instruction
+activation row and an operator-instruction entry row each keep their own
+lifecycle, and a row an operator-instruction entry follows in its group of
+System rows stays. A session running a turn answers `Busy`; a dormant one is
+not woken, and no model is called. The prune can also retire superseded
+instruction activation bodies in the same commit.
+
 Compaction retains active keyed and unkeyed System rows verbatim in relative
 order, while discarding superseded keyed versions from the compacted active
 head. This does not rewrite their retained revision history. Instruction

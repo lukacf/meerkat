@@ -676,6 +676,11 @@ them.
   new. Exhaustive matches must add the new variants, and code that builds
   the state struct literally must set the new fields.
 
+- `meerkat-core`: `TranscriptEditError` is now `#[non_exhaustive]` and gains
+  `SystemRowPruneRefused { index, cause }`, the typed refusal of a
+  system-row prune (see Added). A match over `TranscriptEditError` outside
+  meerkat-core needs a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1352,6 +1357,34 @@ them.
   superseding row with its body). A document that holds a retired body is
   written at session envelope 5 (see Upgrade notes).
 
+- `meerkat-core`, `meerkat-session`: a host removes ordinary System rows it
+  names from an idle session in one audited rewrite, without waking it or
+  calling a model: `SessionServiceTranscriptEditExt::prune_system_rows`
+  (`SystemRowPruneRequest`, `SystemRowPruneResult`; the default method
+  answers `Unsupported`, and `PersistentSessionService` implements it) and
+  `Session::prune_system_rows` (`SystemRowPruneCommit`). Each row is named
+  as a history read showed it (`SystemRowRef`): its 0-based message index
+  and `sha256:<64 lowercase hex>` over its content as UTF-8 text; Core never
+  picks rows, and nothing guards the last ordinary System row. The commit's
+  reason kind is `system-row-prune` (`SYSTEM_ROW_PRUNE_REASON_KIND`) with the
+  request's note, and an optional `expected_parent_revision` adds a
+  compare-and-swap; the per-row digest is the main guard. A named row that
+  is not an ordinary System row, a stale digest, an index out of range or
+  named twice, or a row an operator-instruction entry follows in its group of
+  System rows refuses the whole prune with
+  `TranscriptEditError::SystemRowPruneRefused` (`SystemRowPruneRefusal`),
+  which a session service keeps typed as
+  `SessionError::system_row_prune_refused` structured data
+  (`SessionError::system_row_prune_refusal`); nothing is written. With
+  `retire_superseded_activation_bodies` the same commit retires every
+  superseded instruction activation body in place, as a compaction does; a
+  key's newest body is never retired. A running session answers `Busy`; a
+  dormant one is written store-only and stays dormant, a live idle one
+  converges on the commit, and pending compaction projection intents carry
+  forward unchanged. A prune that moves an instruction activation row to
+  another offset, or retires a body, writes the document at envelope 5; any
+  other stays at envelope 4.
+
 ### Changed
 
 - `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
@@ -1435,6 +1468,13 @@ them.
   roster, is the new pure admission input `AdmitReset`: every guard of
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
+
+- `meerkat-store`: `rkat storage doctor`'s `operator-instruction-envelope`
+  finding, which lists every session at session envelope 5, names the three
+  facts that write envelope 5 (operator-instruction entries, a rewrite record
+  that moved an instruction activation row, a retired instruction activation
+  body) and how a release before 0.9.9 refuses such a session per store kind,
+  instead of saying every listed session carries operator instructions.
 
 ### Fixed
 
@@ -1731,6 +1771,12 @@ them.
   earlier prompt sent again after a change, still append, a bare resume
   still appends nothing, and `StartTurnRequest.system_prompt` keeps its
   per-turn append.
+
+- `meerkat-mob`: a prompt-context fork under `reactivate_inherited` whose
+  carried head of a key holds a body a compaction retired is refused with
+  the typed cause `head_body_retired`, as a durable fork of a retired copied
+  head is. Before, when the source session was unknown, it carried the
+  retired header as the key's instruction text.
 
 ### Upgrade notes
 

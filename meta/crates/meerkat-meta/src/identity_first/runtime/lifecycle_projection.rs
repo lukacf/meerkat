@@ -3830,6 +3830,89 @@ mod tests {
         )));
     }
 
+    /// A failed step reached Core when the fact it journals first follows
+    /// the head it read. For an incarnation it read live, that is the start
+    /// of the incarnation's retirement naming a rotation or, when a host's
+    /// retirement of it ended before the rotation reached Core, the fresh
+    /// life Core seated after it; for an incarnation Core had retired, that
+    /// fresh life; for a member Core held none of, any seat. Another fact of
+    /// the member (a plain retirement's start, the seat of a rotation another
+    /// step started, a retirement) is no reach.
+    #[test]
+    fn a_step_reaches_core_with_the_fact_it_journals_first() {
+        let started =
+            |rotation| MemberLifecycleFact::retirement_started(alpha(), 0, rotation, None);
+        let seated_after = |rotation| {
+            MemberLifecycleFact::seated(alpha(), 1, lead()).with_seat_rotation(Some(rotation))
+        };
+        let fresh_life = || {
+            seated_after(meerkat_mob::SeatRotation::fresh_life_after(
+                meerkat_mob::Generation::new(0),
+            ))
+        };
+        let live = StepFirstFact::RetirementStart { generation: 0 };
+        let retired = StepFirstFact::FreshLifeAfter { predecessor: 0 };
+        for (first, fact, reached) in [
+            (
+                live,
+                started(Some(meerkat_mob::RotationTarget::FreshSession)),
+                true,
+            ),
+            (live, started(None), false),
+            (live, fresh_life(), true),
+            (
+                live,
+                seated_after(meerkat_mob::SeatRotation::successor(
+                    meerkat_mob::Generation::new(0),
+                    meerkat_mob::RotationTarget::FreshSession,
+                )),
+                false,
+            ),
+            (
+                live,
+                MemberLifecycleFact::retired(alpha(), 0, lead()),
+                false,
+            ),
+            (retired, fresh_life(), true),
+            (
+                retired,
+                MemberLifecycleFact::seated(alpha(), 1, lead()),
+                false,
+            ),
+            (
+                StepFirstFact::Seat,
+                MemberLifecycleFact::seated(alpha(), 1, lead()),
+                true,
+            ),
+            (
+                StepFirstFact::Seat,
+                MemberLifecycleFact::seated(meerkat_mob::AgentIdentity::from("beta"), 0, lead()),
+                false,
+            ),
+        ] {
+            assert_eq!(first.is(&fact, &alpha()), reached, "{first:?} at {fact:?}");
+        }
+    }
+
+    /// The note of a later retirement a Meta verb's record answered keeps
+    /// the earlier one's: the live lane may read an identity's later
+    /// retirement before the backlog lane reads the respawn's seat that
+    /// names the earlier.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_later_answered_retirement_keeps_the_earlier_one() {
+        let projection = LifecycleProjection::new();
+        let alice = AgentIdentity::parse("personal:alice").expect("identity");
+        projection.note_answered(&alice, 3);
+        projection.note_answered(&alice, 4);
+        assert!(
+            projection.answered(&alice, 3),
+            "the earlier retirement is still answered"
+        );
+        assert!(projection.answered(&alice, 4));
+        assert!(!projection.answered(&alice, 5));
+    }
+
     /// A bounded side effect that never answers is attempted as often as
     /// its bound allows, and fails timed out; one that answers is attempted
     /// once; a failing write is attempted again, and stops at its first

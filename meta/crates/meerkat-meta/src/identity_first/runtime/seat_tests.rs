@@ -5820,6 +5820,9 @@ async fn unlisting_held_while(
         async move { runtime.settle_lifecycle_projection().await }
     });
     hook_heard_of(&seen, &alice).await;
+    // The exit interviews are keyed by the time their step was asked, to
+    // the millisecond: the step is asked in a later one than the unlisting.
+    tokio::time::sleep(Duration::from_millis(2)).await;
     match step {
         "reset" => {
             runtime
@@ -6331,6 +6334,115 @@ async fn a_respawn_with_no_retirement_since_its_predecessor_s_seat_stalls_there(
     assert!(lock(&seen).is_empty(), "{:?}", lock(&seen));
 }
 
+/// A roster pass lists alice again while a step of hers holds her
+/// lifecycle lock past a side effect's deadline (a reset whose customizer
+/// build is stuck, say). The pass's take-back of her unlisting does not
+/// wait for the lock: it skips her, and her unlisting stays recorded. Once
+/// the step answered, the next pass takes the unlisting back.
+///
+/// RED before the take-back's wait was bounded: the pass waited for the
+/// lock for as long as the step held it.
+#[tokio::test]
+async fn a_roster_pass_does_not_wait_for_a_relisted_identity_s_held_lock() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    runtime.set_identity_records(Arc::clone(&records), "relisted-held".to_string());
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    runtime.settle_lifecycle_projection().await;
+    runtime.set_lifecycle_effect_limits(Duration::from_millis(200), 1);
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    let unlisting = crate::runtime::LifecycleIntentKey::new(alice.as_str(), 0);
+
+    let held = runtime.lifecycle_lock_for(&alice).await.lock_owned().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.take_back_relisted_unlistings(&[spec(&alice)]),
+    )
+    .await
+    .expect("the pass does not wait for a held lock past a side effect's deadline");
+    assert!(
+        records
+            .lifecycle_effect_intent("relisted-held", &unlisting)
+            .await
+            .expect("the record reads")
+            .is_some(),
+        "the unlisting stays recorded for a later pass"
+    );
+    drop(held);
+    runtime.take_back_relisted_unlistings(&[spec(&alice)]).await;
+    assert!(
+        records
+            .lifecycle_effect_intent("relisted-held", &unlisting)
+            .await
+            .expect("the record reads")
+            .is_none(),
+        "the next pass takes the unlisting back"
+    );
+}
+
+/// A reset reads alice's incarnation live, and a host's retirement of it
+/// ends before the reset's rotation reaches Core: Core seats her fresh life
+/// after that incarnation instead of starting its retirement, and the
+/// rotation then fails (Core compensates the spawn). The fresh life's seat
+/// says the rotation reached Core, so the reset keeps what it recorded and
+/// answers that the rotation may have started.
+///
+/// RED before a step that read the incarnation live took the fresh life's
+/// seat after it for its reach: the reset took its records back and
+/// answered that nothing was started, although Core had seated.
+#[tokio::test]
+async fn a_reset_whose_incarnation_a_host_retired_first_keeps_what_it_recorded() {
+    let alice = identity("personal:alice");
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = Arc::new(SeatCore {
+        rotate_gate: StdMutex::new(Some((reached_tx, release_rx))),
+        compensate_next_rotations: AtomicUsize::new(1),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    runtime.settle_lifecycle_projection().await;
+
+    let resetting = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let alice = alice.clone();
+        async move { runtime.reset(&alice).await }
+    });
+    reached_rx.await.expect("the reset reaches Core");
+    // A host's retirement of the incarnation the reset read live ends first.
+    core.core.retire(&live);
+    release_tx.send(()).expect("release the reset's rotation");
+    let answered = resetting.await.expect("the reset's task");
+    let Err(IdentityRuntimeError::Internal(detail)) = &answered else {
+        panic!("the reset answers that its rotation may have started: {answered:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
+    assert!(
+        runtime
+            .pending_rotation_intents()
+            .await
+            .expect("the records read")
+            .contains_key(&alice),
+        "the reset's rotation record stays for the next compile"
+    );
+}
+
 /// Source guard: the lifecycle projection and the verbs decide no
 /// lifecycle fact Core's journal carries. No retirement and seat are paired
 /// by their positions in the journal (`rotation_successor`, a retirement
@@ -6543,10 +6655,50 @@ fn the_bridge_forwards_every_core_lifecycle_kind() {
         let pattern = &pattern[..pattern.find('}').unwrap_or(pattern.len())];
         for field in fields {
             assert!(
-                pattern.contains(field),
+                binds_field(pattern, field),
                 "the bridge's conversion of `{kind}` drops its `{field}`"
             );
         }
+    }
+}
+
+/// Whether the struct pattern `pattern` binds its field `field`, by that
+/// exact name, to anything but `_`: `field` alone, or `field: binding`.
+/// A longer name that holds `field` (`successor_role` for `role`) is not
+/// that field.
+fn binds_field(pattern: &str, field: &str) -> bool {
+    let is_name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = pattern.as_bytes();
+    let mut from = 0;
+    while let Some(at) = pattern[from..].find(field).map(|at| from + at) {
+        let end = at + field.len();
+        from = end;
+        if (at > 0 && is_name(bytes[at - 1])) || bytes.get(end).copied().is_some_and(is_name) {
+            continue;
+        }
+        let Some(binding) = pattern[end..].trim_start().strip_prefix(':') else {
+            return true;
+        };
+        let binding = binding.trim_start();
+        let name = &binding[..binding.bytes().take_while(|byte| is_name(*byte)).count()];
+        if name != "_" {
+            return true;
+        }
+    }
+    false
+}
+
+/// The kind guard above reads a field by its exact name: a longer name that
+/// holds it, or a binding to `_`, does not forward it.
+#[test]
+fn a_forwarded_field_is_bound_by_its_exact_name() {
+    let pattern = "MemberLifecycleEvent::Retired {\n    agent_identity: member,\n    \
+                   generation,\n    successor_role,\n    cause: _,\n    rotation,\n    ..";
+    for field in ["agent_identity", "generation", "rotation"] {
+        assert!(binds_field(pattern, field), "`{field}` is bound");
+    }
+    for field in ["role", "cause", "session_id"] {
+        assert!(!binds_field(pattern, field), "`{field}` is not bound");
     }
 }
 

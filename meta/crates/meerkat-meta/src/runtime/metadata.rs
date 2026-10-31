@@ -2368,9 +2368,19 @@ mod tests {
             "the queue refused the write",
             1_700_000_000_000,
         );
+        let listed_keys = |intents: Vec<LifecycleEffectIntent>| {
+            let mut keys = intents
+                .iter()
+                .map(LifecycleEffectIntent::key)
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        };
         for store in stores {
             for intent in [
                 effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Unlisted),
+                effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Delete)
+                    .with_predecessor_retired(true),
                 effect_intent("mob-a", "personal:bob", 1, LifecycleEffectVerb::RoleMove),
                 effect_intent("mob-b", "personal:alice", 3, LifecycleEffectVerb::Reset),
             ] {
@@ -2381,20 +2391,63 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|intent| (intent.identity, intent.generation, intent.verb))
+                .map(|intent| {
+                    (
+                        intent.identity.clone(),
+                        intent.generation,
+                        intent.key().slot,
+                        intent.verb,
+                    )
+                })
                 .collect::<Vec<_>>();
-            listed.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            listed.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
             assert_eq!(
                 listed,
                 vec![
                     (
                         "personal:alice".to_string(),
                         3,
+                        LifecycleIntentSlot::End,
                         LifecycleEffectVerb::Unlisted
                     ),
-                    ("personal:bob".to_string(), 1, LifecycleEffectVerb::RoleMove),
+                    (
+                        "personal:alice".to_string(),
+                        3,
+                        LifecycleIntentSlot::FreshLifeAfter,
+                        LifecycleEffectVerb::Delete
+                    ),
+                    (
+                        "personal:bob".to_string(),
+                        1,
+                        LifecycleIntentSlot::End,
+                        LifecycleEffectVerb::RoleMove
+                    ),
+                ],
+                "the listing holds both of an incarnation's intents"
+            );
+            // Clearing the fresh life's intent leaves the end's, and the
+            // listing says so.
+            store
+                .clear_lifecycle_effect_intent(
+                    "mob-a",
+                    &LifecycleIntentKey::fresh_life_after("personal:alice", 3),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                listed_keys(store.lifecycle_effect_intents("mob-a").await.unwrap()),
+                vec![
+                    LifecycleIntentKey::new("personal:alice", 3),
+                    LifecycleIntentKey::new("personal:bob", 1),
                 ]
             );
+            store
+                .set_lifecycle_effect_intent(
+                    &effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Delete)
+                        .with_predecessor_retired(true),
+                )
+                .await
+                .unwrap();
             store.record_lifecycle_effect_failure(&hook).await.unwrap();
             store
                 .record_lifecycle_effect_failure(&interview)
@@ -2425,6 +2478,15 @@ mod tests {
                 .unwrap(),
             vec![interview, hook],
             "the failures survive a reopen"
+        );
+        assert_eq!(
+            listed_keys(reopened.lifecycle_effect_intents("mob-a").await.unwrap()),
+            vec![
+                LifecycleIntentKey::new("personal:alice", 3),
+                LifecycleIntentKey::fresh_life_after("personal:alice", 3),
+                LifecycleIntentKey::new("personal:bob", 1),
+            ],
+            "both of an incarnation's intents survive a reopen"
         );
     }
 

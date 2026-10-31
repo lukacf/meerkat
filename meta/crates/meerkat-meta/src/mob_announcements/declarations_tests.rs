@@ -1608,6 +1608,7 @@ async fn a_declarations_read_waits_for_the_reconcile_in_flight() {
             "declarations/get answered while the reconcile of revision 2 was held before \
              declared-b's put: a settled read lists every declared record"
         );
+        panic!("declarations/get answered before the held reconcile was released");
     }
     held.release();
     let answered = tokio::time::timeout(BOUND, reading)

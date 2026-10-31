@@ -660,6 +660,14 @@ them.
   retired (see Added). The Rust enum is `#[non_exhaustive]`; the generated
   Python, TypeScript and Web SDK types gain the kind in their closed
   refusal-cause unions, so SDK code that handles every cause must handle it.
+  A 0.9.8 controller cannot decode the kind: when a 0.9.9 member host
+  refuses a placed forked participant with it (only under
+  `reactivate_inherited`), the 0.9.8 controller fails the create closed
+  with an untyped internal error (`failed to decode command bridge reply`)
+  in place of `ForkInstructionRefused`. Nothing is created on either side
+  and nothing is retried, but a 0.9.8 temporary council reports
+  `participant_seating_failed` for that seat and keeps a cleanup debt for
+  it. A 0.9.9 controller reads the typed refusal.
 
 - `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
   `SessionDocumentMachine` decides which superseded instruction activation
@@ -1356,7 +1364,10 @@ them.
   a fork whose copied head was retired with the cause `head_body_retired`
   before anything is committed (a fork at a later boundary copies the
   superseding row with its body). A document that holds a retired body is
-  written at session envelope 5 (see Upgrade notes).
+  written at session envelope 5 (see Upgrade notes). No compaction retires
+  a key's newest row, so a document whose own newest row of a key holds a
+  retired body is torn: its model requests fail closed with a projection
+  error that names the key.
 
 - `meerkat-core`, `meerkat-session`: a host removes ordinary System rows it
   names from an idle session in one audited rewrite, without waking it or
@@ -1760,8 +1771,11 @@ them.
   offset; so was any rewrite that added or removed an ordinary System row
   before an activation row.
   Moving an activation across a conversation row, and minting, altering,
-  erasing or reordering one, are still refused. A rewrite record that moved
-  an activation row to another offset is written at session envelope 5 (see
+  erasing or reordering one, are still refused. A rewrite that turns an
+  ordinary System row before an activation row into a conversation row at
+  the same offset is now refused too (the offset comparison accepted it),
+  since the activation row's place changes. A rewrite record that moved an
+  activation row to another offset is written at session envelope 5 (see
   Upgrade notes).
 
 - `meerkat-core`, `meerkat`: a resume whose explicit prompt is exactly the
@@ -1812,14 +1826,20 @@ them.
   facts (an entry row, current or retained in its rewrite graph, or the
   recorded instruction state), a session in which a 0.9.9 compaction retired
   a superseded instruction activation body (and a fork child that copied
-  such a row), and a session whose rewrite graph retains a record that moved
-  an instruction activation row to another offset. 0.9.8 refuses such a
-  document typed at its envelope where it reads a store's head row first;
-  where it decodes the whole document, it refuses a retired activation row
-  as malformed instruction activation history. Every other session stays at
-  envelope 4, byte for byte, and still reads on 0.9.8.
+  such a row), and a session in which a rewrite (a keyed prompt update, a
+  generic rewrite, a restore or a system-row prune) moved an instruction
+  activation row to another offset. 0.9.8 refuses such a document typed at
+  its envelope where it reads a store's head row first; where it decodes the
+  whole document, it refuses a retired activation row as malformed
+  instruction activation history. Every other session stays at envelope 4,
+  byte for byte, and still reads on 0.9.8.
   `rkat storage doctor` lists the sessions at envelope 5 (Info finding
-  `operator-instruction-envelope`) before a rollback.
+  `operator-instruction-envelope`) before a rollback. The marker of a
+  retired body or a moved row is the recorded operator-instruction state,
+  unowned and empty: such a session reads back an unowned, empty target
+  (`read_session_instructions`), and its fresh run starts and compactions
+  run the operator-instruction resolution and fold, which find nothing to
+  apply (the empty fold still advances the entry sequence).
 
 ### Known limitations
 

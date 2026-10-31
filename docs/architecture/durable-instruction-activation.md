@@ -383,9 +383,9 @@ Activation rows are immutable transcript-boundary anchors.
     head whose body a compaction of the source retired is refused
     (`head_body_retired`) before anything is committed: a fork whose prefix
     ends between a retired row and the row that superseded it has no body to
-    carry. A fork at the tail always copies each key's newest row, which
-    keeps its body; a host can also fork at a later boundary or activate the
-    key in the child.
+    carry. A fork at the tail copies, with its body, each key's newest row
+    the source activated itself (a compaction never retires it); a host can
+    also fork at a later boundary or activate the key in the child.
 - Re-activation adds each effective body to the lineage again, so it counts
   against the 1 MiB budget of live bodies, and a fork that would cross it is
   refused (`lineage_body_budget_exceeded`). The child's first compaction

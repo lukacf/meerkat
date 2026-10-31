@@ -1704,9 +1704,9 @@ impl Session {
     /// copy (a fork child: the copied rows name another origin, and this
     /// session's own entry sequence starts at zero), a session whose
     /// transcript holds an instruction activation row with a retired body
-    /// (a compaction retired it, or a fork copied it), and a session whose
-    /// rewrite graph retains a record that moved an instruction activation
-    /// row to another offset.
+    /// (a compaction retired it, or a fork copied it), and a session in
+    /// which a rewrite moved an instruction activation row to another
+    /// offset.
     pub(crate) fn record_unowned_instruction_state(&mut self) -> Result<(), InstructionStateError> {
         if self.instruction_target_state()?.is_some() {
             return Ok(());

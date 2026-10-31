@@ -14,6 +14,8 @@ pub const INSTRUCTION_ACTIVATION_RENDER_VERSION_V1: u16 = 1;
 /// a compaction retired ([`crate::types::RetiredInstructionBody`]).
 pub const RETIRED_INSTRUCTION_RENDER_VERSION_V1: u16 = 1;
 pub const MAX_INSTRUCTION_BODY_BYTES: usize = 256 * 1024;
+/// The budget, in UTF-8 bytes, of the live activation bodies one transcript
+/// holds; a body a compaction retired no longer counts.
 pub const MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES: usize = 1024 * 1024;
 
 /// Closed compare-and-set predecessor for an instruction activation.
@@ -188,7 +190,7 @@ pub enum InstructionActivationError {
     Unsupported(String),
     #[error("instruction body exceeds {max_bytes} UTF-8 bytes")]
     BodyTooLarge { max_bytes: usize },
-    #[error("instruction activation lineage exceeds {max_bytes} retained UTF-8 body bytes")]
+    #[error("instruction activation lineage exceeds {max_bytes} UTF-8 bytes of live bodies")]
     LineageBodyBudgetExceeded { max_bytes: usize },
     #[error("instruction body digest mismatch: declared {declared}, computed {computed}")]
     DigestMismatch {
@@ -319,8 +321,9 @@ pub enum ForkInstructionRefusalCause {
     /// Re-activation was asked for, but the last copied row of a key was not
     /// effective in the source: the source never ran a turn under it.
     NotEffectiveInSource,
-    /// Re-activating the effective bodies would exceed the retained
-    /// activation-body budget of the lineage.
+    /// Re-activating the effective bodies would exceed the activation-body
+    /// budget: the live bodies of the child's transcript, the copied rows'
+    /// included, a retired body not counted.
     LineageBodyBudgetExceeded { max_bytes: usize },
     /// The activation rules refused a re-activation row.
     Activation {
@@ -458,7 +461,7 @@ fn fork_instruction_refusal_message(
         ),
         ForkInstructionRefusalCause::LineageBodyBudgetExceeded { max_bytes } => format!(
             "fork refused: re-activating instruction keys [{keys}] would exceed the {max_bytes} \
-             byte retained activation-body budget"
+             byte budget of live activation bodies in the child"
         ),
         ForkInstructionRefusalCause::Activation { code } => {
             format!("fork refused: re-activating instruction keys [{keys}] was refused ({code:?})")
@@ -796,7 +799,7 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
                     })?;
                 if retained_body_bytes > MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES {
                     return Err(format!(
-                        "instruction activation lineage exceeds {MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES} retained UTF-8 body bytes"
+                        "instruction activation lineage exceeds {MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES} UTF-8 bytes of live bodies"
                     ));
                 }
                 keys_with_a_live_row.insert(lineage_key.clone());

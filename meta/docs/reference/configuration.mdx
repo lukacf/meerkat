@@ -1008,8 +1008,9 @@ inherited key, in namespace and key order:
 - **Only a body the source still holds:** a compaction retires the body of
   every activation row that a later row of its key superseded. A fork whose
   prefix ends between such a row and the row that superseded it has no body
-  to carry and is refused with `head_body_retired`. A fork at the tail always
-  copies each key's newest row, which keeps its body.
+  to carry and is refused with `head_body_retired`. A fork at the tail
+  copies, with its body, each key's newest row the source activated itself:
+  a compaction never retires it.
 
 ### What `reactivate_inherited` trusts
 

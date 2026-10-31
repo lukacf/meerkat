@@ -303,9 +303,11 @@ reaches an idle session after the stop waits for that start too. Once the
 session's runtime takes such an input up, as after a stop in the middle of a
 turn, the session's registration waits for its reload, and a later input is
 refused until the next start, with nothing kept for it; an RPC session runtime
-refuses it with `host_runtime_stopped`. On an RPC session runtime two more
-inputs are refused instead of waiting: a governed input, and an input to a help
-session, which is never rebuilt from storage and is refused with
+refuses it with `host_runtime_stopped` (two inputs to the same session within
+milliseconds of each other right after the stop can see the second refused
+untyped instead, `-32603`, with nothing kept). On an RPC session runtime two
+more inputs are refused instead of waiting: a governed input, and an input to a
+help session, which is never rebuilt from storage and is refused with
 `help_session_not_resumable`. A turn whose task
 panicked, or whose session the service retired, fails with its error, as does
 a turn its caller drives directly. When `RKAT_WORKER_STACK_BYTES` is unset the

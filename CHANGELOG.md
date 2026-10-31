@@ -122,12 +122,15 @@ them.
   up, as after a stop in the middle of a turn, the session's registration
   waits for its reload, and a later input is refused until the next start,
   with nothing kept for it (an RPC session runtime refuses it with
-  `host_runtime_stopped`, `-32032`). On an RPC session runtime, a governed
-  input is refused instead of waiting, and so is an input to a help session
-  (`help_session_not_resumable`), which is never rebuilt from storage. A
-  turn whose session task panicked, or whose actor the service retired,
-  still fails with its error, and so does a turn its caller drives directly
-  rather than through the runtime (see Upgrade notes and Fixed).
+  `host_runtime_stopped`, `-32032`; two inputs to the same session within
+  milliseconds of each other right after the stop can see the second
+  refused untyped instead, `-32603`, with nothing kept). On an RPC session
+  runtime, a governed input is refused instead of waiting, and so is an
+  input to a help session (`help_session_not_resumable`), which is never
+  rebuilt from storage. A turn whose session task panicked, or whose actor
+  the service retired, still fails with its error, and so does a turn its
+  caller drives directly rather than through the runtime (see Upgrade notes
+  and Fixed).
 
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds kept governed work that waits

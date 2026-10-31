@@ -384,15 +384,16 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # reachability witnesses violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its nine runs' floors, a coverage block in which each
-# covered action of every run generated a state, its seventy-four step
+# covered action of every run generated a state, its seventy-five step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy
 # mutants' generated invariants, its rotation, seat, respawn and
 # preserving-archive mutants' action properties, its declared apply
 # mutants' generated invariants, totality invariants and action properties
-# (one per declared apply invariant, property and guard), and its forced
-# destroy mutants' generated invariants violated.
+# (one per declared apply invariant, property and guard), its forced
+# destroy mutants' generated invariants, and its in-flight seal mutant's
+# target invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
 # count at or above each of its four runs' floors, a coverage block in which
 # each covered action of every run generated a state, its eighteen step
@@ -744,6 +745,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessReplayEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessApplyBusy is violated."' \
   'echo "Error: Action property NotAuditWitnessDestroyEndsCommittedLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealDefersInFlightSpawn is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEntrySeated is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEndHosted is violated."' \
   'echo "Error: Action property NotAuditWitnessMigrateKeepsHold is violated."' \
@@ -763,6 +765,7 @@ printf '%s\n' \
   'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
   'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
+  'echo "Error: Invariant marked_entry_has_no_spawn_in_flight is violated."' \
   'echo "Error: Invariant archived_session_record_is_unseated is violated."' \
   'echo "Error: Action property AuditEntryLeavesBySealDestroyOrReset is violated."' \
   'echo "Error: Action property AuditCandidateChangesNothing is violated."' \

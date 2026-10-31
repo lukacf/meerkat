@@ -709,10 +709,11 @@ fi
 # WakeMember cause; and a role-held member's declared migration, its
 # same-session and fresh-session rotations under another role or its own,
 # and a first-boot Resume request. --part hosted (shard audits-o): held
-# creation, the held spawn and entries hosted on their first use, with
-# Stop, Resume, Complete and the forced destroy (which ends the held
-# spawn's ladder whether its membership committed or not), and the
-# declared apply's open fact; one bound host and the placed spawn ladder,
+# creation, the held spawn and entries hosted on their first use, the seal
+# that leaves a member whose spawn is in flight unmarked, with Stop,
+# Resume, Complete and the forced destroy (which ends the held spawn's
+# ladder whether its membership committed or not), and the declared
+# apply's open fact; one bound host and the placed spawn ladder,
 # its remote commit, its retirement and the placed end; and an explicit
 # resume over a member, Dormant or Live, whose host preparation is owed or
 # not, probed while the mob is still stopped and again once it runs. They
@@ -720,12 +721,13 @@ fi
 # exactly one arm answering every declaration, seal, mark replay and apply
 # opening, and the declared apply's action properties
 # (identity_entry_apply_audit.tla names them); they require every listed
-# arm to fire, a floor of distinct states and their fifty-five witnesses
-# reached, and --mutants refuses fifty-six seeded defects: one per
+# arm to fire, a floor of distinct states and their fifty-six witnesses
+# reached, and --mutants refuses fifty-seven seeded defects: one per
 # declared apply invariant and property, one per guard of the declared
-# apply that a reachable state needs, and two forced destroys, one that
-# keeps a spawn ladder whose membership committed and one that keeps the
-# startup binding request that commit recorded.
+# apply that a reachable state needs, two forced destroys, one that keeps
+# a spawn ladder whose membership committed and one that keeps the startup
+# binding request that commit recorded, and a seal that marks a member
+# whose spawn is in flight, refused by its target invariant alone.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
@@ -992,9 +994,11 @@ run_machine_verify() {
 # (2026-10-31): apply (one whole-space run, 15 witnesses, 15 mutants)
 # 180 s; legacy (one run, 13 witnesses, 16 mutants) 230 s; roles (two
 # runs, 13 witnesses, 9 mutants) 196 s; hosted (three runs, 14 witnesses,
-# 16 mutants) 212 s. As one part (five runs, 28 witnesses, 17 mutants) the
-# declared apply took 300-305 s; with its seven runs, 55 witnesses and 56
-# mutants it would take about 818 s, past 10 minutes on a hosted runner.
+# 16 mutants) 212 s, with one witness and one mutant more since (the
+# in-flight seal's, not measured yet). As one part (five runs, 28
+# witnesses, 17 mutants) the declared apply took 300-305 s; with its seven
+# runs, 55 witnesses and 56 mutants it would take about 818 s, past 10
+# minutes on a hosted runner.
 # The created identity entries' machine costs each whole-space run about a
 # quarter more per state; to keep that cost down the entry run's probe
 # totality counts its six arms of a spawn without created custody, and the

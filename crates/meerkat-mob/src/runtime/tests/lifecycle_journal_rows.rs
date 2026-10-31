@@ -991,21 +991,29 @@ async fn an_interrupted_unlisted_retirement_finished_after_a_restart_journals_it
     );
 }
 
-/// A seal-marked identity's spawn rollback records the seal's cause on its
-/// start row, so a restarted mob marks the identity again from it and the
-/// end of the retirement ends the entry, as it does live. The row: a host's
-/// resumed spawn of an identity entry's member fails after its membership
-/// step (its role wiring fan-out is refused), so the actor rolls it back;
-/// while the rollback is held before its start row, a complete declared
-/// apply that does not list the identity seals it (marks it unlisted). The
-/// mob crashes once the start row is durable, before the rollback's end.
+/// A complete declared apply that does not list an identity entry whose
+/// member's spawn is rolling back unlists nothing: MobMachine's seal leaves
+/// a member whose spawn is still in flight to a later seal
+/// (`marked_entry_has_no_spawn_in_flight`). The rollback's end names no
+/// cause and keeps the entry, unseated, and the next complete apply
+/// removes it. The row: a host's resumed spawn of an identity entry's
+/// member fails after its membership step (its role wiring fan-out is
+/// refused), and the apply runs while the rollback is held after its
+/// durable start row, before its Retire step. Two legs: the rollback ends
+/// live, or the mob restarts there and the restarted mob ends it.
 ///
-/// RED (before the rollback's start row reads the seal's mark): the start
-/// row records no cause, the restarted mob does not mark the identity, and
-/// the end of its retirement names no cause and keeps the entry.
+/// RED (before the seal's guard): the seal marks the identity between the
+/// rollback's start row and its Retire step.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart() {
-    let definition = with_unique_mob_id(sample_definition_with_role_wiring(), "rollback-cause");
+async fn a_seal_during_an_entry_members_spawn_rollback_defers_its_unlisting() {
+    seal_during_a_spawn_rollback("deferred", false).await;
+    seal_during_a_spawn_rollback("deferred-restart", true).await;
+}
+
+/// One leg of the row above for the identity `name`, restarting the mob
+/// in the rollback's window when `restart` is set.
+async fn seal_during_a_spawn_rollback(name: &str, restart: bool) {
+    let definition = with_unique_mob_id(sample_definition_with_role_wiring(), name);
     let mob_id = definition.id.clone();
     let mut mob = JournalMob::over(definition, MobStorage::in_memory()).await;
     mob.spawn_worker("w-peer").await;
@@ -1019,7 +1027,7 @@ async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart(
             max_tokens: Some(4096),
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some(test_comms_name_for(&mob_id, "worker", "sealed")),
+                comms_name: Some(test_comms_name_for(&mob_id, "worker", name)),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1043,12 +1051,12 @@ async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart(
         )
         .await;
 
-    let rollback_held =
-        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
+    let resume_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id(name), "spawn-rollback");
     let spawned = tokio::time::timeout(
         STEP,
         mob.handle.spawn_spec(
-            worker_spec("sealed")
+            worker_spec(name)
                 .with_entry_custody(true)
                 .with_resume_bridge_session_id(session),
         ),
@@ -1059,12 +1067,40 @@ async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart(
         spawned.is_err(),
         "the resumed spawn fails after its membership step: {spawned:?}"
     );
-    tokio::time::timeout(STEP, rollback_held.entered())
+    tokio::time::timeout(STEP, resume_held.entered())
         .await
         .expect("the spawn's rollback starts");
+    // The rollback's start row is appended, and its next step held: the
+    // window before its Retire step.
+    let start_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id(name), "spawn-rollback");
+    resume_held.release();
+    tokio::time::timeout(STEP, start_held.entered())
+        .await
+        .expect("the rollback reaches its start row");
+    let window_held =
+        crate::runtime::actor::retirement_stage_hold::install(&id(name), "spawn-rollback");
+    start_held.release();
+    tokio::time::timeout(STEP, window_held.entered())
+        .await
+        .expect("the rollback's start row is durable");
+    let key = dsl::AgentIdentity::from_domain(&id(name));
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        assert!(
+            state.spawn_exec_phase.contains_key(&key)
+                && state.identity_to_runtime.get(&key).is_some_and(|runtime| {
+                    state.member_state_markers.get(runtime) != Some(&dsl::MobMemberState::Retiring)
+                }),
+            "the rollback is held before its Retire step: {name} is seated, not retiring, and \
+             its spawn is in flight"
+        );
+    }
 
-    // The seal marks the seated entry the complete roster does not list.
-    let sealing = {
+    // A complete apply that does not list the identity leaves it to a later
+    // seal.
+    let mut state = mob.handle.machine_state_watch_rx.clone();
+    let mut applying = {
         let handle = mob.handle.clone();
         tokio::spawn(async move {
             handle
@@ -1072,53 +1108,69 @@ async fn a_seal_marked_identitys_spawn_rollback_is_marked_again_after_a_restart(
                 .await
         })
     };
-    let marked = dsl::AgentIdentity::from_domain(&id("sealed"));
+    let outcome = tokio::time::timeout(STEP, async {
+        tokio::select! {
+            outcome = &mut applying => outcome
+                .expect("the apply task ends")
+                .expect("the apply runs"),
+            _ = state.wait_for(|state| state.identity_entry_retiring.contains(&key)) => {
+                panic!("the seal marked {name}, whose spawn is still in flight")
+            }
+        }
+    })
+    .await
+    .expect("the apply answers while the rollback is held");
+    assert!(
+        !outcome.unlisted.contains_key(&id(name)),
+        "the apply leaves {name} to a later seal: {outcome:?}"
+    );
+
+    if restart {
+        mob.restart().await;
+    }
+    window_held.release();
+    let records = mob
+        .lifecycle_until("the end of the rolled-back incarnation", |records| {
+            retired(records, name, G0).is_some()
+        })
+        .await;
+    assert_eq!(
+        retired(&records, name, G0).and_then(|(_, facts)| facts.cause),
+        None,
+        "the end of {name}'s rollback names no cause"
+    );
     let mut state = mob.handle.machine_state_watch_rx.clone();
     tokio::time::timeout(
         STEP,
-        state.wait_for(|state| state.identity_entry_retiring.contains(&marked)),
+        state.wait_for(|state| !state.identity_to_runtime.contains_key(&key)),
     )
     .await
-    .expect("the seal marks the identity")
+    .expect("the end of the rollback unseats the member")
     .expect("the state watch outlives the row");
-
-    // The rollback's start row is appended, and its end held.
-    let start_held =
-        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
-    rollback_held.release();
-    tokio::time::timeout(STEP, start_held.entered())
-        .await
-        .expect("the rollback reaches its start row");
-    let end_held =
-        crate::runtime::actor::retirement_stage_hold::install(&id("sealed"), "spawn-rollback");
-    start_held.release();
-    tokio::time::timeout(STEP, end_held.entered())
-        .await
-        .expect("the rollback's start row is durable");
-
-    mob.restart().await;
-    end_held.release();
-    sealing.abort();
-    let _ = sealing.await;
-
-    let records = mob
-        .lifecycle_until(
-            "the restarted mob ends the rolled-back incarnation",
-            |records| retired(records, "sealed", G0).is_some(),
-        )
+    assert!(
+        matches!(
+            mob.handle.identity_entry(&id(name)),
+            Ok(IdentityEntryRead::Entry(view))
+                if view.standing == EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+        ),
+        "the end of the rollback keeps {name}'s entry, unseated"
+    );
+    let removed = mob
+        .apply(DeclaredRoster::complete(Vec::<DeclaredEntry>::new()))
         .await;
-    assert_eq!(
-        retired(&records, "sealed", G0).and_then(|(_, facts)| facts.cause),
-        Some(MemberRetirementCause::Unlisted),
-        "the restarted mob marked the identity again from the start row, and the end names the \
-         cause"
+    assert!(
+        matches!(
+            removed.unlisted.get(&id(name)),
+            Some(UnlistedEntryOutcome::Removed)
+        ),
+        "the next complete apply removes {name}'s entry: {removed:?}"
     );
     assert!(
         matches!(
-            mob.handle.identity_entry(&id("sealed")),
+            mob.handle.identity_entry(&id(name)),
             Ok(IdentityEntryRead::NotAnEntry { worker: None })
         ),
-        "the end of the marked retirement ended the entry"
+        "{name} is no entry"
     );
 }
 

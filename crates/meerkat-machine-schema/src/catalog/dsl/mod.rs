@@ -1118,6 +1118,76 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
         ],
         Vec::new(),
     )
+    // CI bound of the TLC sweep (model checking only: the generated machine,
+    // the Deep profile and the audits' own arguments are unchanged). Every arm
+    // and every invariant works on one region of the state, so the sweep
+    // explores products of the regions' states within the step bound: the
+    // instruction region next to the live region's six-step chains took it
+    // from 18,936 states (249M generated) to about 487,000 (6.5G). These
+    // bounds bring it to about 24,700 states and 99M generated.
+    // - Step bound 5: TLC checks every successor, also one step past the
+    //   bound, so every first-turn, live and lifecycle state (the deepest is
+    //   six steps in) and every class of instruction state that a guard or an
+    //   invariant tells apart is still checked. The instruction boundary
+    //   audit, bound by this config, still reaches each witness and refuses
+    //   each mutant within 5 machine steps, in as many states as at 6.
+    // - Durable-tail counts {0}: the four stateless classification arms make
+    //   most of every state's successors; with both counts at zero each arm
+    //   still fires (Ambiguous through its other conditions), and the
+    //   durable-tail classification audit checks the arms over all of 0..2
+    //   with its own tuples.
+    // - Instruction samples, which keep every class of instruction state and
+    //   every arm's firing from each:
+    //   - target_generation {2}: a recovered mob target at the top of a mob
+    //     record's 0..2 input, so a record finds it already recorded; a
+    //     release or a rebind leaves generation 0, from which records advance
+    //     to 1 and 2.
+    //   - entry_sequence {0}: the effective recovery's guard and
+    //     instruction_entry_sequence_covers_effective tell only zero from at
+    //     least one, which a fold or an application reaches.
+    //   - generation {0}: no guard or invariant reads the generation in
+    //     effect.
+    //   - last_entry_sequence {0, 1}: both sides of its `>= 1` guard and of
+    //     the entry-sequence maximum.
+    //   - body_bytes {1}: an Active body's size counts only against the
+    //     1 MiB active budget, which no CI body nears; an Absent write, which
+    //     must carry 0, needs an empty digest, which the CI strings lack.
+    .with_ci_step_limit(5)
+    .with_input_field_domain(
+        input_variant_id("ClassifyDurableTail"),
+        crate::identity::FieldId::from_trusted_catalog_literal("dangling_tool_use_count"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("ClassifyDurableTail"),
+        crate::identity::FieldId::from_trusted_catalog_literal("orphan_tool_result_count"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionState"),
+        crate::identity::FieldId::from_trusted_catalog_literal("target_generation"),
+        crate::InputFieldDomainKind::CiValues([2].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionState"),
+        crate::identity::FieldId::from_trusted_catalog_literal("entry_sequence"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionEffective"),
+        crate::identity::FieldId::from_trusted_catalog_literal("generation"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionEffective"),
+        crate::identity::FieldId::from_trusted_catalog_literal("last_entry_sequence"),
+        crate::InputFieldDomainKind::CiValues([0, 1].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("SetSessionInstruction"),
+        crate::identity::FieldId::from_trusted_catalog_literal("body_bytes"),
+        crate::InputFieldDomainKind::CiValues([1].into_iter().collect()),
+    )
 }
 
 /// Canonical SessionTurnAdmissionMachine — the live ephemeral turn-admission

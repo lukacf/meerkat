@@ -192,6 +192,14 @@ pub enum InputFieldDomainKind {
     /// the input field's type. Use it for inputs that echo machine state back,
     /// such as an `expected_revision` that must equal `revision`.
     StateField(FieldId),
+    /// Explore exactly these values in the CI profile; the Deep profile
+    /// explores them together with the default unsigned domain (`0..2`). The
+    /// generated model ranges the field over a constant that each profile's
+    /// config assigns; a composition, which has no machine CI profile,
+    /// explores the Deep set. Use it to keep a CI sweep within its budget when
+    /// the field's other values only reach states that no guard or invariant
+    /// tells apart from the kept ones.
+    CiValues(std::collections::BTreeSet<u64>),
 }
 
 /// Why an input field domain declaration is refused.
@@ -206,7 +214,7 @@ pub enum InputFieldDomainError {
     Unused,
     /// The same input field is declared twice.
     Duplicate,
-    /// An `AdditionalValues` declaration lists no values.
+    /// An `AdditionalValues` or `CiValues` declaration lists no values.
     EmptyValues,
     /// A value exceeds [`TLC_MAX_UNSIGNED_INPUT_SAMPLE`].
     ValueOutOfRange { value: u64 },
@@ -226,7 +234,7 @@ impl fmt::Display for InputFieldDomainError {
             Self::NotUnsigned => f.write_str("the field is not u32 or u64"),
             Self::Unused => f.write_str("no transition binds this field"),
             Self::Duplicate => f.write_str("the field is declared more than once"),
-            Self::EmptyValues => f.write_str("no additional values are listed"),
+            Self::EmptyValues => f.write_str("no values are listed"),
             Self::ValueOutOfRange { value } => write!(
                 f,
                 "value {value} exceeds the TLC maximum {TLC_MAX_UNSIGNED_INPUT_SAMPLE}"
@@ -287,7 +295,8 @@ impl MachineSchema {
                 return Err(refuse(InputFieldDomainError::Unused));
             }
             match &declaration.domain {
-                InputFieldDomainKind::AdditionalValues(values) => {
+                InputFieldDomainKind::AdditionalValues(values)
+                | InputFieldDomainKind::CiValues(values) => {
                     if values.is_empty() {
                         return Err(refuse(InputFieldDomainError::EmptyValues));
                     }

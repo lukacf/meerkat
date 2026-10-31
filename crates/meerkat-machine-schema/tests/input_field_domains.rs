@@ -45,6 +45,10 @@ fn values(values: &[u64]) -> InputFieldDomainKind {
     InputFieldDomainKind::AdditionalValues(values.iter().copied().collect::<BTreeSet<_>>())
 }
 
+fn ci_values(values: &[u64]) -> InputFieldDomainKind {
+    InputFieldDomainKind::CiValues(values.iter().copied().collect::<BTreeSet<_>>())
+}
+
 #[test]
 fn workgraph_declares_every_bound_expected_revision_as_the_current_revision() {
     let schema = dsl_workgraph_lifecycle_machine();
@@ -81,6 +85,64 @@ fn additional_values_extend_a_bound_unsigned_field() {
     schema
         .validate()
         .expect("a bound u64 field takes additional values");
+}
+
+#[test]
+fn ci_values_take_a_nonempty_in_range_set_for_a_bound_unsigned_field() {
+    with_declaration("CreateOpen", "unresolved_blocker_count", ci_values(&[0]))
+        .validate()
+        .expect("a bound u64 field takes CI values");
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[])
+        )),
+        InputFieldDomainError::EmptyValues
+    );
+    let too_big = TLC_MAX_UNSIGNED_INPUT_SAMPLE + 1;
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[0, too_big])
+        )),
+        InputFieldDomainError::ValueOutOfRange { value: too_big }
+    );
+}
+
+#[test]
+fn session_document_declares_its_ci_samples_on_bound_unsigned_fields() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+    schema
+        .validate()
+        .expect("the shipped declarations are valid");
+    let declared: [(&str, &str, &[u64]); 7] = [
+        ("ClassifyDurableTail", "dangling_tool_use_count", &[0]),
+        ("ClassifyDurableTail", "orphan_tool_result_count", &[0]),
+        ("RecoverSessionInstructionState", "target_generation", &[2]),
+        ("RecoverSessionInstructionState", "entry_sequence", &[0]),
+        ("RecoverSessionInstructionEffective", "generation", &[0]),
+        (
+            "RecoverSessionInstructionEffective",
+            "last_entry_sequence",
+            &[0, 1],
+        ),
+        ("SetSessionInstruction", "body_bytes", &[1]),
+    ];
+    for (variant, field_name, samples) in declared {
+        assert_eq!(
+            schema.input_field_domain(variant, field_name),
+            Some(&ci_values(samples)),
+            "{variant}.{field_name}"
+        );
+    }
+    assert_eq!(
+        schema.input_field_domains.len(),
+        declared.len(),
+        "no other input field of the machine declares a domain"
+    );
+    assert_eq!(schema.ci_step_limit, Some(5), "the CI step bound");
 }
 
 #[test]

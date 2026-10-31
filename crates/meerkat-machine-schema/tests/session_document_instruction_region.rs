@@ -561,6 +561,11 @@ fn recover_refuses_a_torn_projection() {
             Seed::empty().in_effect(1, over_budget),
             2,
         ),
+        (
+            "a revoked slot in effect",
+            Seed::empty().in_effect(1, Slots::empty().absent("a", 1)),
+            2,
+        ),
     ] {
         let mut authority = Authority::new();
         for (step, input) in seed.inputs().into_iter().enumerate() {

@@ -30040,6 +30040,16 @@ impl MobActor {
                         }
                     }
                 }
+                // The handle's retire found no roster incarnation: MobMachine
+                // answers it (RetireAbsent), and nothing is retired.
+                MobCommand::RetireAbsent {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result =
+                        self.retire_absent_admission(&agent_identity, "retire_absent_command");
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::Respawn {
                     agent_identity,
                     initial_message,

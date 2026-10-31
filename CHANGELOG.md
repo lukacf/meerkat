@@ -289,6 +289,14 @@ them.
   `RecoverCreatedIdentityEntryUnreadableRunning` and
   `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
+- `meerkat-machine-kernels`: the mob machine answers the retire of an
+  identity with no current incarnation (`RetireAbsent`) in a completed and
+  in a destroyed mob too, and `MobHandle::retire` asks it in every phase
+  instead of answering the retire of an absent member itself; the answer
+  stays `Ok(())`. The kernel `generated::mob::TransitionId` gains, appended
+  last, `RetireAbsentCompleted` and `RetireAbsentDestroyed`, so no existing
+  variant's discriminant moves. Exhaustive matches must add the new
+  variants.
 
 - `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
   token: `OpenAiAuthMethod::GitHubCopilotToken`,

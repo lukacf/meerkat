@@ -849,6 +849,14 @@ pub(super) enum MobCommand {
         admission_tx: tokio::sync::watch::Sender<bool>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// The retire of an identity whose roster lists no incarnation. The
+    /// actor answers it with MobMachine's `RetireAbsent` verdict in its own
+    /// step and starts nothing: the command names no incarnation, so it can
+    /// retire or cancel no later incarnation of the identity.
+    RetireAbsent {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     Respawn {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
@@ -2245,6 +2253,7 @@ impl MobCommand {
             Self::Spawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HostRuntimeIncarnationObserved { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Retire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RetireAbsent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Respawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RetireAll { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SubmitWork { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2446,6 +2455,7 @@ impl MobCommand {
             Self::HostOrphanReleaseCompleted { .. } => "HostOrphanReleaseCompleted",
             Self::PlacedBehaviorCompleted { .. } => "PlacedBehaviorCompleted",
             Self::Retire { .. } => "Retire",
+            Self::RetireAbsent { .. } => "RetireAbsent",
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",

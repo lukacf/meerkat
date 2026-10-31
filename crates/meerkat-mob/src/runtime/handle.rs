@@ -8451,8 +8451,9 @@ impl MobHandle {
 
     /// Elect the exact incarnation's singleflight retirement saga: join the
     /// one in flight or start it. `None` when the incarnation is already
-    /// absent. `bound_admission` holds scope admission and the roster
-    /// observation to `operation_deadline`.
+    /// absent and MobMachine answered the retire of the absent identity.
+    /// `bound_admission` holds scope admission, the roster observation and
+    /// that answer to `operation_deadline`.
     async fn join_or_start_retirement_operation(
         &self,
         agent_identity: AgentIdentity,
@@ -8527,9 +8528,24 @@ impl MobHandle {
                 roster.get(&agent_identity).cloned()
             };
             let Some(entry) = entry else {
-                // Retirement is idempotent. Once the exact roster incarnation is
-                // absent there is no authority to enqueue an identity-only command
-                // that could retire a later successor.
+                // Retirement is idempotent, and MobMachine owns that answer:
+                // with no roster incarnation to retire, the actor applies
+                // `RetireAbsent` for the identity in its own step, bounded
+                // like the admission above. The command names no
+                // incarnation and starts no retirement, so it can retire or
+                // cancel no later successor.
+                let absent = self.retire_absent_identity(agent_identity.clone());
+                if bound_admission {
+                    let remaining = operation_deadline.saturating_duration_since(Instant::now());
+                    tokio::time::timeout(remaining, absent)
+                        .await
+                        .map_err(|_| MobError::MemberRetirementAdmissionPending {
+                            member_id: agent_identity.clone(),
+                            stage: "retire_absent_admission".to_string(),
+                        })??;
+                } else {
+                    absent.await?;
+                }
                 return Ok(None);
             };
             let expected = super::state::RetireMemberIncarnation {
@@ -8631,6 +8647,19 @@ impl MobHandle {
             }
         };
         Ok(Some((key, pending)))
+    }
+
+    /// MobMachine's answer to the retire of `agent_identity`, whose roster
+    /// lists no incarnation: the actor applies `RetireAbsent` in its own step
+    /// and answers what the machine answers (in every phase, `Ok(())` while
+    /// the identity maps to no runtime, a refusal for an identity the
+    /// machine still maps).
+    async fn retire_absent_identity(&self, agent_identity: AgentIdentity) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RetireAbsent {
+            agent_identity,
+            reply_tx,
+        })
+        .await?
     }
 
     // Machine commands are issued from inside calling agents' tool-dispatch
@@ -14286,6 +14315,11 @@ impl MobHandle {
     /// same exact-incarnation retire. Every retirement is attempted, and the
     /// first failure is returned after the rest ran; retrying converges,
     /// because a later retire still finds the remaining descendants.
+    ///
+    /// Retiring an identity with no current incarnation (never a member, or
+    /// already retired) retires nothing and answers `Ok(())`. MobMachine
+    /// gives that answer, and it touches no later incarnation of the
+    /// identity.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned
@@ -20782,7 +20816,8 @@ impl MobHandle {
             )
             .await?
         else {
-            // The descendant is already absent: nothing is left to retire.
+            // The descendant is already absent and MobMachine answered its
+            // retire: nothing is left to retire.
             return Ok(RetireStepOutcome::Ran);
         };
         self.wait_for_retirement_operation(&key, pending).await

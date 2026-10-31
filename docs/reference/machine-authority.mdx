@@ -321,6 +321,23 @@ its `rotate-same` and `recover-rotation` runs, and replays a committed
 same-session terminal's rows, its kept edges among them, in its
 `replay-same` run.
 
+The retire of an identity that holds no roster incarnation (never a member,
+or already retired) is a `MobMachine` answer too, in every phase. The handle
+reads the roster only to choose the command: finding no incarnation, it asks
+the actor for `RetireAbsent`, the input the actor's own retirement submits
+when it meets an absent member, and answers what the machine answers.
+`RetireAbsent` has an arm in each phase (`RetireAbsentRunning`,
+`RetireAbsentStopped`, `RetireAbsentCompleted`, `RetireAbsentDestroyed`, the
+last for a destroyed mob whose actor still serves its destroy's retry). Each
+changes nothing while the identity maps to no runtime (`identity_absent`)
+and refuses an identity the machine still maps, such as a successor whose
+spawn committed after the caller read the roster. The input names no
+incarnation, so it never retires or cancels a later incarnation of the
+identity. The hand-written
+`specs/machines/mob_machine/member_lifecycle_audit.sh` fires the four arms
+and checks, in its scope run, that a `RetireAbsent` arm is enabled exactly
+when the identity maps to no runtime.
+
 ## Consumed Checkpoint Completion Recovery
 
 A live steer checkpoint can durably consume an input before its completion

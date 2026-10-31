@@ -250,10 +250,13 @@ neither spawns nor retires a reserved name, the declared apply refuses a
 created, removed or unreadable name for that identity alone (see
 [The declared apply](#the-declared-apply)), the legacy adoption answers
 `NotAdoptable` for any of them, and the agent lane refuses an unreadable
-member as an identity member. The host's own lifecycle calls on the member an
-unreadable name keeps (a retire, a respawn, a rotation) are not refused by
-the reservation. A mob reset keeps the reserved names, which the identity
-store holds; the destroy clears them.
+member as an identity member. The host's own retire and rotation of the
+member an unreadable name keeps are not refused by the reservation, and a
+respawn that keeps the member's session is such a rotation. A fresh-life
+respawn of that member is refused `MobError::IdentityMember` before anything
+is retired, since its successor's spawn would be refused: the member keeps
+its seat and session. A mob reset keeps the reserved names, which the
+identity store holds; the destroy clears them.
 
 The reads need no actor command and never wake a member:
 

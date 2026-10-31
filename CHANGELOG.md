@@ -562,10 +562,12 @@ them.
   unreadable. A member row whose stored origin this build does not know
   reserves its name as unreadable too. No spawn or dormant seat takes a
   reserved name, and a custody of one origin never takes an entry of the
-  other (`MobError::IdentityMember`); a worker reconcile neither spawns nor
-  retires one; the declared apply refuses a created, removed or unreadable
-  name for that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`,
-  `NameTombstoned`, `NameUnreadable`); the legacy adoption answers
+  other (`MobError::IdentityMember`); a fresh-life respawn of the member an
+  unreadable name keeps is refused the same way, before that member is
+  retired; a worker reconcile neither spawns nor retires one; the declared
+  apply refuses a created, removed or unreadable name for that identity
+  alone (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`,
+  `NameUnreadable`); the legacy adoption answers
   `NotAdoptable`; and the agent lane refuses an unreadable member as an
   identity member. The reads: `IdentityEntryRead::Unreadable { member }` and
   `Removed`, `IdentityEntryPage::unreadable`,

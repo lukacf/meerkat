@@ -17803,10 +17803,13 @@ impl MobActor {
         Self::member_admission_verdict_from_effects(&prepared.effects)
     }
 
-    /// The typed refusal of a spawn ladder's close for a name MobMachine
-    /// reserved after the ladder opened (`name_not_reserved` on the close
-    /// arms), as its admission answers the name (`IdentityNameReserved`):
-    /// `MobError::IdentityMember`. `None` for any other name.
+    /// The typed refusal of an act that would seat a member under a name
+    /// MobMachine reserved, as its admission answers the name
+    /// (`IdentityNameReserved`): `MobError::IdentityMember`. It types a spawn
+    /// ladder's close for a name reserved after the ladder opened
+    /// (`name_not_reserved` on the close arms), and refuses a fresh-life
+    /// respawn whose successor the reservation would refuse. `None` for any
+    /// other name.
     fn reserved_name_refusal(&self, agent_identity: &AgentIdentity) -> Option<MobError> {
         matches!(
             self.member_admission_verdict(agent_identity, false, false),
@@ -51043,6 +51046,15 @@ impl MobActor {
                 .map(|entry| entry.runtime_mode)
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
             return Err(MobRespawnError::from(Self::respawn_refusal(mode, reason)));
+        }
+        // A fresh life's successor passes the spawn admission, which refuses
+        // a reserved name (a removed created entry's, or one this build
+        // cannot read): such a respawn would retire the member and then be
+        // refused its successor, leaving the name with no member. It is
+        // refused here, by the name's admission answer, before anything is
+        // retired.
+        if let Some(reserved) = self.reserved_name_refusal(&agent_identity) {
+            return Err(MobRespawnError::from(reserved));
         }
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =

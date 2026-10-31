@@ -230,7 +230,8 @@ pub struct DeclarationRecordView {
 }
 
 /// `declarations/get`: the applied revision, its digest and every record
-/// the declarations manage now.
+/// the declarations manage now, a dropped one included until its drop took
+/// effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclarationsView {
     pub revision: u64,

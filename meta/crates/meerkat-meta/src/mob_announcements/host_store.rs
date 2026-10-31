@@ -108,6 +108,7 @@ use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
+use super::sqlite::call_ended;
 use super::types::{AnnouncementStoreError, Result};
 
 /// The mob announcement store's record family on a host store realm: one
@@ -911,7 +912,7 @@ impl AnnouncementMirror {
     ) -> Result<T> {
         tokio::spawn(Arc::clone(self).call(operation, false))
             .await
-            .map_err(|error| storage(format!("an announcement store call stopped: {error}")))?
+            .map_err(call_ended)?
     }
 
     /// Write the deferred advisory rows, unless a batch carried them already.
@@ -995,13 +996,9 @@ impl AnnouncementMirror {
                 scopes.disarm();
                 return Err(error);
             }
-            // The call failed on the copy's thread: the scopes are still
-            // armed, so dropping them poisons them.
-            Err(error) => {
-                return Err(storage(format!(
-                    "an announcement store call failed: {error}"
-                )));
-            }
+            // The call failed on the copy's thread (a panic): the scopes are
+            // still armed, so dropping them poisons them.
+            Err(error) => return Err(call_ended(error)),
         };
         match captured {
             Captured::Nothing => scopes.disarm(),
@@ -1022,11 +1019,7 @@ impl AnnouncementMirror {
                         Ok(Ok(image)) => image,
                         // Still armed: the copy changed and no batch was sent.
                         Ok(Err(error)) => return Err(error),
-                        Err(error) => {
-                            return Err(storage(format!(
-                                "reading the announcement store image failed: {error}"
-                            )));
-                        }
+                        Err(error) => return Err(call_ended(error)),
                     };
                     let mut written: Entries = image
                         .into_iter()

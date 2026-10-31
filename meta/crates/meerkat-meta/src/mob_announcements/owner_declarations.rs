@@ -1133,7 +1133,8 @@ impl AnnouncementService {
         self.mark_put(before, base, put, managed, after_put).await
     }
 
-    /// End the live source a mark says the reconciler made.
+    /// End the source a mark says the reconciler made, its runner's
+    /// schedule following the end.
     async fn end_declared_source(&self, mark: &DeclarationMark) -> Result<(), AnnouncementError> {
         let Some(mob_id) = mark.mob_id.as_ref() else {
             return Ok(());
@@ -1149,6 +1150,11 @@ impl AnnouncementService {
             return Ok(());
         };
         if source.state == SourceState::Ended {
+            // An earlier end may have stopped before the reconcile of its
+            // runner: the schedule follows the ended record now. A stop
+            // here keeps the mark, which stays owed until a retry gets past
+            // this reconcile.
+            self.reconcile_runner(&source).await;
             return Ok(());
         }
         let operation =
@@ -1494,7 +1500,10 @@ impl AnnouncementService {
 
     /// `declarations/get`: the applied revision and digest, every record the
     /// declarations manage or could not make, and the children of the role
-    /// templates they made.
+    /// templates they made. A record the declarations dropped stays listed
+    /// from its mark until its drop took effect: a drop refused for now, or
+    /// a dropped source whose runner's reconcile after its end still waits
+    /// on the schedule service.
     ///
     /// It reads under the declarations gate, which every reconcile holds
     /// from the revision it records to the last record it writes: a read

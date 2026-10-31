@@ -6277,6 +6277,12 @@ mod tests {
             candidate_slot \in DOMAIN slot_effect /\ slot_effect[candidate_slot] = "Active"}
         |-> slot_values[instruction_slot]]
 "#;
+        let retired_after = r#"session_document_activation_retired_after(activation_rows, activation_retired) ==
+    [activation_key \in DOMAIN activation_rows |->
+        LET retired_count == IF activation_key \in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0
+            superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0
+        IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]
+"#;
         for (native, definition) in [
             (
                 "session_document_instruction_slot_after_set",
@@ -6284,6 +6290,7 @@ mod tests {
             ),
             ("session_document_instruction_active_bytes", active_bytes),
             ("session_document_instruction_active_slots", active_slots),
+            ("session_document_activation_retired_after", retired_after),
         ] {
             assert!(
                 model.contains(definition),

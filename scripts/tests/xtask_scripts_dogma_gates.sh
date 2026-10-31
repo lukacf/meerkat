@@ -420,6 +420,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # instruction_boundary_audit.sh (session_document) requires its five
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
+# activation_body_retirement_audit.sh (session_document) requires its three
+# witnesses violated, and with --mutants each seeded defect's target
+# invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -571,6 +574,13 @@ printf '%s\n' \
   'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
   'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
   'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBodyRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCopiedRetiredHeadKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessThreeRowsRetireTwo is violated."' \
+  'echo "Error: Invariant AuditOwnHeadKeepsItsBody is violated."' \
+  'echo "Error: Invariant AuditSupersededRowsRetired is violated."' \
+  'echo "Error: Invariant AuditRetiredChangesOnlyAtTheDecision is violated."' \
+  'echo "Error: Invariant AuditDecisionNeverLowersACount is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \

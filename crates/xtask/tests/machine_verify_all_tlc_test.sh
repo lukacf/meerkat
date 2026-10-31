@@ -829,6 +829,29 @@ if run_part audits-h; then
   TLC_WORKERS="${tlc_workers}" "${instruction_boundary_audit}" --mutants
 fi
 
+# The SessionDocumentMachine activation-body retirement region: a hand-written
+# audit drives the generated recovery and decision arms as the shell does
+# (one session, two keys, up to three rows per key, own and copied heads; a
+# first recovery from any projection, torn ones included, an own activation
+# as a recovery with one more row, a fork as a recovery of a prefix with
+# every head copied, and the decision) within the ci.cfg step bound, and
+# checks the machine's own per-key state: only the decision retires a body,
+# it retires every superseded row, never lowers a recovered count and
+# changes nothing else, and an own newest row keeps its body. It first
+# checks that the generated model defines both arms it drives, and requires
+# its three witnesses reached. --mutants refuses five seeded defects, each by
+# the invariant it targets. Not yet measured; it joins the shard of the other
+# session-document audit as a small one.
+activation_body_retirement_audit="${workspace_root}/specs/machines/session_document/activation_body_retirement_audit.sh"
+if [[ ! -x "${activation_body_retirement_audit}" ]]; then
+  echo "error: activation body retirement audit runner is missing from workspace runfiles: ${activation_body_retirement_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded activation body retirement TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${activation_body_retirement_audit}" --mutants
+fi
+
 # The MobMachine arm-coverage gate: every arm of the generated model's Next
 # relation is either in a hand-written audit runner's covered_actions array
 # (each runner checks with TLC coverage that every listed arm fires) or named
@@ -1043,7 +1066,9 @@ run_machine_verify() {
 # mutant runs took 100 s on a 4-worker local run; the SessionDocumentMachine
 # instruction boundary audit with --mutants joined it after these
 # measurements (twelve runs over a model that does not extend
-# meerkat_machine; not yet measured);
+# meerkat_machine; not yet measured), and so did the SessionDocumentMachine
+# activation-body retirement audit with --mutants (seven runs over the same
+# model; not yet measured);
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

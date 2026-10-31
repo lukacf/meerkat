@@ -1459,18 +1459,24 @@ pub trait MobSessionService:
         Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
     }
 
-    /// Read a member session's committed operator-instruction state (its
-    /// recorded target and the slots its own entry rows put in effect)
-    /// without materializing it.
+    /// Read member sessions' committed operator-instruction state (each
+    /// one's recorded target and the slots its own entry rows put in effect)
+    /// without materializing them, one answer per id in order. A mob's
+    /// status read asks for one page of its members at once, so a service
+    /// resolves each model's lowering once per page.
     async fn read_member_instructions(
         &self,
-        session_id: &SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
-        let _ = session_id;
-        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+        session_ids
+            .iter()
+            .map(|_| Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable))
+            .collect()
     }
 
     /// Commit one provider-final client-delegation transcript through the
@@ -3650,15 +3656,14 @@ where
 
     async fn read_member_instructions(
         &self,
-        session_id: &SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
-        meerkat_core::service::SessionServiceInstructionExt::read_session_instructions(
-            self, session_id,
-        )
-        .await
+        self.read_sessions_instructions(session_ids).await
     }
 
     async fn publish_boundary_appends_discarded_for_actor(

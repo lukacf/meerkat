@@ -5873,16 +5873,22 @@ impl MobSessionService for MockSessionService {
 
     async fn read_member_instructions(
         &self,
-        session_id: &SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
         self.member_instruction_reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(1);
-        self.read_one_member_instructions(session_id).await
+            .push(session_ids.len());
+        let mut reads = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            reads.push(self.read_one_member_instructions(session_id).await);
+        }
+        reads
     }
 
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {

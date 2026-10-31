@@ -963,10 +963,12 @@ impl MobHandle {
             .collect::<Vec<_>>();
         let next_offset = (query.offset.saturating_add(page.len()) < total)
             .then(|| query.offset.saturating_add(page.len()));
+        let mut reads = self.read_page_member_instructions(&state, &page).await;
         let mut statuses = Vec::with_capacity(page.len());
         for identity in page {
+            let read = reads.remove(&identity);
             statuses.push(
-                self.member_instruction_status(&state, &desired, &identity)
+                self.member_instruction_status(&state, &desired, &identity, read)
                     .await,
             );
         }
@@ -979,11 +981,64 @@ impl MobHandle {
         })
     }
 
+    /// Read the operator-instruction state of a page's member sessions in
+    /// one call, so the session service resolves each model's lowering once
+    /// for the page. An unborn seat and a member without a session binding
+    /// are not read.
+    async fn read_page_member_instructions(
+        &self,
+        state: &mob_dsl::MobMachineState,
+        page: &[AgentIdentity],
+    ) -> BTreeMap<AgentIdentity, Result<SessionInstructionRead, SessionInstructionError>> {
+        let mut members = Vec::new();
+        let mut session_ids = Vec::new();
+        for identity in page {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            if state.member_seat_session_unborn.contains(&dsl_identity) {
+                continue;
+            }
+            if let Some(session_id) = state
+                .member_session_bindings
+                .get(&dsl_identity)
+                .and_then(|session| SessionId::parse(&session.0).ok())
+            {
+                members.push(identity.clone());
+                session_ids.push(session_id);
+            }
+        }
+        if session_ids.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut reads = self
+            .session_service
+            .read_member_instructions(&session_ids)
+            .await
+            .into_iter();
+        members
+            .into_iter()
+            .map(|identity| {
+                let read = reads.next().unwrap_or_else(|| {
+                    Err(SessionInstructionError::Session(
+                        meerkat_core::service::SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(
+                                "the session service answered fewer operator instruction reads \
+                                 than the page asked for"
+                                    .to_string(),
+                            ),
+                        ),
+                    ))
+                });
+                (identity, read)
+            })
+            .collect()
+    }
+
     async fn member_instruction_status(
         &self,
         state: &mob_dsl::MobMachineState,
         desired: &[OperatorInstructionRecordStatus],
         identity: &AgentIdentity,
+        fetched: Option<Result<SessionInstructionRead, SessionInstructionError>>,
     ) -> MemberInstructionStatus {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
         let profile = member_profile(state, identity);
@@ -1020,28 +1075,22 @@ impl MobHandle {
             .member_session_bindings
             .get(&dsl_identity)
             .and_then(|session| SessionId::parse(&session.0).ok());
-        let (read, effective_read) = match (&session_id, unborn) {
-            (Some(session_id), false) => match self
-                .session_service
-                .read_member_instructions(session_id)
-                .await
-            {
-                Ok(read) => (Some(read), MemberInstructionEffectiveRead::Ok),
-                Err(error) => (
-                    None,
-                    MemberInstructionEffectiveRead::Unreadable {
-                        reason: error.to_string(),
-                    },
-                ),
-            },
+        let (read, effective_read) = match (fetched, unborn) {
+            // An unborn seat has no session to read: nothing is effective.
+            (_, true) => (None, MemberInstructionEffectiveRead::Ok),
+            (Some(Ok(read)), false) => (Some(read), MemberInstructionEffectiveRead::Ok),
+            (Some(Err(error)), false) => (
+                None,
+                MemberInstructionEffectiveRead::Unreadable {
+                    reason: error.to_string(),
+                },
+            ),
             (None, false) => (
                 None,
                 MemberInstructionEffectiveRead::Unreadable {
                     reason: "the member has no session binding".to_string(),
                 },
             ),
-            // An unborn seat has no session to read: nothing is effective.
-            (_, true) => (None, MemberInstructionEffectiveRead::Ok),
         };
         let live_channel_open = self.member_live_channel_open(session_id.as_ref()).await;
         // The session's resolved lowering, as its service reads it; without

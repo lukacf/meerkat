@@ -18514,14 +18514,16 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
 
     async fn read_member_instructions(
         &self,
-        session_id: &meerkat_core::types::SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[meerkat_core::types::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::read_member_instructions(
             &self.inner,
-            session_id,
+            session_ids,
         )
         .await
     }

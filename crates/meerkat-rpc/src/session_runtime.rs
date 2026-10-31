@@ -2394,14 +2394,16 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
 
     async fn read_member_instructions(
         &self,
-        session_id: &SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
         <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::read_member_instructions(
             &self.service,
-            session_id,
+            session_ids,
         )
         .await
     }

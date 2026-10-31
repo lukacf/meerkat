@@ -4182,12 +4182,14 @@ macro_rules! delegate_mob_session_service {
 
             async fn read_member_instructions(
                 &self,
-                session_id: &meerkat_core::SessionId,
-            ) -> Result<
-                meerkat_core::service::SessionInstructionRead,
-                meerkat_core::service::SessionInstructionError,
+                session_ids: &[meerkat_core::SessionId],
+            ) -> Vec<
+                Result<
+                    meerkat_core::service::SessionInstructionRead,
+                    meerkat_core::service::SessionInstructionError,
+                >,
             > {
-                self.inner.read_member_instructions(session_id).await
+                self.inner.read_member_instructions(session_ids).await
             }
 
             // Forwarded exactly: the inner service observes the durable
@@ -5688,12 +5690,14 @@ impl MobSessionService for AfterCreateMobSessionService {
 
     async fn read_member_instructions(
         &self,
-        session_id: &meerkat_core::SessionId,
-    ) -> Result<
-        meerkat_core::service::SessionInstructionRead,
-        meerkat_core::service::SessionInstructionError,
+        session_ids: &[meerkat_core::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
     > {
-        self.inner.read_member_instructions(session_id).await
+        self.inner.read_member_instructions(session_ids).await
     }
 
     // Forwarded exactly: the body-free durable-source observation behind

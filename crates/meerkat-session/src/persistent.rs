@@ -19521,6 +19521,102 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
         }
     }
+
+    /// Read several sessions' committed operator-instruction state in one
+    /// pass, one answer per id in order, as
+    /// [`meerkat_core::service::SessionServiceInstructionExt::read_session_instructions`]
+    /// reads one: the lowering of each model and binding the sessions record
+    /// is resolved once for the pass, not once per session. A mob's status
+    /// read asks for one page of its members this way. Wakes nothing.
+    pub async fn read_sessions_instructions(
+        &self,
+        ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        let mut lowerings = InstructionLoweringMemo::default();
+        let mut reads = Vec::with_capacity(ids.len());
+        for id in ids {
+            reads.push(
+                self.read_session_instructions_with(id, &mut lowerings)
+                    .await,
+            );
+        }
+        reads
+    }
+
+    async fn read_session_instructions_with(
+        &self,
+        id: &SessionId,
+        lowerings: &mut InstructionLoweringMemo,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .load_authoritative_session(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        let lowering = match session.session_metadata() {
+            Some(metadata) => {
+                let identity = metadata.llm_identity();
+                match lowerings.get(&identity) {
+                    Some(lowering) => lowering,
+                    None => {
+                        let lowering = self
+                            .inner
+                            .instruction_lowering_for_identity(&identity)
+                            .await;
+                        lowerings.insert(identity, lowering);
+                        lowering
+                    }
+                }
+            }
+            None => None,
+        };
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering,
+        })
+    }
+}
+
+/// The lowerings one instruction read pass has resolved, per model and
+/// binding a session records.
+#[derive(Default)]
+struct InstructionLoweringMemo {
+    resolved: Vec<(
+        meerkat_core::SessionLlmIdentity,
+        Option<meerkat_core::InstructionLowering>,
+    )>,
+}
+
+impl InstructionLoweringMemo {
+    fn get(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<Option<meerkat_core::InstructionLowering>> {
+        self.resolved
+            .iter()
+            .find(|(resolved, _)| resolved == identity)
+            .map(|(_, lowering)| *lowering)
+    }
+
+    fn insert(
+        &mut self,
+        identity: meerkat_core::SessionLlmIdentity,
+        lowering: Option<meerkat_core::InstructionLowering>,
+    ) {
+        self.resolved.push((identity, lowering));
+    }
 }
 
 #[async_trait]
@@ -19557,27 +19653,8 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInst
         meerkat_core::service::SessionInstructionRead,
         meerkat_core::service::SessionInstructionError,
     > {
-        let session = self
-            .load_authoritative_session(id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let target = session.instruction_target_state()?;
-        let effective =
-            meerkat_core::effective_operator_instructions(session.id(), session.messages())
-                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
-        let lowering = match session.session_metadata() {
-            Some(metadata) => {
-                self.inner
-                    .instruction_lowering_for_identity(&metadata.llm_identity())
-                    .await
-            }
-            None => None,
-        };
-        Ok(meerkat_core::service::SessionInstructionRead {
-            target,
-            effective,
-            lowering,
-        })
+        self.read_session_instructions_with(id, &mut InstructionLoweringMemo::default())
+            .await
     }
 }
 
@@ -57082,6 +57159,91 @@ mod tests {
                 memory_blob_store(),
             );
             (service, builds)
+        }
+
+        /// Counts the lowering lookups a service makes through it; every
+        /// session it builds keeps the metadata its request carries.
+        #[derive(Clone, Default)]
+        struct LoweringCountingBuilder {
+            lookups: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for LoweringCountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+
+            async fn instruction_lowering_for_identity(
+                &self,
+                _identity: &meerkat_core::SessionLlmIdentity,
+            ) -> Option<meerkat_core::InstructionLowering> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Some(meerkat_core::InstructionLowering::MidConversation)
+            }
+        }
+
+        /// One read pass over several sessions on the same model resolves the
+        /// model's lowering once, where a read per session resolves it for
+        /// each; every answer carries the lowering.
+        #[tokio::test]
+        async fn a_read_pass_resolves_each_models_lowering_once() {
+            let builder = LoweringCountingBuilder::default();
+            let lookups = Arc::clone(&builder.lookups);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            );
+            let mut ids = Vec::new();
+            for _ in 0..3 {
+                let created = service
+                    .create_session(create_request_with_metadata(
+                        "hello",
+                        InitialTurnPolicy::Defer,
+                    ))
+                    .await
+                    .expect("create_session should succeed");
+                ids.push(created.session_id);
+            }
+
+            let reads = service.read_sessions_instructions(&ids).await;
+            assert_eq!(reads.len(), ids.len(), "one answer per session");
+            for read in reads {
+                assert_eq!(
+                    read.expect("each session reads").lowering,
+                    Some(meerkat_core::InstructionLowering::MidConversation)
+                );
+            }
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                1,
+                "the pass resolves the model's lowering once"
+            );
+
+            for id in &ids {
+                service
+                    .read_session_instructions(id)
+                    .await
+                    .expect("a single read");
+            }
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                1 + ids.len(),
+                "a read per session resolves it for each"
+            );
         }
 
         /// A session created by `service` and then left dormant: its document

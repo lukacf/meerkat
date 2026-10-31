@@ -950,7 +950,10 @@ run_machine_verify() {
 # live-context result barrier with --mutants 27-37: 421-554 s;
 # audits-e = member lifecycle with --mutants 307-458, empty-resume residency
 # with --mutants 45-64, durable-tail classification with --mutants 24-40, the
-# MobMachine arm coverage gate under 1: 376-562 s;
+# MobMachine arm coverage gate under 1: 376-562 s. The member lifecycle
+# audit's two RetireAbsent mutants (2026-10-31) add two scope runs to the 20
+# TLC runs it made in these measurements, about 15-23 s each at its average
+# per run (not measured yet): about 407-608 s for the shard;
 # audits-f = live media health 147-171, requeue-across-stop 122-147,
 # live-context causal-tail batch with --mutants 98-122, generation high-water
 # with --mutants 56-71: 423-511 s, plus the AuthMachine source-credential

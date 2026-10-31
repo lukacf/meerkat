@@ -331,7 +331,9 @@ when it meets an absent member, and answers what the machine answers.
 last for a destroyed mob whose actor still serves its destroy's retry). Each
 changes nothing while the identity maps to no runtime (`identity_absent`)
 and refuses an identity the machine still maps, such as a successor whose
-spawn committed after the caller read the roster. The input names no
+spawn committed after the caller read the roster. The handle answers that
+refusal as the spawn still in progress
+(`MobError::LifecycleOperationPending`, retryable). The input names no
 incarnation, so it never retires or cancels a later incarnation of the
 identity. The hand-written
 `specs/machines/mob_machine/member_lifecycle_audit.sh` fires the four arms

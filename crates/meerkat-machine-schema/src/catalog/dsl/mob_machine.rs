@@ -22559,8 +22559,12 @@ macro_rules! mob_catalog_machine_dsl {
             to Stopped
         }
 
-        // A completed mob retired its members on the way: the retire of one of
-        // them, or of any identity it never held, retires nothing.
+        // A completed mob can still map a member: completion keeps
+        // identity_to_runtime (the runtime retires its members before it
+        // completes; the machine does not require that). The retire of an
+        // identity that maps to no runtime, one retired on the way or one the
+        // mob never held, retires nothing, and a member the machine still maps
+        // is refused (identity_absent).
         transition RetireAbsentCompleted {
             on input RetireAbsent { agent_identity }
             guard { self.lifecycle_phase == Phase::Completed }

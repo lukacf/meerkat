@@ -289,12 +289,17 @@ them.
   `RecoverCreatedIdentityEntryUnreadableRunning` and
   `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
-- `meerkat-machine-kernels`: the mob machine answers the retire of an
-  identity with no current incarnation (`RetireAbsent`) in a completed and
-  in a destroyed mob too, and `MobHandle::retire` asks it in every phase
-  instead of answering the retire of an absent member itself; the answer
-  stays `Ok(())`. The kernel `generated::mob::TransitionId` gains, appended
-  last, `RetireAbsentCompleted` and `RetireAbsentDestroyed`, so no existing
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine answers the retire of an identity with no current incarnation
+  (`RetireAbsent`) in a completed and in a destroyed mob too, and
+  `MobHandle::retire` asks it in every phase instead of answering the retire
+  of an absent member itself; the answer for an identity that maps to no
+  runtime stays `Ok(())`. A retire that races a spawn of the same identity
+  (the spawn committed its membership after the retire read the roster) is
+  refused with `MobError::LifecycleOperationPending`, which is retryable:
+  retry it after the spawn settles. The kernel
+  `generated::mob::TransitionId` gains, appended last,
+  `RetireAbsentCompleted` and `RetireAbsentDestroyed`, so no existing
   variant's discriminant moves. Exhaustive matches must add the new
   variants.
 

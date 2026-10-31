@@ -492,6 +492,27 @@ fn joined_retirement_result(
     }
 }
 
+/// What the retire of an identity its roster lists no incarnation of
+/// answers for the actor's reply to its `RetireAbsent` command. Every phase
+/// has a `RetireAbsent` arm whose only other guard is `identity_absent`, so
+/// MobMachine refuses the input only for an identity it still maps, and the
+/// actor gives that refusal as [`MobError::InvalidTransition`]. With no
+/// roster incarnation, that is an identity whose spawn committed its
+/// membership after the retire read the roster: the retire is answered as
+/// that spawn still in progress, [`MobError::LifecycleOperationPending`],
+/// as the actor answers a retire that meets the identity's retirement in
+/// flight. It is retryable: once the spawn settles, a retry retires the new
+/// incarnation, or answers `Ok(())` if the spawn was rolled back. Any other
+/// answer is unchanged.
+pub(super) fn retire_absent_refusal(agent_identity: &AgentIdentity, error: MobError) -> MobError {
+    match error {
+        MobError::InvalidTransition { .. } => MobError::LifecycleOperationPending {
+            intent: format!("spawn of member {agent_identity}"),
+        },
+        other => other,
+    }
+}
+
 fn pending_retirement_operations()
 -> &'static std::sync::Mutex<HashMap<RetirementOperationKey, Arc<PendingRetirementOperation>>> {
     static OPERATIONS: std::sync::OnceLock<
@@ -8651,15 +8672,19 @@ impl MobHandle {
 
     /// MobMachine's answer to the retire of `agent_identity`, whose roster
     /// lists no incarnation: the actor applies `RetireAbsent` in its own step
-    /// and answers what the machine answers (in every phase, `Ok(())` while
-    /// the identity maps to no runtime, a refusal for an identity the
-    /// machine still maps).
+    /// and answers what the machine answers. In every phase that is `Ok(())`
+    /// while the identity maps to no runtime; the machine refuses an identity
+    /// it still maps, whose spawn committed after the roster read, and that
+    /// refusal is answered as the spawn in progress
+    /// ([`retire_absent_refusal`]).
     async fn retire_absent_identity(&self, agent_identity: AgentIdentity) -> Result<(), MobError> {
+        let identity = agent_identity.clone();
         self.send_actor_command(|reply_tx| MobCommand::RetireAbsent {
             agent_identity,
             reply_tx,
         })
         .await?
+        .map_err(|error| retire_absent_refusal(&identity, error))
     }
 
     // Machine commands are issued from inside calling agents' tool-dispatch
@@ -14319,7 +14344,10 @@ impl MobHandle {
     /// Retiring an identity with no current incarnation (never a member, or
     /// already retired) retires nothing and answers `Ok(())`. MobMachine
     /// gives that answer, and it touches no later incarnation of the
-    /// identity.
+    /// identity. A retire that races a spawn of the same identity (the spawn
+    /// committed its membership after the retire read the roster) is refused
+    /// with [`MobError::LifecycleOperationPending`], which is retryable:
+    /// retried after the spawn settles, it retires the new incarnation.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned

@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::machines::mob_machine as mob_dsl;
+use crate::runtime::handle::retire_absent_refusal;
 
 /// Bound for test steps that must happen promptly; it only turns a hang into
 /// a failure.
@@ -326,4 +327,52 @@ async fn the_handle_answers_an_unlisted_identity_with_mob_machine_verdict() {
         .expect("the listed member retires through its exact incarnation");
     assert!(!maps(&machine_state(&handle), &member));
     assert!(handle.roster.read().await.get(&member).is_none());
+}
+
+/// The handle answers MobMachine's refusal of `RetireAbsent`, which the actor
+/// gives as `InvalidTransition` toward Running from whatever phase the mob is
+/// in, as the spawn of the identity still in progress: the machine refuses
+/// the input only for an identity it maps, and an identity it maps while the
+/// roster lists no incarnation of it is one whose spawn committed its
+/// membership after the retire read the roster. The answer is busy on the
+/// wire and retryable in its data, and any other answer passes through
+/// unchanged.
+#[test]
+fn the_handle_answers_the_refused_retire_absent_as_the_spawn_in_progress() {
+    let member = AgentIdentity::from("retire-absent-racing-spawn");
+    for from in [MobState::Running, MobState::Stopped, MobState::Completed] {
+        let answer = retire_absent_refusal(
+            &member,
+            MobError::InvalidTransition {
+                from,
+                to: MobState::Running,
+            },
+        );
+        assert!(
+            matches!(
+                &answer,
+                MobError::LifecycleOperationPending { intent }
+                    if intent == "spawn of member retire-absent-racing-spawn"
+            ),
+            "a {from:?} mob's refusal is the spawn in progress: {answer:?}"
+        );
+        assert_eq!(
+            answer.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionBusy),
+            "callers retry a busy answer: {answer:?}"
+        );
+        assert_eq!(
+            answer
+                .structured_data()
+                .and_then(|data| data.get("retryable").cloned()),
+            Some(serde_json::Value::Bool(true)),
+            "the answer's data says it is retryable: {answer:?}"
+        );
+    }
+
+    let other = retire_absent_refusal(&member, MobError::ActorCommandChannelClosed);
+    assert!(
+        matches!(other, MobError::ActorCommandChannelClosed),
+        "any other answer passes through unchanged: {other:?}"
+    );
 }

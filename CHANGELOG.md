@@ -708,6 +708,44 @@ them.
   host-store realms keep their documents in the host's store and are not
   listed.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`:
+  MobMachine holds a mob's operator instructions (see Added). `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `State` gain the public fields `operator_instruction_revision`,
+  `operator_instruction_effect`, `operator_instruction_digest`,
+  `operator_instruction_body_bytes`, `operator_instruction_target_kind`,
+  `operator_instruction_target_profile`, `operator_instruction_target_member`,
+  `operator_instruction_generation`, `member_instruction_owed`,
+  `member_instruction_recorded` and `member_instruction_blocked`, so code that
+  builds either struct literally must set them. `MobMachineSignal` gains
+  `SetOperatorInstruction`, `RevokeOperatorInstruction`,
+  `RecoverOperatorInstruction`, `RecoverOperatorInstructionGenerationHighwater`,
+  `PrepareMemberInstructionDelivery`, `RecordMemberInstructionTarget`,
+  `RefuseMemberInstructionTarget` and `ResolveMemberInstructionRelease`, and
+  `MobMachineEffect` gains `OperatorInstructionCommitted`,
+  `OperatorInstructionDuplicate`, `OperatorInstructionRefused`,
+  `MemberInstructionDeliveryPrepared`, `MemberInstructionDeliveryDeferred`,
+  `MemberInstructionTargetRecorded`, `MemberInstructionTargetBlocked`,
+  `MemberInstructionReleaseAuthorized` and `MemberInstructionReleaseNotNeeded`;
+  exhaustive matches must add them. The enums `InstructionTargetKind`,
+  `MemberInstructionBlock`, `OperatorInstructionRefusal` and
+  `MemberInstructionDeferReason` are new.
+
+- `meerkat-mob`: `MobEventKind` gains `OperatorInstructionCommitted` and
+  `MemberInstructionTargetsRecorded`, so an exhaustive match needs the arms.
+  A mob journals these two kinds at mob event schema 10
+  (`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`) and every
+  other kind at 9, so a mob that never uses operator instructions keeps a
+  journal older releases read, and a release before operator instructions
+  refuses the journal of a mob that recorded one, typed ("unsupported stored
+  mob event schema_version=10"), until a roll-forward. `rkat storage doctor`
+  lists such mob databases (Info finding `operator-instruction-mob-events`).
+  `MobSessionService` gains `record_member_instruction_target`,
+  `release_member_instruction_target` and `read_member_instructions`, each
+  defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
+  durable session owner must forward them for its mob's members to receive
+  instructions (Core's CLI and RPC wrappers forward them).
+
 - `meerkat-workgraph`: `WorkEvidenceRef` gains the public field `withdraws`
   (`BTreeSet<String>`, the ids of earlier evidence on the same item that the
   ref withdraws; see Added), so code that builds the struct literally must
@@ -1405,15 +1443,56 @@ them.
   prompt versions in sessions that hold entries, and a fork child's request
   leaves out copied entry rows its model cannot carry.
   `SessionServiceInstructionExt` (`set_session_instruction`,
-  `record_instruction_target`, `read_session_instructions`; the persistent
-  service implements it, the ephemeral one refuses `durability_unavailable`)
-  records a live session's write through a task the service owns, so a
-  caller that stops waiting never leaves it uncommitted, and a dormant
-  session's store-only without waking it. History reads carry each entry's
+  `read_session_instructions`; the persistent service implements it, the
+  ephemeral one refuses `durability_unavailable`) records a live session's
+  write through a task the service owns, so a caller that stops waiting never
+  leaves it uncommitted, and a dormant session's store-only without waking
+  it. A mob member's snapshot is recorded, and released, only by the mob
+  runtime's sealed delivery (see the mob entry below); no session service
+  trait method takes one. History reads carry each entry's
   identity as `WireInstructionEntryIdentity`, raw for a form the reader does
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
   and the fold source.
+
+- `meerkat-mob`, `meerkat-machine-schema`, `meerkat-session`, `meerkat-store`:
+  operator instructions for a mob's members (Rust API).
+  `MobHandle::set_operator_instruction` writes a slot's body at a revision for
+  a target: every member, the members of one profile, or one member, as a
+  predicate over the roster (a member added or moved later receives it; the
+  receipt's `matched_members` counts the current matches);
+  `MobHandle::revoke_operator_instruction` revokes it at a higher revision.
+  The receipt returns once the record is in the mob's journal. MobMachine
+  owns every fact: the records, a generation every committed write and every
+  reset of a mob that has one advances, and each member's owed, recorded and
+  blocked facts. Every member whose snapshot a write changes is owed it, and
+  the mob's delivery owner records the member's whole snapshot in its
+  session: through the session while it is live and store-only while it is
+  dormant, never waking or materializing a member, with dormant deliveries
+  bounded (`MobBuilder::with_member_instruction_delivery_concurrency`,
+  default 16) and live ones in a lane of their own. A member born on a new
+  session (a spawn, a rotation, an unborn seat's first wake, a recreated
+  session) carries the snapshot from its first build, so its first run
+  applies it. A stale or conflicting revision, an unknown slot, a body over
+  256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
+  completed or destroyed mob are refused typed
+  (`OperatorInstructionError::code`); writes need `AdminHost` and are never
+  an agent tool. A session that another mob's target owns blocks the member
+  (`owned_by_other_mob`) until that mob releases it; a mob releases a
+  retiring member's target when the member's host keeps the session, and on
+  destroy. A restart replays the records and the obligations, a delivery
+  wave's records are journaled, and a crash in the middle of a fan-out
+  delivers the remaining members once. `MobHandle::operator_instruction_status`
+  (`ReadHistory`) reads, without waking anyone, the records and per member
+  its residency, its delivery state (`Current`, `Owed` with the last
+  retryable failure, `Blocked` with its reason), per slot the member's
+  desired view, its session's recorded target and the entry in effect with a
+  typed pending reason, an unreadable member's reason, and whether a live
+  channel is open on its session (operator instructions do not reach a live
+  channel). A placed member is reported blocked (`member_host_unsupported`).
+  A TLC audit (`specs/machines/mob_machine/operator_instruction_delivery_audit.sh`)
+  checks the owed computation, the seat and unseat facts and that no
+  delivery wakes a member.
 
 - `meerkat-workgraph`: typed evidence withdrawal. An evidence ref withdraws
   earlier evidence on the same item by listing the earlier ids in its new

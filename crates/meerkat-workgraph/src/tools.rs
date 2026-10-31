@@ -542,18 +542,14 @@ fn evidence_ref_schema() -> Value {
 /// has no earlier evidence on its item, so `workgraph_create` does not
 /// advertise `withdraws`.
 fn withdrawing_evidence_ref_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "kind": { "type": "string" },
-            "id": { "type": "string" },
-            "label": { "type": "string" },
-            "summary": { "type": "string" },
-            "withdraws": { "type": "array", "items": { "type": "string" } }
-        },
-        "required": ["kind", "id"],
-        "additionalProperties": false
-    })
+    let mut schema = evidence_ref_schema();
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(
+            "withdraws".to_string(),
+            json!({ "type": "array", "items": { "type": "string" } }),
+        );
+    }
+    schema
 }
 
 fn owner_key_schema() -> Value {

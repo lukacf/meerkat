@@ -683,12 +683,7 @@ impl WorkEvidenceKind {
 
 /// A typed pointer to evidence for a work item. Evidence is append-only:
 /// nothing edits or removes a ref, and a later ref can withdraw earlier ones
-/// through [`WorkEvidenceRef::withdraws`].
-///
-/// Build one with [`WorkEvidenceRef::new`]; the struct is `#[non_exhaustive]`.
-/// The constructor leaves the confirmation and execution provenance unset:
-/// generic evidence paths refuse them, and only the trusted goal-confirm and
-/// execution-bridge producers set them.
+/// by listing their ids in `withdraws`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -720,12 +715,11 @@ pub struct WorkEvidenceRef {
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub execution_binding_id: Option<WorkExecutionBindingId>,
     /// Ids of earlier evidence refs on the same item that this ref withdraws.
-    /// A ref is withdrawn when a later ref on the item lists its id: nothing
-    /// is edited or removed, and [`WorkItem::is_evidence_withdrawn`] reads
-    /// the relation. A withdrawal names only earlier refs, never its own id
-    /// or another withdrawal; confirmation and execution evidence can neither
-    /// be withdrawn nor withdraw. Omitted on the wire when empty, so a ref
-    /// without withdrawals keeps its encoding.
+    /// A ref is withdrawn when a later ref on the item lists its id; nothing
+    /// is edited or removed. A withdrawal names only earlier refs, never its
+    /// own id or another withdrawal; confirmation and execution evidence can
+    /// neither be withdrawn nor withdraw. Omitted when empty, so a ref without
+    /// withdrawals keeps its encoding.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub withdraws: BTreeSet<String>,
 }
@@ -733,6 +727,13 @@ pub struct WorkEvidenceRef {
 impl WorkEvidenceRef {
     /// Generic evidence of `kind` with `id`: no label, summary or
     /// withdrawals, and no confirmation or execution provenance.
+    ///
+    /// The struct is `#[non_exhaustive]`, so code outside this crate builds a
+    /// ref here and sets the rest with the `with_*` builders or the public
+    /// fields. Generic evidence paths refuse confirmation and execution
+    /// provenance; only the trusted goal-confirm and execution-bridge
+    /// producers set them. [`WorkItem::is_evidence_withdrawn`] reads
+    /// withdrawals.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),

@@ -230,7 +230,7 @@ Lock naming is file-scoped, not derived from session_id.
 persisted.extend(rows.iter().cloned());
 ```
 
-append_rows extends the previously read vector and serializes it back to the single configured file; read_rows deserializes Vec<SessionPersistenceRow>.
+append_rows extends the previously read vector and serializes it back to the single configured file; read_rows deserializes `Vec<SessionPersistenceRow>`.
 
 **`meerkat-mobkit/src/unified_runtime/builder.rs:1916-1938`**
 
@@ -283,7 +283,7 @@ The documented default sessions.lock path and with_lock_path override match the 
 persisted.extend(rows.iter().cloned());
 ```
 
-append_rows extends and rewrites the aggregate array; read_rows deserializes Vec<SessionPersistenceRow>.
+append_rows extends and rewrites the aggregate array; read_rows deserializes `Vec<SessionPersistenceRow>`.
 
 ## E-003: SessionPersistenceRow field table names nonexistent fields and omits payload, tombstones and labels
 
@@ -351,7 +351,7 @@ deleted: true,
 
 The backend test writes a tombstone for s1 and later updates for s2 using payload, demonstrating the omitted fields' concrete semantics.
 
-**Required correction:** Replace the table with session_id: String; updated_at_ms: u64; deleted: bool; payload: serde_json::Value; labels: BTreeMap<String, String>. Describe payload as application JSON and deleted as a tombstone flag. Remove the three nonexistent top-level fields.
+**Required correction:** Replace the table with session_id: String; updated_at_ms: u64; deleted: bool; payload: serde_json::Value; labels: `BTreeMap<String, String>`. Describe payload as application JSON and deleted as a tombstone flag. Remove the three nonexistent top-level fields.
 
 ### Changes and final verification
 

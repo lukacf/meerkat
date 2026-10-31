@@ -1468,7 +1468,7 @@ Every service operation using scope is restricted to the immutable grant, not ju
 let realm = match meerkat_core::mob_realm_id(mob_id) {
 ```
 
-Current scope uses the canonical mob.<mob_id> realm rather than the bare mob definition ID described at document lines 140-142. The service receives WorkNamespace::default().
+Current scope uses the canonical `mob.<mob_id>` realm rather than the bare mob definition ID described at document lines 140-142. The service receives WorkNamespace::default().
 
 **`meerkat-mobkit/tests/workgraph_rpc.rs:251-254`**
 
@@ -1489,7 +1489,7 @@ Grant and all_namespaces refusals surface as JSON-RPC -32602, not a successful b
 
 ### Independent adjudication
 
-Confirmed only as a missing current-applicability qualification on a still-referenced binding contract. The title and 'as-built, 0.7.30' section are real historical boundaries: this review does not claim that old all_namespaces or bare-realm behavior was historically false. However, current SDK and dispatcher source direct readers here and there is no supersession/current-scope warning. The pinned service rejects all_namespaces=true on list/snapshot/events and refuses any scope different from its immutable grant; default MobKit construction now derives mob.<mob_id> and WorkNamespace::default(). Narrow the initial proposed correction for library injection: with_workgraph_service accepts a supplied service, so 'every possible service must use literal default namespace' would itself be too broad.
+Confirmed only as a missing current-applicability qualification on a still-referenced binding contract. The title and 'as-built, 0.7.30' section are real historical boundaries: this review does not claim that old all_namespaces or bare-realm behavior was historically false. However, current SDK and dispatcher source direct readers here and there is no supersession/current-scope warning. The pinned service rejects all_namespaces=true on list/snapshot/events and refuses any scope different from its immutable grant; default MobKit construction now derives `mob.<mob_id>` and WorkNamespace::default(). Narrow the initial proposed correction for library injection: with_workgraph_service accepts a supplied service, so 'every possible service must use literal default namespace' would itself be too broad.
 
 **`docs/design/workgraph-wire-contract.md:3-8`**
 
@@ -1529,7 +1529,7 @@ scope also compares the namespace to the grant and returns InvalidInput for a di
 let realm = match meerkat_core::mob_realm_id(mob_id) {
 ```
 
-Stock composition derives canonical mob.<mob_id> and then calls WorkGraphService::with_scope(store, realm, WorkNamespace::default()). Invalid mob IDs have an explicit error/fallback path, not a supported alternate public realm spelling.
+Stock composition derives canonical `mob.<mob_id>` and then calls WorkGraphService::with_scope(store, realm, WorkNamespace::default()). Invalid mob IDs have an explicit error/fallback path, not a supported alternate public realm spelling.
 
 **`meerkat-mobkit/src/rpc/workgraph_methods.rs:177-177`**
 
@@ -1547,13 +1547,13 @@ self.workgraph_service = service;
 
 Library embedders can inject a composed service; its granted default scope, rather than a universal literal namespace requirement, is the authoritative qualification.
 
-**Required correction:** Preserve the 0.7.30 as-built account and add a clearly visible current-contract qualification/appendix for the audited Meerkat 0.8.40 dependency. Stock gateway/default MobKit construction uses canonical mob.<mob_id> with the default namespace. All WorkGraph reads/mutations remain inside the service's immutable namespace grant; optional namespace may name only that granted scope. all_namespaces=true on list/snapshot/events and out-of-grant namespaces are refused with -32602; realm_id remains caller-forbidden. For a library-injected service, describe its own fixed grant rather than claiming every service must use the stock namespace. Do not silently rewrite the historical table as if these restrictions existed in 0.7.30 or suggest widening the grant.
+**Required correction:** Preserve the 0.7.30 as-built account and add a clearly visible current-contract qualification/appendix for the audited Meerkat 0.8.40 dependency. Stock gateway/default MobKit construction uses canonical `mob.<mob_id>` with the default namespace. All WorkGraph reads/mutations remain inside the service's immutable namespace grant; optional namespace may name only that granted scope. all_namespaces=true on list/snapshot/events and out-of-grant namespaces are refused with -32602; realm_id remains caller-forbidden. For a library-injected service, describe its own fixed grant rather than claiming every service must use the stock namespace. Do not silently rewrite the historical table as if these restrictions existed in 0.7.30 or suggest widening the grant.
 
 ### Changes and final verification
 
 **Changed:** `docs/design/workgraph-wire-contract.md`, `docs/design/workgraph-integration.md`.
 
-Added a prominent current Meerkat 0.8.40 scope qualification while retaining the 0.7.30 inventory and as-built account. Documented stock mob.<mob_id>/default namespace construction, all-operation immutable grants, -32602 for all_namespaces=true and out-of-grant namespaces, and caller-forbidden realm_id. Qualified library-injected services by their own fixed grant. Added a link from the historical integration plan and a warning adjacent to the old as-built scope notes.
+Added a prominent current Meerkat 0.8.40 scope qualification while retaining the 0.7.30 inventory and as-built account. Documented stock `mob.<mob_id>`/default namespace construction, all-operation immutable grants, -32602 for all_namespaces=true and out-of-grant namespaces, and caller-forbidden realm_id. Qualified library-injected services by their own fixed grant. Added a link from the historical integration plan and a warning adjacent to the old as-built scope notes.
 
 **Validation:** PASS: inspected workgraph_wiring.rs::scoped_workgraph_service and grant forwarding, rpc/workgraph_methods.rs namespace checks/error mapping, and pinned meerkat-workgraph-0.8.40 service.rs scope/events/list/snapshot normalization. H-010 assertions cover stock and injected-service boundaries. Both new relative qualification links resolve, and historical scope bullets remain byte-identical.
 

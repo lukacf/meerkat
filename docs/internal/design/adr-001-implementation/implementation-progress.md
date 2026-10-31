@@ -1,5 +1,23 @@
 # ADR-001 implementation checkpoint
 
+## Durable decisions, 2026-10-30
+
+0.9.8 adds durable decisions beside the in-run consent kind, which is
+unchanged: `ApprovalLifecycleMachine`, `approvals.json` and their audits keep
+their bytes. One record-scoped `DurableDecisionMachine` per decision owns its
+hold and sealed binding, the presentation of its subject, the attested human
+or reviewer decision bound to one subject digest, the execution permit and the
+executed fact, expiry, withdrawal and the owed requester notice. A permit is
+authorized only before the deadline, and an approved decision with a permit
+outstanding waits for its settlement instead of expiring. The owner is
+`meerkat_runtime::decision::DurableDecisionService`, stateless over its own
+store (`approval_decisions.sqlite3` beside `approvals.json`, created by the
+first hold, read lazily). Core adds no wire. The hand-written TLC audit
+`specs/machines/durable_decision/durable_decision_audit.{tla,sh}` runs in shard
+`audits-j`. Open: the operation owners' commits under the permit, the host's
+decision surfaces and notice delivery, and routing the decisions file through
+a host's own store.
+
 ## Outcome summary, 2026-10-08 at 03:27 UTC
 
 The 0.9 coordinator leads delivery. This summary separates completed outcomes

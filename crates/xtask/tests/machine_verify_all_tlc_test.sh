@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-i
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-j
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -14,20 +14,21 @@ set -euo pipefail
 #   audits-g        hand-written audit shard G
 #   audits-h        hand-written audit shard H
 #   audits-i        hand-written audit shard I
+#   audits-j        hand-written audit shard J
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the ten parts as separate targets (machine_verify_all_tlc_test,
+# Bazel runs the eleven parts as separate targets (machine_verify_all_tlc_test,
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test,
 # machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test,
 # machine_verify_audits_e_tlc_test, machine_verify_audits_f_tlc_test,
 # machine_verify_audits_g_tlc_test, machine_verify_audits_h_tlc_test,
-# machine_verify_audits_i_tlc_test) so the BuildBuddy machine-authority lane
-# runs them in parallel; together they are exactly `all`. CI's tlc-audits job
-# runs the nine audit shards, one job each.
+# machine_verify_audits_i_tlc_test, machine_verify_audits_j_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`. CI's tlc-audits job runs the ten audit shards, one job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -36,13 +37,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-i may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-j may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-i) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-j) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-i, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-j, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -831,6 +832,31 @@ if run_part audits-c; then
   TLC_WORKERS="${tlc_workers}" "${entered_step_audit}" "${ENTERED_STEP_AUDIT_MAX_STEPS:-16}" --mutants
 fi
 
+# The durable decision record (DurableDecisionMachine: one decision's sealed
+# binding, its attested decision, the execution permit and the executed
+# fact, expiry, withdrawal and the requester notice an ended decision owes)
+# is model-checked by a hand-written audit over the generated model: every
+# input in every phase, through one wrapper per arm, under every generated
+# invariant plus eleven step properties (terminals latch; approvals and
+# rejections attested; execution only from Approved with the held binding;
+# expiry only at the deadline and, for an approved decision, only without
+# an outstanding permit or by its release; withdrawal only while open by the
+# requester or the host; the sealed binding never changes; the notice owed
+# once at the end; no permit at or after the deadline; a release clears the
+# permit) and one state invariant (an owner's commit stays settleable). It
+# requires every wrapper to fire, thirteen witnesses reached and refuses
+# seventeen seeded defects (--mutants). 6 steps reach every witness. It runs
+# alone in shard audits-j.
+durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
+if [[ ! -x "${durable_decision_audit}" ]]; then
+  echo "error: durable decision audit runner is missing from workspace runfiles: ${durable_decision_audit}" >&2
+  exit 1
+fi
+if run_part audits-j; then
+  echo "running bounded durable decision TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier
@@ -925,7 +951,11 @@ run_machine_verify() {
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it. The hosted audits-g and audits-i have not been
-# measured yet.
+# measured yet;
+# audits-j = durable decision with --mutants, alone: its safety run (13863
+# distinct states at 6 steps, 16 s), thirteen witness runs and seventeen
+# mutant runs took 54 s on a 4-worker local run (about 85-125 s hosted at
+# the 1.6-2.3x runner factor), not yet measured on a hosted runner.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

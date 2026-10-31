@@ -23,7 +23,10 @@ These commands never read, move, or report credential stores. A persistent
 `rkat-rpc` host also keeps approval records in `approvals.json` under its
 resolved persistence store path. That RPC-owned sidecar is not an eighth
 `StorageProvider` domain, and the current storage doctor, migration, and prune
-commands do not inventory, migrate, or delete it.
+commands do not inventory, migrate, or delete it. The durable decisions beside
+it, in `approval_decisions.sqlite3` (created by the first hold), are part of
+the realm's database inventory: the doctor reports the file and its
+`approval-decisions` ledger domain, and migration fences it.
 
 ## Select Roots And Realms
 

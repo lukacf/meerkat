@@ -617,6 +617,60 @@ them.
   these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-store`, `meerkat`,
+  `meerkat-rpc`, `meerkat-machine-schema`: durable decisions. A durable
+  decision holds one operation, sealed by the operation id and request digest
+  its owner computed, until an attested party decides it, its requester or
+  the host withdraws it, or its deadline passes; the operation's owner then
+  executes the held request at most once. The new record-scoped
+  `DurableDecisionMachine` owns each decision's lifecycle, with a hand-written
+  TLC audit in the new shard `audits-j`. `ApprovalLifecycleMachine`,
+  `approvals.json` and the in-run consent are unchanged, Core adds no wire
+  method or field, and `approval/list` never shows a decision.
+
+- `meerkat-core`: `approval::decision` holds the vocabulary: decision ids
+  derived from a kind and a subject key, the rendering whose subject digest
+  Core computes (a digest a caller gives must equal it), canonical parts and
+  presentation records (complete exactly when they show the split for their
+  own part size), `AttestedDecision` and `AttributedReview` (not
+  `Deserialize`) with their evidence and its digest, the stored row,
+  `ConsentProvenance` (`Decided`, `Imported`), and the `DecisionStore`
+  contract (lazy reads by id or index page, conditional writes that never
+  wait) with `InMemoryDecisionStore`.
+
+- `meerkat-runtime`: `decision::DurableDecisionService` owns the rows. It
+  holds (a replay answers the held decision as a read does, another binding
+  is refused), presents, decides (the decider's eligibility checked at the
+  commit; the requester never decides; the first valid decision wins),
+  reviews (allow, deny, escalate to the human), withdraws, reads (recording
+  an expiry it observes), lists (projecting an expiry it does not record),
+  and pages the owed and due indexes as stored. `authorize_execution`
+  mints a `DecisionExecutionPermit` (the held binding, the deadline, the
+  decided consent) from the machine's authorization alone, only for an
+  approved decision before its deadline. Its one executor settles it with
+  `record_executed` (accepted at any time, and the only settlement after a
+  commit), `release_execution` or `close_refused`; the last two consume the
+  permit. After a restart the executor settles first: it reads its own record
+  of the operation, then records the commit, or settles the outstanding
+  permit by id with `release_after_restart` or `close_refused_after_restart`.
+  A permit outstanding at the deadline holds the decision until it is
+  settled; without one an approved decision expires at its deadline and
+  never runs after it. Every ended decision of a routable requester owes one
+  notice, settled by `settle_notice`. An owner
+  narrowed for a candidate launch reads, and writes nothing.
+
+- `meerkat-store`: `SqliteDecisionStore` keeps a persistence's decisions in
+  `approval_decisions.sqlite3` beside `approvals.json` (schema domain
+  `approval-decisions` v1). The first hold creates the file; opening the
+  store and reading a missing file create nothing. `rkat storage doctor`
+  reports the file and its domain, and migration fences it.
+
+- `meerkat`: `ApprovalIssuerSelection::open_decisions` opens the decision
+  owner beside the approval issuer (an ephemeral selection's owner refuses
+  every call as unavailable). `PersistenceBundle::decision_owner` returns it,
+  and `PersistenceBundle::with_candidate_launch_decisions` narrows it, one
+  way, for a candidate launch. `meerkat-rpc`: `SessionRuntime::decision_service`.
+
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
   with the same notice record as `PromptInput::detached_job_completed`.
@@ -1146,8 +1200,25 @@ them.
   JSON-RPC client that is not one of the SDKs (which refuse) must check the
   server's contract version (0.9.8 or later) before sending a gate.
 
+- Durable decisions need no migration: 0.9.8 creates
+  `approval_decisions.sqlite3` with the first hold and changes no existing
+  file, and `approvals.json` keeps its format. Rolling back to 0.9.7 keeps
+  every approval: 0.9.7 never opens the decisions file, and nothing serves the
+  decisions under it (none expires, executes or settles its notice). Back on
+  0.9.8, an open decision past its deadline expires at its first read (a
+  deadline driver reads the due ones) and owes its notice; an approved one is
+  listed as owed and runs only before its deadline, and past it expires the
+  same way, unless its execution permit was outstanding at the rollback: that
+  decision waits for its owner to settle the permit (record the commit, or
+  release or refuse the permit). Back the file up with the state root, as a
+  WAL-complete copy.
+
 ### Known limitations
 
+- `meerkat`: a host that supplies its own stores keeps durable decisions in
+  `approval_decisions.sqlite3` under its store path, as it keeps
+  `approvals.json`, not in its runtime store or through the host store
+  interface.
 - `meerkat-runtime`: a governed input admitted under its own authority
   association (a governed prompt, for example) that a graceful requeue stop
   keeps, or that a restart finds in the store, cannot run on the next

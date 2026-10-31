@@ -240,6 +240,14 @@ pub const REALM_DATABASE_FILES: &[(&str, &[&str])] = &[
     ("memory/memory.sqlite3", &["memory"]),
     ("tasks.db", &["tools-tasks"]),
     ("sessions_jsonl/session_index.sqlite3", &["jsonl-index"]),
+    // Durable decisions beside `approvals.json` under the store path: the
+    // realm root, or `sessions_jsonl/` on the JSONL backend. Created by the
+    // first hold, so absent on realms that never held a decision.
+    ("approval_decisions.sqlite3", &["approval-decisions"]),
+    (
+        "sessions_jsonl/approval_decisions.sqlite3",
+        &["approval-decisions"],
+    ),
 ];
 
 /// Every ledger domain name a meerkat store stamps, across the whole crate
@@ -270,6 +278,7 @@ pub const KNOWN_LEDGER_DOMAINS: &[&str] = &[
     "mob",
     "tools-tasks",
     "jsonl-index",
+    "approval-decisions",
 ];
 
 // The supported-version registry is shared with the migration framework:

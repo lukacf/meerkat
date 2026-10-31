@@ -57851,5 +57851,209 @@ mod tests {
             assert_eq!(generation, 1);
             assert_eq!(slots, 1);
         }
+
+        /// The comms name of member `w1` (role `worker`) of mob `mob-1`.
+        fn member_comms_name() -> meerkat_core::MemberCommsName {
+            meerkat_core::MemberCommsName::new("mob-1", "worker", "w1")
+                .expect("a member comms name")
+        }
+
+        /// A session its host created under `comms_name`, naming no member
+        /// binding, whose actor is still live.
+        async fn live_host_session_named<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            comms_name: &meerkat_core::MemberCommsName,
+        ) -> SessionId {
+            let mut request = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
+            let session = request
+                .build
+                .as_mut()
+                .and_then(|build| build.resume_session.as_mut())
+                .expect("the request carries its session");
+            let mut metadata = session
+                .session_metadata()
+                .expect("the request's session carries metadata");
+            metadata.comms_name = Some(comms_name.to_string());
+            session
+                .set_session_metadata(metadata)
+                .expect("the metadata serializes");
+            service
+                .create_session(request)
+                .await
+                .expect("create_session should succeed")
+                .session_id
+        }
+
+        /// A session as `live_host_session_named` makes it, then left
+        /// dormant: no actor serves it.
+        async fn dormant_host_session_named<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            comms_name: &meerkat_core::MemberCommsName,
+        ) -> SessionId {
+            let id = live_host_session_named(service, comms_name).await;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            id
+        }
+
+        /// The member binding the committed session document names.
+        async fn committed_member_binding<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Option<meerkat_core::MobMemberBinding> {
+            service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .try_session_metadata()
+                .expect("the metadata decodes")
+                .expect("the session carries metadata")
+                .mob_member_binding
+        }
+
+        /// The persistent seat stamp binds a dormant session whose comms name
+        /// is the seated member's and that names no binding, once, and holds
+        /// the session's write guards (its turn boundary and recovery gate)
+        /// across its store write, as the store-only controls do: a host's
+        /// write that comes meanwhile waits for it, then meets a member's
+        /// session (`owned_by_mob`), so the stamp neither drops a write its
+        /// host was told was recorded nor is overwritten by one. A live
+        /// session is refused `Busy`, and a session that already names a
+        /// binding, or that is named for another member or mob, is left as
+        /// it is, with no write.
+        #[tokio::test]
+        async fn a_seat_stamp_binds_a_members_dormant_session_once_under_its_write_guards() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let name = member_comms_name();
+            let id = dormant_host_session_named(service.as_ref(), &name).await;
+            let host = Arc::clone(&service)
+                .set_session_instruction(&id, write("host", 1, "Answer formally."))
+                .await
+                .expect("the host writes its own session");
+            assert_eq!(host.disposition, InstructionWriteDisposition::Recorded);
+            let builds_before = builds.load(Ordering::SeqCst);
+
+            // The stamp stops inside its store write, holding what it holds
+            // across that write.
+            gated.set_pause_session_boundary_commit(true);
+            let stamp = tokio::spawn({
+                let service = Arc::clone(&service);
+                let id = id.clone();
+                async move { service.bind_seated_member_session(&id, "mob-1", "w1").await }
+            });
+            gated.await_session_boundary_commit_entered().await;
+            gated.set_pause_session_boundary_commit(false);
+            assert!(
+                service
+                    .turn_finalization_gate_for_session(&id)
+                    .await
+                    .try_lock_owned()
+                    .is_err(),
+                "the stamp holds the session's turn boundary across its store write"
+            );
+            assert!(
+                service
+                    .recovery_gate_for_session(&id)
+                    .await
+                    .try_lock_owned()
+                    .is_err(),
+                "the stamp holds the session's recovery gate across its store write"
+            );
+
+            // A host write that comes now waits for the stamp, then meets a
+            // member's session.
+            let host_write = tokio::spawn({
+                let service = Arc::clone(&service);
+                let id = id.clone();
+                async move {
+                    service
+                        .set_session_instruction(&id, write("host", 2, "Answer in French."))
+                        .await
+                }
+            });
+            gated.release_session_boundary_commit();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stamp)
+                .await
+                .expect("the stamp completes once its write is released")
+                .expect("join")
+                .expect("the stamp binds the member's session");
+            let refused = tokio::time::timeout(std::time::Duration::from_secs(5), host_write)
+                .await
+                .expect("the host's write answers once the stamp is done")
+                .expect("join")
+                .expect_err("the host's write meets a member's session");
+            assert_eq!(refused.code(), Some(InstructionSetErrorCode::OwnedByMob));
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &id).await,
+                Some(name.to_member_binding()),
+                "the stamp is durable"
+            );
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(owner, InstructionTargetOwner::Session),
+                "the target stays its host's until the mob's first record: {owner:?}"
+            );
+            assert_eq!(
+                (generation, slots),
+                (1, 1),
+                "the host's acknowledged write is kept, and nothing else landed"
+            );
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "the stamp builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+
+            // A live session is refused, and nothing is stamped on it.
+            let live = live_host_session_named(service.as_ref(), &name).await;
+            let busy = service
+                .bind_seated_member_session(&live, "mob-1", "w1")
+                .await
+                .expect_err("a dormant seat binds no live session");
+            assert!(matches!(busy, SessionError::Busy { .. }), "{busy:?}");
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &live).await,
+                None
+            );
+
+            // Another session named for the member, dormant and unbound. From
+            // here on every session snapshot commit fails: a stamp that tried
+            // to write would fail with it.
+            let other = dormant_host_session_named(service.as_ref(), &name).await;
+            gated.set_fail_snapshot_commits(true);
+            for (mob, member) in [("mob-1", "w1"), ("mob-1", "w2"), ("mob-2", "w1")] {
+                service
+                    .bind_seated_member_session(&id, mob, member)
+                    .await
+                    .expect("a session that names a binding is left as it is");
+            }
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &id).await,
+                Some(name.to_member_binding())
+            );
+            for (mob, member) in [("mob-1", "w2"), ("mob-2", "w1")] {
+                service
+                    .bind_seated_member_session(&other, mob, member)
+                    .await
+                    .expect("a session named for another member is left as it is");
+            }
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &other).await,
+                None
+            );
+        }
     }
 }

@@ -766,10 +766,13 @@ mod tests {
                 "[meerkat-retired-instruction-v1]\nkey={key}\nstatus=superseded\nbody_bytes={}",
                 body.len()
             );
-            *retired_instruction_body = Some(meerkat_core::RetiredInstructionBody {
-                render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
-                body_bytes: body.len() as u64,
-            });
+            *retired_instruction_body = Some(
+                meerkat_core::RetiredInstructionBody {
+                    render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+                    body_bytes: body.len() as u64,
+                }
+                .into(),
+            );
         }
         WireHistoryRow(row)
     }

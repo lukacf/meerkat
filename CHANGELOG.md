@@ -650,9 +650,9 @@ them.
   the public field `retired_instruction_body: Option<RetiredInstructionBody>`,
   so code that builds a `SystemMessage` literally must set it (`None` keeps
   the previous behaviour). `WireSessionMessage::System` gains the read-only
-  field `retired_instruction_body: Option<RetiredInstructionBody>`, so code
-  that builds the variant literally or destructures it without `..` must
-  name it.
+  field `retired_instruction_body: Option<WireRetiredInstructionBody>`
+  (`Known` or `Raw`), so code that builds the variant literally or
+  destructures it without `..` must name it.
 
 - `meerkat-core`: `ForkInstructionRefusalCause` gains `HeadBodyRetired` (wire
   kind `head_body_retired`), appended last: the refusal of a
@@ -1342,7 +1342,8 @@ them.
   `status=superseded` and the body's length), and it carries the typed
   marker `RetiredInstructionBody` (`render_version`, `body_bytes`;
   `RETIRED_INSTRUCTION_RENDER_VERSION_V1`), which a history read carries
-  beside the row's activation identity. The model, the summarizer and a host
+  beside the row's activation identity as `WireRetiredInstructionBody`, raw
+  for a form the reader does not know. The model, the summarizer and a host
   curator read the retired header, never the superseded body. The 1 MiB
   activation budget counts live bodies only: a retired body stops counting
   at the compaction that retires it. An exact retry of a retired activation

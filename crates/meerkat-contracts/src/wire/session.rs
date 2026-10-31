@@ -1530,9 +1530,10 @@ pub enum WireSessionMessage {
         /// compaction retired, because a later activation row of its key
         /// superseded it: `content` is then the retired header, which names
         /// the key, the revision and the body's length. Read-only: no write
-        /// accepts it.
+        /// accepts it. A marker whose form this reader does not know reads
+        /// raw instead of failing the read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        retired_instruction_body: Option<meerkat_core::RetiredInstructionBody>,
+        retired_instruction_body: Option<WireRetiredInstructionBody>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1646,6 +1647,31 @@ impl From<meerkat_core::InstructionEntryIdentity> for WireInstructionEntryIdenti
     }
 }
 
+/// Public wire form of the marker of an instruction activation row whose
+/// body a compaction retired.
+///
+/// Reads are tolerant: a marker whose form this version does not know (a
+/// later render version with a field this version does not know) reads as
+/// [`Self::Raw`], the value as it was sent, and is written back the same. It
+/// never fails the history page or bridge message that carries it; either
+/// form marks the row's body as retired. The session document keeps the
+/// closed core type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireRetiredInstructionBody {
+    /// A marker this version knows.
+    Known(meerkat_core::RetiredInstructionBody),
+    /// A marker this version does not know, as it was sent.
+    Raw(serde_json::Value),
+}
+
+impl From<meerkat_core::RetiredInstructionBody> for WireRetiredInstructionBody {
+    fn from(marker: meerkat_core::RetiredInstructionBody) -> Self {
+        Self::Known(marker)
+    }
+}
+
 impl From<Message> for WireSessionMessage {
     fn from(value: Message) -> Self {
         match value {
@@ -1656,7 +1682,7 @@ impl From<Message> for WireSessionMessage {
                 prompt_version: message.prompt_version,
                 instruction_activation: message.instruction_activation,
                 instruction_entry: message.instruction_entry.map(Into::into),
-                retired_instruction_body: message.retired_instruction_body,
+                retired_instruction_body: message.retired_instruction_body.map(Into::into),
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -3085,12 +3111,32 @@ mod tests {
         };
 
         let wire: WireSessionHistory = page.into();
+        assert!(
+            matches!(
+                &wire.messages[0],
+                WireSessionMessage::System {
+                    retired_instruction_body: Some(WireRetiredInstructionBody::Known(_)),
+                    ..
+                }
+            ),
+            "the history read carries the marker as a form it knows"
+        );
         let json = serde_json::to_value(&wire.messages[0]).unwrap();
         assert_eq!(
             json["retired_instruction_body"], marker,
             "the history read carries the retired-body marker"
         );
         assert_eq!(json["instruction_activation"]["activation_id"], "act-0003");
+        // The marker a compaction writes decodes as Known from its JSON:
+        // were the core type to gain a field the wire cannot decode, every
+        // real marker would read raw, and this fails first.
+        assert_eq!(
+            serde_json::from_value::<WireRetiredInstructionBody>(marker.clone()).unwrap(),
+            WireRetiredInstructionBody::Known(meerkat_core::RetiredInstructionBody {
+                render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+                body_bytes: 13,
+            })
+        );
 
         // Rewrite input has no marker field: one sent anyway is ignored.
         let forged = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
@@ -3167,6 +3213,16 @@ mod tests {
         };
 
         for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            assert!(
+                matches!(
+                    message,
+                    WireSessionMessage::System {
+                        retired_instruction_body: Some(WireRetiredInstructionBody::Raw(_)),
+                        ..
+                    }
+                ),
+                "the marker reads raw: {message:?}"
+            );
             let json = serde_json::to_value(message).expect("the row serializes");
             assert_eq!(
                 json["retired_instruction_body"], marker,

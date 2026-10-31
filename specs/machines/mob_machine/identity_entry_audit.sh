@@ -139,8 +139,10 @@
 # keeps a spawn ladder whose membership committed and one that keeps the
 # startup binding request that commit recorded (see the mutants below); the
 # held run's seal that marks a member whose spawn is in flight is refused by
-# its target invariant alone (write_target_cfg: no other invariant and no
-# property). An anchor this script expects but cannot find fails the run.
+# its target invariant alone, and the legacy run's reset that ignores the
+# roster by its target action property alone (write_target_cfg: no other
+# invariant and no other property). An anchor this script expects but cannot
+# find fails the run.
 # Each TLC run is held to the canonical lane's per-run cap (tlc_run_cap.sh)
 # and fails closed as TLC INCOMPLETE.
 set -euo pipefail
@@ -764,15 +766,16 @@ CONSTRAINTS" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
 
-# usage: write_target_cfg <run> <file> <invariant>: the run's config with
-# <invariant> as its only invariant and no property, so a mutant run is
-# refused by exactly its target or by nothing.
+# usage: write_target_cfg <run> <file> <kind> <target>: the run's config with
+# <target> as its only check, an invariant (<kind> Invariant) with no
+# property, or an action property (<kind> "Action property") with no
+# invariant, so a mutant run is refused by exactly its target or by nothing.
 write_target_cfg() {
-  local run="$1" cfg="$2" target="$3"
+  local run="$1" cfg="$2" kind="$3" target="$4"
   write_cfg "${run}" "${cfg}" "" ""
-  CFG="${cfg}" TARGET="${target}" python3 - <<'PY'
+  CFG="${cfg}" KIND="${kind}" TARGET="${target}" python3 - <<'PY'
 import os, re
-path, target = os.environ["CFG"], os.environ["TARGET"]
+path, kind, target = os.environ["CFG"], os.environ["KIND"], os.environ["TARGET"]
 lines = open(path).read().split("\n")
 
 def section(name):
@@ -786,9 +789,11 @@ def section(name):
         f"no section follows {name} in {path}"
     return start, end
 
-start, end = section("INVARIANTS")
+kept, dropped = {"Invariant": ("INVARIANTS", "PROPERTIES"),
+                 "Action property": ("PROPERTIES", "INVARIANTS")}[kind]
+start, end = section(kept)
 lines[start:end] = ["  " + target]
-start, end = section("PROPERTIES")
+start, end = section(dropped)
 del lines[start - 1:end]
 open(path, "w").write("\n".join(lines))
 PY
@@ -1073,12 +1078,13 @@ PY
     echo "mutant ${name} refused by $(grep -oE "Error: (${violation}) is violated" "${log}" | head -1)"
   }
 
-  # usage: mutate_target <run> <name> <invariant>; reads a python edit on
-  # stdin, as mutate does, and checks the run with <invariant> as its only
-  # invariant and no property (write_target_cfg): the mutant must be
-  # refused by exactly that invariant.
+  # usage: mutate_target <run> <name> <kind> <target>; reads a python edit on
+  # stdin, as mutate does, and checks the run with <target> as its only
+  # check, an invariant (<kind> Invariant) or an action property (<kind>
+  # "Action property"), and nothing else (write_target_cfg): the mutant must
+  # be refused by exactly that target.
   mutate_target() {
-    local run="$1" name="$2" target="$3"
+    local run="$1" name="$2" kind="$3" target="$4"
     if ! in_part "${run}"; then
       cat > /dev/null
       return 0
@@ -1088,18 +1094,18 @@ PY
     cp "${spec_dir}"/*.tla "${dir}/"
     { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
     local cfg="${work_dir}/mutant-${name}.cfg"
-    write_target_cfg "${run}" "${cfg}" "${target}"
+    write_target_cfg "${run}" "${cfg}" "${kind}" "${target}"
     local status=0
     (cd "${dir}" && run_tlc "${run}" "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
     local log="${work_dir}/mutant-${name}.log"
-    if ! grep -q "Error: Invariant ${target} is violated" "${log}"; then
+    if ! grep -q "Error: ${kind} ${target} is violated" "${log}"; then
       cat "${log}"
-      echo "error: mutant ${name} was not refused by ${target} (tlc exit ${status})" >&2
+      echo "error: mutant ${name} was not refused by ${kind} ${target} (tlc exit ${status})" >&2
       exit 1
     fi
     local depth
     depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
-    echo "mutant ${name} refused by ${target} in ${depth} states"
+    echo "mutant ${name} refused by ${kind} ${target} in ${depth} states"
   }
 
   # A reconcile that retires an entry: the retire helper ranges over every
@@ -1374,8 +1380,14 @@ update_var("AdoptLegacyIdentityEntryNotAdoptable", "identity_entry_origins",
 PY
 
   # The reset commits with a member seated (its roster_empty guard
-  # dropped).
-  mutate legacy reset_ignores_roster "Action property AuditResetOnEmptyRoster" <<'PY'
+  # dropped). The reset drops every identity's retained history
+  # (ResetToRunning), so with the generated invariants checked the seated
+  # member's binding left without history refuses the reset first
+  # (current_runtime_binding_has_history, which TLC checks on the reset's
+  # successor before the step's action properties). The run checks the
+  # target property alone, so it proves AuditResetOnEmptyRoster catches the
+  # defect itself.
+  mutate_target legacy reset_ignores_roster "Action property" AuditResetOnEmptyRoster <<'PY'
 drop_guard("ResetToRunning", "(identity_to_runtime = [x \\in {} |-> None])")
 PY
 
@@ -1559,7 +1571,7 @@ PY
   # mark. The guard is the one ladder test in the seal's lowered loop over
   # identity_entry_retiring; the mutant changes nothing else, so the maps
   # stay consistent and only the target invariant refuses it.
-  mutate_target held seal_marks_in_flight_spawn marked_entry_has_no_spawn_in_flight <<'PY'
+  mutate_target held seal_marks_in_flight_spawn Invariant marked_entry_has_no_spawn_in_flight <<'PY'
 text = open(path).read()
 found = list(re.finditer(
     r"^SealDeclaredRosterSealed_ForEach\d+_identity_entry_retiring\(acc, .*$", text, re.M))

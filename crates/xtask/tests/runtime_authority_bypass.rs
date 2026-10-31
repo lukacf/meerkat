@@ -180,3 +180,50 @@ impl Driver {
 ",
     );
 }
+
+#[test]
+fn planted_mob_only_session_call_outside_the_mob_runtime_fails() {
+    let findings = findings_for(
+        "crates/meerkat-rpc/src/forwarding.rs",
+        r#"
+async fn forward(service: &Service, id: &SessionId, record: Record) {
+    let _ = service.record_mob_instruction_target(id, record).await;
+}
+"#,
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("record_mob_instruction_target")),
+        "a call outside the mob runtime's session service must fail, got {findings:#?}"
+    );
+}
+
+#[test]
+fn the_mob_session_service_and_test_code_may_call_the_mob_only_entry_points() {
+    let findings = findings_for_files(&[
+        (
+            "crates/meerkat-mob/src/runtime/session_service.rs",
+            r#"
+async fn record(service: &Service, id: &SessionId, record: Record) {
+    let _ = service.record_mob_instruction_target(id, record).await;
+}
+"#,
+        ),
+        (
+            "crates/meerkat-rpc/src/lib.rs",
+            r#"
+#[cfg(test)]
+mod tests {
+    async fn release(service: &Service, id: &SessionId) {
+        let _ = service.release_mob_instruction_target(id, "mob").await;
+    }
+}
+"#,
+        ),
+    ]);
+    assert!(
+        findings.is_empty(),
+        "the mob runtime's session service and test code must pass, got {findings:#?}"
+    );
+}

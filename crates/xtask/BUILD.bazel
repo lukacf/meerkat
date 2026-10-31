@@ -1059,6 +1059,8 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//crates/meerkat-mob:package_runfiles",
+        "//crates/meerkat-rpc:package_runfiles",
         "//crates/meerkat-runtime:package_runfiles",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",

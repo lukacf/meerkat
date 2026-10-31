@@ -778,9 +778,9 @@ VERSION=v0.8.24 make release-assets
 
 `make release-workflow` is the full release mode, not a recovery shortcut.
 Recovery modes run the current workflow definition from `main` while binding
-artifacts and package metadata to the selected existing tag; a maintenance
-release's tag runs its own definition instead (`RELEASE_REF=vX.Y.Z`, see
-Releasing below).
+artifacts and package metadata to the selected existing tag, a maintenance
+release's tag included (see Releasing below); `RELEASE_REF=vX.Y.Z` runs the
+tag's own definition instead.
 
 **Pre-tag prebuild** (`make release-prebuild VERSION=vX.Y.Z`, dry run with
 `RELEASE_WORKFLOW_DRY_RUN=true`): once the release commit is on `main`,
@@ -977,9 +977,11 @@ head, which never reaches `main` first. `require_ci_green` and
 other branch. Give the release commit `CI-Plan: workspace`: a
 release-branch push diffs against its payload base and reuses no
 projection. It has no prebuild (`make release-prebuild` is `main`-only), so
-the tag run builds every binary, and its recovery dispatches run the tag's
-own workflow (`RELEASE_REF=vX.Y.Z VERSION=vX.Y.Z make release-assets`, and
-likewise for packages and the Web SDK) until `main` has the same rules.
+the tag run builds every binary. Its recovery dispatches run `main`'s
+workflow, as for any release, since `main` carries the same evidence rules
+(`VERSION=vX.Y.Z make release-assets`, and likewise for packages and the
+Web SDK); `RELEASE_REF=vX.Y.Z` runs the tag's own workflow instead, and
+`ASSETS_RUN_ID` reuse needs `main`.
 After publication merge the tag into `main` by pull request; never set
 `main`'s version to the released one without that merge. See the
 [release guide](docs/guides/cd-and-distribution.md#maintenance-releases).

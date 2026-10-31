@@ -390,10 +390,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # adoption mutant's invariant or property, its replay, archive and destroy
 # mutants' generated invariants, its rotation, seat, respawn and
 # preserving-archive mutants' action properties, its declared apply
-# mutants' generated invariants, totality invariants and action properties
-# (one per declared apply invariant, property and guard), its forced
-# destroy mutants' generated invariants, and its in-flight seal mutant's
-# target invariant violated.
+# mutants' generated invariants (the in-flight seal mutant's run with its
+# target invariant alone), totality invariants and action properties
+# (one per declared apply invariant, property and guard), and its forced
+# destroy mutants' generated invariants violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
 # count at or above each of its four runs' floors, a coverage block in which
 # each covered action of every run generated a state, its eighteen step

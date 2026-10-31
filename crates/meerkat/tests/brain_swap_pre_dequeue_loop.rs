@@ -16,6 +16,11 @@
 //! `Requested` record bound to a run that never committed anything, and then submits the next input through the
 //! ordinary admission path. Nothing here calls the realization method.
 //!
+//! It also proves the handle's precondition on the facade's persistent
+//! executor: with such a request owed, a session whose host runtime stopped
+//! has its registration degraded before the request is consulted, and the
+//! next input is left queued for the session's next registration.
+//!
 //! # Why the seeding is out of band, and what that costs
 //!
 //! The only in-band writer of a committed request is the `brain_swap` builtin,
@@ -56,7 +61,7 @@ use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord;
 use meerkat_runtime::completion::CompletionOutcome;
-use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
+use meerkat_runtime::{Input, InputLifecycleState, LogicalRuntimeId, MeerkatMachine, PromptInput};
 use tokio::time::Duration;
 
 async fn build_service(
@@ -178,4 +183,116 @@ async fn uncommitted_origin_blocks_the_next_input(backend: meerkat_store::RealmB
 #[tokio::test]
 async fn head_canonical_uncommitted_origin_blocks_the_next_input() {
     uncommitted_origin_blocks_the_next_input(meerkat_store::RealmBackend::Sqlite).await;
+}
+
+/// A runtime with named workers, standing for a host's or the process's.
+fn named_runtime(name: &str) -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name(name)
+        .enable_all()
+        .build()
+        .expect("build a runtime")
+}
+
+/// A committed request owed when the session's host runtime has stopped does
+/// not end the next input.
+///
+/// The session is materialized on a host's runtime, which then stops while
+/// the session is idle: the session's actor ended with it, while the runtime
+/// loop, on Core's serving runtime, lives on. Another runtime of the process
+/// admits the next input. The pre-dequeue handle's precondition asks the
+/// session service first: the session's task ended with its runtime, so the
+/// registration is degraded to a cold reload, nothing is realized, and the
+/// caller is answered that the input stays durably admitted. The input stays
+/// queued, never staged onto a run, for the session's next registration.
+/// Without the precondition the handle consults the request, fails without
+/// degrading anything, and the loop's cleanup ends the input.
+#[test]
+fn head_canonical_owed_handoff_after_the_host_runtime_stopped_leaves_the_input_queued() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let process = named_runtime("process-worker");
+    let (service, adapter) = process.block_on(build_service(
+        temp.path(),
+        meerkat_store::RealmBackend::Sqlite,
+    ));
+
+    let mut session = meerkat::Session::new();
+    let session_id = session.id().clone();
+    session
+        .append_model_routing_control_record(
+            SessionModelRoutingControlRecord::request(
+                SwitchTurnRequestId::new(uuid::Uuid::from_bytes([43u8; 16])),
+                RunId::new(),
+                until_changed_model_intent("gpt-5.5"),
+            )
+            .expect("representable durable request"),
+        )
+        .expect("seed committed request");
+    // The session's actor is created on the host's runtime.
+    let host = named_runtime("host-worker");
+    {
+        let service = Arc::clone(&service);
+        let adapter = Arc::clone(&adapter);
+        host.block_on(async move {
+            let service_for_executor = Arc::clone(&service);
+            let adapter_for_executor = Arc::clone(&adapter);
+            Box::pin(meerkat::surface::materialize_session(
+                &service,
+                &adapter,
+                session,
+                create_request(),
+                move |session_id| {
+                    default_persistent_executor(
+                        service_for_executor,
+                        adapter_for_executor,
+                        session_id,
+                    )
+                },
+            ))
+            .await
+            .expect("materialize the session on the host's runtime");
+        });
+    }
+    host.shutdown_timeout(Duration::from_secs(10));
+
+    let observed = process.block_on(async move {
+        let input = Input::Prompt(PromptInput::new(
+            "the next input, after the host's runtime stopped",
+            None,
+        ));
+        let input_id = input.id().clone();
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("the input is admitted");
+        let handle = handle.expect("completion handle");
+        let answered = tokio::time::timeout(Duration::from_secs(20), handle.wait()).await;
+        let reload_required = adapter
+            .durability_reload_required(&session_id)
+            .await
+            .is_some();
+        let row = service
+            .runtime_store()
+            .load_input_state(&LogicalRuntimeId::for_session(&session_id), &input_id)
+            .await
+            .expect("the input's durable row is readable")
+            .map(|row| {
+                (
+                    row.seed.phase,
+                    row.seed.attempt_count,
+                    row.seed.last_run_id.is_some(),
+                )
+            });
+        drop((service, adapter));
+        (matches!(answered, Ok(Err(_))), reload_required, row)
+    });
+    process.shutdown_timeout(Duration::from_secs(10));
+    assert_eq!(
+        observed,
+        (true, true, Some((InputLifecycleState::Queued, 0, false))),
+        "an input admitted after the session's host runtime stopped, with a committed request \
+         owed, waits for the session's next registration: the registration must reload, and \
+         the input stays queued and never staged onto a run"
+    );
 }

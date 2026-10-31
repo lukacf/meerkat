@@ -342,6 +342,10 @@ async fn a_session_bridge_without_the_standing_read_is_reported_off() {
     identities.settle_lifecycle_projection().await;
     identities.settle_lifecycle_projection().await;
     the_off_report(&events).await;
+    assert_eq!(
+        identities.lifecycle_projection_status().state,
+        crate::identity_first::LifecycleProjectionState::Off
+    );
 }
 
 /// A bridge that reads Core's member lifecycle journal and member history

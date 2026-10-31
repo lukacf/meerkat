@@ -45,6 +45,7 @@ import { Icon } from "../icon";
 import { isAgentPinned, operatorPanelPath, sidebarAgentPinId } from "../lib/adapters";
 import { agentDisplayTitle, agentKindLabel } from "../lib/agents";
 import { AGENT_BUCKET_ORDER as SECTION_ORDER, bucketOf, type AgentBucket as Bucket } from "../lib/agent-buckets";
+import { responsePhaseActivity } from "../lib/agent-status";
 import { countRender } from "../lib/render-counts";
 
 export { sidebarAgentPinId } from "../lib/adapters";
@@ -1956,10 +1957,7 @@ export const Sidebar = React.memo(function Sidebar({
   const filtered = React.useMemo(() => {
     const needle = q.toLowerCase();
     return agents.filter((agent) => {
-      // Null is an owner-reported quiet phase; absent activity stays unknown.
-      const activity = agent.response_phase === null ? "quiet"
-        : agent.response_phase === "waiting" || agent.response_phase === "tool-executing" || agent.response_phase === "generating"
-          ? "working" : "unknown";
+      const activity = responsePhaseActivity(agent);
       return (activityFilter === "all" || activity === activityFilter) && (!needle ||
         [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
           .some(value => value?.toLowerCase().includes(needle)));

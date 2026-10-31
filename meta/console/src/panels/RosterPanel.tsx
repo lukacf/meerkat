@@ -3,6 +3,7 @@ import type { ConsoleAgent } from "../types";
 import { agentDisplayTitle, responsePhaseWords } from "../lib/agents";
 import { restartOffered } from "../lib/side-chat";
 import { AGENT_BUCKET_ORDER as BUCKET_ORDER, bucketOf } from "../lib/agent-buckets";
+import { agentStateWord as stateWord, isAgentRetired as isRetired, isAgentWorking as isWorking } from "../lib/agent-status";
 import {
   AgentAvatar,
   AgentName,
@@ -54,21 +55,6 @@ interface RosterPanelProps {
 
 type Bucket = ReturnType<typeof bucketOf>;
 type Filter = "all" | Bucket;
-
-const RETIRED_STATES = new Set(["retired", "retiring", "stopped", "completed"]);
-
-function stateWord(agent: ConsoleAgent): string {
-  return (agent.state || "").trim().toLowerCase();
-}
-
-function isRetired(agent: ConsoleAgent): boolean {
-  return RETIRED_STATES.has(stateWord(agent));
-}
-
-function isWorking(agent: ConsoleAgent): boolean {
-  if (isRetired(agent)) return false;
-  return Boolean(agent.response_phase) || agent.progress?.run_state === "run_open";
-}
 
 /** A health problem worth a chip: degraded or stalled (wedged), or broken. */
 export function rosterHealthChip(agent: ConsoleAgent): { label: string; tone: Tone } | null {

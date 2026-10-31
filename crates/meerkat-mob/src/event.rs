@@ -1582,9 +1582,10 @@ impl MemberSessionBindingRecoveredEvent {
 /// `retired_entry`, `retired_rotation`) and the public event payload never
 /// carries them; a row written before them decodes them as absent (the
 /// default), and a fact in a form this build cannot read decodes as absent
-/// on its own. The rows that close a spawn with no retirement step of the
-/// machine (a membership step that failed after the spawn row was durable,
-/// and a resumed spawn's rollback) record none.
+/// on its own. Two rows that close a spawn record none: the row after a
+/// membership step that failed once the spawn row was durable, and the end
+/// of a resumed spawn's rollback, which MobMachine records without a
+/// journal effect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MemberRetiredFacts {

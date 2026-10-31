@@ -1505,6 +1505,48 @@ fn every_member_retired_writer_records_its_facts_but_the_spawn_compensations() {
     );
 }
 
+/// The journal read maps exactly the six member lifecycle row kinds
+/// (`member_lifecycle_event`), read with comments and literals blanked, as
+/// the writer guard above reads its writers: a kind named only in a comment
+/// or a string does not count. A row kind dropped from the mapping, or one
+/// added to it without a decision on what it records, fails here.
+#[test]
+fn the_lifecycle_mapping_names_the_six_row_kinds() {
+    let code = super::fail_stop_cause::shipped_sources()
+        .into_iter()
+        .find_map(|(path, code)| (path == "runtime/identity_entry.rs").then_some(code))
+        .expect("the journal read's source");
+    let at = code
+        .find("fn member_lifecycle_event(")
+        .expect("the mapping");
+    let open = at + code[at..].find('{').expect("the mapping's body");
+    let body = &code[open..brace_group_close(&code, open)];
+    let mut kinds = body
+        .match_indices("MobEventKind::")
+        .map(|(at, prefix)| {
+            let rest = &body[at + prefix.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            &rest[..end]
+        })
+        .collect::<Vec<_>>();
+    kinds.sort_unstable();
+    kinds.dedup();
+    assert_eq!(
+        kinds,
+        [
+            "MemberReset",
+            "MemberRetired",
+            "MemberRetirementStarted",
+            "MemberSessionBindingRecovered",
+            "MemberSpawned",
+            "MobReset",
+        ],
+        "the journal read's mapping names exactly the six row kinds"
+    );
+}
+
 /// Rollback of the journal read's facts, lane-run leg: needs the published
 /// Core 0.9.7 (`meerkat-mob` 0.9.7).
 ///

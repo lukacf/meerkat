@@ -683,10 +683,13 @@ impl RetiredRotation {
 ///
 /// Every fact is one MobMachine decided, read from the journal row that
 /// records it: a row records the machine's state before the step that wrote
-/// it, or the step's own journal effect. A row written before a field was
-/// recorded reads it as absent, as do the two rows that close a spawn with no
-/// retirement step of the machine: a spawn whose membership step failed
-/// after its spawn row was durable, and a resumed spawn's rollback. No row
+/// it, or the step's own journal effect. A retirement's facts, a seat's
+/// rotation and a placed seat's session read as absent on a row written
+/// before they were recorded (a seat's own session binding is one every seat
+/// row records), or in a form this build cannot read. Two rows that close a
+/// spawn record no retirement facts: the row after a membership step that
+/// failed once the spawn row was durable, and the end of a resumed spawn's
+/// rollback, which MobMachine records without a journal effect. No row
 /// records the runtime registration an incarnation held: a registration
 /// belongs to one process, and none of a stopped process outlives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,9 +699,10 @@ pub enum MemberLifecycleEvent {
     /// a rotation's terminal. `identity_entry` is set for the member of an
     /// identity entry, and `history_unavailable` for an identity seated on a
     /// fresh session because its archived session is gone from the store.
-    /// `session_id` is the session it was seated on (none for a member bound
-    /// to no session of its own, a peer-only member), and `rotation` is set
-    /// when a rotation seated it ([`SeatRotation`]).
+    /// `session_id` is the session it was seated on (a placed member's, the
+    /// session its member host keeps; none for a member bound to no session
+    /// of its own, a peer-only member), and `rotation` is set when a rotation
+    /// or a respawn seated it ([`SeatRotation`]).
     #[non_exhaustive]
     Spawned {
         agent_identity: AgentIdentity,
@@ -1985,48 +1989,6 @@ mod tests {
                 Some(MemberRetirementCause::Unlisted)
             ),
             "the bound incarnation's end names both"
-        );
-    }
-
-    /// The journal read maps exactly the six member lifecycle row kinds
-    /// (`member_lifecycle_event`): a row kind dropped from it, or one added
-    /// to it without a decision on what it records, fails here.
-    #[test]
-    fn the_lifecycle_mapping_names_the_six_row_kinds() {
-        let source = include_str!("identity_entry.rs");
-        let start = source
-            .find("fn member_lifecycle_event(")
-            .expect("the mapping");
-        let end = start
-            + source[start..]
-                .find("\n}\n")
-                .expect("the end of the mapping");
-        let mut kinds = source[start..end]
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .flat_map(|line| {
-                line.match_indices("MobEventKind::")
-                    .map(move |(at, prefix)| {
-                        let rest = &line[at + prefix.len()..];
-                        let name = rest
-                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                            .unwrap_or(rest.len());
-                        &rest[..name]
-                    })
-            })
-            .collect::<Vec<_>>();
-        kinds.sort_unstable();
-        kinds.dedup();
-        assert_eq!(
-            kinds,
-            [
-                "MemberReset",
-                "MemberRetired",
-                "MemberRetirementStarted",
-                "MemberSessionBindingRecovered",
-                "MemberSpawned",
-                "MobReset",
-            ]
         );
     }
 }

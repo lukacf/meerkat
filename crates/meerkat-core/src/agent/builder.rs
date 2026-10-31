@@ -620,7 +620,7 @@ impl AgentBuilder {
             None
         };
         if let Some(prompt) = system_prompt
-            && !crate::types::newest_prompt_row_is(session.messages(), &prompt)
+            && !session.newest_prompt_row_is(&prompt)
         {
             session.append_system_message(prompt);
         }

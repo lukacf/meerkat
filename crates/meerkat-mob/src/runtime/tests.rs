@@ -4280,7 +4280,11 @@ impl MockSessionService {
             .await
             .entry(session_id.clone())
             .or_insert_with(|| tokio::sync::watch::channel(0).0);
-        if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
+        // As the real builder does: a resume whose prompt is already the
+        // newest prompt row appends nothing.
+        if let Some(system_prompt) = req.system_prompt.as_set_prompt()
+            && !session.newest_prompt_row_is(system_prompt)
+        {
             session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {
@@ -69665,7 +69669,11 @@ impl RealCommsSessionService {
             .await
             .insert(session_id.clone(), comms_name.clone());
 
-        if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
+        // As the real builder does: a resume whose prompt is already the
+        // newest prompt row appends nothing.
+        if let Some(system_prompt) = req.system_prompt.as_set_prompt()
+            && !session.newest_prompt_row_is(system_prompt)
+        {
             session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {

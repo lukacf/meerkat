@@ -1771,7 +1771,8 @@ them.
   resume appended another identical System row. A different prompt, and an
   earlier prompt sent again after a change, still append, a bare resume
   still appends nothing, and `StartTurnRequest.system_prompt` keeps its
-  per-turn append.
+  per-turn append. `Session::newest_prompt_row_is` answers the rule for a
+  host that materializes a resumed session itself.
 
 - `meerkat-mob`: a prompt-context fork under `reactivate_inherited` whose
   carried head of a key holds a body a compaction retired is refused with

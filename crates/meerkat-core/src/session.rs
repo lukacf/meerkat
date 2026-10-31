@@ -6857,6 +6857,17 @@ impl Session {
         self.push(Message::System(SystemMessage::new(content)));
     }
 
+    /// Whether the newest System row the model reads as a prompt holds
+    /// exactly `prompt`: a System row without an append identity, an
+    /// instruction activation or an operator-instruction entry, that is not
+    /// a superseded prompt version. A build that resumes this session with
+    /// an explicit `prompt` appends it only when this is false; a host that
+    /// materializes a resumed session itself applies the same rule.
+    #[must_use]
+    pub fn newest_prompt_row_is(&self, prompt: &str) -> bool {
+        crate::types::newest_prompt_row_is(self.messages(), prompt)
+    }
+
     /// Append an ordinary System message with optional control-ingress
     /// identity.
     ///

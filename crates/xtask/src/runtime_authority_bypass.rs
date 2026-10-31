@@ -309,7 +309,7 @@ const MOB_ONLY_SESSION_CALLERS: [&str; 2] = [
 
 /// The workspace roots whose production sources the mob-only caller audit
 /// reads.
-const WORKSPACE_SOURCE_ROOTS: [&str; 4] = ["crates", "meta", "connect", "tests"];
+const WORKSPACE_SOURCE_ROOTS: [&str; 5] = ["crates", "meta", "connect", "tests", "examples"];
 
 fn audit_mob_only_session_callers(root: &Path, findings: &mut Vec<String>) -> Result<()> {
     for file in workspace_production_sources(root)? {
@@ -339,9 +339,9 @@ fn audit_mob_only_session_callers(root: &Path, findings: &mut Vec<String>) -> Re
     Ok(())
 }
 
-/// Every `.rs` file under a `src` directory of the workspace roots, except
-/// test sources (`tests.rs`, `*_tests.rs` and files under a `tests`
-/// directory) and build output.
+/// Every `.rs` file under a `src` or `examples` directory of the workspace
+/// roots (the root `examples` included), except test sources (`tests.rs`,
+/// `*_tests.rs` and files under a `tests` directory) and build output.
 fn workspace_production_sources(root: &Path) -> Result<Vec<SourceFile>> {
     let mut files = Vec::new();
     let mut stack = WORKSPACE_SOURCE_ROOTS
@@ -371,9 +371,10 @@ fn workspace_production_sources(root: &Path) -> Result<Vec<SourceFile>> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let in_src = rel.contains("/src/");
+            let in_examples = rel.starts_with("examples/") || rel.contains("/examples/");
             let test_source =
                 rel.contains("/tests/") || name == "tests.rs" || name.ends_with("_tests.rs");
-            if in_src && !test_source {
+            if (in_src || in_examples) && !test_source {
                 files.push(SourceFile { rel, abs: path });
             }
         }
@@ -415,16 +416,56 @@ impl<'ast> Visit<'ast> for MobOnlySessionCallVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let method = node.method.to_string();
-        if self.skip_test_depth == 0 && MOB_ONLY_SESSION_METHODS.contains(&method.as_str()) {
+        self.flag(&node.method.to_string(), "called");
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    /// A path naming an entry point: a `Type::method(..)` call, or the
+    /// method taken as a value.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(segment) = node.path.segments.last() {
+            self.flag(&segment.ident.to_string(), "named by path");
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    /// syn keeps a macro's input (`tokio::select!`, `futures::join!`) as
+    /// unparsed tokens, so an entry point named there is found by its
+    /// identifier token. Comments are not tokens, and a string is one
+    /// literal token, so neither names an entry point.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let mut idents = Vec::new();
+        token_idents(node.tokens.clone(), &mut idents);
+        for ident in idents {
+            self.flag(&ident, "named in a macro body");
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+impl MobOnlySessionCallVisitor<'_> {
+    /// Record a finding when `name` is a mob-only entry point outside test
+    /// code.
+    fn flag(&mut self, name: &str, how: &str) {
+        if self.skip_test_depth == 0 && MOB_ONLY_SESSION_METHODS.contains(&name) {
             self.findings.push(format!(
-                "{}: mob-only session entry point `{method}` called in `{}` outside the mob \
+                "{}: mob-only session entry point `{name}` {how} in `{}` outside the mob \
                  runtime's session service; it records or releases a mob member's target \
                  only for MobSessionService's sealed delivery",
                 self.rel,
                 self.fn_stack.last().map_or("<root>", String::as_str)
             ));
         }
-        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// The identifier tokens of a token stream, nested groups included.
+fn token_idents(tokens: proc_macro2::TokenStream, idents: &mut Vec<String>) {
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => idents.push(ident.to_string()),
+            proc_macro2::TokenTree::Group(group) => token_idents(group.stream(), idents),
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
     }
 }

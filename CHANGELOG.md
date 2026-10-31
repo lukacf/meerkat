@@ -746,7 +746,8 @@ them.
   `rkat storage doctor` lists such mob databases (Info finding
   `operator-instruction-mob-events`).
   `MobSessionService` gains `record_member_instruction_target`,
-  `release_member_instruction_target` and `read_member_instructions`, each
+  `release_member_instruction_target` and `read_member_instructions` (the
+  member sessions of one status page, one answer per session in order), each
   defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
   durable session owner must forward them for its mob's members to receive
   instructions (Core's CLI and RPC wrappers and Meta's wrappers forward
@@ -1409,7 +1410,13 @@ them.
   later owner starts from the empty target.
   `Session::rebind_instruction_owner` attaches a mob to a session-owned
   target from the instructions in effect, or gives an unowned target a new
-  owner. A stale or conflicting revision, a slot
+  owner. A mob member's session (its metadata names a mob member binding,
+  which a mob stamps when it seats the session) refuses its own host's
+  writes and adoption (`owned_by_mob`) whether or not its mob has recorded
+  a target yet, and its target its host wrote before the mob seated it (an
+  attach) becomes the mob's at the mob's first snapshot, in the same record
+  step; a session-owned target of a session no mob seated refuses a mob's
+  snapshot (`owned_by_session`). A stale or conflicting revision, a slot
   that instruction activations manage, more than 64 slots, a body over
   256 KiB and more than 1 MiB of Active bodies are refused typed
   (`InstructionSetErrorCode`). A write or record changes only the recorded
@@ -1456,7 +1463,10 @@ them.
   it. Its read (`SessionInstructionRead`) also says how the session's model
   lowers entries (`lowering`, resolved by the service's builder through the
   new defaulted `SessionAgentBuilder::instruction_lowering_for_identity`;
-  `None` when the builder cannot tell). A mob member's snapshot is recorded,
+  `None` when the builder cannot tell);
+  `PersistentSessionService::read_sessions_instructions` reads several
+  sessions in one pass and resolves each model's lowering once for the
+  pass. A mob member's snapshot is recorded,
   and released, only by the mob runtime's sealed delivery (see the mob entry
   below); no session service trait method takes one, and an xtask gate
   (`runtime-authority-bypass`) refuses a call of the persistent service's
@@ -1496,19 +1506,28 @@ them.
   retiring member's target when the member's host keeps the session (the
   release names the session the retirement disposes of, which MobMachine
   checks against the member's binding or its pending retirement, within the
-  retirement's deadline), and on destroy, where a release that does not land
-  answers the destroy incomplete with the member still seated, so a retry
-  releases it. A member seated over an existing session whose own host holds
-  its target (an attach) hands the target to the mob at the mob's first
-  delivery: the session-document authority rebinds it, then records the
-  snapshot (`Session::adopt_instruction_target`). A blocked member is owed
+  retirement's deadline), and on destroy, which goes on past every member
+  whose release does not land and answers incomplete naming each of them,
+  still seated, so one retry releases them all; a member session whose
+  operator-instruction state does not read holds nothing to release, so it
+  never wedges a retirement or a destroy. A member's session takes no
+  session-level write of its own host (`owned_by_mob`) from the moment a mob
+  seats it, so a mob's first write never replaces a write the host was told
+  was recorded. A member seated over an existing session whose own host
+  wrote its target before (an attach) hands that target to the mob at the
+  mob's first delivery, in one session-document step
+  (`Session::record_instruction_target`). A member is delivered to only once
+  its spawn has activated (`MemberInstructionDeferReason::SpawnInFlight`
+  until then), so a failed activation rolls it back with its session
+  untouched. A blocked member is owed
   again by a new revision of a slot that selects it, a seat or a restart. A
   restart replays the records and the obligations, a delivery wave's records
   are journaled, and a crash in the middle of a fan-out delivers the
   remaining members once; a write whose journal row landed although its
   append answered an error is committed, never dropped by the next write.
   `MobHandle::operator_instruction_status`
-  (`ReadHistory`) reads, without waking anyone, the records and per member
+  (`ReadHistory`) reads, without waking anyone and in one session read per
+  page, the records and per member
   its residency, its delivery state (`Current`, `Owed` with the last
   retryable failure, `Blocked` with its reason), per slot the member's
   desired view, its session's recorded target and the entry in effect with a

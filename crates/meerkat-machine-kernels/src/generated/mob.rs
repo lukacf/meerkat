@@ -3940,6 +3940,8 @@ pub enum MemberReleaseVerdict {
     NotYetReleasable,
     #[serde(rename = "PinnedByPlacedPeer")]
     PinnedByPlacedPeer,
+    #[serde(rename = "Stale")]
+    Stale,
 }
 impl MemberReleaseVerdict {
     pub fn as_str(&self) -> &'static str {
@@ -3951,6 +3953,7 @@ impl MemberReleaseVerdict {
             Self::NotAMember => "NotAMember",
             Self::NotYetReleasable => "NotYetReleasable",
             Self::PinnedByPlacedPeer => "PinnedByPlacedPeer",
+            Self::Stale => "Stale",
         }
     }
 }
@@ -3965,6 +3968,7 @@ impl std::convert::TryFrom<&str> for MemberReleaseVerdict {
             "NotAMember" => Ok(Self::NotAMember),
             "NotYetReleasable" => Ok(Self::NotYetReleasable),
             "PinnedByPlacedPeer" => Ok(Self::PinnedByPlacedPeer),
+            "Stale" => Ok(Self::Stale),
             other => Err(format!("invalid MemberReleaseVerdict value `{other}`")),
         }
     }
@@ -4106,6 +4110,8 @@ pub enum MemberSessionDisposal {
     RuntimeReleasedOnlyHostOwned,
     #[serde(rename = "RuntimeReleasedOnlyNoDurableSessions")]
     RuntimeReleasedOnlyNoDurableSessions,
+    #[serde(rename = "KeptForSuccessor")]
+    KeptForSuccessor,
 }
 impl MemberSessionDisposal {
     pub fn as_str(&self) -> &'static str {
@@ -4113,6 +4119,7 @@ impl MemberSessionDisposal {
             Self::Archived => "Archived",
             Self::RuntimeReleasedOnlyHostOwned => "RuntimeReleasedOnlyHostOwned",
             Self::RuntimeReleasedOnlyNoDurableSessions => "RuntimeReleasedOnlyNoDurableSessions",
+            Self::KeptForSuccessor => "KeptForSuccessor",
         }
     }
 }
@@ -4125,6 +4132,7 @@ impl std::convert::TryFrom<&str> for MemberSessionDisposal {
             "RuntimeReleasedOnlyNoDurableSessions" => {
                 Ok(Self::RuntimeReleasedOnlyNoDurableSessions)
             }
+            "KeptForSuccessor" => Ok(Self::KeptForSuccessor),
             other => Err(format!("invalid MemberSessionDisposal value `{other}`")),
         }
     }
@@ -6820,6 +6828,52 @@ impl std::fmt::Display for ResourceClaimId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RespawnRefusalReason {
+    #[default]
+    #[serde(rename = "IdentityEntryKeepsSession")]
+    IdentityEntryKeepsSession,
+}
+impl RespawnRefusalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::IdentityEntryKeepsSession => "IdentityEntryKeepsSession",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RespawnRefusalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "IdentityEntryKeepsSession" => Ok(Self::IdentityEntryKeepsSession),
+            other => Err(format!("invalid RespawnRefusalReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RespawnRefusalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RespawnRefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -7040,6 +7094,56 @@ impl std::convert::TryFrom<String> for RetireAtScopeVerdictKind {
     }
 }
 impl std::fmt::Display for RetireAtScopeVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RotationTarget {
+    #[default]
+    #[serde(rename = "FreshSession")]
+    FreshSession,
+    #[serde(rename = "SameSession")]
+    SameSession,
+}
+impl RotationTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FreshSession => "FreshSession",
+            Self::SameSession => "SameSession",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RotationTarget {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FreshSession" => Ok(Self::FreshSession),
+            "SameSession" => Ok(Self::SameSession),
+            other => Err(format!("invalid RotationTarget value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RotationTarget {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RotationTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -8235,6 +8339,7 @@ pub struct State {
     pub member_definition_wiring_exempt: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_origins: std::collections::BTreeMap<AgentIdentity, IdentityEntryOrigin>,
     pub spawn_exec_entry_custody: std::collections::BTreeSet<AgentIdentity>,
+    pub member_rotation_targets: std::collections::BTreeMap<AgentIdentity, RotationTarget>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -8598,6 +8703,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Respawn {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -9675,6 +9781,7 @@ pub mod inputs {
         pub session_id: SessionId,
         pub peer_endpoint: Option<MemberPeerEndpoint>,
         pub session_archived: bool,
+        pub target: RotationTarget,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitMemberRotation {
@@ -9696,6 +9803,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyMemberRelease {
         pub agent_identity: AgentIdentity,
+        pub scope_agent_runtime_id: Option<AgentRuntimeId>,
+        pub scope_fence_token: Option<FenceToken>,
+        pub scope_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdoptLegacyIdentityEntry {
@@ -10992,6 +11102,14 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub origin: IdentityEntryOrigin,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberRotationIntent {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub target: RotationTarget,
+        pub session_id: SessionId,
+        pub peer_endpoint: Option<MemberPeerEndpoint>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11086,6 +11204,7 @@ pub enum Signal {
     RecoverMemberSeatSession(signals::RecoverMemberSeatSession),
     ExemptMemberFromDefinitionWiring(signals::ExemptMemberFromDefinitionWiring),
     RecoverIdentityEntry(signals::RecoverIdentityEntry),
+    RecoverMemberRotationIntent(signals::RecoverMemberRotationIntent),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -11214,6 +11333,7 @@ impl Signal {
                 SignalKind::ExemptMemberFromDefinitionWiring
             }
             Self::RecoverIdentityEntry(_) => SignalKind::RecoverIdentityEntry,
+            Self::RecoverMemberRotationIntent(_) => SignalKind::RecoverMemberRotationIntent,
         }
     }
 }
@@ -11307,6 +11427,7 @@ pub enum SignalKind {
     RecoverMemberSeatSession,
     ExemptMemberFromDefinitionWiring,
     RecoverIdentityEntry,
+    RecoverMemberRotationIntent,
 }
 
 pub mod effects {
@@ -12269,6 +12390,11 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub admission: AgentLaneMemberAdmissionKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RespawnRefused {
+        pub agent_identity: AgentIdentity,
+        pub reason: RespawnRefusalReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12447,6 +12573,7 @@ pub enum Effect {
     PersistMemberSeatSessionBorn(effects::PersistMemberSeatSessionBorn),
     LegacyIdentityEntryAdoptionResolved(effects::LegacyIdentityEntryAdoptionResolved),
     AgentLaneMemberAdmissionResolved(effects::AgentLaneMemberAdmissionResolved),
+    RespawnRefused(effects::RespawnRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -12620,6 +12747,7 @@ pub enum EffectKind {
     PersistMemberSeatSessionBorn,
     LegacyIdentityEntryAdoptionResolved,
     AgentLaneMemberAdmissionResolved,
+    RespawnRefused,
 }
 
 pub mod command_capabilities {
@@ -14357,6 +14485,21 @@ pub enum TransitionId {
     ResolveAgentLaneMemberAdmissionIdentityMemberStopped,
     ResolveAgentLaneMemberAdmissionIdentityMemberCompleted,
     ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed,
+    BeginMemberRotationSameSessionRunning,
+    CommitMemberRotationSameSessionRunning,
+    CommitMemberRotationSameSessionStopped,
+    CommitMemberRotationSameSessionKickoffRunning,
+    CommitMemberRotationSameSessionKickoffStopped,
+    RecoverMemberRotationIntentFreshSessionRunning,
+    RecoverMemberRotationIntentSameSessionRunning,
+    RecoverMemberRotationIntentDestroyingRunning,
+    ClassifyMemberReleaseStaleRunning,
+    ClassifyMemberReleaseStaleStopped,
+    ClassifyMemberReleaseStaleCompleted,
+    ClassifyMemberReleaseStaleDestroyed,
+    RespawnIdentityEntryRefusedRunning,
+    RespawnIdentityEntryRefusedStopped,
+    RespawnIdentityEntryRefusedCompleted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14733,5 +14876,6 @@ pub fn initial_state() -> State {
         member_definition_wiring_exempt: Default::default(),
         identity_entry_origins: Default::default(),
         spawn_exec_entry_custody: Default::default(),
+        member_rotation_targets: Default::default(),
     }
 }

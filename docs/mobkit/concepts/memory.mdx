@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*Mirrored from MobKit main at [d5fde91c2854](https://github.com/lukacf/meerkat/commit/d5fde91c2854948d31f84a1f6e259ecd6db3e660) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [0ea2eb63c73e](https://github.com/lukacf/meerkat/commit/0ea2eb63c73edcac714c3e02dd802f35f752d8c5) on 2026-10-31; MobKit version 0.9.6 at that commit.*
 
 Meta has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -295,7 +295,7 @@ The store operation behind it is `StewardStore::review_quarantined`, which the b
 
 ## Console Memory panel
 
-When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel: trust through inspectability. Its reads are served by ten `meta/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants. Its one mutation is the quarantine decision above, offered as Release and Tombstone on a quarantined record's detail view:
+When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel: trust through inspectability. Its reads are served by ten `meta/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants. Its one mutation is the quarantine decision above, offered as Release and Discard (the `tombstone` verdict) on a quarantined record's detail view:
 
 | Method | Returns |
 |--------|---------|

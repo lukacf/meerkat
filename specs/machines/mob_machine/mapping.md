@@ -15,6 +15,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
 - `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
+- `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
+- `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
+- `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
@@ -3913,6 +3916,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnRunning`
   - anchors: (unclaimed)
   - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedRunning`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedStopped`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedCompleted`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
 - `CancelAllWorkRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4477,6 +4489,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginMemberRotationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
 - `CommitMemberRotationLiveRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4627,6 +4642,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberReleaseDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleRunning`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleStopped`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleCompleted`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleDestroyed`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
 - `CommitMemberRotationLiveKickoffRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4638,6 +4665,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `CommitMemberRotationRetiredKickoffStopped`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentFreshSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentDestroyingRunning`
+  - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
 - `ResolveRuntimeBindingRefusalStaleRunning`
   - anchors: (unclaimed)
@@ -5337,6 +5385,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AgentLaneMemberAdmissionResolved`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
+- `RespawnRefused`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -5548,6 +5599,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `rotation_intent_is_a_retiring_member`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `rotation_target_recorded_with_its_intent`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `same_session_rotation_keeps_its_binding`
+  - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
 - `archive_only_retirement_is_retiring`
   - anchors: (unclaimed)

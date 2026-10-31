@@ -112,6 +112,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_operator_can_mutate_profiles`: `Bool`
 - `mob_operator_managed_mob_scope`: `Set<String>`
 - `mob_operator_spawn_profile_scope`: `Map<String, Set<String>>`
+- `mob_operator_identity_creation_scope`: `Map<String, Set<String>>`
 - `mob_operator_mob_incarnations`: `Map<String, MobIncarnationId>`
 - `mob_operator_caller_provenance`: `Option<MobToolCallerProvenance>`
 - `mob_operator_audit_invocation_id`: `Option<String>`
@@ -575,7 +576,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishDeferredSessionArchive`(session_id: SessionId)
 - `DropDeferredSession`(session_id: SessionId)
 - `ResolveMobOperatorCreateAuthority`(request_kind: MobOperatorAccessRequestKind, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
-- `RestoreMobOperatorAuthority`(principal_token: OpaquePrincipalToken, can_create_mobs: Bool, can_mutate_profiles: Bool, managed_mob_scope: Set<String>, spawn_profile_scope: Map<String, Set<String>>, mob_incarnations: Map<String, MobIncarnationId>, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
+- `RestoreMobOperatorAuthority`(principal_token: OpaquePrincipalToken, can_create_mobs: Bool, can_mutate_profiles: Bool, managed_mob_scope: Set<String>, spawn_profile_scope: Map<String, Set<String>>, identity_creation_scope: Map<String, Set<String>>, mob_incarnations: Map<String, MobIncarnationId>, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `SetMobOperatorProfileMutation`(allowed: Bool)
 - `SetMobOperatorCreateAuthority`(allowed: Bool)
 - `GrantMobOperatorManageMob`(mob_id: String, mob_incarnation: MobIncarnationId)
@@ -915,6 +916,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReleaseInputController`(input_id: String)
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
+- `SetMobOperatorIdentityCreationInMob`(mob_id: String, mob_incarnation: MobIncarnationId, templates: Set<String>)
+- `ResolveMobOperatorIdentityCreation`(mob_id: String, mob_incarnation: MobIncarnationId, template: String)
 
 ## Signals
 - `Initialize`
@@ -1190,6 +1193,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeRegistrationReleased`(agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
+- `MobOperatorIdentityCreationResolved`(verdict: MobOperatorIdentityCreationVerdict)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -2319,7 +2323,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreMobOperatorAuthority`
 - From: `Initializing`
-- On: `RestoreMobOperatorAuthority`(principal_token, can_create_mobs, can_mutate_profiles, managed_mob_scope, spawn_profile_scope, mob_incarnations, caller_provenance, audit_invocation_id)
+- On: `RestoreMobOperatorAuthority`(principal_token, can_create_mobs, can_mutate_profiles, managed_mob_scope, spawn_profile_scope, identity_creation_scope, mob_incarnations, caller_provenance, audit_invocation_id)
 - Guards:
   - `scoped_mobs_are_bound`
 - To: `Initializing`
@@ -2368,6 +2372,50 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `authority_present`
   - `mob_bound_to_another_incarnation`
+- To: `Initializing`
+
+### `SetMobOperatorIdentityCreationInMob`
+- From: `Initializing`
+- On: `SetMobOperatorIdentityCreationInMob`(mob_id, mob_incarnation, templates)
+- Guards:
+  - `authority_present`
+  - `mob_unbound_or_same_incarnation`
+- To: `Initializing`
+
+### `RebindMobOperatorIdentityCreationInMob`
+- From: `Initializing`
+- On: `SetMobOperatorIdentityCreationInMob`(mob_id, mob_incarnation, templates)
+- Guards:
+  - `authority_present`
+  - `mob_bound_to_another_incarnation`
+- To: `Initializing`
+
+### `ResolveMobOperatorIdentityCreationAdmitted`
+- From: `Initializing`
+- On: `ResolveMobOperatorIdentityCreation`(mob_id, mob_incarnation, template)
+- Guards:
+  - `authority_present`
+  - `mob_bound_to_the_incarnation`
+  - `template_in_scope`
+- Emits: `MobOperatorIdentityCreationResolved`
+- To: `Initializing`
+
+### `ResolveMobOperatorIdentityCreationUnbound`
+- From: `Initializing`
+- On: `ResolveMobOperatorIdentityCreation`(mob_id, mob_incarnation, template)
+- Guards:
+  - `absent_or_not_bound_to_the_incarnation`
+- Emits: `MobOperatorIdentityCreationResolved`
+- To: `Initializing`
+
+### `ResolveMobOperatorIdentityCreationTemplateNotInScope`
+- From: `Initializing`
+- On: `ResolveMobOperatorIdentityCreation`(mob_id, mob_incarnation, template)
+- Guards:
+  - `authority_present`
+  - `mob_bound_to_the_incarnation`
+  - `template_not_in_scope`
+- Emits: `MobOperatorIdentityCreationResolved`
 - To: `Initializing`
 
 ### `BeginUnregisterSessionIdle`

@@ -310,6 +310,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_definition_wiring_exempt`: `Set<AgentIdentity>`
 - `identity_entry_origins`: `Map<AgentIdentity, IdentityEntryOrigin>`
 - `spawn_exec_entry_custody`: `Set<AgentIdentity>`
+- `member_rotation_targets`: `Map<AgentIdentity, RotationTarget>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -319,7 +320,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
-- `Respawn`(agent_runtime_id: AgentRuntimeId)
+- `Respawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
 - `WireMembers`(edge: WiringEdge)
 - `WireMembersWithTrust`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
@@ -551,9 +552,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyPeerNotice`(recipient: AgentIdentity, sender: AgentIdentity, notice_class: PeerInputClass)
 - `CommitDormantSeat`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, kickoff_owed: Bool, session_unborn: Bool, fresh_launch: Bool, definition_wiring_exempt: Bool)
 - `ResolveMemberHostPreparation`(agent_identity: AgentIdentity)
-- `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool)
+- `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, target: RotationTarget)
 - `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String, definition_wiring_exempt: Bool)
-- `ClassifyMemberRelease`(agent_identity: AgentIdentity)
+- `ClassifyMemberRelease`(agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId>)
 - `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: Bool)
 - `ResolveAgentLaneMemberAdmission`(agent_identity: AgentIdentity)
 
@@ -646,6 +647,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberSeatSession`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: Bool)
 - `ExemptMemberFromDefinitionWiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverIdentityEntry`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: IdentityEntryOrigin)
+- `RecoverMemberRotationIntent`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: RotationTarget, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>)
 
 ## Effects
 - `HoldMemberRunStarts`
@@ -818,6 +820,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistMemberSeatSessionBorn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId)
 - `LegacyIdentityEntryAdoptionResolved`(agent_identity: AgentIdentity, verdict: LegacyIdentityEntryAdoptionKind)
 - `AgentLaneMemberAdmissionResolved`(agent_identity: AgentIdentity, admission: AgentLaneMemberAdmissionKind)
+- `RespawnRefused`(agent_identity: AgentIdentity, reason: RespawnRefusalReason)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -988,6 +991,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `attempt_and_epoch_follow_the_phase`
 - `only_a_running_mob_wakes`
 - `rotation_intent_is_a_retiring_member`
+- `rotation_target_recorded_with_its_intent`
+- `same_session_rotation_keeps_its_binding`
 - `archive_only_retirement_is_retiring`
 - `seat_session_unborn_is_seated`
 - `seat_session_unborn_is_never_bound`
@@ -4630,6 +4635,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `session_matches_releasing`
   - `binding_matches_releasing`
+  - `same_session_rotation_absent`
   - `retiring_peer_endpoint_consistent`
 - To: `Running`
 
@@ -7607,6 +7613,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_not_preserved`
@@ -7628,9 +7635,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_preserved`
+  - `not_an_identity_entry`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_absent`
@@ -7649,6 +7658,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_not_preserved`
@@ -7670,6 +7680,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_not_preserved`
@@ -7691,9 +7702,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_preserved`
+  - `not_an_identity_entry`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_absent`
@@ -7712,6 +7725,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `rotation_settled_or_destroying`
   - `host_preparation_settled_or_destroying`
   - `topology_not_preserved`
@@ -7733,6 +7747,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_present`
@@ -7751,6 +7766,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_present`
@@ -7769,6 +7785,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_present`
@@ -7787,6 +7804,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `placed_carrier_present`
@@ -7879,6 +7897,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
@@ -7898,6 +7917,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
@@ -7917,6 +7937,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
@@ -7936,6 +7957,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
@@ -7955,6 +7977,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `destroy_admitted`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
@@ -7975,6 +7998,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `destroy_admitted`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
@@ -7995,6 +8019,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `destroy_admitted`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
@@ -8015,6 +8040,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal)
 - Guards:
+  - `session_disposed`
   - `destroy_admitted`
   - `session_ingress_detach_closed`
   - `identity_binding_matches`
@@ -13348,6 +13374,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `releasing_matches_current`
   - `session_matches_releasing`
+  - `same_session_rotation_absent`
   - `retire_archive_only`
 - Emits: `AppendLifecycleJournal`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`, `RequestKickoffQuiesce`
 - To: `Running`
@@ -13467,6 +13494,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `releasing_matches_current`
   - `session_matches_releasing`
+  - `same_session_rotation_absent`
   - `retire_archive_only`
 - Emits: `AppendLifecycleJournal`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`, `RequestKickoffQuiesce`
 - To: `Stopped`
@@ -13765,13 +13793,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RespawnRunning`
 - From: `Running`
-- On: `Respawn`(agent_runtime_id)
+- On: `Respawn`(agent_identity, agent_runtime_id)
 - Guards:
   - `lifecycle_origin_open`
   - `runtime_id_present`
+  - `identity_matches`
+  - `not_an_identity_entry`
   - `coordinator_bound`
 - Emits: `ExposePendingSpawn`
 - To: `Running`
+
+### `RespawnIdentityEntryRefusedRunning`
+- From: `Running`
+- On: `Respawn`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_matches`
+  - `an_identity_entry`
+- Emits: `RespawnRefused`
+- To: `Running`
+
+### `RespawnIdentityEntryRefusedStopped`
+- From: `Stopped`
+- On: `Respawn`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_matches`
+  - `an_identity_entry`
+- Emits: `RespawnRefused`
+- To: `Stopped`
+
+### `RespawnIdentityEntryRefusedCompleted`
+- From: `Completed`
+- On: `Respawn`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_matches`
+  - `an_identity_entry`
+- Emits: `RespawnRefused`
+- To: `Completed`
 
 ### `CancelAllWorkRunning`
 - From: `Running`
@@ -15961,8 +16018,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginMemberRotationRunning`
 - From: `Running`
-- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived)
+- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target)
 - Guards:
+  - `fresh_session_target`
   - `composition_authoritative`
   - `destroy_not_admitted`
   - `identity_binding_matches`
@@ -15977,11 +16035,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_peer_id_is_not_host`
 - To: `Running`
 
+### `BeginMemberRotationSameSessionRunning`
+- From: `Running`
+- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target)
+- Guards:
+  - `same_session_target`
+  - `composition_authoritative`
+  - `destroy_not_admitted`
+  - `runtime_id_present`
+  - `identity_binding_matches`
+  - `fence_token_matches_history`
+  - `generation_matches`
+  - `member_not_retiring`
+  - `member_not_placed`
+  - `rotation_not_pending`
+  - `same_session`
+  - `session_not_archived`
+  - `member_keeps_its_endpoint`
+- Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
+- To: `Running`
+
 ### `CommitMemberRotationLiveRunning`
 - From: `Running`
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_no_kickoff`
   - `destroy_not_admitted`
@@ -16011,6 +16091,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_no_kickoff`
   - `destroy_not_admitted`
@@ -16040,6 +16122,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_no_kickoff`
   - `destroy_not_admitted`
@@ -16069,6 +16153,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_no_kickoff`
   - `destroy_not_admitted`
@@ -16463,25 +16549,65 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyMemberReleaseRunning`
 - From: `Running`
-- On: `ClassifyMemberRelease`(agent_identity)
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_current`
 - Emits: `MemberReleaseClassified`
 - To: `Running`
 
 ### `ClassifyMemberReleaseStopped`
 - From: `Stopped`
-- On: `ClassifyMemberRelease`(agent_identity)
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_current`
 - Emits: `MemberReleaseClassified`
 - To: `Stopped`
 
 ### `ClassifyMemberReleaseCompleted`
 - From: `Completed`
-- On: `ClassifyMemberRelease`(agent_identity)
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_current`
 - Emits: `MemberReleaseClassified`
 - To: `Completed`
 
 ### `ClassifyMemberReleaseDestroyed`
 - From: `Destroyed`
-- On: `ClassifyMemberRelease`(agent_identity)
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_current`
+- Emits: `MemberReleaseClassified`
+- To: `Destroyed`
+
+### `ClassifyMemberReleaseStaleRunning`
+- From: `Running`
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_stale`
+- Emits: `MemberReleaseClassified`
+- To: `Running`
+
+### `ClassifyMemberReleaseStaleStopped`
+- From: `Stopped`
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_stale`
+- Emits: `MemberReleaseClassified`
+- To: `Stopped`
+
+### `ClassifyMemberReleaseStaleCompleted`
+- From: `Completed`
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_stale`
+- Emits: `MemberReleaseClassified`
+- To: `Completed`
+
+### `ClassifyMemberReleaseStaleDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberRelease`(agent_identity, scope_agent_runtime_id, scope_fence_token, scope_session_id)
+- Guards:
+  - `scope_stale`
 - Emits: `MemberReleaseClassified`
 - To: `Destroyed`
 
@@ -16490,6 +16616,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_kickoff`
   - `destroy_not_admitted`
@@ -16519,6 +16647,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_kickoff`
   - `destroy_not_admitted`
@@ -16548,6 +16678,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_kickoff`
   - `destroy_not_admitted`
@@ -16577,6 +16709,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
+  - `fresh_session_target`
+  - `session_disposed`
   - `composition_authoritative`
   - `rotation_owes_kickoff`
   - `destroy_not_admitted`
@@ -16600,6 +16734,160 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_peer_id_is_not_host`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Stopped`
+
+### `CommitMemberRotationSameSessionRunning`
+- From: `Running`
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
+- Guards:
+  - `rotation_pending`
+  - `same_session_target`
+  - `session_kept`
+  - `composition_authoritative`
+  - `rotation_owes_no_kickoff`
+  - `destroy_not_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `placed_carrier_absent`
+  - `member_not_placed`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+  - `session_binding_kept`
+  - `rotation_session_is_the_binding`
+  - `kickoff_quiesced`
+  - `generation_is_next`
+  - `next_runtime_fresh`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_addressability_authorized`
+- Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
+- To: `Running`
+
+### `CommitMemberRotationSameSessionStopped`
+- From: `Stopped`
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
+- Guards:
+  - `rotation_pending`
+  - `same_session_target`
+  - `session_kept`
+  - `composition_authoritative`
+  - `rotation_owes_no_kickoff`
+  - `destroy_not_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `placed_carrier_absent`
+  - `member_not_placed`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+  - `session_binding_kept`
+  - `rotation_session_is_the_binding`
+  - `kickoff_quiesced`
+  - `generation_is_next`
+  - `next_runtime_fresh`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_addressability_authorized`
+- Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
+- To: `Stopped`
+
+### `CommitMemberRotationSameSessionKickoffRunning`
+- From: `Running`
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
+- Guards:
+  - `rotation_pending`
+  - `same_session_target`
+  - `session_kept`
+  - `composition_authoritative`
+  - `rotation_owes_kickoff`
+  - `destroy_not_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `placed_carrier_absent`
+  - `member_not_placed`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+  - `session_binding_kept`
+  - `rotation_session_is_the_binding`
+  - `kickoff_quiesced`
+  - `generation_is_next`
+  - `next_runtime_fresh`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_addressability_authorized`
+- Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `CommitMemberRotationSameSessionKickoffStopped`
+- From: `Stopped`
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
+- Guards:
+  - `rotation_pending`
+  - `same_session_target`
+  - `session_kept`
+  - `composition_authoritative`
+  - `rotation_owes_kickoff`
+  - `destroy_not_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `placed_carrier_absent`
+  - `member_not_placed`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+  - `session_binding_kept`
+  - `rotation_session_is_the_binding`
+  - `kickoff_quiesced`
+  - `generation_is_next`
+  - `next_runtime_fresh`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_addressability_authorized`
+- Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `RecoverMemberRotationIntentFreshSessionRunning`
+- From: `Running`
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- Guards:
+  - `fresh_session_target`
+  - `destroy_not_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `member_not_placed`
+  - `rotation_not_recorded`
+  - `new_session`
+- To: `Running`
+
+### `RecoverMemberRotationIntentSameSessionRunning`
+- From: `Running`
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- Guards:
+  - `same_session_target`
+  - `destroy_not_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `member_not_placed`
+  - `rotation_not_recorded`
+  - `same_session`
+  - `member_keeps_its_endpoint`
+- To: `Running`
+
+### `RecoverMemberRotationIntentDestroyingRunning`
+- From: `Running`
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- Guards:
+  - `destroy_admitted`
+- To: `Running`
 
 ### `ResolveRuntimeBindingRefusalStaleRunning`
 - From: `Running`
@@ -17189,6 +17477,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
 - `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
+- `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
+- `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
+- `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios

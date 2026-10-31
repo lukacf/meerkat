@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [d5fde91c2854](https://github.com/lukacf/meerkat/commit/d5fde91c2854948d31f84a1f6e259ecd6db3e660) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [0ea2eb63c73e](https://github.com/lukacf/meerkat/commit/0ea2eb63c73edcac714c3e02dd802f35f752d8c5) on 2026-10-31; MobKit version 0.9.6 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -308,9 +308,57 @@ Operator panels depend on a few host constraints:
 - A page served with `frame-ancestors 'none'`, such as a secret-entry page, cannot be framed and must not be configured as a panel.
 
 Each agent row shows:
-- Agent display name and member ID
-- Status badge (active, running, idle)
-- Pin action; pinned agents persist in local storage after the first user interaction
+- The agent's display name or, for an agent without one, its identity in words
+  (`router:main` reads "Router main"; a generated id reads as the agent's kind
+  and the id's last six characters, such as "Reviewer 4e5f60")
+- A second line with what the agent is (its role, else its group) and what it
+  is doing in words, or how long ago it was last active, for example
+  `Router · working` or `Router · active 3 min ago`
+- A pin action on hover, and beside it, when you point at the pin or reach the
+  row with the keyboard, a copy action: pinned agents move to a Pinned section
+  at the top, and the copy action copies the agent's identity, which the row's
+  tooltip also shows
+
+#### Ordering and grouping the roster
+
+Two controls under the search box set how the roster lists agents:
+
+- **Group**: *Category* lists agents under their categories and subgroups (the
+  `[agent_list]` grouping above); *None* lists every agent in one list. Either
+  way, Pinned stays on top and an agent spawned by another, or a side chat,
+  stays nested under it.
+- **Sort**: *Manual* keeps your own order; *Name* sorts by display name, with
+  numbers in order (`Agent 2` before `Agent 10`); *Last activity* lists the
+  most recently active agents first and agents with no known activity last.
+
+In *Manual*, drag an agent by the grip that appears at its left edge on hover,
+or focus the agent and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>; a screen reader hears each move. An agent moves
+among the agents that share its place: its category and subgroup, or the agent
+it is nested under, and its nested agents move with it. One order serves every
+view: it orders each category, the flat list, and Pinned. Until you move an
+agent, each category keeps its default order and the flat list follows the
+categories in their order; the first move keeps that order for every agent,
+and a move changes only where the moved agent stands, in either view. A new
+agent appears at the end of its place, and a renamed agent keeps its place,
+since the order is kept by identity. Agents do not move while you sort by name or last activity, or while
+a search or an activity filter is on. Categories and subgroups reorder the same
+way: drag a header, or focus it and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>.
+
+Last activity is the newest time the console's frame log recorded the agent
+acting (a live runtime event, a message sent to it or a tool application),
+which `/console/experience` reports as `last_activity_ms`, or a newer event the
+console has since seen. History the console rebuilds, lifecycle records
+(respawn, retire, reset, delete), interaction failures and memory events do not
+count. Reading it wakes no agent.
+
+The browser keeps these preferences in local storage, per signed-in user and
+console: the manual order, the Group and Sort choices and the pins follow the
+user and are kept when the `[agent_list]` configuration changes. The order of
+categories and subgroups and which of them are collapsed belong to that
+configuration and start over when it changes. Pins an earlier console kept
+carry over once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -325,6 +373,11 @@ does not say whether the mob runs; a stopped mob's dot is red.
 ### Approvals
 
 Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+**Needs you** also counts host-provided attention items when the console configuration
+names `[[attention.sources]]`. The inbox lists them after the approvals, as cards with one
+**Open** link to the host's page, which owns the decision. A source that cannot be read is
+named and hides nothing else (see [host-provided attention items](/mobkit/reference/configuration#host-provided-attention-items)).
+A source with a `decide_href` gives a read-only console a **Decide in** link on each pending approval, in the inbox and in an agent's chat, to the host page that decides it.
 Expand **Complete request details** before deciding. Stale or unavailable approval
 data does not mean there are no pending requests; use **Refresh approvals** to
 reload it. Read-only consoles cannot submit decisions.
@@ -336,8 +389,11 @@ reload it. Read-only consoles cannot submit decisions.
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
 
-Audit tiers display the recorded `r0`, `r1`, `r2`, or `r3`; missing or unrecognized
-tiers display as unknown. The current Meta R2 path normally allows with audit.
+Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
+R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and
+an audit row reads "Risk: High (R3)". A missing tier reads "Unknown"; an
+unrecognized one reads "Unknown" followed by the recorded value. The current Meta
+R2 path normally allows with audit.
 It does not run the proposed native model reviewer. An approval record does not
 confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/mobkit/concepts/gating) for
@@ -363,7 +419,7 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 **Split panels** — click the split controls (← → ↑ ↓, visible on hover) to divide a panel. This lets you chat with multiple agents side-by-side.
 
 **Composer** at the bottom of each panel:
-- Textarea with "Message {agent}..." placeholder
+- Textarea with `Message {agent}...` placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
 

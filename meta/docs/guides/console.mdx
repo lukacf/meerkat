@@ -371,6 +371,10 @@ does not say whether the mob runs; a stopped mob's dot is red.
 ### Approvals
 
 Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+**Needs you** also counts host-provided attention items when the console configuration
+names `[[attention.sources]]`. The inbox lists them after the approvals, as cards with one
+**Open** link to the host's page, which owns the decision. A source that cannot be read is
+named and hides nothing else (see [host-provided attention items](/reference/configuration#host-provided-attention-items)).
 Expand **Complete request details** before deciding. Stale or unavailable approval
 data does not mean there are no pending requests; use **Refresh approvals** to
 reload it. Read-only consoles cannot submit decisions.

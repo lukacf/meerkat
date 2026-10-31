@@ -148,27 +148,72 @@ impl MobActor {
     }
 
     /// Journal a committed record, then commit its prepared transition: a
-    /// record the journal does not hold is never in the machine.
+    /// record the journal does not hold is never in the machine, and one it
+    /// holds always is. An append that answers an error may still have
+    /// landed (a store whose commit outlived its acknowledgement): the
+    /// journal after the append's floor decides. A landed row commits the
+    /// transition, so the next write never reuses its generation (a replay
+    /// keeps the first row of a generation and drops a later one as stale);
+    /// a row proven absent drops it; a journal that cannot be read stops
+    /// the actor for a cold recovery, which replays whatever landed.
     async fn journal_operator_instruction_commit(
         &mut self,
         prepared: PreparedDslTransition,
         event: OperatorInstructionCommittedEvent,
     ) -> Result<(), OperatorInstructionError> {
-        let events = Arc::clone(&self.events);
-        let mob_id = self.definition.id.clone();
-        self.commit_prepared_dsl_transition_after(prepared, || async move {
-            events
-                .append(NewMobEvent {
-                    mob_id,
-                    timestamp: None,
-                    kind: MobEventKind::OperatorInstructionCommitted(event),
-                })
-                .await
-                .map(|_| ())
-                .map_err(MobError::from)
-        })
-        .await
-        .map_err(OperatorInstructionError::Mob)
+        let desired = MobEventKind::OperatorInstructionCommitted(event);
+        let cursor_floor = self
+            .events
+            .latest_cursor()
+            .await
+            .map_err(|error| OperatorInstructionError::Mob(MobError::from(error)))?;
+        let append = self
+            .events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: desired.clone(),
+            })
+            .await;
+        if let Err(error) = append {
+            match super::reconcile_exact_mob_event_after_cursor(
+                self.events.as_ref(),
+                &self.definition.id,
+                cursor_floor,
+                &desired,
+            )
+            .await
+            {
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        error = %error,
+                        "an operator instruction row landed although its append answered an error; \
+                         committing it"
+                    );
+                }
+                Ok(None) => return Err(OperatorInstructionError::Mob(MobError::from(error))),
+                Err(reconcile_error) => {
+                    return Err(OperatorInstructionError::Mob(
+                        self.durable_uncertainty_fail_stop
+                            .record(MobError::Internal(format!(
+                                "an operator instruction append failed ({error}) and the journal \
+                                 could not tell whether it landed; the actor stops for a cold \
+                                 recovery: {reconcile_error}"
+                            ))),
+                    ));
+                }
+            }
+        }
+        if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
+            return Err(OperatorInstructionError::Mob(
+                self.durable_uncertainty_fail_stop
+                    .record(MobError::Internal(format!(
+                        "an operator instruction row is journaled but MobMachine did not commit \
+                         it; the actor stops for a cold recovery: {error}"
+                    ))),
+            ));
+        }
+        Ok(())
     }
 
     fn operator_instruction_target_of(

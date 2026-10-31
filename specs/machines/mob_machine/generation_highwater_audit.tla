@@ -194,11 +194,16 @@ AuditRetainedOnlyThisEpoch ==
 \* The identity's next incarnation mints above every generation it was seated
 \* at, across a mob reset too (the reset folds the retained generation into
 \* the high-water). None is an exhausted generation space, which mints
-\* nothing.
+\* nothing. The order goes through the model's OptionLt, as the generated
+\* model renders `next > Some(g)`: it reads `tag` before `value`. This module
+\* names no option field itself: TLC orders a record's fields by when their
+\* names were first parsed, and a `value` parsed here, before the model's
+\* None, would make every comparison of None with Some(n) compare "none"
+\* with n first, which TLC refuses.
 AuditMintAboveEverySeat ==
     LET next == mob_machine_next_minted_generation(
                     identity_runtime_generations, identity_generation_highwater, AuditIdentity)
-    IN next = None \/ \A g \in audit_seated_generations : next.value > g
+    IN next = None \/ \A g \in audit_seated_generations : OptionLt(Some(g), next)
 
 \* A mob reset dropped a retained generation of the identity, folded into its
 \* high-water.

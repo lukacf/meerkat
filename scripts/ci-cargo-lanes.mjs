@@ -433,7 +433,7 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
   ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", "census-wake-timeout"],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));

@@ -84,7 +84,7 @@ The exact compiled mapping selection is:
 | `catalog_id` | `forge.ghe-collections.v1` |
 | collection `family` | `official-github` |
 | collection `profile` | `enterprise-selected-reads` |
-| collection `agent` | `SOURCE_AGENT` in `src/protected_catalog.rs` |
+| collection `agent` | `forge-ingestion` |
 
 These are behavior selectors, not authenticated principals or installed
 receipts. Source/requirement IDs and original resources remain separate. The

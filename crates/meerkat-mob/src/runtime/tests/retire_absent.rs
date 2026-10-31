@@ -3,7 +3,9 @@
 //! reads the roster only to choose the command: a retire that finds no
 //! incarnation asks the actor, which applies `RetireAbsent` in its own step
 //! and answers what the machine answers. Nothing changes while the identity
-//! maps to no runtime, and an identity the machine still maps is refused.
+//! maps to no runtime, and an identity the machine still maps is refused: a
+//! spawn of it committed its membership after the retire read the roster, and
+//! the handle answers that refusal as the spawn still in progress, retryable.
 
 use super::*;
 use crate::machines::mob_machine as mob_dsl;
@@ -277,8 +279,12 @@ async fn an_incompletely_destroyed_mob_answers_the_retire_of_an_absent_identity_
 /// member's roster anchor and leaves MobMachine mapping the member: the handle
 /// finds no incarnation, so it asks `RetireAbsent`, and the machine refuses,
 /// because the identity is not absent. The handle used to answer `Ok(())`
-/// here without asking the machine. With the anchor back, the member retires
-/// through its exact incarnation, so the refusal started nothing.
+/// here without asking the machine. Outside a test, a retire meets that
+/// refusal only when a spawn of the identity committed its membership after
+/// the retire read the roster, so the handle answers it as that spawn still
+/// in progress, `MobError::LifecycleOperationPending`, which is retryable.
+/// With the anchor back, the member retires through its exact incarnation,
+/// so the refusal started nothing.
 #[tokio::test]
 async fn the_handle_answers_an_unlisted_identity_with_mob_machine_verdict() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
@@ -302,13 +308,11 @@ async fn the_handle_answers_an_unlisted_identity_with_mob_machine_verdict() {
         .expect_err("MobMachine refuses RetireAbsent for an identity it still maps");
     assert!(
         matches!(
-            error,
-            MobError::InvalidTransition {
-                from: MobState::Running,
-                to: MobState::Running,
-            }
+            &error,
+            MobError::LifecycleOperationPending { intent }
+                if intent == "spawn of member retire-absent-unlisted"
         ),
-        "the refusal is MobMachine's, as the actor answers it: {error:?}"
+        "the handle answers MobMachine's refusal as the spawn in progress: {error:?}"
     );
     assert!(
         maps(&machine_state(&handle), &member),

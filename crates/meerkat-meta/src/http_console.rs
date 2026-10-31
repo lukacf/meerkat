@@ -53,8 +53,8 @@ use crate::console_aggregator::{
     MetaConsoleAggregator,
 };
 use crate::console_aggregator::{
-    ConsoleSendRecovery, ConsoleSendScope, NativeSendObservation, ScopedReservation,
-    TIMELINE_RAW_SCAN_PAGE_LIMIT, TimelineFrameDecider, TimelineFrameFilter,
+    ConsoleSendRecovery, ConsoleSendScope, INTERACTIVE_SEND_READ_BOUND, NativeSendObservation,
+    ScopedReservation, TIMELINE_RAW_SCAN_PAGE_LIMIT, TimelineFrameDecider, TimelineFrameFilter,
     timeline_frame_visible_to,
 };
 use crate::contact_directory::ContactDirectory;
@@ -2840,8 +2840,12 @@ async fn console_send_identity_first_governed(
         }
         // A replay of a send no live owner settled (the process that
         // accepted it stopped): the runtime's admission evidence decides.
+        // The sender waits for it, under the store read bound.
         ScopedReservation::Unsettled(accepted, claim, frame) => {
-            match aggregator.observe_native_send(&frame).await {
+            match aggregator
+                .observe_native_send(&frame, INTERACTIVE_SEND_READ_BOUND)
+                .await
+            {
                 NativeSendObservation::Admitted { .. } => {
                     return aggregator.settle_admitted_send(&frame, &claim).await;
                 }

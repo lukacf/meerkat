@@ -63,6 +63,8 @@ interface SidebarProps {
   pinnedAgentIds?: Set<string>;
   approvals?: PendingApprovalSnapshot;
   onOpenApproval?: (pendingId?: string) => void;
+  /** Host-provided attention items, counted in "Needs you". */
+  hostAttentionCount?: number;
   onSelect: (agent: ConsoleAgent) => void;
   onTogglePinnedAgent?: (agent: ConsoleAgent, familyPinIds?: Set<string>) => void;
   onOpenControl: (kind: NavKind) => void;
@@ -1268,6 +1270,7 @@ export const Sidebar = React.memo(function Sidebar({
   onOpenOperatorPanel,
   approvals,
   onOpenApproval,
+  hostAttentionCount = 0,
 }: SidebarProps): React.JSX.Element {
   countRender("Sidebar");
   const [q, setQ] = React.useState("");
@@ -1628,7 +1631,7 @@ export const Sidebar = React.memo(function Sidebar({
       >
         {orderAnnouncement}
       </div>
-      {approvals ? <ApprovalAttention snapshot={approvals} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
+      {approvals || hostAttentionCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
       <div className="sidebar__mast">
         <div>
           <div className="sidebar__mast-title">Roster</div>

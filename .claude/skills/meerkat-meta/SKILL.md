@@ -352,6 +352,12 @@ retire_label = "Retire"
 reset_label = "Reset"
 show_reset = false
 
+[[attention.sources]]
+id = "host-items"
+label = "Host"
+url = "/host/attention"
+decide_href = "/host/decide?decision={decision_id}"
+
 [realms.ops]
 title = "Ops"
 

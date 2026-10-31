@@ -209,7 +209,11 @@ never made, answers HTTP **404** with `{"error":"send_not_found"}`. A
 candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) settles no send and answers HTTP **409** with
 `{"error":"candidate_launch"}`, as `/console/send` does: recover the send on
-the authoritative launch.
+the authoritative launch. It waits for the runtime's admission evidence as
+the RPC does: up to 45 seconds in all when the store is slow (after a restart,
+reading the evidence loads the session the send recorded), so an HTTP client
+whose timeout is shorter gives up first. `console_fetch_timeout_ms`, the bundled
+console's fetch timeout, should stay above 45 seconds.
 
 ### `POST /console/rpc`
 

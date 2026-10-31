@@ -122,9 +122,9 @@ jobs:
           fi
 
   # The checks every run needs and no compile: formatting, the repository
-  # contract tests, the generated Bazel files and unused dependencies. The
-  # cargo metadata they read downloads the dependency sources; no build
-  # output is worth a cache entry here.
+  # contract tests, the generated Bazel files, unused dependencies and the
+  # Mintlify parse of docs/. The cargo metadata they read downloads the
+  # dependency sources; no build output is worth a cache entry here.
   fmt-lint:
     name: fmt-lint
     runs-on: ubuntu-24.04
@@ -173,8 +173,8 @@ jobs:
       # The export scripts' suites again on the oldest runtimes a 0.9.3 host
       # may run them on, the 0.9.3 SDKs' floors: Python 3.10 and Node.js 18,
       # and the blob restore's suite on the Python floor it states.
-      # Last in the job, since each setup step changes the python3 or node
-      # every later step runs.
+      # After every step on the runner's own runtimes, since each setup step
+      # changes the python3 or node every later step runs.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
@@ -184,6 +184,19 @@ jobs:
         with:
           node-version: "18"
       - run: node --test tools/continuity-export/continuity-export.test.mjs
+      # The Mintlify parse and link check of docs/, last in the job on the
+      # Node.js it sets up itself. docs.rkat.ai mirrors the published pages
+      # and runs this same check only after a merge to main, where an MDX
+      # error (a raw <placeholder> in prose, say) fails the publication; here
+      # it fails the pull request instead. The mint version is identical to
+      # the one in lukacf/meerkat's .github/workflows/publish-mobkit-docs.yml;
+      # change both together. docs/.mintignore keeps the internal records,
+      # which MDX cannot parse, out of the check.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - run: npx --yes mint@4.2.728 broken-links
+        working-directory: docs
 
   # The workspace lint, split from fmt-lint: it ran after fmt-lint's
   # contract tests and was the run's critical path (run 38776842877: clippy

@@ -41,12 +41,15 @@ import type {
   IdentityStatusRow,
   TopologyMutationIntent,
   TopologyOperationReceipt,
+  HostAttentionSnapshot,
+  HostAttentionSourceConfig,
 } from "@console-core";
 import {
   collectConsoleDockPanelIds,
   consoleMobStatus,
   createPendingApprovalResource,
   identityStateLabel,
+  startHostAttentionPolling,
   migrateConsoleWorkbenchTarget,
   normalizeConsoleDockState,
   normalizeIdentityInspectViewState,
@@ -210,6 +213,7 @@ import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type 
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
+import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
 import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft } from "./lib/send-attempt-storage";
@@ -2667,6 +2671,37 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
+  // Host-provided attention items ("Needs you"): read from the configured
+  // same-origin sources every 30 s while the page is visible. Each source
+  // fails alone; approvals never depend on them.
+  // Items belong to the scope (principal and runtime) that read them: a scope
+  // change hides the previous scope's items before effects run, like approvals.
+  const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
+  // Stable across experience reloads that leave the sources unchanged, so the
+  // decide-link consumers (inbox, every chat approval list) do not re-render.
+  const hostAttentionSources = React.useMemo(
+    () => JSON.parse(hostAttentionKey) as HostAttentionSourceConfig[],
+    [hostAttentionKey],
+  );
+  const [hostAttentionState, setHostAttentionState] = React.useState<{ scope: string; snapshot: HostAttentionSnapshot }>();
+  const hostAttention = hostAttentionState?.scope === approvalScope ? hostAttentionState.snapshot : undefined;
+  React.useEffect(() => {
+    setHostAttentionState(undefined);
+    const sources = hostAttentionSources;
+    if (!sources.length) return;
+    const scope = approvalScope;
+    return startHostAttentionPolling(sources, (snapshot) => setHostAttentionState({ scope, snapshot }), {
+      fetch: window.fetch.bind(window),
+      visible: () => document.visibilityState !== "hidden",
+      onVisible: (callback) => {
+        const listener = () => { if (document.visibilityState === "visible") callback(); };
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      setInterval: (callback, ms) => window.setInterval(callback, ms),
+      clearInterval: (handle) => window.clearInterval(handle as number),
+    });
+  }, [hostAttentionSources, approvalScope]);
   function openApproval(pendingId?: string) {
     setSelectedApprovalId(pendingId);
     dock.openTarget(buildControlTarget("gating"), "replace_focused");
@@ -5393,6 +5428,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (target.kind === "identity-inspect") {
       return renderInspectPanel(target);
     }
+    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface
+      && hostAttentionSources?.length) {
+      // No gating surface here (an aggregate console), but "Needs you" counts
+      // host-provided items: show them, with approvals marked unavailable.
+      return (
+        <GatingInboxPanel
+          pending={[]}
+          resource={{ scopeKey: approvalScope, status: "unsupported", requests: [], decisions: {}, readOnly: true }}
+          audit={[]}
+          onDecide={() => {}}
+          readOnly
+          hostAttention={hostAttention || { status: "loading", items: [], failedSources: [] }}
+        />
+      );
+    }
     if (
       (target.kind === "routing" ||
         target.kind === "gating" ||
@@ -5416,6 +5466,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
+          hostAttention={hostAttention}
+          hostDecideSources={hostAttentionSources}
         />
       );
     if (target.kind === "topology")
@@ -5468,6 +5520,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
+          hostAttention={hostAttention}
+          hostDecideSources={hostAttentionSources}
         />
       );
     if (target.kind === "logs")
@@ -5599,6 +5653,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   return (
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
+    <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
       className="cc-theme-scope meta-shell"
       data-cc-theme={theme}
@@ -5662,6 +5717,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenOperatorPanel={openOperatorPanel}
           approvals={activeApprovals}
           onOpenApproval={openApproval}
+          hostAttentionCount={hostAttention?.items.length || 0}
         />
         <div
           className="pane-resizer"
@@ -5719,6 +5775,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </HostDecideSourcesProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>
   );

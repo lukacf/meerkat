@@ -233,7 +233,10 @@ class TransportTermination:
 
     #: ``"exited"`` when the stop observed the process exit, ``"unknown"``
     #: when bounded cleanup ended without an exit and the transport still
-    #: owns the process, ``"not_started"`` when no process was started.
+    #: owns the process, ``"not_started"`` when no process was started. For
+    #: an ``AdoptedGatewayTransport`` the exit is what the host's
+    #: ``wait_process`` reported, and ``"unknown"`` means it was still pending:
+    #: the host owns that process, and the transport keeps observing it.
     state: Literal["exited", "not_started", "unknown"]
     #: The observed exit status; ``None`` for a signal exit or no observed exit.
     exit_code: int | None
@@ -241,7 +244,8 @@ class TransportTermination:
     #: a normal exit or no observed exit.
     signal: str | None
     #: The highest signal any stop attempted against the process. An attempt
-    #: is not proof that it caused the exit, nor that the process ended.
+    #: is not proof that it caused the exit, nor that the process ended. Always
+    #: ``"none"`` for an ``AdoptedGatewayTransport``, which never signals.
     escalation: Literal["none", "sigterm", "sigkill"]
     #: The gateway's own answer to its one shutdown request, apart from the
     #: process outcome: ``"acknowledged"`` (runtime cleanup completed),
@@ -776,6 +780,15 @@ class PersistentTransport:
             process.wait()
         except Exception:  # noqa: BLE001 - the watcher must never raise
             return
+        self._fail_waiters_after_exit(process, reader)
+
+    def _fail_waiters_after_exit(self, process, reader: threading.Thread) -> None:
+        """After the child exited: fail its waiters if its reader still waits.
+
+        Gives the reader a short grace to reach the end of stdout; a reader
+        still blocked then, on a stdout a process the gateway started holds
+        open, fails every waiter with the child's ``GatewayChildEndedError``.
+        """
         reader.join(_CHILD_EXIT_STDOUT_GRACE_SECONDS)
         if not reader.is_alive():
             return
@@ -1177,6 +1190,60 @@ class PersistentTransport:
             "gateway shutdown did not complete runtime-owned cleanup"
         )
 
+    def _recorded_shutdown_answer(
+        self, supports_shutdown_handshake: bool
+    ) -> tuple[str | None, Exception | None]:
+        """The current child's answer to its one shutdown request, and its error.
+
+        ``"not_negotiated"`` when the gateway offered no shutdown handshake;
+        ``(None, None)`` while the request is still to be made. A later stop
+        of a child that was asked only finishes its stop, and reports that
+        answer as the stop which finished it would have.
+        """
+        native_shutdown = getattr(self, "_native_shutdown", None)
+        if native_shutdown is not None:
+            return native_shutdown, getattr(self, "_native_shutdown_error", None)
+        if not supports_shutdown_handshake:
+            return "not_negotiated", None
+        return None, None
+
+    def _ask_gateway_shutdown(
+        self, process: Any, shutdown_horizon: float
+    ) -> tuple[str, Exception | None]:
+        """Make the current child's one shutdown request and record its answer.
+
+        The gateway may need to round-trip host callbacks while
+        UnifiedRuntime shuts down, so stdin stays open until a capable
+        gateway acknowledges that cleanup is complete. Older or custom
+        gateways stay on the EOF protocol (``_close_gateway_input``).
+        """
+        native_shutdown = "unanswered"
+        shutdown_error: Exception | None = None
+        try:
+            native_shutdown = self._request_gateway_shutdown(
+                process,
+                timeout=shutdown_horizon,
+            )
+        except Exception as exc:
+            if isinstance(exc, _GatewayShutdownRefusedError):
+                native_shutdown = "refused"
+            _log.debug("gateway shutdown handshake failed: %s", exc)
+            shutdown_error = exc
+        with self._pending_lock:
+            if self._process is process:
+                self._native_shutdown = native_shutdown
+                self._native_shutdown_error = shutdown_error
+        return native_shutdown, shutdown_error
+
+    @staticmethod
+    def _close_gateway_input(process: Any) -> None:
+        """End the child's input: a gateway without the handshake exits on it."""
+        if process.stdin:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
     async def send_async(
         self,
         request: dict[str, Any],
@@ -1229,7 +1296,6 @@ class PersistentTransport:
             elif getattr(self, "_last_termination", None) is None:
                 self._last_termination = _NOT_STARTED
             return
-        shutdown_error: Exception | None = None
         process_reaped = False
         reap_error: Exception | None = None
         # What this stop observes of ``process``: its exit status, plus the
@@ -1240,45 +1306,22 @@ class PersistentTransport:
         # An earlier stop of this child already gave it the whole horizon and
         # escalated; a later stop goes straight to the signals.
         grace_spent = escalation != "none"
-        native_shutdown = getattr(self, "_native_shutdown", None)
-        if native_shutdown is not None:
-            # A later stop of this child only finishes reaping it, and reports
-            # that answer as the stop which reaped it would have.
-            shutdown_error = getattr(self, "_native_shutdown_error", None)
-        elif not supports_shutdown_handshake:
-            native_shutdown = "not_negotiated"
+        native_shutdown, shutdown_error = self._recorded_shutdown_answer(
+            supports_shutdown_handshake
+        )
         shutdown_started = time.monotonic()
         try:
-            # The gateway may need to round-trip host callbacks while
-            # UnifiedRuntime shuts down. Keep stdin open until a capable
-            # gateway acknowledges that cleanup is complete. Older or custom
-            # gateways stay on the EOF protocol below.
             if native_shutdown is None:
                 native_shutdown = "unanswered"
-                try:
-                    native_shutdown = self._request_gateway_shutdown(
-                        process,
-                        timeout=shutdown_horizon,
-                    )
-                except Exception as exc:
-                    if isinstance(exc, _GatewayShutdownRefusedError):
-                        native_shutdown = "refused"
-                    _log.debug("gateway shutdown handshake failed: %s", exc)
-                    shutdown_error = exc
-                with self._pending_lock:
-                    if self._process is process:
-                        self._native_shutdown = native_shutdown
-                        self._native_shutdown_error = shutdown_error
+                native_shutdown, shutdown_error = self._ask_gateway_shutdown(
+                    process, shutdown_horizon
+                )
 
             elapsed = time.monotonic() - shutdown_started
             remaining_grace = 0.0 if grace_spent else max(0.0, shutdown_horizon - elapsed)
-            if process.stdin:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    # A gateway that already closed its pipe still needs to be
-                    # reaped below.
-                    pass
+            # A gateway that already closed its pipe still needs to be
+            # reaped below.
+            self._close_gateway_input(process)
             try:
                 exit_status = process.wait(timeout=remaining_grace)
                 process_reaped = True
@@ -1396,6 +1439,16 @@ class PersistentTransport:
             return False
         lifetime = self._lifetime_of(process)
         return lifetime is None or lifetime.error is None
+
+    def _is_fresh(self) -> bool:
+        """Never started and never stopped: a runtime may still start it."""
+        with self._lifecycle_lock:
+            return (
+                self._process is None
+                and self._lifetime is None
+                and self._start_claim is None
+                and not self._closed
+            )
 
     @property
     def last_termination(self) -> TransportTermination | None:

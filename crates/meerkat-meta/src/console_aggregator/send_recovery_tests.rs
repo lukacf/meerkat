@@ -79,6 +79,45 @@ fn admit(aggregator: &MetaConsoleAggregator, admitted: &[(&str, &str)]) {
     }));
 }
 
+/// Admission evidence that answers only after `delay`, as a remote store's
+/// does: the read first loads the runtime body of the session the send
+/// recorded, one round trip at a time.
+struct SlowEvidenceReader {
+    evidence: EvidenceReader,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl SendAdmissionReader for SlowEvidenceReader {
+    async fn admitted_input(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<AdmittedInput>, String> {
+        tokio::time::sleep(self.delay).await;
+        self.evidence
+            .admitted_input(session_id, idempotency_key)
+            .await
+    }
+}
+
+fn admit_slowly(
+    aggregator: &MetaConsoleAggregator,
+    delay: std::time::Duration,
+    admitted: &[(&str, &str)],
+) {
+    *aggregator.inner.send_admission_override.lock().unwrap() =
+        Some(Arc::new(SlowEvidenceReader {
+            evidence: EvidenceReader {
+                admitted: admitted
+                    .iter()
+                    .map(|(key, input)| ((*key).to_string(), (*input).to_string()))
+                    .collect(),
+            },
+            delay,
+        }));
+}
+
 async fn status_of(aggregator: &MetaConsoleAggregator, frame_id: &str) -> ConsoleFrameStatus {
     aggregator
         .inner
@@ -341,6 +380,70 @@ async fn boot_reconciliation_settles_admitted_sends_only_and_dispatches_nothing(
     let second = aggregator.reconcile_interrupted_sends().await;
     assert_eq!(second.examined, 2);
     assert_eq!(second.delivered, 1);
+}
+
+/// A sender's recovery waits for a slow store's admission evidence. After a
+/// restart, the evidence read loads the session the send recorded, which on
+/// a remote store takes seconds (here 3 s): the recovery answers what the
+/// store holds and settles the send whose input was admitted. Bounded by
+/// 2 s, it answered `unknown` on every try, and the delivered send stayed
+/// unsettled.
+#[tokio::test]
+async fn recovery_waits_for_a_slow_store_and_settles_an_admitted_send() {
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let (accepted, claim) = fresh(reserve(&aggregator, "k1", "hello", &human("u1")).await);
+    drop(claim);
+    admit_slowly(
+        &aggregator,
+        std::time::Duration::from_secs(3),
+        &[(accepted.input_frame_id.as_str(), "input-1")],
+    );
+
+    let recovered = aggregator
+        .recover_send(&["agent".to_string()], "console", "k1", &human("u1"))
+        .await
+        .expect("recover")
+        .expect("own send");
+    assert_eq!(
+        recovered.native,
+        NativeSendObservation::Admitted {
+            input_id: "input-1".to_string(),
+            phase: Some("queued".to_string())
+        }
+    );
+    assert_eq!(recovered.accepted.status, ConsoleFrameStatus::Delivered);
+    assert_eq!(
+        status_of(&aggregator, &accepted.input_frame_id).await,
+        ConsoleFrameStatus::Delivered
+    );
+}
+
+/// The boot reconciliation keeps its short bound per read. It runs before
+/// the gateway serves, so on a slow store it leaves the send unsettled for
+/// its sender's recovery instead of holding startup for the read.
+#[tokio::test]
+async fn boot_reconciliation_keeps_its_short_read_bound_on_a_slow_store() {
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let (accepted, claim) = fresh(reserve(&aggregator, "k1", "hello", &human("u1")).await);
+    drop(claim);
+    let delay = std::time::Duration::from_secs(5);
+    admit_slowly(
+        &aggregator,
+        delay,
+        &[(accepted.input_frame_id.as_str(), "input-1")],
+    );
+
+    let started = std::time::Instant::now();
+    let outcome = aggregator.reconcile_interrupted_sends().await;
+    assert!(
+        started.elapsed() < delay,
+        "the boot reconciliation waited for the slow read"
+    );
+    assert_eq!((outcome.examined, outcome.delivered), (1, 0));
+    assert_eq!(
+        status_of(&aggregator, &accepted.input_frame_id).await,
+        ConsoleFrameStatus::Accepted
+    );
 }
 
 #[tokio::test]

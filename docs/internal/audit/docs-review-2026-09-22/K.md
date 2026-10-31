@@ -263,7 +263,7 @@ MemoryStoreInfo.store also requires String.
 
 ### Independent adjudication
 
-Both fences are Rust value literals, not schematic field-type declarations. Their string expressions are &str, whereas the actual public fields require String and Option<String>; Rust does not perform these owned conversions implicitly. The nearby field table even states the owned types, so there is no reasonable pseudocode interpretation that makes the copyable literals correct. G-001 through G-004 address ledger persistence, normalization, conflict semantics, and panel methods; none includes these literal type errors. The two occurrences are one finding, not separate counts.
+Both fences are Rust value literals, not schematic field-type declarations. Their string expressions are &str, whereas the actual public fields require String and `Option<String>`; Rust does not perform these owned conversions implicitly. The nearby field table even states the owned types, so there is no reasonable pseudocode interpretation that makes the copyable literals correct. G-001 through G-004 address ledger persistence, normalization, conflict semantics, and panel methods; none includes these literal type errors. The two occurrences are one finding, not separate counts.
 
 **`docs/concepts/memory.mdx:50-53`**
 
@@ -318,7 +318,7 @@ record_count is already valid; only store needs conversion.
 
 Added .into() to LocalJsonMemoryBackendConfig.state_path, the endpoint within Some, and MemoryStoreInfo.store, preserving their values and record_count.
 
-**Validation:** Verified the actual String/Option<String> field declarations in runtime.rs and the three converted literal expressions. Source-contract validation only; no Rust build or live snippet execution was needed for these documentary edits.
+**Validation:** Verified the actual String/`Option<String>` field declarations in runtime.rs and the three converted literal expressions. Source-contract validation only; no Rust build or live snippet execution was needed for these documentary edits.
 
 **Final review: pass.** All three borrowed-string assignments now convert to owned Strings at the existing literal sites, including inside Some. The example values and record_count remain unchanged; no API or storage semantics were altered.
 
@@ -359,7 +359,7 @@ pub store: String,
 
 MemoryStoreInfo's actual field types match the corrected literal.
 
-**Final review: pass.** All three owned-string expressions, across both Rust value literals, now have .into(). The values and record count are preserved. The concrete source fields remain String and Option<String>; no runtime or field-type change was used to accommodate the snippets.
+**Final review: pass.** All three owned-string expressions, across both Rust value literals, now have .into(). The values and record count are preserved. The concrete source fields remain String and `Option<String>`; no runtime or field-type change was used to accommodate the snippets.
 
 **`docs/concepts/memory.mdx:49-54`**
 
@@ -576,7 +576,7 @@ The supplied provenance affects the session-tracker mark, not just an informatio
 
 The asynchronous fallback remains name-based, so replacing the sentence with an all-events-provenance claim would be incorrect.
 
-**Required correction:** Replace the name-only current-release sentence with: 'Dispatch-time classification joins recognized tool results to the request tool catalog's ToolDef.provenance. MCP provenance uses source_id as the server name even when the tool name is unqualified. The asynchronous observe-stream fallback remains name-based.' Document precedence as always-untrusted builtin names (web_search, web_fetch, fetch, http_request), untrusted_tools, trusted_tools, typed MCP server attribution/allowlist, qualified mcp__<server>__<tool> fallback when provenance is absent or non-MCP, then trusted. State that provider-native ServerToolContent is always untrusted and that explicit tool rules precede MCP server rules but cannot override the always-untrusted builtin names. Do not require listing all unqualified MCP tools in untrusted_tools; reserve such overrides for intentional policy or tools without usable attribution.
+**Required correction:** Replace the name-only current-release sentence with: 'Dispatch-time classification joins recognized tool results to the request tool catalog's ToolDef.provenance. MCP provenance uses source_id as the server name even when the tool name is unqualified. The asynchronous observe-stream fallback remains name-based.' Document precedence as always-untrusted builtin names (web_search, web_fetch, fetch, http_request), untrusted_tools, trusted_tools, typed MCP server attribution/allowlist, qualified `mcp__<server>__<tool>` fallback when provenance is absent or non-MCP, then trusted. State that provider-native ServerToolContent is always untrusted and that explicit tool rules precede MCP server rules but cannot override the always-untrusted builtin names. Do not require listing all unqualified MCP tools in untrusted_tools; reserve such overrides for intentional policy or tools without usable attribution.
 
 ### Changes and final verification
 

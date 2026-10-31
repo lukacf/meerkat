@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.7
+
+- No SDK API changes; released with Meta 0.9.7 on Meerkat 0.9.8.
+
 ## 0.9.6
 
 - `MetaBuilder.providerCredentialsRoot(path)` sends

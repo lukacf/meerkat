@@ -94,6 +94,27 @@ def job_block(name: str) -> str:
     return "\n".join(lines[start:])
 
 
+def job_steps(name: str) -> str:
+    """One job's lines, newline-terminated, without the blank and comment
+    lines job_block keeps above the next job's header."""
+    lines = job_block(name).splitlines()
+    while lines and (not lines[-1].strip() or lines[-1].startswith("  #")):
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+# fmt-lint's last steps, with their comment: the Mintlify parse of docs/ on
+# the Node.js it sets up itself, with a pinned mint version.
+DOCS_PARSE_STEPS = (
+    r"(?:      #.*\n)*"
+    "      - uses: actions/setup-node@[0-9a-f]{40} # v4\n"
+    "        with:\n"
+    '          node-version: "22"\n'
+    r"      - run: npx --yes mint@\d+\.\d+\.\d+ broken-links\n"
+    "        working-directory: docs\n"
+)
+
+
 # A runner label that names its image. A -latest label moves to a new image on
 # GitHub's schedule (ubuntu-latest left 24.04 on 2026-10-19), and with it the
 # toolchains, glibc and preinstalled tools every job reads.
@@ -770,17 +791,17 @@ class CiWorkflowTests(unittest.TestCase):
         continuity mirror runs once.
         fmt-lint runs on every pull request and push; ci-changes.py lets
         their changes reach no lane on that promise. Each suite runs twice:
-        on the runner's own Python and Node.js, and again, last in the job,
-        on the oldest runtimes a 0.9.3 host may run them on, the 0.9.3 SDKs'
-        floors (Python 3.10 and Node.js 18)."""
+        on the runner's own Python and Node.js, and again, after every step
+        on the runner's own runtimes, on the oldest runtimes a 0.9.3 host may
+        run them on, the 0.9.3 SDKs' floors (Python 3.10 and Node.js 18).
+        Only the docs parse, on the Node.js it sets up itself, follows them."""
         python_suite = "- run: python3 tools/continuity-export/test_continuity_export.py\n"
         restore_suite = "- run: python3 tools/continuity-export/test_restore_blobs.py\n"
         node_suite = "- run: node --test tools/continuity-export/continuity-export.test.mjs\n"
-        lines = job_block("fmt-lint").splitlines()
-        # job_block ends at the next job's header, below the comment above it.
-        while lines and (not lines[-1].strip() or lines[-1].startswith("  #")):
-            lines.pop()
-        steps = "\n".join(lines) + "\n"
+        steps = job_steps("fmt-lint")
+        docs_parse = re.search(DOCS_PARSE_STEPS + r"\Z", steps)
+        if docs_parse:
+            steps = steps[:docs_parse.start()]
         floor_rows = re.search(
             "      - uses: actions/setup-python@[0-9a-f]{40} # v5\n"
             "        with:\n"
@@ -792,13 +813,24 @@ class CiWorkflowTests(unittest.TestCase):
             '          node-version: "18"\n'
             f"      {re.escape(node_suite)}"
             r"\Z", steps)
-        self.assertIsNotNone(floor_rows, "fmt-lint must end with the suites on the floor runtimes")
+        self.assertIsNotNone(floor_rows, "fmt-lint must end with the suites on the floor runtimes, "
+                                         "then the docs parse")
         before = steps[:floor_rows.start()]
         for suite in (python_suite, restore_suite, node_suite):
             self.assertEqual(before.count(suite), 1, suite)
         # The first runs use the runner's own runtimes.
         self.assertNotIn("actions/setup-python@", before)
         self.assertNotIn("actions/setup-node@", before)
+
+    def test_fmt_lint_ends_with_the_mintlify_parse_of_docs(self):
+        """docs.rkat.ai mirrors the published pages and parses them with
+        Mintlify only after a merge to main, where a raw placeholder that MDX
+        read as an unclosed tag failed the publication. fmt-lint, which runs
+        on every pull request, runs the same check on docs/ first. Mintlify
+        parses every page docs/.mintignore does not exclude, so it excludes
+        the internal records, plain Markdown that MDX cannot parse."""
+        self.assertRegex(job_steps("fmt-lint"), DOCS_PARSE_STEPS + r"\Z")
+        self.assertIn("internal/", (ROOT / "docs/.mintignore").read_text().splitlines())
 
     def test_the_workspace_lint_runs_in_its_own_rust_lane_job(self):
         """fmt-lint runs on every pull request and compiles nothing; the

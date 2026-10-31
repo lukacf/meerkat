@@ -28,8 +28,20 @@ pub(crate) const SEND_SWEEP_WINDOW: usize = 4096;
 pub(crate) const SEND_SWEEP_LIMIT: usize = 256;
 /// Bound of the whole boot reconciliation.
 pub(crate) const SEND_SWEEP_DEADLINE: Duration = Duration::from_secs(10);
-/// Bound of one native admission read.
-pub(crate) const NATIVE_SEND_READ_BOUND: Duration = Duration::from_secs(2);
+/// Bound of one send's native admission evidence (both of its delivery
+/// keys) in the boot reconciliation. The pass runs before the gateway
+/// serves, so evidence slower than this (on a remote store, the read loads
+/// the runtime body of the session the send recorded) leaves the send
+/// unsettled for its sender's recovery instead of holding startup.
+pub(crate) const BOOT_SEND_READ_BOUND: Duration = Duration::from_secs(2);
+/// Bound of one send's native admission evidence (both of its delivery
+/// keys) for a sender: a replay of the send, or a request for its recovery.
+/// The sender waits for the answer, and a read cut short is discarded, so
+/// the bound sits well above a whole load on a remote store. It also sits
+/// below the default request timeout of the console and of the SDKs' stdio
+/// clients (60 s), so such a client gets the observation's answer, `unknown`
+/// included, before it gives up on the request.
+pub(crate) const INTERACTIVE_SEND_READ_BOUND: Duration = Duration::from_secs(45);
 
 /// Console send frames whose dispatch has a live owner in this process.
 #[derive(Debug, Default)]
@@ -166,11 +178,15 @@ impl SendAdmissionReader for meerkat_runtime::MeerkatMachine {
 }
 
 /// Read a send's admission evidence in the session it recorded, under the
-/// host-human key (the input frame id) and the governed key.
+/// host-human key (the input frame id) and then the governed key, all within
+/// one deadline `bound` from now: evidence the store has not given by then
+/// answers `unknown`, without reading the keys left.
 pub(crate) async fn observe_native_send(
     reader: &dyn SendAdmissionReader,
     frame: &ConsoleFrame,
+    bound: Duration,
 ) -> NativeSendObservation {
+    let deadline = tokio::time::Instant::now() + bound;
     let Some(session_id) = frame.session_id.as_deref() else {
         return NativeSendObservation::Unknown {
             cause: "the send recorded no session".to_string(),
@@ -186,12 +202,7 @@ pub(crate) async fn observe_native_send(
         keys.push(governed_delivery_key(interaction_id, &frame.id));
     }
     for key in keys {
-        match tokio::time::timeout(
-            NATIVE_SEND_READ_BOUND,
-            reader.admitted_input(&session_id, &key),
-        )
-        .await
-        {
+        match tokio::time::timeout_at(deadline, reader.admitted_input(&session_id, &key)).await {
             Ok(Ok(Some(input))) => {
                 return NativeSendObservation::Admitted {
                     input_id: input.input_id,
@@ -313,7 +324,7 @@ mod tests {
         let governed = governed_delivery_key(frame.interaction_id.as_deref().unwrap(), &frame.id);
         let host_human = reader(&[("console-frame-1", "input-a")]);
         assert_eq!(
-            observe_native_send(&host_human, &frame).await,
+            observe_native_send(&host_human, &frame, INTERACTIVE_SEND_READ_BOUND).await,
             NativeSendObservation::Admitted {
                 input_id: "input-a".to_string(),
                 phase: Some("queued".to_string())
@@ -321,7 +332,7 @@ mod tests {
         );
         let governed_reader = reader(&[(governed.as_str(), "input-b")]);
         assert_eq!(
-            observe_native_send(&governed_reader, &frame).await,
+            observe_native_send(&governed_reader, &frame, INTERACTIVE_SEND_READ_BOUND).await,
             NativeSendObservation::Admitted {
                 input_id: "input-b".to_string(),
                 phase: Some("queued".to_string())
@@ -332,7 +343,7 @@ mod tests {
             vec!["console-frame-1".to_string(), governed]
         );
         assert_eq!(
-            observe_native_send(&reader(&[]), &frame).await,
+            observe_native_send(&reader(&[]), &frame, INTERACTIVE_SEND_READ_BOUND).await,
             NativeSendObservation::Absent
         );
     }
@@ -341,11 +352,16 @@ mod tests {
     async fn observation_without_a_readable_session_or_answer_is_unknown() {
         let none = reader(&[("console-frame-1", "input-a")]);
         assert!(matches!(
-            observe_native_send(&none, &frame(None)).await,
+            observe_native_send(&none, &frame(None), INTERACTIVE_SEND_READ_BOUND).await,
             NativeSendObservation::Unknown { .. }
         ));
         assert!(matches!(
-            observe_native_send(&none, &frame(Some("not-a-session"))).await,
+            observe_native_send(
+                &none,
+                &frame(Some("not-a-session")),
+                INTERACTIVE_SEND_READ_BOUND
+            )
+            .await,
             NativeSendObservation::Unknown { .. }
         ));
         assert!(none.reads.lock().unwrap().is_empty());
@@ -354,9 +370,56 @@ mod tests {
             ..reader(&[])
         };
         assert_eq!(
-            observe_native_send(&failing, &frame(Some(SESSION))).await,
+            observe_native_send(&failing, &frame(Some(SESSION)), INTERACTIVE_SEND_READ_BOUND).await,
             NativeSendObservation::Unknown {
                 cause: "store unavailable".to_string()
+            }
+        );
+    }
+
+    /// A reader whose every answer takes `delay`, as a slow store's does.
+    struct DelayedReader {
+        evidence: FakeReader,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionReader for DelayedReader {
+        async fn admitted_input(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            idempotency_key: &str,
+        ) -> Result<Option<AdmittedInput>, String> {
+            tokio::time::sleep(self.delay).await;
+            self.evidence
+                .admitted_input(session_id, idempotency_key)
+                .await
+        }
+    }
+
+    /// One deadline bounds the whole observation, not each key's read: the
+    /// governed key is read with what is left of the bound after the
+    /// host-human key, and an observation past its deadline answers unknown
+    /// without reading on. Each read here takes 6 s and the admission is
+    /// under the governed key, so the second read answers at 12 s: past a
+    /// 10 s bound, within a 13 s one.
+    #[tokio::test(start_paused = true)]
+    async fn one_deadline_bounds_the_reads_of_both_delivery_keys() {
+        let frame = frame(Some(SESSION));
+        let governed = governed_delivery_key(frame.interaction_id.as_deref().unwrap(), &frame.id);
+        let slow = DelayedReader {
+            evidence: reader(&[(governed.as_str(), "input-b")]),
+            delay: Duration::from_secs(6),
+        };
+        assert!(matches!(
+            observe_native_send(&slow, &frame, Duration::from_secs(10)).await,
+            NativeSendObservation::Unknown { .. }
+        ));
+        assert_eq!(
+            observe_native_send(&slow, &frame, Duration::from_secs(13)).await,
+            NativeSendObservation::Admitted {
+                input_id: "input-b".to_string(),
+                phase: Some("queued".to_string())
             }
         );
     }

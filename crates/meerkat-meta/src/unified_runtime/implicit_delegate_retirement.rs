@@ -59,6 +59,55 @@ impl UnifiedRuntime {
     }
 }
 
+/// A member's idle clock: the session it was started on, when the member's
+/// window started, the pass that last observed the member idle, and the last
+/// terminal run the member's execution snapshot named at that time
+/// ([`SnapshotTerminalRun::NotRead`] while no idle observation of this clock
+/// read a snapshot).
+struct IdleClock {
+    session_id: meerkat_core::types::SessionId,
+    since: Instant,
+    observed_pass: u64,
+    terminal_run: SnapshotTerminalRun,
+}
+
+/// What an idle observation of a member read from its execution snapshot
+/// about the member's last terminal run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotTerminalRun {
+    /// No snapshot was read: the session answered none, or no live session
+    /// serves the member. Such an observation says nothing about its runs.
+    NotRead,
+    /// The snapshot names no terminal run: the session has finished none.
+    NoRun,
+    /// The snapshot names this run as the session's last terminal run.
+    Run(meerkat_core::lifecycle::RunId),
+}
+
+/// Whether an idle member keeps the clock it already has, observed now in
+/// pass `pass` under `session_id`, with `terminal_run` read from its
+/// execution snapshot.
+///
+/// Its window starts again when the member is under another session, when
+/// the previous pass did not observe it idle, or when its snapshot names
+/// another last terminal run than at the previous idle observation: it ran a
+/// turn the sweep never saw busy, however short, and however long the passes
+/// ran. A member observed idle by every pass, under one session, with no new
+/// terminal run, keeps its clock whatever the passes took. An observation
+/// that read no snapshot leaves the run as it was; a clock that has read no
+/// snapshot yet starts again at the first one it reads.
+fn keeps_idle_clock(
+    clock: &IdleClock,
+    pass: u64,
+    session_id: &meerkat_core::types::SessionId,
+    terminal_run: &SnapshotTerminalRun,
+) -> bool {
+    clock.session_id == *session_id
+        && clock.observed_pass.checked_add(1) == Some(pass)
+        && (matches!(terminal_run, SnapshotTerminalRun::NotRead)
+            || clock.terminal_run == *terminal_run)
+}
+
 async fn run_implicit_delegate_retirement(
     runtime: MobRuntime,
     state: Arc<MobMcpState>,
@@ -69,10 +118,12 @@ async fn run_implicit_delegate_retirement(
 ) {
     let primary_mob_id = runtime.handle().mob_id().to_string();
     let session_service = state.session_service();
-    // Each member's idle clock, with the session it was started on: a member
-    // re-seated or re-woken under another session starts a fresh window.
-    let mut idle_since: BTreeMap<(String, String), (meerkat_core::types::SessionId, Instant)> =
-        BTreeMap::new();
+    #[cfg(test)]
+    let session_service = tests::sweep_session_service(&primary_mob_id, session_service);
+    // Each member's idle clock (`keeps_idle_clock` says when a window starts
+    // again), and the number of the pass the sweep is on.
+    let mut idle_since: BTreeMap<(String, String), IdleClock> = BTreeMap::new();
+    let mut pass: u64 = 0;
     // A retirement that outlives `retire`'s wait stays owned by the mob
     // (meerkat 0.8.51): its settlement is awaited here, off the sweep, and
     // reported. Dropping the set with this task aborts the waits.
@@ -80,6 +131,7 @@ async fn run_implicit_delegate_retirement(
 
     loop {
         tokio::time::sleep(sweep_interval).await;
+        pass += 1;
         while settlements.try_join_next().is_some() {}
         let mut seen = BTreeSet::new();
         // Opt-ins for members of implicit delegation mobs, as held before
@@ -146,38 +198,20 @@ async fn run_implicit_delegate_retirement(
                     idle_since.remove(&key);
                     continue;
                 };
-                let idle = match observe_member_execution(session_service.as_ref(), &session_id)
-                    .await
-                {
-                    MemberExecution::Idle => true,
+                let execution =
+                    observe_member_execution(session_service.as_ref(), &session_id).await;
+                let idle = match &execution {
+                    MemberExecution::Idle { .. } => true,
                     MemberExecution::Busy => false,
-                    // Retiring a member ends the work it still owes, so a
-                    // member no live session serves is idle only once it
-                    // owes none: no kickoff in flight and no input of its
-                    // session short of a terminal phase.
-                    MemberExecution::NotLive(error) => {
-                        let owes_input = tokio::time::timeout(
-                            MEMBER_EXECUTION_OBSERVATION_TIMEOUT,
-                            runtime.session_owes_durable_input(&session_id),
-                        )
-                        .await
-                        .ok()
-                        .flatten();
-                        let owes = owes_work_while_not_live(
-                            member.kickoff.as_ref().map(|kickoff| kickoff.phase),
-                            owes_input,
-                        );
-                        if owes {
-                            tracing::debug!(
-                                mob_id = %mob_id,
-                                agent_identity = %identity,
-                                session_id = %session_id,
-                                error = %error,
-                                "implicit delegate idle sweep kept a member no live session serves: it still owes work"
-                            );
-                        }
-                        !owes
-                    }
+                    // A member no live session serves is idle while no
+                    // kickoff of it is in flight. What else it must show to be
+                    // retired is read from the store once it is due, below: a
+                    // pass that only times its window reads nothing from the
+                    // store, however many dormant members it times.
+                    MemberExecution::NotLive(_) => !member
+                        .kickoff
+                        .as_ref()
+                        .is_some_and(|kickoff| kickoff_is_pending(kickoff.phase)),
                     MemberExecution::Unreadable(error) => {
                         tracing::debug!(
                             mob_id = %mob_id,
@@ -213,15 +247,82 @@ async fn run_implicit_delegate_retirement(
                     idle_since.remove(&key);
                     continue;
                 }
-                let since = match idle_since.get(&key) {
-                    Some((clock_session, since)) if *clock_session == session_id => *since,
-                    _ => {
-                        let now = Instant::now();
-                        idle_since.insert(key.clone(), (session_id.clone(), now));
-                        now
-                    }
+                let terminal_run = match &execution {
+                    MemberExecution::Idle { terminal_run } => terminal_run.clone(),
+                    _ => SnapshotTerminalRun::NotRead,
                 };
+                let kept = idle_since
+                    .get(&key)
+                    .filter(|clock| keeps_idle_clock(clock, pass, &session_id, &terminal_run));
+                let (since, terminal_run) = match kept {
+                    Some(clock) => (
+                        clock.since,
+                        match terminal_run {
+                            // No snapshot now: the run its last one named
+                            // stands.
+                            SnapshotTerminalRun::NotRead => clock.terminal_run.clone(),
+                            read => read,
+                        },
+                    ),
+                    None => (Instant::now(), terminal_run),
+                };
+                idle_since.insert(
+                    key.clone(),
+                    IdleClock {
+                        session_id: session_id.clone(),
+                        since,
+                        observed_pass: pass,
+                        terminal_run,
+                    },
+                );
                 if since.elapsed() < idle_after {
+                    continue;
+                }
+                // Retiring a member ends the work it still owes, so a member
+                // no live session serves is retired only when this process's
+                // store holds its session and it owes no work: no kickoff in
+                // flight and no input of its session short of a terminal
+                // phase.
+                if let MemberExecution::NotLive(error) = &execution
+                    && let Some(kept) = why_not_live_member_stays(
+                        session_service.as_ref(),
+                        &session_id,
+                        member.kickoff.as_ref().map(|kickoff| kickoff.phase),
+                        runtime.session_owes_durable_input(&session_id),
+                    )
+                    .await
+                {
+                    if kept.warns() {
+                        if let KeptDueMember::SessionReadFailed(read_error) = &kept {
+                            tracing::warn!(
+                                mob_id = %mob_id,
+                                agent_identity = %identity,
+                                session_id = %session_id,
+                                error = %read_error,
+                                reason = kept.reason(),
+                                "implicit delegate idle sweep kept a due member: the store read of its session failed"
+                            );
+                        } else {
+                            tracing::warn!(
+                                mob_id = %mob_id,
+                                agent_identity = %identity,
+                                session_id = %session_id,
+                                bound_secs = MEMBER_STORE_READ_TIMEOUT.as_secs(),
+                                reason = kept.reason(),
+                                "implicit delegate idle sweep kept a due member: a store read did not answer within its bound"
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            mob_id = %mob_id,
+                            agent_identity = %identity,
+                            session_id = %session_id,
+                            error = %error,
+                            reason = kept.reason(),
+                            "implicit delegate idle sweep kept a member no live session serves"
+                        );
+                    }
+                    idle_since.remove(&key);
                     continue;
                 }
                 #[cfg(test)]
@@ -375,22 +476,45 @@ async fn report_idle_retirement_settlement(
     }
 }
 
-/// How long the sweep waits for one read of a member's execution. A session
-/// answers its execution snapshot only between turns, so a member mid-turn
-/// does not answer in time: it counts as busy, and the sweep moves on instead
-/// of waiting for the turn to end.
+/// How long the sweep waits for one observation of a member's execution (its
+/// runtime state, its execution snapshot, the live-session witness). A
+/// session answers its execution snapshot only between turns, so a member
+/// mid-turn does not answer in time: it counts as busy, and the sweep moves on
+/// instead of waiting for the turn to end. The durable store reads the sweep
+/// makes for a member no live session serves wait behind no turn and take
+/// [`MEMBER_STORE_READ_TIMEOUT`] instead.
 const MEMBER_EXECUTION_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long the sweep waits for one durable store read about a member no live
+/// session serves: whether this process's store holds its session, and
+/// whether the session owes input. Such a read waits behind no turn, but it
+/// can be slow: on a remote store, the first read of a session loads its
+/// runtime body (its head, its rows page by page, its chunked entries), one
+/// round trip at a time, and a load cut short is discarded, so the next pass
+/// would start it again from the beginning. The crate's durable store read
+/// bound sits well above such a load, and keeps one session whose read never
+/// answers from holding the sweep, and the store locks the read holds, for a
+/// whole idle window. The sweep makes these reads only for a member that is
+/// due.
+const MEMBER_STORE_READ_TIMEOUT: Duration = crate::mob_handle_runtime::DURABLE_STORE_READ_BOUND;
 
 /// A member's execution as the idle sweep sees it.
 enum MemberExecution {
-    Idle,
+    /// Between turns. `terminal_run` is what the session's execution snapshot
+    /// names as its last terminal run, [`SnapshotTerminalRun::NotRead`] when
+    /// the session answered no snapshot.
+    Idle {
+        terminal_run: SnapshotTerminalRun,
+    },
     /// Mid-turn: the runtime machine has a run open for the session, or the
     /// session did not answer within [`MEMBER_EXECUTION_OBSERVATION_TIMEOUT`].
     Busy,
-    /// The execution snapshot failed, and the typed local reads say why: this
-    /// process's durable store holds the session and no live actor serves it,
-    /// as for a member a restart left without a live session. Idle unless it
-    /// still owes work ([`owes_work_while_not_live`]).
+    /// The execution snapshot failed, and the typed live-session witness says
+    /// why: no live actor serves the session, as for a member a restart left
+    /// without a live session. Such a member is retired only when this
+    /// process's durable store holds its session and it owes no work
+    /// ([`why_not_live_member_stays`]), which the sweep reads from the store
+    /// once the member is due.
     NotLive(meerkat_core::service::SessionError),
     Unreadable(meerkat_core::service::SessionError),
 }
@@ -399,7 +523,8 @@ enum MemberExecution {
 /// running turn to end. The runtime machine the member runs on answers
 /// without queueing behind the turn; a member it reports running is busy.
 /// Otherwise the session's execution snapshot decides, bounded: a session
-/// busy with a turn does not answer, which reads as busy too.
+/// busy with a turn does not answer, which reads as busy too. Nothing is read
+/// from the durable store.
 async fn observe_member_execution(
     session_service: &dyn meerkat_mob::MobSessionService,
     session_id: &meerkat_core::types::SessionId,
@@ -429,19 +554,29 @@ async fn observe_member_execution(
     )
     .await
     {
-        Ok(Ok(Some(snapshot))) if delegate_execution_is_idle(&snapshot) => MemberExecution::Idle,
+        Ok(Ok(Some(snapshot))) if delegate_execution_is_idle(&snapshot) => MemberExecution::Idle {
+            terminal_run: snapshot
+                .terminal_run_id
+                .map_or(SnapshotTerminalRun::NoRun, SnapshotTerminalRun::Run),
+        },
         Ok(Ok(Some(_))) | Err(_) => MemberExecution::Busy,
-        Ok(Ok(None)) => MemberExecution::Idle,
+        Ok(Ok(None)) => MemberExecution::Idle {
+            terminal_run: SnapshotTerminalRun::NotRead,
+        },
         Ok(Err(error)) => not_live_or_unreadable(session_service, session_id, error).await,
     }
 }
 
-/// A member whose execution snapshot failed, read with typed local reads and
-/// never by the error's variant. Only a session this process's durable store
-/// holds and no live actor serves is [`MemberExecution::NotLive`]. A session
-/// the store does not hold (a placed member's session is resident on its
-/// host, or the session is gone), a live session, and a read that fails or
-/// does not answer in time stay [`MemberExecution::Unreadable`].
+/// A member whose execution snapshot failed, read with the typed live-session
+/// witness and never by the error's variant. A session no live actor serves
+/// is [`MemberExecution::NotLive`]; a live session, and a witness read that
+/// fails or does not answer in time, stay [`MemberExecution::Unreadable`].
+///
+/// The stock session services answer the witness from their registry of live
+/// sessions, without waiting on a turn. The trait's default, left to a
+/// wrapper that does not forward it, classifies durable authority instead and
+/// can wait for the session's turn to finalize, so the read keeps the turn
+/// observation bound.
 async fn not_live_or_unreadable(
     session_service: &dyn meerkat_mob::MobSessionService,
     session_id: &meerkat_core::types::SessionId,
@@ -452,19 +587,136 @@ async fn not_live_or_unreadable(
         session_service.live_session_actor_registered(session_id),
     )
     .await;
-    if !matches!(live, Ok(Ok(false))) {
-        return MemberExecution::Unreadable(error);
-    }
-    let persisted = tokio::time::timeout(
-        MEMBER_EXECUTION_OBSERVATION_TIMEOUT,
-        session_service.load_persisted_session_metadata(session_id),
-    )
-    .await;
-    if matches!(persisted, Ok(Ok(Some(_)))) {
+    if matches!(live, Ok(Ok(false))) {
         MemberExecution::NotLive(error)
     } else {
         MemberExecution::Unreadable(error)
     }
+}
+
+/// What the session service's persisted metadata read, within
+/// [`MEMBER_STORE_READ_TIMEOUT`], answers for a member's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PersistedSession {
+    /// This process's durable store holds the session.
+    Held,
+    /// The store does not hold it: a placed member's session is resident on
+    /// its host, or the session is gone or archived.
+    NotHeld,
+    /// The read failed, with the read's error.
+    ReadFailed(String),
+    /// The read did not answer in time.
+    ReadTimedOut,
+}
+
+/// Whether this process's durable store holds `session_id`'s session, by the
+/// session service's persisted metadata read within
+/// [`MEMBER_STORE_READ_TIMEOUT`].
+async fn session_persisted_here(
+    session_service: &dyn meerkat_mob::MobSessionService,
+    session_id: &meerkat_core::types::SessionId,
+) -> PersistedSession {
+    match tokio::time::timeout(
+        MEMBER_STORE_READ_TIMEOUT,
+        session_service.load_persisted_session_metadata(session_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(_))) => PersistedSession::Held,
+        Ok(Ok(None)) => PersistedSession::NotHeld,
+        Ok(Err(error)) => PersistedSession::ReadFailed(error.to_string()),
+        Err(_) => PersistedSession::ReadTimedOut,
+    }
+}
+
+/// Why a member no live session serves stays when it is due for retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeptDueMember {
+    /// This process's store does not hold its session (a placed member's
+    /// session is resident on its host, or the session is gone or archived).
+    NotHeldHere,
+    /// The store read of its session failed, with the read's error, which
+    /// the sweep's WARN carries.
+    SessionReadFailed(String),
+    /// The store read of its session did not answer within
+    /// [`MEMBER_STORE_READ_TIMEOUT`].
+    SessionReadTimedOut,
+    /// It owes work, or the sweep cannot tell that it owes none: a kickoff in
+    /// flight, an input of its session short of a terminal phase, or an input
+    /// read that could not tell.
+    OwesWork,
+    /// The store read of its session's input did not answer within
+    /// [`MEMBER_STORE_READ_TIMEOUT`].
+    InputReadTimedOut,
+    /// Read again after the store reads, it no longer reads as a member no
+    /// live session serves: it was woken while they ran.
+    NoLongerNotLive,
+}
+
+impl KeptDueMember {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::NotHeldHere => "this process's store does not hold its session",
+            Self::SessionReadFailed(_) => "session read failed",
+            Self::SessionReadTimedOut => {
+                "the store read of its session did not answer within the store bound"
+            }
+            Self::OwesWork => "it owes work or cannot tell",
+            Self::InputReadTimedOut => {
+                "the store read of its session's input did not answer within the store bound"
+            }
+            Self::NoLongerNotLive => "it no longer reads as a member no live session serves",
+        }
+    }
+
+    /// Whether the sweep logs this at WARN: a store read failed or did not
+    /// answer within [`MEMBER_STORE_READ_TIMEOUT`], so the member stays until
+    /// a later window for a reason the store, not the member, gave. The WARN
+    /// for a failed read carries the read's error, and the WARN for a read
+    /// that did not answer carries the bound.
+    fn warns(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionReadFailed(_) | Self::SessionReadTimedOut | Self::InputReadTimedOut
+        )
+    }
+}
+
+/// Why a member no live session serves stays when it is due for retirement,
+/// or `None` when it is retired: this process's store holds its session, it
+/// owes no work ([`owes_work_while_not_live`]), and still no live session
+/// serves it. `owes_input` reads whether the session's durable input owes
+/// work; it is awaited only once the store holds the session. The store reads
+/// take [`MEMBER_STORE_READ_TIMEOUT`] each. They can take long, so the
+/// member's execution is read again after them: a member woken meanwhile is
+/// no longer the member they describe.
+async fn why_not_live_member_stays(
+    session_service: &dyn meerkat_mob::MobSessionService,
+    session_id: &meerkat_core::types::SessionId,
+    kickoff: Option<MobMemberKickoffPhase>,
+    owes_input: impl std::future::Future<Output = Option<bool>>,
+) -> Option<KeptDueMember> {
+    match session_persisted_here(session_service, session_id).await {
+        PersistedSession::Held => {}
+        PersistedSession::NotHeld => return Some(KeptDueMember::NotHeldHere),
+        PersistedSession::ReadFailed(error) => {
+            return Some(KeptDueMember::SessionReadFailed(error));
+        }
+        PersistedSession::ReadTimedOut => return Some(KeptDueMember::SessionReadTimedOut),
+    }
+    let Ok(owes_input) = tokio::time::timeout(MEMBER_STORE_READ_TIMEOUT, owes_input).await else {
+        return Some(KeptDueMember::InputReadTimedOut);
+    };
+    if owes_work_while_not_live(kickoff, owes_input) {
+        return Some(KeptDueMember::OwesWork);
+    }
+    if !matches!(
+        observe_member_execution(session_service, session_id).await,
+        MemberExecution::NotLive(_)
+    ) {
+        return Some(KeptDueMember::NoLongerNotLive);
+    }
+    None
 }
 
 /// Whether a member no live session serves still owes work: its kickoff has
@@ -595,13 +847,72 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         assert!(matches!(
             observe_member_execution(service.as_ref(), &session_id).await,
-            MemberExecution::Idle
+            MemberExecution::Idle {
+                terminal_run: SnapshotTerminalRun::NotRead
+            }
         ));
         assert_eq!(
             reads.load(Ordering::SeqCst),
             1,
             "a service without a runtime owner must still consult its idle session snapshot"
         );
+    }
+
+    /// The rules that start an idle window again: another session, a pass
+    /// that did not observe the member idle (the previous pass, by number,
+    /// not by time), or another last terminal run in its execution snapshot.
+    /// An idle observation that read no snapshot keeps the clock.
+    #[test]
+    fn an_idle_clock_restarts_on_another_session_a_missed_pass_or_a_new_terminal_run() {
+        use meerkat_core::lifecycle::RunId;
+
+        let session = meerkat_core::SessionId::new();
+        let run = SnapshotTerminalRun::Run(RunId::new());
+        let clock = IdleClock {
+            session_id: session.clone(),
+            since: Instant::now(),
+            observed_pass: 4,
+            terminal_run: run.clone(),
+        };
+        assert!(keeps_idle_clock(&clock, 5, &session, &run));
+        assert!(
+            keeps_idle_clock(&clock, 5, &session, &SnapshotTerminalRun::NotRead),
+            "no snapshot now"
+        );
+        assert!(
+            !keeps_idle_clock(&clock, 5, &meerkat_core::SessionId::new(), &run),
+            "another session"
+        );
+        assert!(
+            !keeps_idle_clock(&clock, 6, &session, &run),
+            "a pass in between did not observe the member idle"
+        );
+        assert!(
+            !keeps_idle_clock(&clock, 4, &session, &run),
+            "not the pass after the observation"
+        );
+        assert!(
+            !keeps_idle_clock(&clock, 5, &session, &SnapshotTerminalRun::Run(RunId::new())),
+            "another last terminal run"
+        );
+        assert!(
+            !keeps_idle_clock(&clock, 5, &session, &SnapshotTerminalRun::NoRun),
+            "no last terminal run where one was"
+        );
+        let unread = IdleClock {
+            terminal_run: SnapshotTerminalRun::NotRead,
+            ..clock
+        };
+        assert!(
+            !keeps_idle_clock(&unread, 5, &session, &SnapshotTerminalRun::NoRun),
+            "the first snapshot read for a clock that read none"
+        );
+        assert!(keeps_idle_clock(
+            &unread,
+            5,
+            &session,
+            &SnapshotTerminalRun::NotRead
+        ));
     }
 
     #[test]
@@ -3263,6 +3574,52 @@ comms = true
             .remove(mob_id);
     }
 
+    /// Makes the session service a sweep reads members through from the
+    /// runtime's own.
+    type SweepSessionServiceWrap = Arc<
+        dyn Fn(Arc<dyn meerkat_mob::MobSessionService>) -> Arc<dyn meerkat_mob::MobSessionService>
+            + Send
+            + Sync,
+    >;
+
+    /// The wraps tests set, by the primary mob id of the runtime whose sweep
+    /// they wrap.
+    static SWEEP_SESSION_SERVICES: std::sync::Mutex<BTreeMap<String, SweepSessionServiceWrap>> =
+        std::sync::Mutex::new(BTreeMap::new());
+
+    /// Called by the sweep as it starts: the session service it reads members
+    /// through, wrapped when a test set a wrap for its mob.
+    pub(super) fn sweep_session_service(
+        mob_id: &str,
+        service: Arc<dyn meerkat_mob::MobSessionService>,
+    ) -> Arc<dyn meerkat_mob::MobSessionService> {
+        let wrap = SWEEP_SESSION_SERVICES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(mob_id)
+            .cloned();
+        match wrap {
+            Some(wrap) => wrap(service),
+            None => service,
+        }
+    }
+
+    /// Wrap the session service of every sweep that starts over `mob_id`
+    /// from now, until [`unwrap_sweep_session_service`].
+    fn wrap_sweep_session_service(mob_id: &str, wrap: SweepSessionServiceWrap) {
+        SWEEP_SESSION_SERVICES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.to_string(), wrap);
+    }
+
+    fn unwrap_sweep_session_service(mob_id: &str) {
+        SWEEP_SESSION_SERVICES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(mob_id);
+    }
+
     /// The idle-retirement runtime as a gateway composes it over a durable
     /// root: persistent mob storage, Core's persistent session service and
     /// runtime store, and the opt-ins in `<root>/metadata.sqlite3`. A second
@@ -3423,22 +3780,186 @@ comms = true
         second.shutdown().await;
     }
 
-    /// C1/C5: a failed execution snapshot is never idle by its error alone.
-    /// A session this process's store does not hold (a placed member's
-    /// session is resident on its host), a session a live actor serves, and a
-    /// live-actor read that fails all stay unreadable.
-    #[tokio::test]
-    async fn a_failed_snapshot_of_a_session_not_held_here_or_live_is_never_idle() {
-        for (live, persisted, case) in [
-            (
-                Some(false),
-                false,
-                "a session this process's store does not hold",
+    /// L11 over a slow store: the first boot seats `worker`, lets its kickoff
+    /// turn run to its end and opts it in to retire as soon as it is idle,
+    /// and never sweeps. The second boot over the same durable root restores
+    /// the worker with no live session (nothing revives it), so it owes no
+    /// work and is due at the sweep's first pass; that sweep reads members
+    /// through a session service whose persisted metadata read answers only
+    /// after `answer_after` (`None`: never), counted in `reads`. Returns the
+    /// second runtime and its mob handle.
+    async fn restart_a_dormant_worker_over_a_slow_store(
+        mob_id: &str,
+        root: &std::path::Path,
+        answer_after: Option<Duration>,
+        reads: crate::mob_handle_runtime::MetadataReadCounts,
+    ) -> (UnifiedRuntime, meerkat_mob::MobHandle) {
+        let first = boot_restartable_sweeping_runtime(
+            mob_id,
+            root,
+            3_600_000,
+            Arc::new(meerkat_client::TestClient::default()),
+        )
+        .await;
+        let handle = first.mob_handle();
+        let worker_session = seat(&handle, "worker").await;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while first
+                .mob_runtime
+                .session_owes_durable_input(&worker_session)
+                .await
+                != Some(false)
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the worker's kickoff input stayed open");
+        first
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+            .expect("overrides")
+            .set(mob_id, "worker", DelegateIdleRetireOverride::Seconds(0))
+            .await;
+        assert_eq!(
+            persisted_members(&root.join("metadata.sqlite3")).await,
+            vec!["worker"]
+        );
+        drop(handle);
+        first.shutdown().await;
+        drop(first);
+
+        wrap_sweep_session_service(
+            mob_id,
+            Arc::new(move |inner| {
+                crate::mob_handle_runtime::slow_metadata_probe(inner, answer_after, reads.clone())
+            }),
+        );
+        let second = boot_restartable_sweeping_runtime(
+            mob_id,
+            root,
+            1_000,
+            Arc::new(meerkat_client::TestClient::default()),
+        )
+        .await;
+        let handle = second.mob_handle();
+        assert_eq!(
+            handle
+                .resolve_bridge_session_id(&AgentIdentity::from("worker"))
+                .await,
+            Some(worker_session.clone()),
+            "the restored worker keeps its session"
+        );
+        let service = second
+            .mob_runtime
+            .agent_mob_mcp_state()
+            .expect("agent mob tool state")
+            .session_service();
+        assert!(
+            matches!(
+                service.live_session_actor_registered(&worker_session).await,
+                Ok(false)
             ),
-            (Some(true), true, "a session a live actor serves"),
-            (None, true, "a live-actor read that fails"),
+            "no live actor serves the restored worker's session"
+        );
+        (second, handle)
+    }
+
+    /// A slow store does not keep a dormant member from idle retirement. The
+    /// restored worker of L11 owes no work and is due at once, but its
+    /// session's persisted metadata answers only after 400 ms, as a remote
+    /// store's does (the read loads the session's runtime body in several
+    /// round trips). The sweep retires the worker after one read that
+    /// answered. A sweep that bounds that read by the 250 ms it gives a turn
+    /// observation cuts it short on every pass: the worker reads as
+    /// unreadable and is never retired, and each pass starts the same read
+    /// again from the beginning.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_store_read_does_not_keep_a_dormant_member_from_retiring() {
+        const MOB_ID: &str = "slow-store-dormant-member";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reads = crate::mob_handle_runtime::MetadataReadCounts::default();
+        let (runtime, handle) = restart_a_dormant_worker_over_a_slow_store(
+            MOB_ID,
+            temp.path(),
+            Some(Duration::from_millis(400)),
+            reads.clone(),
+        )
+        .await;
+        // The worker is retired, or the sweep started three reads of its
+        // session's metadata without retiring it.
+        let retired = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !is_live(&handle, "worker").await {
+                    return true;
+                }
+                if reads.started() >= 3 {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the sweep neither retired the worker nor read its session's metadata");
+        let (started, answered) = (reads.started(), reads.answered());
+        unwrap_sweep_session_service(MOB_ID);
+        assert!(
+            retired,
+            "the sweep never retired the dormant worker: it started {started} reads of its \
+             session's metadata, and {answered} of them answered"
+        );
+        assert_eq!(
+            (started, answered),
+            (1, 1),
+            "the worker is retired after one metadata read, which answered"
+        );
+        drop(handle);
+        runtime.shutdown().await;
+    }
+
+    /// A store read that never answers does not hold up shutdown. The
+    /// restored worker of L11 is due at the sweep's first pass, and its
+    /// session's persisted metadata read never answers. Once the sweep has
+    /// started that read, shutdown stops the sweep with the read in flight
+    /// and finishes. The cap (20 s) sits well above this fixture's shutdown
+    /// and well below the store bound the read waits on (60 s), so a shutdown
+    /// that waited out the read fails here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_is_not_held_by_a_store_read_that_never_answers() {
+        const MOB_ID: &str = "unanswered-store-dormant-member";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reads = crate::mob_handle_runtime::MetadataReadCounts::default();
+        let (runtime, handle) =
+            restart_a_dormant_worker_over_a_slow_store(MOB_ID, temp.path(), None, reads.clone())
+                .await;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while reads.started() == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the sweep never read the worker's session metadata");
+        unwrap_sweep_session_service(MOB_ID);
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(20), runtime.shutdown())
+            .await
+            .expect("shutdown waited for a store read that never answers");
+        assert_eq!(reads.answered(), 0, "the read never answered");
+    }
+
+    /// C1/C5: a failed execution snapshot is never idle by its error alone.
+    /// A session a live actor serves and a live-actor read that fails stay
+    /// unreadable. A session no live actor serves reads not live, whether or
+    /// not this process's store holds it: observing a member reads no store,
+    /// and the store decides only once the member is due (the `a_due_member_`
+    /// rows below).
+    #[tokio::test]
+    async fn a_failed_snapshot_reads_unreadable_unless_no_live_actor_serves_its_session() {
+        for (live, case) in [
+            (Some(true), "a session a live actor serves"),
+            (None, "a live-actor read that fails"),
         ] {
-            let service = crate::mob_handle_runtime::failed_snapshot_probe(live, persisted);
+            let service = crate::mob_handle_runtime::failed_snapshot_probe(live, true);
             let observed =
                 observe_member_execution(service.as_ref(), &meerkat_core::SessionId::new()).await;
             assert!(
@@ -3449,18 +3970,229 @@ comms = true
                 "{case} must stay unreadable"
             );
         }
+        for persisted in [true, false] {
+            let reads = crate::mob_handle_runtime::MetadataReadCounts::default();
+            let service = crate::mob_handle_runtime::slow_metadata_probe(
+                crate::mob_handle_runtime::failed_snapshot_probe(Some(false), persisted),
+                Some(Duration::ZERO),
+                reads.clone(),
+            );
+            assert!(
+                matches!(
+                    observe_member_execution(service.as_ref(), &meerkat_core::SessionId::new())
+                        .await,
+                    MemberExecution::NotLive(meerkat_core::SessionError::NotFound { .. })
+                ),
+                "a session no live actor serves reads not live (held here: {persisted})"
+            );
+            assert_eq!(reads.started(), 0, "observing a member reads no store");
+        }
     }
 
     /// C1: a failed execution snapshot of a session this process's store
-    /// holds and no live actor serves reads not live, so the owed-work check
-    /// decides it.
+    /// holds and no live actor serves reads not live, and the store read
+    /// finds the session held, so the owed-work check decides it.
     #[tokio::test]
     async fn a_failed_snapshot_of_a_held_session_no_live_actor_serves_reads_not_live() {
         let service = crate::mob_handle_runtime::failed_snapshot_probe(Some(false), true);
+        let session_id = meerkat_core::SessionId::new();
         assert!(matches!(
-            observe_member_execution(service.as_ref(), &meerkat_core::SessionId::new()).await,
+            observe_member_execution(service.as_ref(), &session_id).await,
             MemberExecution::NotLive(meerkat_core::SessionError::NotFound { .. })
         ));
+        assert_eq!(
+            session_persisted_here(service.as_ref(), &session_id).await,
+            PersistedSession::Held
+        );
+    }
+
+    /// A due member no live session serves, whose session this process's
+    /// store does not hold (a placed member's session is resident on its
+    /// host), is kept, and its input is never read.
+    #[tokio::test]
+    async fn a_due_member_whose_session_this_store_does_not_hold_is_kept() {
+        let service = crate::mob_handle_runtime::failed_snapshot_probe(Some(false), false);
+        let input_read = std::sync::atomic::AtomicBool::new(false);
+        let kept = why_not_live_member_stays(
+            service.as_ref(),
+            &meerkat_core::SessionId::new(),
+            None,
+            async {
+                input_read.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(false)
+            },
+        )
+        .await;
+        assert_eq!(kept, Some(KeptDueMember::NotHeldHere));
+        assert!(
+            !input_read.load(std::sync::atomic::Ordering::SeqCst),
+            "the input is read only for a session the store holds"
+        );
+    }
+
+    /// A due member that owes work is kept: an input of its session short of
+    /// a terminal phase, an input read that cannot tell, or a kickoff in
+    /// flight.
+    #[tokio::test]
+    async fn a_due_member_that_owes_work_or_cannot_tell_is_kept() {
+        let service = crate::mob_handle_runtime::failed_snapshot_probe(Some(false), true);
+        for (kickoff, owes_input) in [
+            (None, Some(true)),
+            (None, None),
+            (Some(MobMemberKickoffPhase::Pending), Some(false)),
+        ] {
+            assert_eq!(
+                why_not_live_member_stays(
+                    service.as_ref(),
+                    &meerkat_core::SessionId::new(),
+                    kickoff,
+                    async move { owes_input },
+                )
+                .await,
+                Some(KeptDueMember::OwesWork),
+                "kickoff {kickoff:?}, owed input {owes_input:?}"
+            );
+        }
+    }
+
+    /// A due member woken while its store reads ran is kept: read again after
+    /// them, a live session serves it.
+    #[tokio::test]
+    async fn a_due_member_woken_while_its_store_reads_ran_is_kept() {
+        let service = crate::mob_handle_runtime::woken_by_metadata_read_probe();
+        let session_id = meerkat_core::SessionId::new();
+        assert!(matches!(
+            observe_member_execution(service.as_ref(), &session_id).await,
+            MemberExecution::NotLive(_)
+        ));
+        assert_eq!(
+            why_not_live_member_stays(service.as_ref(), &session_id, None, async { Some(false) })
+                .await,
+            Some(KeptDueMember::NoLongerNotLive)
+        );
+    }
+
+    /// A due member whose session this process's store holds, that owes no
+    /// work and that still no live session serves, is retired.
+    #[tokio::test]
+    async fn a_due_member_held_here_owing_no_work_is_retired() {
+        let service = crate::mob_handle_runtime::failed_snapshot_probe(Some(false), true);
+        for kickoff in [None, Some(MobMemberKickoffPhase::Started)] {
+            assert_eq!(
+                why_not_live_member_stays(
+                    service.as_ref(),
+                    &meerkat_core::SessionId::new(),
+                    kickoff,
+                    async { Some(false) },
+                )
+                .await,
+                None,
+                "kickoff {kickoff:?}"
+            );
+        }
+    }
+
+    /// A due member whose store reads do not answer within the store bound is
+    /// kept, and the reason names the read that did not answer: its
+    /// session's (its input is then never read) or its input's. These two, and
+    /// a session read that fails, are the reasons that warn.
+    #[tokio::test(start_paused = true)]
+    async fn a_due_member_whose_store_reads_do_not_answer_is_kept_naming_the_read() {
+        let session_id = meerkat_core::SessionId::new();
+        let unanswered = crate::mob_handle_runtime::slow_metadata_probe(
+            crate::mob_handle_runtime::failed_snapshot_probe(Some(false), true),
+            None,
+            crate::mob_handle_runtime::MetadataReadCounts::default(),
+        );
+        let input_read = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            why_not_live_member_stays(unanswered.as_ref(), &session_id, None, async {
+                input_read.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(false)
+            })
+            .await,
+            Some(KeptDueMember::SessionReadTimedOut)
+        );
+        assert!(!input_read.load(std::sync::atomic::Ordering::SeqCst));
+        let held = crate::mob_handle_runtime::failed_snapshot_probe(Some(false), true);
+        assert_eq!(
+            why_not_live_member_stays(
+                held.as_ref(),
+                &session_id,
+                None,
+                std::future::pending::<Option<bool>>(),
+            )
+            .await,
+            Some(KeptDueMember::InputReadTimedOut)
+        );
+        for kept in [
+            KeptDueMember::SessionReadFailed(String::new()),
+            KeptDueMember::SessionReadTimedOut,
+            KeptDueMember::InputReadTimedOut,
+        ] {
+            assert!(kept.warns(), "{kept:?} warns");
+        }
+        for kept in [
+            KeptDueMember::NotHeldHere,
+            KeptDueMember::OwesWork,
+            KeptDueMember::NoLongerNotLive,
+        ] {
+            assert!(!kept.warns(), "{kept:?} does not warn");
+        }
+    }
+
+    /// A due member whose session read fails is kept with its own reason,
+    /// not as a session this process's store does not hold, and its input is
+    /// never read. The reason keeps the read's error for the WARN. The owes
+    /// reason says the sweep may not be able to tell.
+    #[tokio::test]
+    async fn a_due_member_whose_session_read_fails_is_kept_naming_the_failure() {
+        let service = crate::mob_handle_runtime::failing_metadata_probe();
+        let input_read = std::sync::atomic::AtomicBool::new(false);
+        let kept = why_not_live_member_stays(
+            service.as_ref(),
+            &meerkat_core::SessionId::new(),
+            None,
+            async {
+                input_read.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(false)
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &kept,
+                Some(KeptDueMember::SessionReadFailed(read_error))
+                    if read_error.contains("probe: the metadata read fails")
+            ),
+            "a failed session read keeps the member with the read's own error: {kept:?}"
+        );
+        assert_eq!(
+            kept.as_ref().map(KeptDueMember::reason),
+            Some("session read failed")
+        );
+        assert!(!input_read.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            KeptDueMember::OwesWork.reason(),
+            "it owes work or cannot tell"
+        );
+    }
+
+    /// Control for the store reads' own bound: a member mid-turn (its session
+    /// answers no execution snapshot until the turn ends) still reads busy
+    /// within the turn observation bound, and costs no store read.
+    #[tokio::test]
+    async fn a_member_mid_turn_still_reads_busy_within_the_observation_bound() {
+        let reads = crate::mob_handle_runtime::MetadataReadCounts::default();
+        let service = crate::mob_handle_runtime::mid_turn_probe(reads.clone());
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            observe_member_execution(service.as_ref(), &meerkat_core::SessionId::new()),
+        )
+        .await
+        .expect("the observation waited for the turn to end");
+        assert!(matches!(observed, MemberExecution::Busy));
+        assert_eq!(reads.started(), 0, "a member mid-turn costs no store read");
     }
 
     /// C2: a member no live session serves owes work while its kickoff has
@@ -3531,11 +4263,15 @@ comms = true
         );
     }
 
-    /// C4: an idle clock belongs to the session it started on. Pass 1 starts
-    /// the worker's clock; pass 2 is held while the worker is re-seated under
-    /// a new session, until the old clock is past the window. Pass 2 must
-    /// start a fresh window for the new session, so pass 3 still finds the
-    /// worker seated.
+    /// C4: an idle clock belongs to the session it started on. The worker is
+    /// turn-driven, so it runs no kickoff turn and is idle from its seat; the
+    /// row releases passes until one has it in its member snapshot, and that
+    /// pass starts its clock. The next pass is held while the worker is
+    /// re-seated under a new session, and observes it at least one sweep
+    /// interval (4 s) later: past the 3 s window on the old clock. The
+    /// successor ran no turn and the pass before observed the worker, so only
+    /// the new session can start a fresh window there. The held pass must
+    /// start one, so the pass after it still finds the worker seated.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_member_reseated_inside_its_window_is_not_retired_on_the_old_clock() {
         const MOB_ID: &str = "reseated-inside-window";
@@ -3544,7 +4280,7 @@ comms = true
             MOB_ID,
             &temp.path().join("state"),
             &temp.path().join("metadata.sqlite3"),
-            1_000,
+            4_000,
         )
         .await;
         let handle = runtime.mob_handle();
@@ -3553,21 +4289,24 @@ comms = true
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
         let (mut reached, release) = pause_sweep(MOB_ID);
-        let first = seat(&handle, "worker").await;
+        seat_turn_driven(&handle, "worker").await;
+        let member = AgentIdentity::from("worker");
+        let first = handle
+            .resolve_bridge_session_id(&member)
+            .await
+            .expect("the worker's session");
         overrides
             .set(MOB_ID, "worker", DelegateIdleRetireOverride::Seconds(3))
             .await;
         let pass = Duration::from_secs(30);
-        // Pass 1 sees the worker idle and starts its clock.
+        // A pass that has the worker in its member snapshot observes it idle
+        // and starts its clock.
+        release_passes_until_observed(&mut reached, &release, "worker").await;
+        // The next pass is held while the worker is re-seated under a new
+        // session.
         tokio::time::timeout(pass, reached.recv())
             .await
-            .expect("pass 1");
-        release.send(()).expect("release pass 1");
-        // Pass 2 is held while the worker is re-seated under a new session.
-        tokio::time::timeout(pass, reached.recv())
-            .await
-            .expect("pass 2");
-        let member = AgentIdentity::from("worker");
+            .expect("the held pass");
         crate::mob_handle_runtime::respawn_carrying_idle_retire_opt_in(
             Some(&overrides),
             &handle,
@@ -3582,16 +4321,14 @@ comms = true
             .await
             .expect("the re-seated worker's session");
         assert_ne!(second, first, "a respawn mints a new session");
-        // Past the window on the old clock, well inside it on a new one.
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        release.send(()).expect("release pass 2");
-        // Pass 3 starts only after pass 2 finished.
+        release.send(()).expect("release the held pass");
+        // The pass after it starts only once the held pass finished.
         tokio::time::timeout(pass, reached.recv())
             .await
-            .expect("pass 3");
+            .expect("the pass after the held one");
         assert!(
             is_live(&handle, "worker").await,
-            "pass 2 retired the re-seated worker on its old session's clock"
+            "the held pass retired the re-seated worker on its old session's clock"
         );
         assert_eq!(
             handle.resolve_bridge_session_id(&member).await,
@@ -3666,6 +4403,199 @@ comms = true
         );
         unpause_retire(MOB_ID);
         drop(release_retire);
+        unpause_sweep(MOB_ID);
+        drop(release);
+        runtime.shutdown().await;
+    }
+
+    /// Release held sweep passes over `reached`/`release` until one has
+    /// `member` in its member snapshot: that pass observes the member, and
+    /// starts its clock when the member is idle.
+    async fn release_passes_until_observed(
+        reached: &mut tokio::sync::mpsc::UnboundedReceiver<SweepSnapshot>,
+        release: &tokio::sync::mpsc::UnboundedSender<()>,
+        member: &str,
+    ) {
+        loop {
+            let snapshot = tokio::time::timeout(Duration::from_secs(30), reached.recv())
+                .await
+                .expect("a pass")
+                .expect("a pass snapshot");
+            release.send(()).expect("release the pass");
+            if snapshot.iter().any(|(seated, _)| seated.as_str() == member) {
+                return;
+            }
+        }
+    }
+
+    /// Run one short turn on `member` and wait until it ended. The turn is the
+    /// host's internal work: a turn-driven member whose profile admits no
+    /// external work still runs it, and `internal_turn` returns once the
+    /// member's turn completed.
+    async fn run_a_short_turn(handle: &meerkat_mob::MobHandle, member: &str) {
+        let member_handle = handle
+            .member(&AgentIdentity::from(member))
+            .await
+            .expect("the member's handle");
+        let _receipt = tokio::time::timeout(
+            Duration::from_secs(30),
+            member_handle.internal_turn("one short task"),
+        )
+        .await
+        .expect("the turn ended")
+        .expect("the turn completed");
+    }
+
+    /// A member that ran a turn while a sweep pass was held starts a fresh
+    /// idle window, though the sweep never saw it busy: a pass that retires
+    /// due members on a slow store holds every member it has not reached yet,
+    /// and a turn a member runs meanwhile can end before the pass reaches it.
+    /// One pass observes the turn-driven worker idle and starts its clock
+    /// (window 3 s, sweep interval 2 s); the next pass is held after its
+    /// member snapshot while the worker runs a short turn, for about 2 s in
+    /// all, so the old clock is past the window when the pass resumes. The
+    /// held pass must start a fresh window, so the pass after it still finds
+    /// the worker seated. The sessions are runtime-backed, so the worker's
+    /// execution snapshot names its last terminal run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_that_ran_a_turn_while_a_pass_was_held_starts_a_fresh_window() {
+        const MOB_ID: &str = "turn-while-pass-held";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = boot_persistent_sweeping_runtime(
+            MOB_ID,
+            &temp.path().join("state"),
+            &temp.path().join("metadata.sqlite3"),
+            2_000,
+        )
+        .await;
+        let handle = runtime.mob_handle();
+        let overrides = runtime
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+            .expect("overrides");
+        let (mut reached, release) = pause_sweep(MOB_ID);
+        seat_turn_driven(&handle, "worker").await;
+        overrides
+            .set(MOB_ID, "worker", DelegateIdleRetireOverride::Seconds(3))
+            .await;
+        let pass = Duration::from_secs(30);
+        release_passes_until_observed(&mut reached, &release, "worker").await;
+        // The next pass is held while the worker runs a short turn, until the
+        // old clock is past the window.
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the held pass");
+        let held = Instant::now();
+        run_a_short_turn(&handle, "worker").await;
+        tokio::time::sleep(Duration::from_secs(2).saturating_sub(held.elapsed())).await;
+        release.send(()).expect("release the held pass");
+        // The pass after it starts only once the held pass finished.
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the pass after the held one");
+        assert!(
+            is_live(&handle, "worker").await,
+            "the held pass retired, on its old clock, a member that ran a turn the sweep never saw"
+        );
+        unpause_sweep(MOB_ID);
+        drop(release);
+        runtime.shutdown().await;
+    }
+
+    /// A member that ran a short turn between two sweep passes starts a fresh
+    /// idle window: the sweep never saw it busy, and the passes ran at their
+    /// interval. One pass observes the turn-driven worker idle and starts its
+    /// clock (window 2 s, sweep interval 3 s); the worker runs a short turn
+    /// before the next pass reaches it, so the old clock is past the window
+    /// when that pass does. That pass must start a fresh window, so the pass
+    /// after it still finds the worker seated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_that_ran_a_short_turn_between_two_sweeps_starts_a_fresh_window() {
+        const MOB_ID: &str = "short-turn-between-sweeps";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = boot_persistent_sweeping_runtime(
+            MOB_ID,
+            &temp.path().join("state"),
+            &temp.path().join("metadata.sqlite3"),
+            3_000,
+        )
+        .await;
+        let handle = runtime.mob_handle();
+        let overrides = runtime
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+            .expect("overrides");
+        let (mut reached, release) = pause_sweep(MOB_ID);
+        seat_turn_driven(&handle, "worker").await;
+        overrides
+            .set(MOB_ID, "worker", DelegateIdleRetireOverride::Seconds(2))
+            .await;
+        let pass = Duration::from_secs(30);
+        release_passes_until_observed(&mut reached, &release, "worker").await;
+        // The next pass reaches the worker only after its short turn ended.
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the next pass");
+        run_a_short_turn(&handle, "worker").await;
+        release.send(()).expect("release the next pass");
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the pass after it");
+        assert!(
+            is_live(&handle, "worker").await,
+            "a pass retired, on its old clock, a member that ran a turn between two sweeps"
+        );
+        unpause_sweep(MOB_ID);
+        drop(release);
+        runtime.shutdown().await;
+    }
+
+    /// A long pass keeps the clocks of the members it observes: a member idle
+    /// through it, observed by every pass and running no turn, is still
+    /// retired once its window has passed. One pass observes the turn-driven
+    /// worker idle and starts its clock (window 3 s, sweep interval 1 s); the
+    /// next pass is held after its member snapshot for 4 s, past the worker's
+    /// 3 s window, as a pass that retires many due members on a slow store
+    /// runs. The held pass must retire the worker on its clock, so the pass
+    /// after it finds the worker gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_idle_through_a_long_pass_is_still_retired() {
+        const MOB_ID: &str = "idle-through-long-pass";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = boot_persistent_sweeping_runtime(
+            MOB_ID,
+            &temp.path().join("state"),
+            &temp.path().join("metadata.sqlite3"),
+            1_000,
+        )
+        .await;
+        let handle = runtime.mob_handle();
+        let overrides = runtime
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+            .expect("overrides");
+        let (mut reached, release) = pause_sweep(MOB_ID);
+        seat_turn_driven(&handle, "worker").await;
+        overrides
+            .set(MOB_ID, "worker", DelegateIdleRetireOverride::Seconds(3))
+            .await;
+        let pass = Duration::from_secs(30);
+        release_passes_until_observed(&mut reached, &release, "worker").await;
+        // The next pass is held 4 s, past the worker's 3 s window.
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the held pass");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        release.send(()).expect("release the held pass");
+        // The pass after it starts only once the held pass finished.
+        tokio::time::timeout(pass, reached.recv())
+            .await
+            .expect("the pass after the held one");
+        assert!(
+            !is_live(&handle, "worker").await,
+            "a long pass started the window again for a member it observed idle, as every pass \
+             had: the member was not retired on its clock"
+        );
         unpause_sweep(MOB_ID);
         drop(release);
         runtime.shutdown().await;

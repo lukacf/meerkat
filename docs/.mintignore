@@ -8,3 +8,8 @@ proposals/
 # published surface and do not become part of it by being archived.
 archive/design/
 archive/proposals/
+
+# The internal review records under internal/ are not Mintlify pages either.
+# Many are plain Markdown that MDX cannot parse, so `mint broken-links`, which
+# CI's fmt-lint job runs on this directory, must skip them.
+internal/

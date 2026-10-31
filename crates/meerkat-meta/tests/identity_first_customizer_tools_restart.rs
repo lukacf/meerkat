@@ -1924,13 +1924,16 @@ impl meerkat_meta::EventLogStore for RecordedEventLog {
 
 /// Runs a graceful shutdown left open reach the host's event log after the
 /// restart resumes them at boot, through Meta's forwarded member events:
-/// each durable worker's run from its `run_resumed` to its `run_completed`,
-/// and no event twice. The forwarder subscribes a member when the machine
-/// state change of its wake makes it live (a pass that starts watching the
-/// mob is followed by another at once), and replays the woken actor's
-/// events from its first, so nothing between the boot wake and the attach
-/// is missing; a member Core still holds unmaterialized (the roster's
-/// identity, which owes no work) is asked nothing meanwhile.
+/// each durable worker's run from its `run_resumed` through its
+/// `turn_completed` to its `run_completed`, and no event twice. The forwarder
+/// subscribes a member when the machine state change of its wake makes it
+/// live (a pass that starts watching the mob is followed by another at once),
+/// and replays the woken actor's events from its first, so nothing between
+/// the boot wake and the attach is missing; a member Core still holds
+/// unmaterialized (the roster's identity, which owes no work) is asked
+/// nothing meanwhile. The log's `batch_size: 1` keeps its intake buffer at 4
+/// events, under one resumed run's burst: the drain waits for room rather
+/// than dropping the rest.
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once() {
     const MOB_ID: &str = "customizer-tools-restart-p";
@@ -1942,6 +1945,7 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
         .await;
 
     let log = RecordedEventLog::default();
+    let model = WorkerModel::default();
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -1957,7 +1961,7 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
             .identity_bootstrap_mode(IdentityBootstrapMode::EagerMaterialize)
             .identity_runtime_instance_id(MOB_ID)
             .comms(true)
-            .default_llm_client(Arc::new(WorkerModel::default()))
+            .default_llm_client(Arc::new(model.clone()))
             .event_log(meerkat_meta::EventLogConfig {
                 store: Box::new(log.clone()),
                 filter: None,
@@ -1976,14 +1980,10 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     while !WORKERS.iter().all(|&worker| completed(worker)) {
-        assert!(
-            Instant::now() < deadline,
-            "every resumed run reaches the event log: {:?}",
-            WORKERS
-                .iter()
-                .map(|worker| (worker, log.agent_events_of(worker)))
-                .collect::<Vec<_>>()
-        );
+        if Instant::now() >= deadline {
+            let diagnostics = resumed_run_diagnostics(&runtime, &log, &model).await;
+            panic!("every resumed run reaches the event log:{diagnostics}");
+        }
         runtime
             .drain_mob_agent_events()
             .await
@@ -2013,6 +2013,15 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
             .position(|kind| kind == "run_completed")
             .unwrap_or_else(|| panic!("{worker}'s run completed: {kinds:?}"));
         assert!(resumed < terminal, "{worker}: {kinds:?}");
+        // Core publishes the turn's `turn_completed` before the run's
+        // terminal, in the same burst as the turn's text.
+        if !kinds[resumed..terminal]
+            .iter()
+            .any(|kind| kind == "turn_completed")
+        {
+            let diagnostics = resumed_run_diagnostics(&runtime, &log, &model).await;
+            panic!("{worker}'s resumed run logs its turn_completed: {kinds:?}{diagnostics}");
+        }
         assert_eq!(
             kinds.iter().filter(|kind| *kind == "run_completed").count(),
             1,
@@ -2023,6 +2032,59 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
     let distinct: BTreeSet<&String> = ids.iter().collect();
     assert_eq!(distinct.len(), ids.len(), "no event is forwarded twice");
     runtime.shutdown().await;
+}
+
+/// Per worker, what tells an event lost on the way to the log from a run
+/// that never resumed or never completed: the event types of the runtime's
+/// module events (the drain hands them every event it takes, whatever the
+/// log keeps), the model calls the run made after its committed round, the
+/// member's status, and the event types the log holds. Each runtime read is
+/// bounded, so a wedged runtime cannot turn the failure into a hang.
+async fn resumed_run_diagnostics(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    log: &RecordedEventLog,
+    model: &WorkerModel,
+) -> String {
+    const READ_BOUND: Duration = Duration::from_secs(5);
+    let module_events = tokio::time::timeout(READ_BOUND, runtime.module_events())
+        .await
+        .ok();
+    let members = tokio::time::timeout(READ_BOUND, runtime.mob_runtime().handle().list_members())
+        .await
+        .ok();
+    let mut diagnostics = String::new();
+    for worker in WORKERS {
+        let drained: Option<Vec<&str>> = module_events.as_ref().map(|events| {
+            events
+                .iter()
+                .filter_map(|envelope| match &envelope.event {
+                    meerkat_meta::UnifiedEvent::Agent {
+                        agent_id,
+                        event_type,
+                        ..
+                    } if agent_id.contains(worker) => Some(event_type.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let member = members.as_ref().map(|members| {
+            members
+                .iter()
+                .find(|member| member.agent_identity.as_str() == worker)
+                .map(|member| format!("{:?} {:?}", member.status, member.error))
+        });
+        let logged: Vec<String> = log
+            .agent_events_of(worker)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect();
+        diagnostics.push_str(&format!(
+            "\n{worker}: module events {drained:?}; calls after its round {}; \
+             member {member:?}; event log {logged:?} (None: not read within {READ_BOUND:?})",
+            model.after_round(worker)
+        ));
+    }
+    diagnostics
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meerkat-meta"
-version = "0.9.6"
+version = "0.9.7"
 description = "Python SDK for Meta — companion orchestration platform for the Meerkat multi-agent runtime"
 requires-python = ">=3.10"
 license = {text = "MIT OR Apache-2.0"}
@@ -47,3 +47,6 @@ meerkat_meta = ["py.typed"]
 # Short tracebacks do not print frame arguments. Transport fakes receive the
 # child's env (the whole process environment), and CI logs are public.
 addopts = "--tb=short"
+# Explicit, so a run with -W error starts cleanly on pytest-asyncio 1.4, which
+# otherwise warns at startup that the default is unset.
+asyncio_default_fixture_loop_scope = "function"

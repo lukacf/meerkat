@@ -62,6 +62,7 @@ mod build_preparation;
 mod records;
 mod seat;
 pub(crate) use records::host_pending_members_before_build;
+use seat::SeatFollowUp;
 pub(crate) use seat::SeatOutcome;
 
 const MANAGED_PEER_RECONCILE_CONCURRENCY: usize = 64;
@@ -7537,10 +7538,11 @@ impl IdentityRuntime {
     /// admission, when Core does not hold it yet, its pending first-boot
     /// row is still to carry out, its role migration is held, or Core still
     /// keeps the host preparation Meta asked for at start
-    /// ([`Self::seat_identity_locked`]). Nothing is materialized here: the
-    /// delivery goes to Core, whose dispatch materializes a Dormant member
-    /// before it delivers. An identity Core holds, with nothing owed, takes
-    /// no Core step at all.
+    /// ([`Self::seat_identity_locked`]). The delivery goes to Core, whose
+    /// dispatch materializes a Dormant member before it delivers, so the seat
+    /// materializes nothing, except the member of an archived session it
+    /// revives, which stays live for the delivery. An identity Core holds,
+    /// with nothing owed, takes no Core step at all.
     ///
     /// A target seated here had no managed edges while it was not a member:
     /// its own edges are reconciled after the seat, bounded (see
@@ -7576,7 +7578,12 @@ impl IdentityRuntime {
                 .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
             // A send authored from another registered row seats nothing.
             refuse_unless_registered_row(identity, &spec, expected_spec_digest)?;
-            self.seat_identity_locked(&spec, None).await
+            // The delivery goes to Core after the seat, and Core's dispatch
+            // materializes the member for it. The lifecycle lock is released
+            // in between, so a delivery refused there leaves a member the
+            // seat built live until it is released.
+            self.seat_identity_locked(&spec, None, SeatFollowUp::CallerMakesLive)
+                .await
         };
         let seat = match seated {
             Ok(seat) => seat,
@@ -9204,6 +9211,9 @@ impl IdentityRuntime {
     ///   wake): Core's own restore builds it on its durable session, or
     ///   answers typed (a session Core cannot resume is Broken through its
     ///   machine; a refused wake keeps its kind). One attempt, no retry loop.
+    ///   A member the seat built (its archived session's revival, as after a
+    ///   respawn's own retirement, or a declared role migration's restamp) is
+    ///   live already: Core answers the wake so, and builds nothing again.
     async fn embody_identity_transaction(
         &self,
         identity: &AgentIdentity,
@@ -9282,9 +9292,12 @@ impl IdentityRuntime {
             ));
         }
         // Make the identity a member of Core's mob first: nothing is called
-        // when Core holds it and nothing is owed.
+        // when Core holds it and nothing is owed. The wake below makes the
+        // member live right after the seat, so a member the seat builds (an
+        // archived session's revival, a declared role migration's restamp)
+        // stays live and is not built again.
         let seat = self
-            .seat_identity_locked(&spec, overrides.customizer)
+            .seat_identity_locked(&spec, overrides.customizer, SeatFollowUp::CallerMakesLive)
             .await?;
         if cancellation
             .as_ref()
@@ -13535,6 +13548,8 @@ impl IdentityRuntime {
 
     /// Change a maintenance build input and rebuild only the captured owner.
     /// The existing retire and embodiment doors share one lifecycle lock.
+    /// The retire ends the member's wiring, so the rebuild wires the
+    /// identity's managed edges again once the wake answers.
     pub(crate) async fn rebuild_compaction_owner(
         &self,
         identity: &AgentIdentity,
@@ -13593,6 +13608,18 @@ impl IdentityRuntime {
             change.registry.clear_owned(identity, change.operation_id);
         }
         let binding = result?;
+        // Core's retirement ended the member's wiring: its managed edges are
+        // wired again now, bounded, as a respawn wires them. The reconcile
+        // takes no lifecycle lock. A failed reconcile is logged; the next
+        // reconcile retries it.
+        if let Err(error) = self.reconcile_target_topology_for_wake(identity).await {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the rebuilt compaction owner's managed edges were not wired again; the next \
+                 reconcile retries them"
+            );
+        }
         let Some(session_id) = binding
             .session_id
             .filter(|session_id| before.session_id.as_ref() == Some(session_id))
@@ -13751,8 +13778,9 @@ impl IdentityRuntime {
     /// quiesces, discards and re-registers the executor for the SAME session
     /// and can tell a healthy registration apart (`not_degraded`). A bridge
     /// without that primitive falls back to retire then wake under the
-    /// identity's lifecycle lock: the same session is resumed and Core's
-    /// generation advances.
+    /// identity's lifecycle lock: the same session is resumed, Core's
+    /// generation advances, and the identity's managed edges, which Core's
+    /// retirement ended, are wired again.
     ///
     /// Contrast reset and `delete_identity`: a fresh session. This verb never
     /// starts one. An identity Core holds no member for returns `not_current`
@@ -13889,7 +13917,11 @@ impl IdentityRuntime {
     }
 
     /// Wake `identity` through the one wake door under the caller's
-    /// lifecycle lock and report it as a completed reload.
+    /// lifecycle lock and report it as a completed reload. Core's retirement
+    /// ended the member's wiring (the reload's own retire, or the one that
+    /// left Core holding no member of an identity held for repair), so its
+    /// managed edges are wired again once the wake answers, as a respawn
+    /// wires them.
     async fn wake_onto_last_session_locked(
         &self,
         identity: &AgentIdentity,
@@ -13913,6 +13945,16 @@ impl IdentityRuntime {
         )
         .await;
         let outcome = result?;
+        // The reconcile takes no lifecycle lock. A failed reconcile is
+        // logged; the next reconcile retries it.
+        if let Err(error) = self.reconcile_target_topology_for_wake(identity).await {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the reloaded identity's managed edges were not wired again; the next \
+                 reconcile retries them"
+            );
+        }
         let scope = self.core_live_scope(identity).await?;
         let session_id = outcome.binding.session_id.clone();
         if let (Some(before), Some(after)) = (
@@ -14256,6 +14298,18 @@ impl IdentityRuntime {
     /// refuses as stale. A crash between the two halves leaves the identity
     /// retired with its history; the next wake resumes it. An identity Core
     /// holds no member for is simply woken.
+    ///
+    /// Core keeps a built member's session archived once it retired it, so
+    /// the wake's seat revives the identity on it, and that revival is the
+    /// member's one build: the host's customizer is asked once
+    /// (`customize_build`, then `after_create` for the same session), and
+    /// Core's wake finds the member live. A member Core never built (its
+    /// session unborn) is seated again unborn, and the wake builds it as a
+    /// first build does, after its own `customize_build`.
+    ///
+    /// Core's retirement ends every edge of the member it retires, so once
+    /// the wake answers, the respawn wires the identity's managed edges
+    /// again, as a reset's rotation does.
     async fn respawn_locked(
         &self,
         identity: &AgentIdentity,
@@ -14316,6 +14370,19 @@ impl IdentityRuntime {
         self.mark_bootstrap_materialization_finished(identity, result.as_ref().err(), generation)
             .await;
         result?;
+        // Core's retirement ended the identity's wiring with the member it
+        // retired: its managed and topology-controlled edges are wired again
+        // now, bounded, as a reset's rotation wires them. The reconcile takes
+        // no lifecycle lock. A failed reconcile is logged; the next reconcile
+        // retries it.
+        if let Err(error) = self.reconcile_target_topology_for_wake(identity).await {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the respawned identity's managed edges were not wired again; the next \
+                 reconcile retries them"
+            );
+        }
         self.core_live_scope(identity).await
     }
 

@@ -2146,6 +2146,130 @@ comms = true
         harness.teardown().await;
     }
 
+    /// The identity pairs Core's roster holds wired, either directed half,
+    /// read off the roster itself through each member's `agent_identity`
+    /// label.
+    async fn wired_identity_pairs(
+        harness: &OperatorVerbHarness,
+    ) -> std::collections::BTreeSet<(AgentIdentity, AgentIdentity)> {
+        let members = harness
+            .runtime
+            .mob_handle()
+            .list_members_including_retiring()
+            .await;
+        let identity_of: std::collections::BTreeMap<String, AgentIdentity> = members
+            .iter()
+            .filter_map(|member| {
+                let label = member.labels.get("agent_identity")?;
+                let identity = AgentIdentity::parse(label).expect("an identity label");
+                Some((member.agent_identity.to_string(), identity))
+            })
+            .collect();
+        members
+            .iter()
+            .flat_map(|member| {
+                let identity_of = &identity_of;
+                member.wired_to.iter().filter_map(move |peer| {
+                    let a = identity_of.get(&member.agent_identity.to_string())?;
+                    let b = identity_of.get(&peer.to_string())?;
+                    Some(if a <= b {
+                        (a.clone(), b.clone())
+                    } else {
+                        (b.clone(), a.clone())
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// Each in-place rebuild of `meta/compact_member` retires the member, and
+    /// Core's retirement ends every edge of the member it retires. The
+    /// rebuild wires the identity's managed edges again itself, as a respawn
+    /// does: right after the verb, with no roster refresh, Core's roster
+    /// holds the member's managed edge to its peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_wires_the_identitys_managed_edges_again() {
+        let harness = operator_verb_harness("worker:main", "operator-compact-edges").await;
+
+        // A peer identity, a member of the same mob the way the harness makes
+        // its own member, and a managed edge between the two, wired.
+        let peer_name = "worker:peer";
+        let peer = AgentIdentity::parse(peer_name).expect("peer identity");
+        let peer_roster_identity = crate::member_comms_id::mob_member_id(peer_name);
+        let handle = harness.runtime.mob_handle();
+        handle
+            .ensure_member(
+                meerkat_mob::SpawnMemberSpec::new(
+                    meerkat_mob::ProfileName::from("worker"),
+                    peer_roster_identity.clone(),
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    "agent_identity".to_string(),
+                    peer_name.to_string(),
+                )])),
+            )
+            .await
+            .expect("spawn the peer member");
+        handle
+            .wait_for_members_kickoff_complete(
+                std::slice::from_ref(&peer_roster_identity),
+                // A settle bound only: the assertions below check state, not elapsed time.
+                Some(Duration::from_secs(30)),
+            )
+            .await
+            .expect("peer kickoff settled");
+        harness.identity_runtime.register(worker_spec(&peer)).await;
+        let edges = vec![
+            crate::identity_first::ManagedPeerEdge::new(harness.identity.clone(), peer)
+                .expect("a managed edge"),
+        ];
+        harness
+            .identity_runtime
+            .set_desired_peer_edges(edges.clone())
+            .await;
+        harness
+            .identity_runtime
+            .reconcile_managed_peer_edges(&edges)
+            .await
+            .expect("wire the managed edge");
+        // A managed edge holds its endpoints in order, as the pairs read do.
+        let wired =
+            std::collections::BTreeSet::from([(edges[0].a().clone(), edges[0].b().clone())]);
+        assert_eq!(
+            wired_identity_pairs(&harness).await,
+            wired,
+            "the reconcile wires the managed edge"
+        );
+
+        // The seed of the compaction row above: past the floor and the
+        // recent-turn budget.
+        let fat = "seeded transcript ballast ".repeat(160);
+        for turn in 0..8 {
+            harness.run_turn(format!("turn {turn}: {fat}")).await;
+        }
+        let response = rpc(
+            &harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "floor_tokens": 256,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await;
+        assert!(
+            response["error"].is_null(),
+            "compact_member must succeed: {response:#?}"
+        );
+        assert_eq!(
+            wired_identity_pairs(&harness).await,
+            wired,
+            "the rebuilds wire the identity's managed edge again, with no roster refresh"
+        );
+
+        harness.teardown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn autonomous_compaction_exact_input_completion_survives_observation_timeout() {
         use meerkat_runtime::SessionServiceRuntimeExt;

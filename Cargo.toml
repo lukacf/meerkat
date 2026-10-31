@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-version = "0.9.6"
+version = "0.9.7"
 authors = ["Luka Crnkovic-Friis"]
 repository = "https://github.com/lukacf/meerkat-meta"
 homepage = "https://docs.rkat.ai/meta/introduction"

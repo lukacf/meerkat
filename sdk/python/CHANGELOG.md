@@ -4,6 +4,39 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.7
+
+- Breaking (behaviour-only): a transport given to
+  `MetaRuntime(config, transport)` is now started and initialized by
+  `connect()` when a gateway is configured, instead of being replaced by a
+  spawn of `gateway()`, as in the TypeScript SDK; an `AdoptedGatewayTransport`
+  given there is used even without `gateway()`. One that was already started
+  or stopped raises `GatewayTransportConflictError` at connect. With a
+  gateway configured, one that is not a `PersistentTransport` raises
+  `TypeError` at connect, where it was ignored before.
+- `AdoptedGatewayTransport(child, *, timeout=60.0)` runs the gateway over a
+  child the host started and keeps. `AdoptedGatewayChild(input, output,
+  request_retirement, wait_process)` is what the host hands over: the
+  child's stdin and stdout streams (raw unbuffered ones, which the transport
+  buffers itself, or buffered ones), a non-blocking retirement request, and a
+  bounded wait (0 to 60 s, `TimeoutError` while pending) for the child's
+  exit code. `MetaBuilder.gateway_transport(transport_or_factory)` uses it,
+  and the SDK then never spawns, even with `gateway()` set. Only `start()`
+  hands the child over; a request before it is refused. From the hand-off an
+  exit watcher thread is the only caller of `wait_process`, so an exit while
+  a process the child started holds its stdout fails waiters promptly. The
+  transport's `stop()` is synchronous, for a worker thread, and refuses an
+  event-loop thread with `TransportError`. It bounds the protocol shutdown by
+  the shutdown horizon, then requests the retirement once per child, waits
+  for the exit, and raises `GatewayChildPendingError` (`child_exit` pending)
+  when the exit is not observed in time. `start_failure`
+  (`GatewayStartFailure`), `child_exit` (`GatewayChildExit`) and
+  `reader_completed` report the native terminal failure, the child's exit
+  and the SDK reader's completion apart. `GatewayTransportConflictError` (a
+  `ValueError`) refuses a transport that was already started or stopped, and
+  a builder transport given together with a constructor transport (the
+  TypeScript factory takes precedence instead).
+
 ## 0.9.6
 
 - `MetaBuilder.provider_credentials_root(path)` sends

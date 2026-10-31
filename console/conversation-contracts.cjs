@@ -5,6 +5,7 @@ const { spawnSync } = require("node:child_process");
 const { build } = require("esbuild");
 const entries = [
   "../packages/console-core/src/pending-approvals.test.ts",
+  "../packages/console-core/src/host-attention.test.ts",
   "../packages/console-core/src/tool-completion.test.ts",
   "src/lib/adapters-completion.test.ts",
   "src/lib/adapters-integrity.test.ts",

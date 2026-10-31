@@ -389,8 +389,8 @@ None if the group is resolved/missing, in which case the single claim direct-com
 clears/stales the slot (`handle_deleted_slot`, mod.rs:1659-1693). Assertion/Entity/Predicate/Revision triggers do NOT run detection — they mark truth slots stale for tm_recompute
 (mod.rs:954-982, 1010-1071).
 
-ConflictGroup record shape: crates/types/src/records/truth.rs:91-122 (slot_key, slot_type, claim_ids: Vec<String>, resolved, resolution_rationale, detected_at, resolved_at).
-TruthSlot: truth.rs:145-199 (current_values: Vec<CurrentValue{claim_id, confidence, status, evidence}>, conflict_group link, stale/stale_reason, semantics_version/alias_version,
+ConflictGroup record shape: crates/types/src/records/truth.rs:91-122 (slot_key, slot_type, claim_ids: `Vec<String>`, resolved, resolution_rationale, detected_at, resolved_at).
+TruthSlot: truth.rs:145-199 (current_values: `Vec<CurrentValue{claim_id, confidence, status, evidence}>`, conflict_group link, stale/stale_reason, semantics_version/alias_version,
 security_hash).
 
 =====================================================================

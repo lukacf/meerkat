@@ -34,14 +34,14 @@ workspace = true
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
-meerkat-core = { version = "=0.9.7" }
+meerkat-core = { version = "=0.9.8" }
 # The one-remote-bundle reference provider (M4b) implements both levels of
 # the composite seam: meerkat's RealmStorageProvider (facade storage_provider
 # module + in-memory store implementations) next to Meta's realm store set.
-meerkat = { version = "=0.9.7", features = ["session-store", "memory-store"] }
-meerkat-runtime = { version = "=0.9.7" }
-meerkat-store = { version = "=0.9.7", features = ["memory"] }
-meerkat-store-conformance = { version = "=0.9.7" }
+meerkat = { version = "=0.9.8", features = ["session-store", "memory-store"] }
+meerkat-runtime = { version = "=0.9.8" }
+meerkat-store = { version = "=0.9.8", features = ["memory"] }
+meerkat-store-conformance = { version = "=0.9.8" }
 meerkat-meta = { path = "../meerkat-meta" }
 # The extension document chapters run against the store trait directly, so
 # the suite reaches it without turning on meerkat-meta's extension-state

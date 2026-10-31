@@ -115,6 +115,57 @@ pub(crate) fn failing_metadata_probe() -> Arc<dyn MobSessionService> {
     tests::failing_metadata_probe()
 }
 
+/// How many persisted metadata reads a probe session service started, and
+/// how many of them answered.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct MetadataReadCounts {
+    started: Arc<std::sync::atomic::AtomicUsize>,
+    answered: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl MetadataReadCounts {
+    pub(crate) fn started(&self) -> usize {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn answered(&self) -> usize {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A session service that serves the reads of a member's execution (its
+/// runtime owner, its execution snapshot and the live-actor witness) and the
+/// persisted metadata read from `inner`, the metadata read only after
+/// `answer_after` (`None`: it never answers), as a slow store does. `counts`
+/// counts the metadata reads.
+#[cfg(test)]
+pub(crate) fn slow_metadata_probe(
+    inner: Arc<dyn MobSessionService>,
+    answer_after: Option<std::time::Duration>,
+    counts: MetadataReadCounts,
+) -> Arc<dyn MobSessionService> {
+    tests::slow_metadata_probe(inner, answer_after, counts)
+}
+
+/// A session service with no runtime owner whose execution snapshot never
+/// answers, as a session busy with a turn does not. `counts` counts its
+/// persisted metadata reads.
+#[cfg(test)]
+pub(crate) fn mid_turn_probe(counts: MetadataReadCounts) -> Arc<dyn MobSessionService> {
+    tests::mid_turn_probe(counts)
+}
+
+/// A session service with no runtime owner whose execution snapshot fails as
+/// `NotFound` and whose durable store holds every session. Its live-actor
+/// read finds no live actor until a persisted metadata read has answered,
+/// and a live one after: a member woken while that read ran.
+#[cfg(test)]
+pub(crate) fn woken_by_metadata_read_probe() -> Arc<dyn MobSessionService> {
+    tests::woken_by_metadata_read_probe()
+}
+
 /// Whether durable input rows include one short of a terminal phase
 /// (consumed, superseded, coalesced or abandoned). `None` when a row does not
 /// decode. A phase this build does not know counts as not terminal.
@@ -9565,6 +9616,16 @@ async fn canonical_definition_snapshot(
 pub const SESSION_COMMIT_PENDING_READ_BOUND: std::time::Duration =
     std::time::Duration::from_secs(2);
 
+/// Bound on one durable store read whose answer the idle sweep needs to make
+/// progress: a dormant session's metadata or input rows. Such a read waits
+/// behind no turn, but on a remote store one read can load a session's whole
+/// runtime body, a few round trips in sequence, and a load cut short is
+/// discarded: a bound shorter than the load makes its caller start the load
+/// again and never finish. This bound sits well above such a load, and is
+/// short enough that a read that never answers does not hold its caller, or
+/// the store locks the read holds, for long.
+pub(crate) const DURABLE_STORE_READ_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// [`MobRuntime::session_commit_pending`]'s mapping: only a conclusive answer
 /// within `bound` is `Some`; an error or a timeout is `None`.
 async fn bounded_commit_pending<E>(
@@ -17603,6 +17664,18 @@ comms = true
         persisted: bool,
     }
 
+    /// When the probe's persisted metadata read answers.
+    #[derive(Clone, Copy, Default)]
+    enum MetadataReadLatency {
+        /// At once.
+        #[default]
+        Immediate,
+        /// After this long, as a slow store does.
+        After(std::time::Duration),
+        /// Never, as a store that does not answer.
+        Never,
+    }
+
     #[derive(Default)]
     struct ForwardingProbe {
         /// Set: the execution snapshot fails and the typed local reads answer
@@ -17678,6 +17751,21 @@ comms = true
         persisted_metadata_view: Mutex<Option<meerkat_core::PersistedSessionMetadataView>>,
         /// Set: the persisted metadata read fails.
         persisted_metadata_read_fails: std::sync::atomic::AtomicBool,
+        /// When the persisted metadata read answers.
+        persisted_metadata_latency: MetadataReadLatency,
+        /// The persisted metadata reads started and answered.
+        persisted_metadata_reads: MetadataReadCounts,
+        /// Set: the reads of a member's execution (the runtime owner, the
+        /// execution snapshot and the live-actor witness) and the persisted
+        /// metadata read are this service's.
+        execution_reads: Option<Arc<dyn MobSessionService>>,
+        /// Set: the execution snapshot never answers, as a session busy with
+        /// a turn does not.
+        execution_snapshot_pends: bool,
+        /// Set: the live-actor read finds the session live once a persisted
+        /// metadata read has answered, as for a member woken while that read
+        /// ran.
+        live_once_metadata_answered: bool,
     }
 
     impl ForwardingProbe {
@@ -17698,6 +17786,43 @@ comms = true
         fn set_cancel_outcome(&self, outcome: u8) {
             self.cancel_outcome
                 .store(outcome, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// The probe's own answer to a persisted metadata read.
+        fn probe_persisted_session_metadata(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+            if self
+                .persisted_metadata_read_fails
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(SessionError::Store(Box::new(std::io::Error::other(
+                    "probe: the metadata read fails",
+                ))));
+            }
+            if let Some(mut view) = self
+                .persisted_metadata_view
+                .lock()
+                .expect("persisted metadata view")
+                .clone()
+            {
+                view.session_id = session_id.clone();
+                return Ok(Some(view));
+            }
+            let persisted = self
+                .failed_snapshot
+                .lock()
+                .expect("failed snapshot")
+                .is_some_and(|failed| failed.persisted);
+            if persisted {
+                let session = meerkat_core::Session::new();
+                return Ok(Some(
+                    meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+                        .expect("a fresh session's metadata view"),
+                ));
+            }
+            Ok(None)
         }
     }
 
@@ -18040,36 +18165,22 @@ comms = true
             session_id: &meerkat_core::SessionId,
         ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
             self.record("load_persisted_session_metadata");
-            if self
-                .persisted_metadata_read_fails
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                return Err(SessionError::Store(Box::new(std::io::Error::other(
-                    "probe: the metadata read fails",
-                ))));
+            self.persisted_metadata_reads
+                .started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.persisted_metadata_latency {
+                MetadataReadLatency::Immediate => {}
+                MetadataReadLatency::After(latency) => tokio::time::sleep(latency).await,
+                MetadataReadLatency::Never => std::future::pending::<()>().await,
             }
-            if let Some(mut view) = self
-                .persisted_metadata_view
-                .lock()
-                .expect("persisted metadata view")
-                .clone()
-            {
-                view.session_id = session_id.clone();
-                return Ok(Some(view));
-            }
-            let persisted = self
-                .failed_snapshot
-                .lock()
-                .expect("failed snapshot")
-                .is_some_and(|failed| failed.persisted);
-            if persisted {
-                let session = meerkat_core::Session::new();
-                return Ok(Some(
-                    meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
-                        .expect("a fresh session's metadata view"),
-                ));
-            }
-            Ok(None)
+            let answer = match self.execution_reads.as_ref() {
+                Some(inner) => inner.load_persisted_session_metadata(session_id).await,
+                None => self.probe_persisted_session_metadata(session_id),
+            };
+            self.persisted_metadata_reads
+                .answered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            answer
         }
 
         async fn recorded_auth_binding(
@@ -18367,8 +18478,14 @@ comms = true
             &self,
             session_id: &meerkat_core::SessionId,
         ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, SessionError> {
+            if let Some(inner) = self.execution_reads.as_ref() {
+                return inner.execution_snapshot(session_id).await;
+            }
             self.execution_snapshot_reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.execution_snapshot_pends {
+                std::future::pending::<()>().await;
+            }
             if self
                 .failed_snapshot
                 .lock()
@@ -18386,6 +18503,12 @@ comms = true
             &self,
             session_id: &meerkat_core::SessionId,
         ) -> Result<bool, SessionError> {
+            if let Some(inner) = self.execution_reads.as_ref() {
+                return inner.live_session_actor_registered(session_id).await;
+            }
+            if self.live_once_metadata_answered {
+                return Ok(self.persisted_metadata_reads.answered() > 0);
+            }
             let failed = *self.failed_snapshot.lock().expect("failed snapshot");
             match failed {
                 Some(FailedSnapshot {
@@ -18408,6 +18531,9 @@ comms = true
             explicit: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, meerkat_runtime::RuntimeDriverError>
         {
+            if let Some(inner) = self.execution_reads.as_ref() {
+                return inner.acquire_runtime_adapter(explicit);
+            }
             self.acquisition_inputs
                 .lock()
                 .expect("acquisition inputs")
@@ -22996,6 +23122,43 @@ image_generation = true
                 persisted: true,
             })),
             persisted_metadata_read_fails: std::sync::atomic::AtomicBool::new(true),
+            ..ForwardingProbe::default()
+        })
+    }
+
+    pub(super) fn slow_metadata_probe(
+        inner: Arc<dyn MobSessionService>,
+        answer_after: Option<std::time::Duration>,
+        counts: MetadataReadCounts,
+    ) -> Arc<dyn MobSessionService> {
+        Arc::new(ForwardingProbe {
+            execution_reads: Some(inner),
+            persisted_metadata_latency: answer_after
+                .map_or(MetadataReadLatency::Never, MetadataReadLatency::After),
+            persisted_metadata_reads: counts,
+            ..ForwardingProbe::default()
+        })
+    }
+
+    pub(super) fn mid_turn_probe(counts: MetadataReadCounts) -> Arc<dyn MobSessionService> {
+        Arc::new(ForwardingProbe {
+            execution_snapshot_pends: true,
+            // No runtime owner: the snapshot alone decides.
+            acquisition_outcome: std::sync::atomic::AtomicU8::new(1),
+            persisted_metadata_reads: counts,
+            ..ForwardingProbe::default()
+        })
+    }
+
+    pub(super) fn woken_by_metadata_read_probe() -> Arc<dyn MobSessionService> {
+        Arc::new(ForwardingProbe {
+            failed_snapshot: Mutex::new(Some(FailedSnapshot {
+                live: Some(false),
+                persisted: true,
+            })),
+            live_once_metadata_answered: true,
+            // No runtime owner: the snapshot alone decides.
+            acquisition_outcome: std::sync::atomic::AtomicU8::new(1),
             ..ForwardingProbe::default()
         })
     }

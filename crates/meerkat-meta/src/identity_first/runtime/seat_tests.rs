@@ -59,7 +59,9 @@ type SeatCall = Vec<(AgentIdentity, Option<SessionId>)>;
 
 /// A Core that seats, rotates and releases members over a
 /// [`CoreTestMembers`] history, and counts every other Core step a seat
-/// must never take: a create, a resume, a wake.
+/// must never take: a create, a resume, a wake. It keeps Core's residency
+/// too, and counts each member build it makes: a revival, and a wake or a
+/// delivery that finds its member not materialized.
 ///
 /// It answers as Core does where a row depends on it: an identity's first
 /// generation is zero; a seat of an identity Core holds is `AlreadySeated`
@@ -144,6 +146,14 @@ struct SeatCore {
     /// The sessions Core holds unborn: a seat named them and no wake has
     /// created them (`MemberBindingHistory::session_unborn`).
     unborn: StdMutex<BTreeSet<SessionId>>,
+    /// The incarnations Core holds materialized in this process, as Core's
+    /// residency does: a revival (a resume) builds its member, a release or a
+    /// retirement drops it, and a wake or a delivery that finds its seated
+    /// member not materialized builds it.
+    materialized: StdMutex<BTreeSet<AgentRuntimeId>>,
+    /// Every member build Core made: each revival, and each wake or delivery
+    /// that found its member not materialized.
+    builds: AtomicUsize,
 }
 
 /// Whether a fresh life of `spec` owes a kickoff (an initial message, or an
@@ -191,6 +201,20 @@ impl SeatCore {
             .core
             .last_member_binding(identity)?
             .map_or(0, |binding| binding.generation().get() + 1))
+    }
+
+    /// Core materializes the incarnation `runtime_id` for a wake or a
+    /// delivery: it builds the member when it is not materialized yet.
+    fn materialize(&self, runtime_id: &AgentRuntimeId) {
+        if lock(&self.materialized).insert(runtime_id.clone()) {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The incarnation `runtime_id` is no longer materialized here: Core
+    /// released or retired it.
+    fn dematerialize(&self, runtime_id: &AgentRuntimeId) {
+        lock(&self.materialized).remove(runtime_id);
     }
 }
 
@@ -244,6 +268,7 @@ impl SessionBridge for SeatCore {
                 )));
             }
             self.core.retire(&live.agent_runtime_id);
+            self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
         let agent_runtime_id = bind_live(
@@ -253,6 +278,8 @@ impl SessionBridge for SeatCore {
             generation,
             Some(session_id.clone()),
         )?;
+        // A resume is a spawn: Core builds the member, live.
+        self.materialize(&agent_runtime_id);
         Ok(ResumeSessionOutcome::Resumed {
             session_id: session_id.clone(),
             agent_runtime_id,
@@ -299,7 +326,11 @@ impl SessionBridge for SeatCore {
                 detail: "Core holds the member Broken".to_string(),
             });
         }
-        self.core.live_member(identity)
+        let live = self.core.live_member(identity)?;
+        if let Some(live) = live.as_ref() {
+            self.materialize(&live.agent_runtime_id);
+        }
+        Ok(live)
     }
 
     async fn member_binding_history(
@@ -493,6 +524,7 @@ impl SessionBridge for SeatCore {
         lock(&self.rotations_listed).push((identity.clone(), listed));
         if let Some(live) = self.core.live_member(identity)? {
             self.core.retire(&live.agent_runtime_id);
+            self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
         let session_id = SessionId::new();
@@ -509,6 +541,10 @@ impl SessionBridge for SeatCore {
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         lock(&self.releases).push(identity.clone());
+        // The member stays seated at its generation, not materialized.
+        if let Some(live) = self.core.live_member(identity)? {
+            self.dematerialize(&live.agent_runtime_id);
+        }
         Ok(())
     }
 
@@ -548,6 +584,9 @@ impl SessionBridge for SeatCore {
             .live_incarnation(runtime_id)
             .and_then(|(session, _)| session)
             .ok_or_else(|| BridgeError::Mob(format!("{runtime_id} is no live member")))?;
+        // Core's dispatch materializes a member that is not live before it
+        // delivers.
+        self.materialize(runtime_id);
         lock(&self.delivered).push(runtime_id.clone());
         Ok(session)
     }
@@ -564,6 +603,7 @@ impl SessionBridge for SeatCore {
 
     async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
         self.core.retire(runtime_id);
+        self.dematerialize(runtime_id);
         Ok(())
     }
 }
@@ -2308,6 +2348,234 @@ async fn an_archived_first_boot_session_revived_and_released_ends_its_host_prepa
     assert_eq!(lock(&core.delivered).len(), 1, "one delivery");
 }
 
+/// A runtime whose Core retired `identity`'s built member at generation 0
+/// and keeps its session archived, as Core does once it retired a built
+/// member: the identity's next seat step revives it on that session.
+/// Answers Core, the runtime and the session.
+async fn retired_on_archived_session(
+    identity: &AgentIdentity,
+) -> (Arc<SeatCore>, Arc<IdentityRuntime>, SessionId) {
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        archived: vec![session.clone()],
+        resumes_onto_session: true,
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    let runtime_id = register_live(&runtime, &core.core, spec(identity), 0, session.clone())
+        .await
+        .expect("registered live");
+    core.core.retire(&runtime_id);
+    (core, runtime, session)
+}
+
+/// An explicit materialization (a warm materializes the same way) of an
+/// identity whose built member Core retired: the seat step revives the
+/// identity once on its archived session, and the revival stays live, since
+/// the materialization makes the member live right after the step. Core's
+/// wake finds it live: the member is built once, by its revival, and nothing
+/// is released.
+#[tokio::test]
+async fn a_materialization_over_an_archived_session_builds_the_member_once() {
+    let alice = identity("personal:alice");
+    let (core, runtime, session) = retired_on_archived_session(&alice).await;
+
+    let scope = runtime
+        .materialize(&alice)
+        .await
+        .expect("the materialization succeeds")
+        .expect("a session-backed member has a delivery scope");
+
+    assert_eq!(scope.session_id(), &session, "the member keeps its session");
+    assert_eq!(
+        scope.generation(),
+        meerkat_mob::Generation::new(1),
+        "at the next generation"
+    );
+    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one revival");
+    assert!(
+        lock(&core.releases).is_empty(),
+        "the revival is not released"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst),
+        1,
+        "Core's wake is asked once"
+    );
+    assert_eq!(
+        core.builds.load(Ordering::SeqCst),
+        1,
+        "the member is built once, by its revival: the wake finds it live"
+    );
+}
+
+/// A respawn of a built member: Core retires it and keeps its session
+/// archived, the seat step revives the identity on that session, and the
+/// revival stays live for the respawn's wake. The respawn builds the member
+/// once and releases nothing.
+#[tokio::test]
+async fn a_respawn_of_a_built_member_builds_it_once() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        archived: vec![session.clone()],
+        resumes_onto_session: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    runtime
+        .materialize(&alice)
+        .await
+        .expect("the member is built");
+    let built = core.builds.load(Ordering::SeqCst);
+    assert_eq!(built, 1, "the member's first build");
+
+    let scope = runtime
+        .respawn(&alice)
+        .await
+        .expect("the respawn succeeds")
+        .expect("a session-backed member has a delivery scope");
+
+    assert_eq!(
+        scope.session_id(),
+        &session,
+        "the respawn keeps the session"
+    );
+    assert_eq!(
+        scope.generation(),
+        meerkat_mob::Generation::new(1),
+        "at the next generation"
+    );
+    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one revival");
+    assert!(
+        lock(&core.releases).is_empty(),
+        "the revival is not released"
+    );
+    assert_eq!(
+        core.builds.load(Ordering::SeqCst) - built,
+        1,
+        "the respawn builds the member once, by its revival: its wake finds it live"
+    );
+}
+
+/// A delivery to an identity whose built member Core retired: the seat step
+/// before its admission revives the identity once on its archived session,
+/// and the revival stays live for the delivery Core makes right after it.
+/// The member is built once, by its revival, and nothing is released.
+#[tokio::test]
+async fn a_delivery_over_an_archived_session_builds_the_member_once() {
+    let alice = identity("personal:alice");
+    let (core, runtime, _session) = retired_on_archived_session(&alice).await;
+
+    runtime
+        .send(&alice, &text("hello"))
+        .await
+        .expect("the delivery goes through");
+
+    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one revival");
+    assert!(
+        lock(&core.releases).is_empty(),
+        "the revival is not released"
+    );
+    assert_eq!(
+        lock(&core.delivered).as_slice(),
+        [AgentRuntimeId::parse("rt:personal:alice:1").expect("a runtime id")],
+        "the delivery goes to the revived member"
+    );
+    assert_eq!(
+        core.builds.load(Ordering::SeqCst),
+        1,
+        "the member is built once, by its revival: the delivery finds it live"
+    );
+}
+
+/// The roster pass's seat of an identity whose built member Core retired
+/// still revives it once on its archived session and releases it: the pass
+/// makes nothing live, so the identity is a Dormant member on its own
+/// session, built at its first delivery. A seat step keeps a revival live
+/// only for a caller that makes the member live right after it.
+#[tokio::test]
+async fn the_roster_pass_still_releases_an_archived_sessions_revival() {
+    let alice = identity("personal:alice");
+    let (core, runtime, session) = retired_on_archived_session(&alice).await;
+
+    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
+
+    let outcome = outcomes[&alice].as_ref().expect("alice is seated");
+    assert_eq!(
+        outcome.session_id,
+        Some(session),
+        "seated on its own session"
+    );
+    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one revival");
+    assert_eq!(
+        lock(&core.releases).as_slice(),
+        std::slice::from_ref(&alice),
+        "the revival is released"
+    );
+    assert!(
+        lock(&core.materialized).is_empty(),
+        "the member is not materialized after the pass"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst),
+        0,
+        "the pass wakes nothing"
+    );
+}
+
+/// An explicit materialization that applies a declared role migration: the
+/// seat step restamps the member onto its own session under the new role,
+/// which builds it, and the restamp stays live, since the materialization
+/// makes the member live right after the step. Core's wake finds it live:
+/// the member is built once, by its restamp, and nothing is released.
+#[tokio::test]
+async fn a_materialization_that_applies_a_declared_migration_builds_the_member_once() {
+    let alice = identity("personal:alice");
+    let previous = meerkat_mob::ProfileName::from("previous");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        resumes_onto_session: true,
+        migrations: BTreeMap::from([(alice.clone(), previous.clone())]),
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    // Core holds alice on her session under her previous role; the roster
+    // names her new one.
+    bind_live(&core.core, &alice, &previous, 0, Some(session.clone())).expect("Core holds alice");
+    runtime.register(spec(&alice)).await;
+
+    let scope = runtime
+        .materialize(&alice)
+        .await
+        .expect("the materialization succeeds")
+        .expect("a session-backed member has a delivery scope");
+
+    assert_eq!(scope.session_id(), &session, "the member keeps its session");
+    assert_eq!(
+        core.core
+            .last_member_binding(&alice)
+            .expect("Core's history reads")
+            .map(|binding| binding.role().clone()),
+        Some(meerkat_mob::ProfileName::from("personal")),
+        "the member runs the new role"
+    );
+    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one restamp");
+    assert!(
+        lock(&core.releases).is_empty(),
+        "the restamp is not released"
+    );
+    assert_eq!(
+        core.builds.load(Ordering::SeqCst),
+        1,
+        "the member is built once, by its restamp: the wake finds it live"
+    );
+}
+
 /// A declared role migration of an identity whose first-boot row Core
 /// already shows done: the step restamps the member onto its own session
 /// under the new role and releases it. The restamp retires the member under
@@ -2565,6 +2833,10 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
             .map(|binding| binding.role().clone()),
         Some(meerkat_mob::ProfileName::from("personal")),
         "the member runs the new role"
+    );
+    assert!(
+        lock(&core.materialized).is_empty(),
+        "the roster pass releases the restamp: the member is not materialized after it"
     );
     runtime
         .send(&alice, &text("hello"))

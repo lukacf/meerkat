@@ -63,7 +63,8 @@ use crate::unified_runtime::{ConsoleEventStore, UnifiedRuntime};
 
 pub use query_error::{ConsoleTimelineQueryError, ConsoleTimelineQueryResult};
 pub(crate) use send_recovery::{
-    ConsoleSendRecovery, NativeSendObservation, ScopedReservation, SendDispatchClaim,
+    ConsoleSendRecovery, INTERACTIVE_SEND_READ_BOUND, NativeSendObservation, ScopedReservation,
+    SendDispatchClaim,
 };
 use send_recovery::{SendDispatchClaims, SendSweepOutcome};
 pub(crate) use send_scope::ConsoleSendScope;
@@ -2879,7 +2880,10 @@ impl MetaConsoleAggregator {
         claim: SendDispatchClaim,
         frame: ConsoleFrame,
     ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
-        match self.observe_native_send(&frame).await {
+        match self
+            .observe_native_send(&frame, INTERACTIVE_SEND_READ_BOUND)
+            .await
+        {
             NativeSendObservation::Admitted { .. } => {
                 self.settle_admitted_send(&frame, &claim).await
             }
@@ -2991,8 +2995,15 @@ impl MetaConsoleAggregator {
     }
 
     /// What the runtime holding `frame`'s recorded session has admitted
-    /// under the send's delivery keys.
-    pub(crate) async fn observe_native_send(&self, frame: &ConsoleFrame) -> NativeSendObservation {
+    /// under the send's delivery keys, all keys read within one deadline
+    /// `bound` from now: the boot reconciliation's
+    /// [`send_recovery::BOOT_SEND_READ_BOUND`], or
+    /// [`INTERACTIVE_SEND_READ_BOUND`] for a sender's replay or recovery.
+    pub(crate) async fn observe_native_send(
+        &self,
+        frame: &ConsoleFrame,
+        bound: Duration,
+    ) -> NativeSendObservation {
         #[cfg(test)]
         {
             let reader = self
@@ -3002,7 +3013,7 @@ impl MetaConsoleAggregator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(reader) = reader {
-                return send_recovery::observe_native_send(reader.as_ref(), frame).await;
+                return send_recovery::observe_native_send(reader.as_ref(), frame, bound).await;
             }
         }
         let owner = self
@@ -3026,7 +3037,7 @@ impl MetaConsoleAggregator {
                 cause: "the runtime exposes no admission evidence".to_string(),
             };
         };
-        send_recovery::observe_native_send(machine.as_ref(), frame).await
+        send_recovery::observe_native_send(machine.as_ref(), frame, bound).await
     }
 
     /// The caller's own send under `idempotency_key`, as it is now, with the
@@ -3061,7 +3072,9 @@ impl MetaConsoleAggregator {
         let Some(frame) = found else {
             return Ok(None);
         };
-        let native = self.observe_native_send(&frame).await;
+        let native = self
+            .observe_native_send(&frame, INTERACTIVE_SEND_READ_BOUND)
+            .await;
         let unsettled =
             SendState::from_send_frame_status(frame.status).is_some_and(SendState::is_unsettled);
         let mut accepted = accepted_from_frame(&frame);
@@ -3077,9 +3090,12 @@ impl MetaConsoleAggregator {
     /// Settle, from native admission evidence, the console sends a previous
     /// process accepted but did not see settle. Bounded (the newest
     /// [`send_recovery::SEND_SWEEP_WINDOW`] frames, at most
-    /// [`send_recovery::SEND_SWEEP_LIMIT`] sends, one overall deadline);
-    /// evidence only: a send whose input was admitted is settled delivered,
-    /// and nothing is ever dispatched or failed here.
+    /// [`send_recovery::SEND_SWEEP_LIMIT`] sends, one overall deadline, and
+    /// [`send_recovery::BOOT_SEND_READ_BOUND`] per send's evidence), since it
+    /// runs before the gateway serves; a send whose evidence the store did
+    /// not answer in time stays unsettled for its sender's recovery, which
+    /// waits longer. Evidence only: a send whose input was admitted is
+    /// settled delivered, and nothing is ever dispatched or failed here.
     pub(crate) async fn reconcile_interrupted_sends(&self) -> SendSweepOutcome {
         let deadline = tokio::time::Instant::now() + send_recovery::SEND_SWEEP_DEADLINE;
         let frames = match self
@@ -3111,7 +3127,8 @@ impl MetaConsoleAggregator {
                 continue;
             };
             if matches!(
-                self.observe_native_send(&frame).await,
+                self.observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
+                    .await,
                 NativeSendObservation::Admitted { .. }
             ) {
                 match self.settle_admitted_send(&frame, &claim).await {

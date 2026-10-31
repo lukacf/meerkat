@@ -323,6 +323,11 @@ does not say whether the mob runs; a stopped mob's dot is red.
 ### Approvals
 
 Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+**Needs you** also counts host-provided attention items when the console configuration
+names `[[attention.sources]]`. The inbox lists them after the approvals, as cards with one
+**Open** link to the host's page, which owns the decision. A source that cannot be read is
+named and hides nothing else (see [host-provided attention items](/reference/configuration#host-provided-attention-items)).
+A source with a `decide_href` gives a read-only console a **Decide in** link on each pending approval, in the inbox and in an agent's chat, to the host page that decides it.
 Expand **Complete request details** before deciding. Stale or unavailable approval
 data does not mean there are no pending requests; use **Refresh approvals** to
 reload it. Read-only consoles cannot submit decisions.
@@ -361,7 +366,7 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 **Split panels** — click the split controls (← → ↑ ↓, visible on hover) to divide a panel. This lets you chat with multiple agents side-by-side.
 
 **Composer** at the bottom of each panel:
-- Textarea with "Message {agent}..." placeholder
+- Textarea with `Message {agent}...` placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
 

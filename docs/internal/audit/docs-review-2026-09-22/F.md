@@ -1514,13 +1514,13 @@ fn deploy_argv_prefers_supplied_prompt_param_over_prompt_flag() {
 
 The existing tests explicitly cover all relevant branches; they were read, not run.
 
-**Required correction:** At flow-editor.mdx:141 say that RPC input_params values are forwarded as repeated --param key=<json> bindings. The deploy prompt supplies --prompt=<text> only if the generated input schema permits prompt (including packs without typed input parameters) and input_params did not already bind prompt. Do not claim it overrides explicit bindings or is always forwarded.
+**Required correction:** At flow-editor.mdx:141 say that RPC input_params values are forwarded as repeated `--param key=<json>` bindings. The deploy prompt supplies `--prompt=<text>` only if the generated input schema permits prompt (including packs without typed input parameters) and input_params did not already bind prompt. Do not claim it overrides explicit bindings or is always forwarded.
 
 ### Changes and final verification
 
 **Changed:** `docs/guides/flow-editor.mdx`.
 
-Documented JSON-valued input_params as repeated --param bindings and --prompt=<text> as a fallback only when the input schema accepts prompt and no explicit prompt binding exists.
+Documented JSON-valued input_params as repeated --param bindings and `--prompt=<text>` as a fallback only when the input schema accepts prompt and no explicit prompt binding exists.
 
 **Validation:** Read mobpack.rs:13383-13434,13455-13474. Static checks matched the accepts_prompt/contains_key conditional and verified the corrected binding/default prose; no rkat execution was performed.
 
@@ -1544,7 +1544,7 @@ for (key, value) in &input_bindings.params {
     if input_bindings.accepts_prompt() && !input_bindings.params.contains_key("prompt") {
 ```
 
-This is the actual argv branch. accepts_prompt at 13399-13402 allows no-schema or a schema containing prompt; line 13474 emits the single-token --prompt=<text> form.
+This is the actual argv branch. accepts_prompt at 13399-13402 allows no-schema or a schema containing prompt; line 13474 emits the single-token `--prompt=<text>` form.
 
 ## F-013: The examples index recommends two npm scripts that do not exist
 

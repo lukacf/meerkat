@@ -2222,13 +2222,6 @@ impl UnifiedRuntime {
         self.mob_events.subscribe()
     }
 
-    /// Ingest an event into the event log (if configured). Non-blocking.
-    pub(crate) fn ingest_event(&self, event: &EventEnvelope<UnifiedEvent>) {
-        if let Some(ref log) = self.event_log {
-            log.ingest(event.clone());
-        }
-    }
-
     pub(crate) async fn record_console_lifecycle(
         &self,
         identity: &str,

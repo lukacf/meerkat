@@ -88,6 +88,7 @@ export default defineConfig({
       "console/src/panels/Sidebar.activity.test.tsx",
       "console/src/panels/OperatorPanel.test.tsx",
       "console/src/lib/operator-panel-integration.test.tsx",
+      "console/src/lib/host-attention-integration.test.tsx",
       "packages/console-components/src/conversation/conversation-message-group.test.tsx",
       "packages/console-components/src/conversation/context-selection.test.tsx",
       "packages/console-components/src/conversation/approval-card.test.tsx",

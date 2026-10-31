@@ -7619,8 +7619,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text9) => {
-  return text9.charAt(0).toUpperCase() + text9.slice(1);
+var capitalizeFirstCharacter = (text10) => {
+  return text10.charAt(0).toUpperCase() + text10.slice(1);
 };
 function getUnitTypeFromNumber(number5) {
   const abs = Math.abs(number5);
@@ -20917,11 +20917,11 @@ var EMBEDDED_PEER_ACK_TOKEN_RE = /\bACK_?FROM_?PEER_?peer[-_][a-z0-9][a-z0-9_-]*
 var EMBEDDED_PEER_RESPONSE_TOKEN_RE = /\bpeer[-_]merge[-_][a-z0-9][a-z0-9_-]*\b/gi;
 var LEGACY_INLINE_CODE_PLACEHOLDER_RE = /@@CODE\d+@@/g;
 function normalizeProjectDisplayLabel(value) {
-  const text9 = String(value || "").trim();
-  if (!text9) {
+  const text10 = String(value || "").trim();
+  if (!text10) {
     return "";
   }
-  return text9.split(/[\s_-]+/u).filter(Boolean).map((part) => part.replace(/^[a-z]/u, (char) => char.toUpperCase())).join(" ");
+  return text10.split(/[\s_-]+/u).filter(Boolean).map((part) => part.replace(/^[a-z]/u, (char) => char.toUpperCase())).join(" ");
 }
 function escapeHtml(value) {
   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -20937,12 +20937,12 @@ function safeConsoleHref(value) {
   }
   return null;
 }
-function renderConversationInlineMarkdown(text9, options = {}) {
+function renderConversationInlineMarkdown(text10, options = {}) {
   const displayNormalization = options.displayNormalization !== false;
   const codeTokens = [];
   const tokenPrefix = "\uE000CCODE";
   const tokenSuffix = "\uE001";
-  const source = displayNormalization ? normalizeConversationDisplayText(text9 || "") : String(text9 || "");
+  const source = displayNormalization ? normalizeConversationDisplayText(text10 || "") : String(text10 || "");
   const escaped = escapeHtml(source).replace(/`([^`]+)`/g, (_match, code4) => {
     const index2 = codeTokens.push('<code class="cc-rich-inline-code">'.concat(code4, "</code>")) - 1;
     return "".concat(tokenPrefix).concat(index2).concat(tokenSuffix);
@@ -20952,16 +20952,16 @@ function renderConversationInlineMarkdown(text9, options = {}) {
   }).replace(/\n/g, "<br />");
   return escaped.replace(new RegExp("".concat(tokenPrefix, "(\\d+)").concat(tokenSuffix), "g"), (_match, index2) => codeTokens[Number(index2)] || "");
 }
-function normalizeLegacyInlineCodePlaceholders(text9) {
-  const source = String(text9 || "");
+function normalizeLegacyInlineCodePlaceholders(text10) {
+  const source = String(text10 || "");
   if (!LEGACY_INLINE_CODE_PLACEHOLDER_RE.test(source)) {
     return source;
   }
   LEGACY_INLINE_CODE_PLACEHOLDER_RE.lastIndex = 0;
   return source.split(/\n/u).map((line) => line.replace(/\s*@@CODE\d+@@\s*(?:[—–-]\s*)?/g, " ").replace(/\s*,\s*(?=,|and\b|or\b|[.;:!?]|$)/gi, " ").replace(/\s*\+\s*/g, " ").replace(/\s+([,.;:!?])/g, "$1").replace(/\s{2,}/g, " ").trim()).filter(Boolean).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function normalizeEmbeddedMachinePeerTokens(text9) {
-  const source = String(text9 || "");
+function normalizeEmbeddedMachinePeerTokens(text10) {
+  const source = String(text10 || "");
   if (!EMBEDDED_MACHINE_PEER_TOKEN_RE.test(source) && !EMBEDDED_PEER_ACK_TOKEN_RE.test(source)) {
     return source;
   }
@@ -20969,8 +20969,8 @@ function normalizeEmbeddedMachinePeerTokens(text9) {
   EMBEDDED_PEER_ACK_TOKEN_RE.lastIndex = 0;
   return source.split(/\n/u).map((line) => line.replace(EMBEDDED_PEER_ACK_TOKEN_RE, "acknowledgement").replace(EMBEDDED_PEER_RESPONSE_TOKEN_RE, "response token").replace(EMBEDDED_MACHINE_PEER_TOKEN_RE, " ").replace(/\bcontaining\s*([.;])/gi, "$1").replace(/^Meta live peer smoke[.:]?\s*/i, "Peer check. ").replace(/\s+([,.;:!?])/g, "$1").replace(/:\s*([.;])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").replace(/\s{2,}/g, " ").trim()).filter(Boolean).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function normalizePeerSteeringPrompt(text9) {
-  const source = String(text9 || "").trim();
+function normalizePeerSteeringPrompt(text10) {
+  const source = String(text10 || "").trim();
   if (!source) {
     return "";
   }
@@ -21036,33 +21036,33 @@ function normalizePeerSteeringPrompt(text9) {
   }
   return source;
 }
-function normalizeDisplayPunctuation(text9) {
-  return String(text9 || "").split(/\n/u).map((line) => line.replace(/\b(verified|received):\s*`?(?:response token|acknowledgement)`?\.?$/i, "$1.").replace(/:\s*\./g, ".").replace(/:\s*$/g, ".").replace(/\s+([,.;:!?])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").trim()).filter((line) => line && !/^[\s"'“”‘’`´.,;:!?()[\]{}<>—–-]+$/u.test(line)).join("\n").trim();
+function normalizeDisplayPunctuation(text10) {
+  return String(text10 || "").split(/\n/u).map((line) => line.replace(/\b(verified|received):\s*`?(?:response token|acknowledgement)`?\.?$/i, "$1.").replace(/:\s*\./g, ".").replace(/:\s*$/g, ".").replace(/\s+([,.;:!?])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").trim()).filter((line) => line && !/^[\s"'“”‘’`´.,;:!?()[\]{}<>—–-]+$/u.test(line)).join("\n").trim();
 }
-function normalizeConversationDisplayText(text9) {
+function normalizeConversationDisplayText(text10) {
   return normalizeDisplayPunctuation(
-    normalizePeerSteeringPrompt(normalizeEmbeddedMachinePeerTokens(normalizeLegacyInlineCodePlaceholders(text9)))
+    normalizePeerSteeringPrompt(normalizeEmbeddedMachinePeerTokens(normalizeLegacyInlineCodePlaceholders(text10)))
   );
 }
 function conversationRichPeerIntentForDisplay(intent, body) {
-  const text9 = String(intent || "").trim();
-  if (!text9) {
+  const text10 = String(intent || "").trim();
+  if (!text10) {
     return void 0;
   }
-  if (HIDDEN_PEER_DISPLAY_INTENTS.has(text9.toLowerCase()) || UUID_RE.test(text9) || MACHINE_PEER_TOKEN_RE.test(text9)) {
+  if (HIDDEN_PEER_DISPLAY_INTENTS.has(text10.toLowerCase()) || UUID_RE.test(text10) || MACHINE_PEER_TOKEN_RE.test(text10)) {
     return void 0;
   }
   if (body && String(body).trim()) {
     return void 0;
   }
-  return text9;
+  return text10;
 }
 function normalizeConversationDisplayLabel(label) {
-  const text9 = String(label || "").trim().replace(/\s+/g, " ");
-  if (!text9 || UUID_RE.test(text9) || MACHINE_PEER_TOKEN_RE.test(text9)) {
+  const text10 = String(label || "").trim().replace(/\s+/g, " ");
+  if (!text10 || UUID_RE.test(text10) || MACHINE_PEER_TOKEN_RE.test(text10)) {
     return "";
   }
-  const withoutToken = text9.replace(MACHINE_PEER_TOKEN_SUFFIX_RE, "").trim();
+  const withoutToken = text10.replace(MACHINE_PEER_TOKEN_SUFFIX_RE, "").trim();
   if (!withoutToken || UUID_RE.test(withoutToken) || MACHINE_PEER_TOKEN_RE.test(withoutToken)) {
     return "";
   }
@@ -21139,8 +21139,8 @@ function conversationRichBlockCopyText(block) {
   }
 }
 function conversationRichBlocksToText(blocks) {
-  const text9 = (blocks || []).map((block) => conversationRichBlockCopyText(block)).filter(Boolean).join("\n\n");
-  return blocks?.some((block) => block.type === "markdown" || block.type === "tool-call") ? text9 : text9.trim();
+  const text10 = (blocks || []).map((block) => conversationRichBlockCopyText(block)).filter(Boolean).join("\n\n");
+  return blocks?.some((block) => block.type === "markdown" || block.type === "tool-call") ? text10 : text10.trim();
 }
 function parseStreamingConversationRichBlocks(content3, options) {
   const source = String(content3 || "").trimEnd();
@@ -21359,10 +21359,10 @@ function splitMixedProseSection(section) {
   let prose = [];
   let structural = false;
   const flushProse = () => {
-    const text9 = prose.join("\n").replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ").trim();
+    const text10 = prose.join("\n").replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ").trim();
     prose = [];
-    if (text9) {
-      blocks.push({ type: "paragraph", text: text9 });
+    if (text10) {
+      blocks.push({ type: "paragraph", text: text10 });
     }
   };
   for (let index2 = 0; index2 < lines.length; index2 += 1) {
@@ -21564,8 +21564,8 @@ function conversationEntryText(entry) {
       ...attentionLines
     ].filter(Boolean).join("\n");
   }
-  const text9 = String(entry.copyText ?? entry.text ?? conversationRichBlocksToText(entry.blocks));
-  return entry.blocks?.some((block) => block.type === "markdown") ? text9 : text9.trim();
+  const text10 = String(entry.copyText ?? entry.text ?? conversationRichBlocksToText(entry.blocks));
+  return entry.blocks?.some((block) => block.type === "markdown") ? text10 : text10.trim();
 }
 
 // ../packages/console-core/src/transcript-source.ts
@@ -23898,7 +23898,7 @@ function toolCompletionFromFrame(frame, toolCallId) {
 // ../packages/console-core/src/context-record.ts
 var MAX_CONSOLE_CONTEXTS = 8;
 var MAX_CONSOLE_CONTEXT_BYTES = 64 * 1024;
-var byteLength = (text9) => new TextEncoder().encode(text9).length;
+var byteLength = (text10) => new TextEncoder().encode(text10).length;
 function validateConsoleContexts(records) {
   if (records.length > MAX_CONSOLE_CONTEXTS) throw new Error("A message can include at most 8 quotes.");
   const ids = /* @__PURE__ */ new Set();
@@ -24108,8 +24108,8 @@ function legacyPeerNoticeTextCandidates(record8) {
   }
   return candidates;
 }
-function isLegacyPeerNoticeText(text9) {
-  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text9.trim());
+function isLegacyPeerNoticeText(text10) {
+  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text10.trim());
 }
 function canUseLegacyPeerNoticeText(record8) {
   const kind = textFromUnknown(record8.kind);
@@ -25611,6 +25611,185 @@ function createPendingApprovalResource(input) {
   return resource;
 }
 
+// ../packages/console-core/src/host-attention.ts
+var HOST_ATTENTION_LIMITS = {
+  itemsPerSource: 50,
+  detailsPerItem: 12,
+  textLength: 300,
+  /** A source answer larger than this fails that source. */
+  responseBytes: 256 * 1024,
+  /** A source that has not answered within this fails alone. */
+  timeoutMs: 1e4
+};
+var TONES = /* @__PURE__ */ new Set(["attention", "info", "warning", "critical"]);
+function isSameOriginPath(value) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) return false;
+  if (new TextEncoder().encode(value).length > 2048) return false;
+  if (/[\s\u0000-\u001f\u007f-\u009f\\\uFEFF]/.test(value)) return false;
+  const path2 = value.split(/[?#]/, 1)[0];
+  return !path2.split("/").some((segment) => {
+    const decoded = segment.toLowerCase().replace(/%2e/g, ".");
+    return decoded === "." || decoded === "..";
+  });
+}
+function text3(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > HOST_ATTENTION_LIMITS.textLength ? "".concat(trimmed.slice(0, HOST_ATTENTION_LIMITS.textLength - 1), "\u2026") : trimmed;
+}
+var DECISION_ID = "{decision_id}";
+function hostDecideLinks(sources, decisionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(decisionId);
+  } catch {
+    encoded = null;
+  }
+  const links = [];
+  for (const source of sources || []) {
+    const template = source.decide_href;
+    if (!isSameOriginPath(template)) continue;
+    const parts = template.split(DECISION_ID);
+    if (parts.length > 1 && encoded === null) continue;
+    const href = parts.join(encoded ?? "");
+    if (isSameOriginPath(href)) links.push({ sourceId: source.id, label: source.label, href });
+  }
+  return links;
+}
+function normalizeHostAttention(source, body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.items)) return null;
+  const items = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of body.items) {
+    if (items.length >= HOST_ATTENTION_LIMITS.itemsPerSource) break;
+    if (!raw || typeof raw !== "object") continue;
+    const record8 = raw;
+    const id = text3(record8.id);
+    const title = text3(record8.title);
+    if (!id || !title || seen.has(id) || !isSameOriginPath(record8.href)) continue;
+    const details = [];
+    if (Array.isArray(record8.details)) {
+      for (const detail of record8.details) {
+        if (details.length >= HOST_ATTENTION_LIMITS.detailsPerItem) break;
+        if (!detail || typeof detail !== "object") continue;
+        const label = text3(detail.label);
+        const value = text3(detail.value);
+        if (label && value) details.push({ label, value });
+      }
+    }
+    const tone = typeof record8.tone === "string" && TONES.has(record8.tone) ? record8.tone : void 0;
+    seen.add(id);
+    items.push({ sourceId: source.id, sourceLabel: source.label, id, title, details, href: record8.href, tone });
+  }
+  return items;
+}
+async function readCapped(response, limit) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    void response.body?.cancel().catch(() => {
+    });
+    return null;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const text10 = await response.text();
+    return new TextEncoder().encode(text10).length > limit ? null : text10;
+  }
+  const chunks = [];
+  let size = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      void reader.cancel().catch(() => {
+      });
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+async function loadSource(source, fetchImpl, signal, timeoutMs) {
+  if (!isSameOriginPath(source.url)) return null;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) return null;
+  signal?.addEventListener("abort", abort, { once: true });
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+  const read = (async () => {
+    try {
+      const response = await fetchImpl(source.url, {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {
+        });
+        return null;
+      }
+      const text10 = await readCapped(response, HOST_ATTENTION_LIMITS.responseBytes);
+      return text10 === null ? null : normalizeHostAttention(source, JSON.parse(text10));
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    return await Promise.race([read, timedOut]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+    controller.abort();
+  }
+}
+async function loadHostAttention(sources, fetchImpl, signal, timeoutMs = HOST_ATTENTION_LIMITS.timeoutMs) {
+  const results = await Promise.all(sources.map(async (source) => ({
+    source,
+    items: await loadSource(source, fetchImpl, signal, timeoutMs)
+  })));
+  return {
+    status: "ready",
+    items: results.flatMap((result) => result.items || []),
+    failedSources: results.filter((result) => result.items === null).map((result) => result.source.label)
+  };
+}
+function startHostAttentionPolling(sources, publish, environment, intervalMs = 3e4) {
+  let stopped = false;
+  let current = null;
+  const load = async () => {
+    if (stopped || !environment.visible()) return;
+    current?.abort();
+    const mine = new AbortController();
+    current = mine;
+    const snapshot = await loadHostAttention(sources, environment.fetch, mine.signal);
+    if (!stopped && current === mine) publish(snapshot);
+  };
+  void load();
+  const timer = environment.setInterval(() => void load(), intervalMs);
+  const stopVisible = environment.onVisible(() => void load());
+  return () => {
+    stopped = true;
+    current?.abort();
+    environment.clearInterval(timer);
+    stopVisible();
+  };
+}
+
 // ../packages/console-core/src/send-attempt.ts
 var nonemptyString = (value) => typeof value === "string" && value.trim().length > 0;
 function createConsoleSendAttempt(input) {
@@ -25823,8 +26002,8 @@ var NEUTRAL_HOST = "the server";
 function hostOf(names) {
   return names.host?.trim() || NEUTRAL_HOST;
 }
-function capitalize(text9) {
-  return text9.charAt(0).toUpperCase() + text9.slice(1);
+function capitalize(text10) {
+  return text10.charAt(0).toUpperCase() + text10.slice(1);
 }
 function consoleCannotReachHost(names) {
   return "Couldn't reach ".concat(hostOf(names), " (offline or signed out).");
@@ -26029,12 +26208,12 @@ function clsx() {
 var clsx_default = clsx;
 
 // ../packages/console-components/src/shared.ts
-function fallbackCopyTextToClipboard(text9) {
+function fallbackCopyTextToClipboard(text10) {
   if (typeof document === "undefined" || !document.body || typeof document.execCommand !== "function") {
     return false;
   }
   const textarea = document.createElement("textarea");
-  textarea.value = text9;
+  textarea.value = text10;
   textarea.setAttribute("readonly", "true");
   textarea.style.position = "fixed";
   textarea.style.top = "0";
@@ -26060,18 +26239,18 @@ function fallbackCopyTextToClipboard(text9) {
   }
   return copied;
 }
-async function copyTextToClipboard(text9) {
-  if (!text9.trim()) {
+async function copyTextToClipboard(text10) {
+  if (!text10.trim()) {
     return false;
   }
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(text9);
+      await navigator.clipboard.writeText(text10);
       return true;
     } catch {
     }
   }
-  return fallbackCopyTextToClipboard(text9);
+  return fallbackCopyTextToClipboard(text10);
 }
 
 // ../packages/console-components/src/activity/console-activity-rail.tsx
@@ -26110,7 +26289,7 @@ function CopyGlyph({ state = "idle" }) {
 // ../packages/console-components/src/copy-button.tsx
 var import_jsx_runtime5 = require("react/jsx-runtime");
 function CopyButton({
-  text: text9,
+  text: text10,
   label,
   copiedLabel = "Copied",
   className,
@@ -26118,7 +26297,7 @@ function CopyButton({
 }) {
   const [copied, setCopied] = (0, import_react3.useState)(false);
   const resetTimerRef = (0, import_react3.useRef)(null);
-  const disabled = !text9.trim();
+  const disabled = !text10.trim();
   (0, import_react3.useEffect)(() => () => {
     if (resetTimerRef.current != null) {
       window.clearTimeout(resetTimerRef.current);
@@ -26128,7 +26307,7 @@ function CopyButton({
     if (disabled) {
       return;
     }
-    const wasCopied = await copyTextToClipboard(text9);
+    const wasCopied = await copyTextToClipboard(text10);
     if (!wasCopied) {
       return;
     }
@@ -26180,10 +26359,10 @@ function readConsoleQuoteSelection(root4, selection) {
   for (const node2 of excluded) {
     if (range.intersectsNode(node2)) return { kind: "rejected", message: "Select only the message text, without tool controls or metadata." };
   }
-  const text9 = selection.toString();
+  const text10 = selection.toString();
   const messageId = start2.dataset.quoteMessageId;
-  if (!text9.trim() || !messageId) return { kind: "empty" };
-  return { kind: "selected", quote: { text: text9, messageId, sourceText: start2.dataset.quoteSource } };
+  if (!text10.trim() || !messageId) return { kind: "empty" };
+  return { kind: "selected", quote: { text: text10, messageId, sourceText: start2.dataset.quoteSource } };
 }
 
 // ../packages/console-components/src/conversation/quote-selection-action.tsx
@@ -26274,6 +26453,9 @@ function JumpToLatest({ onClick, working = false }) {
     }
   ) });
 }
+
+// ../packages/console-components/src/conversation/approval-card.tsx
+var React3 = __toESM(require("react"));
 
 // ../packages/console-components/src/conversation/presentation-policy.tsx
 var import_react5 = require("react");
@@ -26401,10 +26583,16 @@ function CompletedToolDisclosure({ blocks, children }) {
 // ../packages/console-components/src/conversation/approval-card.tsx
 var import_jsx_runtime11 = require("react/jsx-runtime");
 var labels = { approve: "Approve", reject: "Reject", escalate: "Escalate" };
-function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onDecide }) {
+var HostDecideSourcesContext = React3.createContext(void 0);
+var HostDecideSourcesProvider = HostDecideSourcesContext.Provider;
+function useHostDecideSources() {
+  return React3.useContext(HostDecideSourcesContext);
+}
+function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }) {
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
   const stale = resourceStatus !== "ready";
+  const hostDecide = readOnly && pending && decideLinks?.length ? decideLinks : null;
   const state = submitting ? "submitting" : decision?.phase === "failed" ? "failed" : request.status === "expired" ? "expired" : !pending ? "settled" : stale ? "stale" : decision?.phase === "unavailable" ? "unavailable" : "pending";
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("article", { className: "cc-approval", "data-state": state, "data-testid": "gating-pending:".concat(request.pendingId), children: [
     /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("header", { className: "cc-approval__header", children: [
@@ -26464,19 +26652,42 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onD
       "Escalated to ",
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("code", { children: decision.result.next_pending_id })
     ] }) : null,
-    readOnly ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("p", { children: "Read-only access" }) : null,
+    readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("p", { children: "Read-only access" }) : null,
     resourceStatus === "forbidden" ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("p", { children: "Approval access denied" }) : null,
-    pending ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "cc-approval__actions", children: request.actions.map((action) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", disabled: readOnly || stale || submitting, "data-action": action, "data-testid": "gating-action:".concat(request.pendingId, ":").concat(action), onClick: () => {
+    hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "cc-approval__actions", children: hostDecide.map((link3) => /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("a", { className: "cc-host-attention__open", href: link3.href, target: "_top", "aria-label": "Decide in ".concat(link3.label, ": ").concat(request.action), "data-testid": "gating-decide-link:".concat(request.pendingId, ":").concat(link3.sourceId), children: [
+      "Decide in ",
+      link3.label
+    ] }, link3.sourceId)) }) : pending ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "cc-approval__actions", children: request.actions.map((action) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", disabled: readOnly || stale || submitting, "data-action": action, "data-testid": "gating-action:".concat(request.pendingId, ":").concat(action), onClick: () => {
       void onDecide(request.pendingId, action);
     }, children: labels[action] }, action)) }) : null
   ] });
 }
-function ApprovalAttention({ snapshot, onOpen }) {
-  if (snapshot.status === "forbidden" || snapshot.status === "unsupported") return null;
-  const requests = snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled");
-  const ready = snapshot.status === "ready";
-  const status = ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot.status === "loading" ? "Checking approvals" : snapshot.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
-  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "cc-approval-attention", "aria-label": "Needs you", "data-testid": "approval-attention", "data-state": snapshot.status, "data-pending": ready && requests.length > 0, children: [
+function HostAttentionCard({ item }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("article", { className: "cc-approval cc-host-attention", "data-kind": "host", "data-tone": item.tone || "attention", "data-testid": "host-attention:".concat(item.sourceId, ":").concat(item.id), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("header", { className: "cc-approval__header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("strong", { children: item.title }),
+      item.sourceLabel ? /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "cc-host-attention__source", children: [
+        "From ",
+        item.sourceLabel
+      ] }) : null
+    ] }),
+    item.details.length ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("dl", { className: "cc-approval__scope", children: item.details.map((detail, index2) => /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(React3.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("dt", { children: detail.label }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("dd", { children: detail.value })
+    ] }, "".concat(detail.label, ":").concat(index2))) }) : null,
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "cc-approval__actions", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("a", { className: "cc-host-attention__open", href: item.href, target: "_top", "aria-label": "Open: ".concat(item.title), "data-testid": "host-attention-open:".concat(item.sourceId, ":").concat(item.id), children: "Open" }) })
+  ] });
+}
+function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }) {
+  const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  if (!approvalsShown && hostItems === 0) return null;
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const ready = !approvalsShown || snapshot?.status === "ready";
+  const approvalStatus = !approvalsShown ? "" : ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
+  const hostStatus = hostItems ? "".concat(hostItems, " item").concat(hostItems === 1 ? "" : "s", " from the host") : "";
+  const status = [approvalStatus, hostStatus].filter(Boolean).join(", ");
+  const count = requests.length + hostItems;
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "cc-approval-attention", "aria-label": "Needs you", "data-testid": "approval-attention", "data-state": approvalsShown ? snapshot?.status : "ready", "data-pending": ready && count > 0, children: [
     /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
       "button",
       {
@@ -26491,7 +26702,7 @@ function ApprovalAttention({ snapshot, onOpen }) {
             /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("path", { d: "M2 14h6l2 3h4l2-3h6" })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "cc-approval-attention__label", children: "Needs you" }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "cc-approval-attention__count", "aria-hidden": "true", children: ready ? requests.length : snapshot.status === "loading" ? "..." : "!" }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "cc-approval-attention__count", "aria-hidden": "true", children: ready ? count : snapshot?.status === "loading" ? "..." : "!" }),
           /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("svg", { className: "cc-approval-attention__chevron", viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("path", { d: "m6 4 4 4-4 4" }) })
         ]
       }
@@ -26512,10 +26723,23 @@ function pendingApprovalTurns(turns, { approvalSnapshot, approvalIdentity, conve
   return approvalInteractionIdsByTurn(turns).flatMap((interactionIds, index2) => interactionIds.length > 0 && approvalSnapshot.requests.some((request) => Boolean(request.origin?.interactionId) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds })) ? [index2] : []);
 }
 function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds }) {
+  const decideSources = useHostDecideSources();
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
-  return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(import_jsx_runtime12.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ApprovalCard, { request, resourceStatus: approvalSnapshot.status, decision: approvalSnapshot.decisions[request.pendingId], readOnly: approvalSnapshot.readOnly || !onApprovalDecision, onDecide: onApprovalDecision ?? (() => {
-  }) }, request.pendingId)) });
+  const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(import_jsx_runtime12.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+    ApprovalCard,
+    {
+      request,
+      resourceStatus: approvalSnapshot.status,
+      decision: approvalSnapshot.decisions[request.pendingId],
+      readOnly,
+      decideLinks: readOnly ? hostDecideLinks(decideSources, request.pendingId) : void 0,
+      onDecide: onApprovalDecision ?? (() => {
+      })
+    },
+    request.pendingId
+  )) });
 }
 
 // ../packages/console-components/src/conversation/conversation-pane.tsx
@@ -28512,7 +28736,7 @@ function one(state, node2, key) {
     return root(state, node2, key);
   }
   if (node2.type === "text") {
-    return text3(state, node2);
+    return text4(state, node2);
   }
 }
 function element(state, node2, key) {
@@ -28580,7 +28804,7 @@ function root(state, node2, key) {
   addChildren(props, createChildren(state, node2));
   return state.create(node2, state.Fragment, props, key);
 }
-function text3(_2, node2) {
+function text4(_2, node2) {
   return node2.value;
 }
 function addNode(state, props, type, node2) {
@@ -29353,7 +29577,7 @@ function resolveAllAttention(events, context) {
   let index2 = -1;
   let open;
   let group;
-  let text9;
+  let text10;
   let openingSequence;
   let closingSequence;
   let use;
@@ -29391,7 +29615,7 @@ function resolveAllAttention(events, context) {
             },
             end
           };
-          text9 = {
+          text10 = {
             type: use > 1 ? "strongText" : "emphasisText",
             start: {
               ...events[open][1].end
@@ -29419,9 +29643,9 @@ function resolveAllAttention(events, context) {
           if (events[open][1].end.offset - events[open][1].start.offset) {
             nextEvents = push(nextEvents, [["enter", events[open][1], context], ["exit", events[open][1], context]]);
           }
-          nextEvents = push(nextEvents, [["enter", group, context], ["enter", openingSequence, context], ["exit", openingSequence, context], ["enter", text9, context]]);
+          nextEvents = push(nextEvents, [["enter", group, context], ["enter", openingSequence, context], ["exit", openingSequence, context], ["enter", text10, context]]);
           nextEvents = push(nextEvents, resolveAll(context.parser.constructs.insideSpan.null, events.slice(open + 1, index2), context));
-          nextEvents = push(nextEvents, [["exit", text9, context], ["enter", closingSequence, context], ["exit", closingSequence, context], ["exit", group, context]]);
+          nextEvents = push(nextEvents, [["exit", text10, context], ["enter", closingSequence, context], ["exit", closingSequence, context], ["exit", group, context]]);
           if (events[index2][1].end.offset - events[index2][1].start.offset) {
             offset = 2;
             nextEvents = push(nextEvents, [["enter", events[index2][1], context], ["exit", events[index2][1], context]]);
@@ -30869,7 +31093,7 @@ function resolveHeadingAtx(events, context) {
   let contentEnd = events.length - 2;
   let contentStart = 3;
   let content3;
-  let text9;
+  let text10;
   if (events[contentStart][1].type === "whitespace") {
     contentStart += 2;
   }
@@ -30885,13 +31109,13 @@ function resolveHeadingAtx(events, context) {
       start: events[contentStart][1].start,
       end: events[contentEnd][1].end
     };
-    text9 = {
+    text10 = {
       type: "chunkText",
       start: events[contentStart][1].start,
       end: events[contentEnd][1].end,
       contentType: "text"
     };
-    splice(events, contentStart, contentEnd - contentStart + 1, [["enter", content3, context], ["enter", text9, context], ["exit", text9, context], ["exit", content3, context]]);
+    splice(events, contentStart, contentEnd - contentStart + 1, [["enter", content3, context], ["enter", text10, context], ["exit", text10, context], ["exit", content3, context]]);
   }
   return events;
 }
@@ -31781,7 +32005,7 @@ function resolveToLabelEnd(events, context) {
       ...events[close][1].end
     }
   };
-  const text9 = {
+  const text10 = {
     type: "labelText",
     start: {
       ...events[open + offset + 2][1].end
@@ -31792,9 +32016,9 @@ function resolveToLabelEnd(events, context) {
   };
   media = [["enter", group, context], ["enter", label, context]];
   media = push(media, events.slice(open + 1, open + offset + 3));
-  media = push(media, [["enter", text9, context]]);
+  media = push(media, [["enter", text10, context]]);
   media = push(media, resolveAll(context.parser.constructs.insideSpan.null, events.slice(open + offset + 4, close - 3), context));
-  media = push(media, [["exit", text9, context], events[close - 2], events[close - 1], ["exit", label, context]]);
+  media = push(media, [["exit", text10, context], events[close - 2], events[close - 1], ["exit", label, context]]);
   media = push(media, events.slice(close + 1));
   media = push(media, [["exit", group, context]]);
   splice(events, open, events.length, media);
@@ -32174,7 +32398,7 @@ var setextUnderline = {
 function resolveToSetextUnderline(events, context) {
   let index2 = events.length;
   let content3;
-  let text9;
+  let text10;
   let definition3;
   while (index2--) {
     if (events[index2][0] === "enter") {
@@ -32183,7 +32407,7 @@ function resolveToSetextUnderline(events, context) {
         break;
       }
       if (events[index2][1].type === "paragraph") {
-        text9 = index2;
+        text10 = index2;
       }
     } else {
       if (events[index2][1].type === "content") {
@@ -32203,9 +32427,9 @@ function resolveToSetextUnderline(events, context) {
       ...events[events.length - 1][1].end
     }
   };
-  events[text9][1].type = "setextHeadingText";
+  events[text10][1].type = "setextHeadingText";
   if (definition3) {
-    events.splice(text9, 0, ["enter", heading3, context]);
+    events.splice(text10, 0, ["enter", heading3, context]);
     events.splice(definition3 + 1, 0, ["exit", events[content3][1], context]);
     events[content3][1].end = {
       ...events[definition3][1].end
@@ -32300,7 +32524,7 @@ var resolver = {
   resolveAll: createResolver()
 };
 var string5 = initializeFactory("string");
-var text4 = initializeFactory("text");
+var text5 = initializeFactory("text");
 function initializeFactory(field) {
   return {
     resolveAll: createResolver(field === "text" ? resolveAllLineSuffixes : void 0),
@@ -32309,10 +32533,10 @@ function initializeFactory(field) {
   function initializeText(effects) {
     const self2 = this;
     const constructs2 = this.parser.constructs[field];
-    const text9 = effects.attempt(constructs2, start2, notText);
+    const text10 = effects.attempt(constructs2, start2, notText);
     return start2;
     function start2(code4) {
-      return atBreak(code4) ? text9(code4) : notText(code4);
+      return atBreak(code4) ? text10(code4) : notText(code4);
     }
     function notText(code4) {
       if (code4 === null) {
@@ -32326,7 +32550,7 @@ function initializeFactory(field) {
     function data(code4) {
       if (atBreak(code4)) {
         effects.exit("data");
-        return text9(code4);
+        return text10(code4);
       }
       effects.consume(code4);
       return data;
@@ -32445,7 +32669,7 @@ __export(constructs_exports, {
   flowInitial: () => flowInitial,
   insideSpan: () => insideSpan,
   string: () => string6,
-  text: () => text5
+  text: () => text6
 });
 var document3 = {
   [42]: list,
@@ -32485,7 +32709,7 @@ var string6 = {
   [38]: characterReference,
   [92]: characterEscape
 };
-var text5 = {
+var text6 = {
   [-5]: lineEnding,
   [-4]: lineEnding,
   [-3]: lineEnding,
@@ -32847,7 +33071,7 @@ function parse4(options) {
     flow: create2(flow),
     lazy: {},
     string: create2(string5),
-    text: create2(text4)
+    text: create2(text5)
   };
   return parser;
   function create2(initial) {
@@ -33348,7 +33572,7 @@ function compiler(options) {
     const siblings = node2.children;
     let tail = siblings[siblings.length - 1];
     if (!tail || tail.type !== "text") {
-      tail = text9();
+      tail = text10();
       tail.position = {
         start: point3(token.start),
         // @ts-expect-error: we’ll add `end` later.
@@ -33593,7 +33817,7 @@ function compiler(options) {
       children: []
     };
   }
-  function text9() {
+  function text10() {
     return {
       type: "text",
       value: ""
@@ -33876,13 +34100,13 @@ function image(state, node2) {
 
 // node_modules/mdast-util-to-hast/lib/handlers/inline-code.js
 function inlineCode(state, node2) {
-  const text9 = { type: "text", value: node2.value.replace(/\r?\n|\r/g, " ") };
-  state.patch(node2, text9);
+  const text10 = { type: "text", value: node2.value.replace(/\r?\n|\r/g, " ") };
+  state.patch(node2, text10);
   const result = {
     type: "element",
     tagName: "code",
     properties: {},
-    children: [text9]
+    children: [text10]
   };
   state.patch(node2, result);
   return state.applyData(node2, result);
@@ -34169,7 +34393,7 @@ function trimLine(value, start2, end) {
 }
 
 // node_modules/mdast-util-to-hast/lib/handlers/text.js
-function text6(state, node2) {
+function text7(state, node2) {
   const result = { type: "text", value: trimLines(String(node2.value)) };
   state.patch(node2, result);
   return state.applyData(node2, result);
@@ -34211,7 +34435,7 @@ var handlers = {
   table,
   tableCell,
   tableRow,
-  text: text6,
+  text: text7,
   thematicBreak: thematicBreak2,
   toml: ignore,
   yaml: ignore,
@@ -37785,12 +38009,12 @@ function linkReference2(node2, _2, state, info) {
   let subexit = state.enter("label");
   const tracker = state.createTracker(info);
   let value = tracker.move("[");
-  const text9 = state.containerPhrasing(node2, {
+  const text10 = state.containerPhrasing(node2, {
     before: value,
     after: "]",
     ...tracker.current()
   });
-  value += tracker.move(text9 + "][");
+  value += tracker.move(text10 + "][");
   subexit();
   const stack = state.stack;
   state.stack = [];
@@ -37803,7 +38027,7 @@ function linkReference2(node2, _2, state, info) {
   subexit();
   state.stack = stack;
   exit3();
-  if (type === "full" || !text9 || text9 !== reference) {
+  if (type === "full" || !text10 || text10 !== reference) {
     value += tracker.move(reference + "]");
   } else if (type === "shortcut") {
     value = value.slice(0, -1);
@@ -38048,7 +38272,7 @@ function strongPeek(_2, _1, state) {
 }
 
 // node_modules/mdast-util-to-markdown/lib/handle/text.js
-function text7(node2, _2, state, info) {
+function text8(node2, _2, state, info) {
   return state.safe(node2.value, info);
 }
 
@@ -38089,7 +38313,7 @@ var handle = {
   paragraph: paragraph2,
   root: root3,
   strong: strong2,
-  text: text7,
+  text: text8,
   thematicBreak: thematicBreak3
 };
 
@@ -38377,27 +38601,27 @@ var emailAutolink = {
   tokenize: tokenizeEmailAutolink,
   previous: previousEmail
 };
-var text8 = {};
+var text9 = {};
 function gfmAutolinkLiteral() {
   return {
-    text: text8
+    text: text9
   };
 }
 var code3 = 48;
 while (code3 < 123) {
-  text8[code3] = emailAutolink;
+  text9[code3] = emailAutolink;
   code3++;
   if (code3 === 58) code3 = 65;
   else if (code3 === 91) code3 = 97;
 }
-text8[43] = emailAutolink;
-text8[45] = emailAutolink;
-text8[46] = emailAutolink;
-text8[95] = emailAutolink;
-text8[72] = [emailAutolink, protocolAutolink];
-text8[104] = [emailAutolink, protocolAutolink];
-text8[87] = [emailAutolink, wwwAutolink];
-text8[119] = [emailAutolink, wwwAutolink];
+text9[43] = emailAutolink;
+text9[45] = emailAutolink;
+text9[46] = emailAutolink;
+text9[95] = emailAutolink;
+text9[72] = [emailAutolink, protocolAutolink];
+text9[104] = [emailAutolink, protocolAutolink];
+text9[87] = [emailAutolink, wwwAutolink];
+text9[119] = [emailAutolink, wwwAutolink];
 function tokenizeEmailAutolink(effects, ok3, nok) {
   const self2 = this;
   let dot;
@@ -38996,17 +39220,17 @@ function gfmStrikethrough(options) {
               start: Object.assign({}, events[open][1].start),
               end: Object.assign({}, events[index2][1].end)
             };
-            const text9 = {
+            const text10 = {
               type: "strikethroughText",
               start: Object.assign({}, events[open][1].end),
               end: Object.assign({}, events[index2][1].start)
             };
-            const nextEvents = [["enter", strikethrough2, context], ["enter", events[open][1], context], ["exit", events[open][1], context], ["enter", text9, context]];
+            const nextEvents = [["enter", strikethrough2, context], ["enter", events[open][1], context], ["exit", events[open][1], context], ["enter", text10, context]];
             const insideSpan2 = context.parser.constructs.insideSpan.null;
             if (insideSpan2) {
               splice(nextEvents, nextEvents.length, 0, resolveAll(insideSpan2, events.slice(open + 1, index2), context));
             }
-            splice(nextEvents, nextEvents.length, 0, [["exit", text9, context], ["enter", events[index2][1], context], ["exit", events[index2][1], context], ["exit", strikethrough2, context]]);
+            splice(nextEvents, nextEvents.length, 0, [["exit", text10, context], ["enter", events[index2][1], context], ["exit", events[index2][1], context], ["exit", strikethrough2, context]]);
             splice(events, open - 1, index2 - open + 3, nextEvents);
             index2 = open + nextEvents.length - 2;
             break;
@@ -39881,8 +40105,8 @@ function ChangeStatPair({
 
 // ../packages/console-components/src/conversation/conversation-rich-content.tsx
 var import_jsx_runtime17 = require("react/jsx-runtime");
-function markdownHtml(text9, displayNormalization = true) {
-  return { __html: renderConversationInlineMarkdown(text9, { displayNormalization }) };
+function markdownHtml(text10, displayNormalization = true) {
+  return { __html: renderConversationInlineMarkdown(text10, { displayNormalization }) };
 }
 function commandCopyText(block) {
   return [block.title, block.body, block.output || "", block.footer || ""].filter(Boolean).join("\n").trim();
@@ -40121,17 +40345,17 @@ function renderBlock(block, index2, Icon2, displayNormalization = true, markdown
   return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ThinkingBlock, { block, index: index2, displayNormalization }) }, "thinking-".concat(index2));
 }
 var PEER_TOOL_NAMES = /* @__PURE__ */ new Set(["send_request", "send_message", "send_response"]);
-function formatJsonIfPossible(text9) {
-  const trimmed = text9.trim();
-  if (!trimmed) return text9;
+function formatJsonIfPossible(text10) {
+  const trimmed = text10.trim();
+  if (!trimmed) return text10;
   if (!(trimmed.startsWith("{") && trimmed.endsWith("}") || trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-    return text9;
+    return text10;
   }
   try {
     const parsed = JSON.parse(trimmed);
     return JSON.stringify(parsed, null, 2);
   } catch {
-    return text9;
+    return text10;
   }
 }
 function toolBlockCopyText(block) {
@@ -40151,8 +40375,8 @@ function toolBlockCopyText(block) {
   if (block.result) parts.push("Result: ".concat(block.result));
   return parts.join("\n");
 }
-function parseObjectJson(text9) {
-  const trimmed = String(text9 || "").trim();
+function parseObjectJson(text10) {
+  const trimmed = String(text10 || "").trim();
   if (!trimmed || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
     return null;
   }
@@ -40173,11 +40397,11 @@ function textFromUnknown2(value) {
   return normalizeConversationDisplayText(JSON.stringify(value, null, 2));
 }
 function meaningfulPeerResult(value) {
-  const text9 = normalizeConversationDisplayText(String(value || "")).trim();
-  if (!text9 || /^(completed|delivered|ok|success)$/i.test(text9)) {
+  const text10 = normalizeConversationDisplayText(String(value || "")).trim();
+  if (!text10 || /^(completed|delivered|ok|success)$/i.test(text10)) {
     return "";
   }
-  return formatJsonIfPossible(text9);
+  return formatJsonIfPossible(text10);
 }
 function peerDetailRows(block) {
   const args = parseObjectJson(block.arguments) || {};
@@ -40196,7 +40420,7 @@ function peerDetailRows(block) {
     result ? { label: "Result", value: result } : null
   ].filter(Boolean);
 }
-function CopyBtn({ text: text9, label = "Copy" }) {
+function CopyBtn({ text: text10, label = "Copy" }) {
   const [outcome, setOutcome] = (0, import_react10.useState)("idle");
   const resetTimer = (0, import_react10.useRef)(null);
   (0, import_react10.useEffect)(
@@ -40216,7 +40440,7 @@ function CopyBtn({ text: text9, label = "Copy" }) {
       "data-copy-outcome": outcome === "idle" ? void 0 : outcome,
       onClick: (e) => {
         e.stopPropagation();
-        void copyTextToClipboard(text9).then((ok3) => {
+        void copyTextToClipboard(text10).then((ok3) => {
           setOutcome(ok3 ? "copied" : "failed");
           if (resetTimer.current) clearTimeout(resetTimer.current);
           resetTimer.current = setTimeout(() => setOutcome("idle"), 1500);
@@ -44104,14 +44328,14 @@ function exchangeRows(result) {
     const outcome = asRecord(row.outcome);
     const rawStatus = outcome ? asString(outcome.status) : void 0;
     const status = rawStatus === "completed" || rawStatus === "failed" ? rawStatus : "pending";
-    const text9 = outcome ? status === "failed" ? asString(outcome.detail) : asString(outcome.text) : void 0;
+    const text10 = outcome ? status === "failed" ? asString(outcome.detail) : asString(outcome.text) : void 0;
     return [{
       round,
       sequence,
       participantOrder: participantOrder ?? 0,
       targetIdentity: asString(row.target_identity) || "",
       status,
-      ...text9 ? { text: text9 } : {},
+      ...text10 ? { text: text10 } : {},
       ...outcome && outcome.truncated === true ? { truncated: true } : {}
     }];
   });
@@ -44693,11 +44917,11 @@ var HIDDEN_EVENTS2 = /* @__PURE__ */ new Set([
   "tool_scope_changed"
 ]);
 function appendDistinctText(parts, value) {
-  const text9 = value.trim();
-  if (!text9) return;
-  const comparable = normalizeComparableText(text9);
+  const text10 = value.trim();
+  if (!text10) return;
+  const comparable = normalizeComparableText(text10);
   if (parts.some((part) => normalizeComparableText(part) === comparable)) return;
-  parts.push(text9);
+  parts.push(text10);
 }
 function textFromReasoningValue(value) {
   if (typeof value === "string") return value.trim();
@@ -44932,8 +45156,8 @@ function parseToolResult(frame, blobBaseUrl) {
   const completionEvidence = toolCompletionFromFrame(frame, parseToolCallId(frame) || "");
   const status = completionEvidence.outcome === "success" ? "success" : completionEvidence.outcome === "error" ? "error" : "pending";
   const feedback = operationFeedbackFromFrame(frame);
-  const { text: text9, images } = toolResultTextAndImages(record8, blobBaseUrl);
-  const result = feedback ? feedback.detail : text9;
+  const { text: text10, images } = toolResultTextAndImages(record8, blobBaseUrl);
+  const result = feedback ? feedback.detail : text10;
   return {
     ...result !== void 0 ? { result } : {},
     ...images.length > 0 ? { images } : {},
@@ -45767,8 +45991,8 @@ function createWorkGraphHydrationGate() {
     }
   };
 }
-function parsePeerSummary(text9) {
-  const match = text9.match(/Peer\s+(response|request|message):\s*(.+?)(?:\s*Status:\s|$)/s);
+function parsePeerSummary(text10) {
+  const match = text10.match(/Peer\s+(response|request|message):\s*(.+?)(?:\s*Status:\s|$)/s);
   if (!match) return null;
   const [, verb, body] = match;
   let summary = body.trim();
@@ -45803,9 +46027,9 @@ function renderTerminalEntry(agent, frame, entryId, streamedText = "", textMode 
   if (frame.event === "interaction_complete" || frame.event === "run_completed" || frame.event === "text_complete") {
     if (isSteerDeliveryTerminalFrame(frame)) return null;
     const source = terminalFrameVisibleText(frame);
-    const text9 = textMode === "markdown" ? source : source.trim();
-    if (!text9) return null;
-    const peer = parsePeerSummary(text9);
+    const text10 = textMode === "markdown" ? source : source.trim();
+    if (!text10) return null;
+    const peer = parsePeerSummary(text10);
     if (peer) {
       return {
         kind: "message",
@@ -45816,30 +46040,30 @@ function renderTerminalEntry(agent, frame, entryId, streamedText = "", textMode 
         text: "\u21A9 ".concat(peer.verb, ": ").concat(peer.summary)
       };
     }
-    if (streamedTextMatchesTerminal(streamedText, text9)) {
+    if (streamedTextMatchesTerminal(streamedText, text10)) {
       return null;
     }
-    const blocks = messageTextBlocks(text9, textMode);
+    const blocks = messageTextBlocks(text10, textMode);
     return {
       kind: "message",
       id: entryId,
       identity: agentIdentity(agent),
       variant: blocks.length > 0 ? "rich" : "plain",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      ...blocks.length > 0 ? { blocks } : { text: text9 }
+      ...blocks.length > 0 ? { blocks } : { text: text10 }
     };
   }
   if (frame.event === "interaction_failed" || frame.event === "run_failed") {
     const runtimeEvent = runtimeEventFromFrame(frame.event, frame.data);
     const detail = describeFailure(frame.data, "");
-    const text9 = detail ? "".concat(humanizeRuntimeEventType(frame.event), ": ").concat(detail) : runtimeEventText(runtimeEvent);
+    const text10 = detail ? "".concat(humanizeRuntimeEventType(frame.event), ": ").concat(detail) : runtimeEventText(runtimeEvent);
     return {
       kind: "message",
       id: entryId,
       identity: SYSTEM_IDENTITY,
       variant: "meta",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      text: text9,
+      text: text10,
       runtimeEvent
     };
   }
@@ -45924,10 +46148,10 @@ function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
     const key = assistantOwnerKey(frame);
     if (frame.event === "reasoning_complete" && frame.runId?.trim()) {
       const byText = reasoningByOwner.get(key) || /* @__PURE__ */ new Map();
-      const text9 = reasoningFrameText(frame);
-      const completions = byText.get(text9) || [];
+      const text10 = reasoningFrameText(frame);
+      const completions = byText.get(text10) || [];
       completions.push(frame);
-      byText.set(text9, completions);
+      byText.set(text10, completions);
       reasoningByOwner.set(key, byText);
     }
     let current = active.get(key);
@@ -45964,31 +46188,31 @@ function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
   const deltaOverrides = /* @__PURE__ */ new Map();
   for (const history of frames) {
     if (history.sourceKind !== "session_history" || hasAssistantMessageIdCarrier(history) || isRealtimeHistoryMessage(history)) continue;
-    const text9 = historyAssistantSource(history);
-    if (!text9) continue;
+    const text10 = historyAssistantSource(history);
+    if (!text10) continue;
     const key = assistantOwnerKey(history);
     const candidates = byOwner.get(key) || [];
     const occurrence = candidates.find((candidate) => {
       if (consumed.has(candidate) || !candidate.text) return false;
-      if (key === "legacy") return !candidate.owner.runId?.trim() && candidate.text === text9;
+      if (key === "legacy") return !candidate.owner.runId?.trim() && candidate.text === text10;
       if (!sameAssistantRunOwner(history, candidate.owner)) return false;
       if (!history.runId?.trim()) return true;
-      return candidate.text === text9 || !candidate.complete && candidate.frames.length > 0 && text9.startsWith(candidate.text);
+      return candidate.text === text10 || !candidate.complete && candidate.frames.length > 0 && text10.startsWith(candidate.text);
     });
     if (!occurrence) continue;
     consumed.add(occurrence);
     consumedHistory.add(history.id);
-    if (occurrence.text !== text9 && !occurrence.complete && occurrence.frames.length > 0) {
+    if (occurrence.text !== text10 && !occurrence.complete && occurrence.frames.length > 0) {
       const last = occurrence.frames.length - 1;
-      deltaOverrides.set(occurrence.frames[last].id, occurrence.chunks[last] + text9.slice(occurrence.text.length));
+      deltaOverrides.set(occurrence.frames[last].id, occurrence.chunks[last] + text10.slice(occurrence.text.length));
     }
   }
   return {
     consumedHistory,
     deltaOverrides,
-    consumeReasoning: (history, text9) => {
+    consumeReasoning: (history, text10) => {
       if (hasAssistantMessageIdCarrier(history) || isRealtimeHistoryMessage(history)) return false;
-      const candidates = reasoningByOwner.get(assistantOwnerKey(history))?.get(text9) || [];
+      const candidates = reasoningByOwner.get(assistantOwnerKey(history))?.get(text10) || [];
       const completion = candidates.find((live) => !consumedReasoning.has(live.id) && sameAssistantRunOwner(history, live));
       if (!completion) return false;
       consumedReasoning.add(completion.id);
@@ -46184,8 +46408,8 @@ function renderHistoryUserEntry(frame, entryId, blobBaseUrl, textMode = "markdow
     };
   }
   const source = extractTextFromContentBlocks(content3);
-  const text9 = textMode === "markdown" ? source : source.trim();
-  if (!text9) return null;
+  const text10 = textMode === "markdown" ? source : source.trim();
+  if (!text10) return null;
   return {
     kind: "message",
     id: entryId,
@@ -46193,9 +46417,9 @@ function renderHistoryUserEntry(frame, entryId, blobBaseUrl, textMode = "markdow
     ...realtimeOrigin ? { realtimeOrigin } : {},
     ...frame.interactionId ? { interactionId: frame.interactionId } : {},
     variant: textMode === "markdown" ? "rich" : "plain",
-    ...textMode === "markdown" ? { blocks: messageTextBlocks(text9, textMode) } : {},
+    ...textMode === "markdown" ? { blocks: messageTextBlocks(text10, textMode) } : {},
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    text: text9,
+    text: text10,
     ...origin ? { origin } : {}
   };
 }
@@ -46340,8 +46564,8 @@ function contentToUserBlocks(content3, blobBaseUrl, textMode = "markdown") {
     const record8 = block;
     const type = typeof record8.type === "string" ? record8.type : "";
     if (type === "text") {
-      const text9 = typeof record8.text === "string" ? record8.text : typeof record8.content === "string" ? record8.content : "";
-      blocks.push(...messageTextBlocks(text9, textMode));
+      const text10 = typeof record8.text === "string" ? record8.text : typeof record8.content === "string" ? record8.content : "";
+      blocks.push(...messageTextBlocks(text10, textMode));
       continue;
     }
     if (type === "image" || type === "image_ref") {
@@ -46463,8 +46687,8 @@ function toolResultTextAndImages(record8, blobBaseUrl) {
   const split = splitToolResultImages(carrier2, blobBaseUrl);
   const images = split.images.length > 0 || carrier2 === record8?.content ? split.images : splitToolResultImages(record8?.content, blobBaseUrl).images;
   const residualEmpty = split.images.length > 0 && Array.isArray(split.residual) && split.residual.length === 0;
-  const text9 = residualEmpty ? void 0 : toolResultTextFromContent(split.residual);
-  return { ...text9 !== void 0 ? { text: text9 } : {}, images };
+  const text10 = residualEmpty ? void 0 : toolResultTextFromContent(split.residual);
+  return { ...text10 !== void 0 ? { text: text10 } : {}, images };
 }
 function toolResultTextFromContent(content3) {
   if (typeof content3 === "string") return content3;
@@ -46489,8 +46713,8 @@ function historyToolResults(frames, cardToolCallIds, includeLive = false, blobBa
     const toolCallId = typeof data?.tool_call_id === "string" && data.tool_call_id.trim() ? data.tool_call_id.trim() : typeof data?.id === "string" && data.id.trim() ? data.id.trim() : "";
     if (!toolCallId) continue;
     const feedback = operationFeedbackFromFrame(frame);
-    const { text: text9, images } = toolResultTextAndImages(data, blobBaseUrl);
-    const result = feedback ? feedback.detail : text9;
+    const { text: text10, images } = toolResultTextAndImages(data, blobBaseUrl);
+    const result = feedback ? feedback.detail : text10;
     const completionEvidence = toolCompletionFromFrame(frame, toolCallId);
     const status = completionEvidence.outcome === "success" ? "success" : completionEvidence.outcome === "error" ? "error" : "pending";
     const next = {
@@ -46555,13 +46779,13 @@ function blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode = 
     const blockType = typeof item.block_type === "string" ? item.block_type : typeof item.type === "string" ? item.type : "";
     const data = item.data && typeof item.data === "object" ? item.data : {};
     if (blockType === "reasoning") {
-      const text9 = reasoningBlockText(item);
-      if (text9) {
+      const text10 = reasoningBlockText(item);
+      if (text10) {
         hasNonTextBlock = true;
         actionAndTextBlocks.push({
           type: "thinking",
           label: "",
-          text: text9,
+          text: text10,
           final: true,
           persisted: true
         });
@@ -46603,13 +46827,13 @@ function blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode = 
       continue;
     }
     if (blockType === "text" || blockType === "transcript") {
-      const text9 = typeof data.text === "string" ? data.text : typeof item.text === "string" ? item.text : "";
-      if (textMode === "markdown" && text9) {
+      const text10 = typeof data.text === "string" ? data.text : typeof item.text === "string" ? item.text : "";
+      if (textMode === "markdown" && text10) {
         const previous3 = actionAndTextBlocks.at(-1);
-        if (previous3?.type === "markdown") previous3.source += text9;
-        else actionAndTextBlocks.push(...messageTextBlocks(text9, textMode));
-      } else if (textMode !== "markdown" && text9.trim()) {
-        actionAndTextBlocks.push(...messageTextBlocks(text9, textMode));
+        if (previous3?.type === "markdown") previous3.source += text10;
+        else actionAndTextBlocks.push(...messageTextBlocks(text10, textMode));
+      } else if (textMode !== "markdown" && text10.trim()) {
+        actionAndTextBlocks.push(...messageTextBlocks(text10, textMode));
       }
     }
   }
@@ -46639,17 +46863,17 @@ function typedCommsStableBodyText(block) {
   ].filter(Boolean);
   return parts.join("\n");
 }
-function stripCommsIntentBodyPrefix(text9, peerAliases = []) {
-  const match = text9.match(/^\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]\n]+)\]\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i) || text9.match(/^\s*Peer\s+(?:message|request|response)\s+from\s+(.+):\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
+function stripCommsIntentBodyPrefix(text10, peerAliases = []) {
+  const match = text10.match(/^\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]\n]+)\]\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i) || text10.match(/^\s*Peer\s+(?:message|request|response)\s+from\s+(.+):\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
   if (match?.[1] && peerAliases.length > 0) {
     const peer = normalizePeerAlias(match[1]);
-    if (!peerAliases.includes(peer)) return text9.trim();
+    if (!peerAliases.includes(peer)) return text10.trim();
   }
-  return (match?.[2] || text9).trim();
+  return (match?.[2] || text10).trim();
 }
-function stripBareCommsIntentBodyPrefix(text9) {
-  const match = text9.match(/^\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
-  return (match?.[1] || text9).trim();
+function stripBareCommsIntentBodyPrefix(text10) {
+  const match = text10.match(/^\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
+  return (match?.[1] || text10).trim();
 }
 function isExternalEventOnlySystemNotice2(message) {
   if (!message || typeof message !== "object") return false;
@@ -46719,19 +46943,19 @@ function legacyPeerNoticeTextCandidates2(record8) {
   }
   return candidates;
 }
-function isLegacyPeerNoticeText2(text9) {
-  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text9.trim());
+function isLegacyPeerNoticeText2(text10) {
+  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text10.trim());
 }
-function isCommsLikeRunStartedPrompt(text9) {
-  const trimmed = text9.trim();
+function isCommsLikeRunStartedPrompt(text10) {
+  const trimmed = text10.trim();
   return /(^|\n)\s*Peer (?:message|request|response)(?:\s+from\b|$)/i.test(trimmed) || /(^|\n)\s*\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b/i.test(trimmed);
 }
 var PEER_ENVELOPE_LINE_RE = /^Peer\s+(?:message|request|response)\s+from\s+(.+):(.*)$/i;
 var PEER_TRANSPORT_SCAFFOLD_START_RE = /Peer\s+request\s+from\s+peer_id\s/i;
 var PEER_TRANSPORT_SCAFFOLD_SPAN_RE = /Peer\s+request\s+from\s+peer_id\s[\s\S]*?(?:Do not answer this request with send_message\.|Do not use send_message for this reply\.)/gi;
-function stripPeerTransportScaffold(text9) {
-  if (!text9 || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text9)) return text9;
-  let scrubbed = text9.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
+function stripPeerTransportScaffold(text10) {
+  if (!text10 || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text10)) return text10;
+  let scrubbed = text10.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
   const residualIndex = scrubbed.search(PEER_TRANSPORT_SCAFFOLD_START_RE);
   if (residualIndex >= 0) scrubbed = scrubbed.slice(0, residualIndex);
   return scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -46739,8 +46963,8 @@ function stripPeerTransportScaffold(text9) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function stripPeerEnvelopeByAlias(text9, peerAliases) {
-  const normalized = text9.replace(/\r/g, "\n").trim();
+function stripPeerEnvelopeByAlias(text10, peerAliases) {
+  const normalized = text10.replace(/\r/g, "\n").trim();
   const aliases = [...peerAliases].filter(Boolean).sort((a, b2) => b2.length - a.length);
   for (const alias of aliases) {
     const escaped = escapeRegExp(alias);
@@ -46788,12 +47012,12 @@ function isPeerEnvelopeScaffoldLine(line, peerAliases = [], allowStandaloneScaff
 function isImagePlaceholderLine(line) {
   return /^\[image:\s*[^\]]+\]$/i.test(line.trim());
 }
-function normalizePeerEnvelopeText(text9, peerAliases = []) {
+function normalizePeerEnvelopeText(text10, peerAliases = []) {
   const allowGenericEnvelopeStrip = peerAliases.length === 0;
-  const intentBodyStripped = stripCommsIntentBodyPrefix(text9, peerAliases);
-  const envelopeStripped = intentBodyStripped === text9.trim() ? stripPeerEnvelopeByAlias(text9, peerAliases) : null;
-  const aliasStripped = envelopeStripped ?? (intentBodyStripped === text9.trim() ? null : intentBodyStripped);
-  let normalized = (envelopeStripped !== null ? stripBareCommsIntentBodyPrefix(envelopeStripped) : aliasStripped ?? text9).replace(/\r/g, "\n").split("\n").map((line) => line.trim()).filter((line) => {
+  const intentBodyStripped = stripCommsIntentBodyPrefix(text10, peerAliases);
+  const envelopeStripped = intentBodyStripped === text10.trim() ? stripPeerEnvelopeByAlias(text10, peerAliases) : null;
+  const aliasStripped = envelopeStripped ?? (intentBodyStripped === text10.trim() ? null : intentBodyStripped);
+  let normalized = (envelopeStripped !== null ? stripBareCommsIntentBodyPrefix(envelopeStripped) : aliasStripped ?? text10).replace(/\r/g, "\n").split("\n").map((line) => line.trim()).filter((line) => {
     if (isPeerEnvelopeScaffoldLine(
       line,
       peerAliases,
@@ -46808,8 +47032,8 @@ function normalizePeerEnvelopeText(text9, peerAliases = []) {
   }
   return normalized.replace(/\s+/g, " ").trim();
 }
-function normalizeStructuredCommsBodyText(text9, peerAliases = []) {
-  const trimmed = text9.trim();
+function normalizeStructuredCommsBodyText(text10, peerAliases = []) {
+  const trimmed = text10.trim();
   if (trimmed) {
     const stripped = stripPeerEnvelopeByAlias(trimmed, peerAliases);
     if (stripped !== null) return stripped.replace(/\s+/g, " ").trim();
@@ -46819,8 +47043,8 @@ function normalizeStructuredCommsBodyText(text9, peerAliases = []) {
 function normalizePeerAlias(value) {
   return value.trim().toLowerCase();
 }
-function peerFromCommsText(text9) {
-  const trimmed = text9.trim();
+function peerFromCommsText(text10) {
+  const trimmed = text10.trim();
   const peerLine = trimmed.match(/(?:^|\n)\s*Peer\s+(?:message|request|response)\s+from\s+(.+):(?:[^\n]*)/i);
   if (peerLine?.[1]) return normalizePeerAlias(peerLine[1]);
   const bracketed = trimmed.match(/(?:^|\n)\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]]+)\]/i);
@@ -46836,8 +47060,8 @@ function normalizedPeerAliases(...values) {
   }
   return aliases;
 }
-function commsKindFromText(text9) {
-  const match = text9.trim().match(/(?:^|\n)\s*Peer\s+(message|request|response)\s+from\s+/i) || text9.trim().match(/(?:^|\n)\s*\[COMMS\s+(MESSAGE|REQUEST|RESPONSE)\s+from\s+/i);
+function commsKindFromText(text10) {
+  const match = text10.trim().match(/(?:^|\n)\s*Peer\s+(message|request|response)\s+from\s+/i) || text10.trim().match(/(?:^|\n)\s*\[COMMS\s+(MESSAGE|REQUEST|RESPONSE)\s+from\s+/i);
   return match?.[1]?.toLowerCase() || "";
 }
 function systemNoticeCommsSignatures(frame) {
@@ -47226,8 +47450,8 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
     if (type === "tool_config" || type === "mcp") {
       const payload = record8.payload && typeof record8.payload === "object" ? record8.payload : record8;
       const label = type === "mcp" ? "MCP" : "Tool config";
-      const text9 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record8) || label;
-      rich.push({ type: "divider", text: text9 });
+      const text10 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record8) || label;
+      rich.push({ type: "divider", text: text10 });
       continue;
     }
     if (type === "background_job" && typeof record8.job_id === "string" && record8.job_id.trim() && typeof record8.status === "string" && record8.status.trim()) {
@@ -47242,8 +47466,8 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
       continue;
     }
     if (type === "background_job" || type === "auth" || type === "runtime_notice") {
-      const text9 = typedNoticeBlockText2(record8) || type.replace(/_/g, " ");
-      rich.push({ type: "paragraph", text: text9 });
+      const text10 = typedNoticeBlockText2(record8) || type.replace(/_/g, " ");
+      rich.push({ type: "paragraph", text: text10 });
       continue;
     }
     const contentBlocks = typedNoticeContentBlocks(record8.content, blobBaseUrl);
@@ -47266,8 +47490,8 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
   const role = typeof record8.role === "string" ? record8.role : null;
   switch (role) {
     case "user": {
-      const text9 = extractTextFromContentBlocks(record8.content);
-      return { role: "user", text: text9 };
+      const text10 = extractTextFromContentBlocks(record8.content);
+      return { role: "user", text: text10 };
     }
     case "system_notice": {
       const blocks = typedSystemNoticeBlocksToRich(
@@ -47285,15 +47509,15 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
           index2
         ).length > 0)
       );
-      const text9 = duplicateCommsConsumed ? "" : typeof record8.body === "string" ? record8.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
-      return { role: "meta", text: text9, ...blocks.length > 0 ? { blocks } : {} };
+      const text10 = duplicateCommsConsumed ? "" : typeof record8.body === "string" ? record8.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
+      return { role: "meta", text: text10, ...blocks.length > 0 ? { blocks } : {} };
     }
     case "assistant":
       return { role: "assistant", text: typeof record8.content === "string" ? record8.content : "" };
     case "block_assistant": {
       const blocks = Array.isArray(record8.blocks) ? record8.blocks : [];
       const richBlocks = blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode, blobBaseUrl);
-      const text9 = blocks.map((block) => {
+      const text10 = blocks.map((block) => {
         if (!block || typeof block !== "object") return "";
         const item = block;
         const blockType = typeof item.block_type === "string" ? item.block_type : typeof item.type === "string" ? item.type : "";
@@ -47304,7 +47528,7 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
         }
         return "";
       }).filter((value) => value.trim().length > 0).join("\n\n");
-      return { role: "assistant", text: text9, ...richBlocks.length > 0 ? { blocks: richBlocks } : {} };
+      return { role: "assistant", text: text10, ...richBlocks.length > 0 ? { blocks: richBlocks } : {} };
     }
     case "system":
       return { role: "system", text: typeof record8.content === "string" ? record8.content : "" };
@@ -47336,7 +47560,7 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
   const textMode = options.textMode ?? "markdown";
   const realtimeOrigin = realtimeMessageOrigin(frame);
   const canonicalText = textMode === "markdown" && !options.suppressAssistantText ? canonicalHistoryAssistantText(frame) : void 0;
-  const text9 = canonicalText ?? (textMode === "markdown" ? parsed.text : parsed.text.trim());
+  const text10 = canonicalText ?? (textMode === "markdown" ? parsed.text : parsed.text.trim());
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];
   if (!assistantMessageKey(frame) && !isRealtimeHistoryMessage(frame)) {
     parsedBlocks.sort((left, right) => Number(right.type === "thinking") - Number(left.type === "thinking"));
@@ -47346,27 +47570,27 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
       if (block.type !== "tool-call") return true;
       return !options.consumeDuplicateToolBlock?.(block);
     }) : parsedBlocks;
-    if (!text9 && filteredParsedBlocks2.length === 0) return null;
-    const blocks2 = filteredParsedBlocks2.length > 0 ? filteredParsedBlocks2 : messageTextBlocks(text9, textMode);
+    if (!text10 && filteredParsedBlocks2.length === 0) return null;
+    const blocks2 = filteredParsedBlocks2.length > 0 ? filteredParsedBlocks2 : messageTextBlocks(text10, textMode);
     return {
       kind: "message",
       id: entryId,
       identity: COMMS_IDENTITY,
       variant: blocks2.length > 0 ? "rich" : "meta",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      ...blocks2.length > 0 ? { blocks: blocks2 } : { text: text9 }
+      ...blocks2.length > 0 ? { blocks: blocks2 } : { text: text10 }
     };
   }
-  if (parsed.role !== "assistant" || !text9 && parsedBlocks.length === 0) return null;
-  if (/^I have acknowledged the addition of the following peers:/i.test(text9)) {
+  if (parsed.role !== "assistant" || !text10 && parsedBlocks.length === 0) return null;
+  if (/^I have acknowledged the addition of the following peers:/i.test(text10)) {
     return null;
   }
   const filteredParsedBlocks = options.consumeDuplicateToolBlock ? parsedBlocks.filter((block) => {
     if (block.type !== "tool-call") return true;
     return !options.consumeDuplicateToolBlock?.(block);
   }) : parsedBlocks;
-  if (!text9 && filteredParsedBlocks.length === 0) return null;
-  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : messageTextBlocks(text9, textMode);
+  if (!text10 && filteredParsedBlocks.length === 0) return null;
+  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : messageTextBlocks(text10, textMode);
   return {
     kind: "message",
     id: entryId,
@@ -47375,7 +47599,7 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
     ...canonicalText !== void 0 ? { copyText: canonicalText } : {},
     variant: blocks.length > 0 ? "rich" : "plain",
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    ...blocks.length > 0 ? { blocks } : { text: text9 }
+    ...blocks.length > 0 ? { blocks } : { text: text10 }
   };
 }
 function renderSystemNoticeEntry(frame, entryId, options = {}) {
@@ -47405,16 +47629,16 @@ function renderSystemNoticeEntry(frame, entryId, options = {}) {
     if (block.type !== "tool-call") return true;
     return !options.consumeDuplicateToolBlock?.(block);
   }) : parsedBlocks;
-  const text9 = parsed.text.trim();
-  if (!text9 && filteredParsedBlocks.length === 0) return null;
-  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : parseConversationRichBlocks(text9, { displayNormalization: false });
+  const text10 = parsed.text.trim();
+  if (!text10 && filteredParsedBlocks.length === 0) return null;
+  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : parseConversationRichBlocks(text10, { displayNormalization: false });
   return {
     kind: "message",
     id: entryId,
     identity: COMMS_IDENTITY,
     variant: blocks.length > 0 ? "rich" : "meta",
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    ...blocks.length > 0 ? { blocks } : { text: text9 }
+    ...blocks.length > 0 ? { blocks } : { text: text10 }
   };
 }
 function runOwnerKey(frame) {
@@ -47718,12 +47942,12 @@ function createTimelineFold(agent, frames, options) {
     if (streams.length) completedTextByOwner.set(key, streams);
     else completedTextByOwner.delete(key);
   }
-  function completeOwnedStream(frame, text9 = ownedStream(frame)?.text || "") {
-    if (text9) {
+  function completeOwnedStream(frame, text10 = ownedStream(frame)?.text || "") {
+    if (text10) {
       forgetCompletedStream(frame);
       const key = assistantOwnerKey(frame);
       const streams = completedTextByOwner.get(key) || [];
-      streams.push({ owner: frame, text: text9 });
+      streams.push({ owner: frame, text: text10 });
       completedTextByOwner.set(key, streams);
     }
     forgetOwnedStream(frame);
@@ -47864,10 +48088,10 @@ function createTimelineFold(agent, frames, options) {
       const unfinished = openReasoning.get(scope);
       if (activeReasoning !== unfinished) flushPendingReasoning(true);
       flushPendingText();
-      const text9 = reasoningFrameText(frame);
-      if (unfinished || text9.trim()) {
+      const text10 = reasoningFrameText(frame);
+      if (unfinished || text10.trim()) {
         const state = unfinished || startReasoning(frame, entryId);
-        state.block.text = text9;
+        state.block.text = text10;
         state.block.final = true;
         openReasoning.delete(scope);
         if (activeReasoning === state) activeReasoning = void 0;
@@ -48061,7 +48285,7 @@ function createTimelineFold(agent, frames, options) {
       if (suppressAssistantText && !historyHasAssistantSiblings(frame)) return;
       const historyEntry = renderSessionHistoryTextCompleteEntry(agent, frame, entryId, {
         suppressAssistantText,
-        consumeDuplicateReasoningBlock: (text9) => assistantHistory.consumeReasoning(frame, text9),
+        consumeDuplicateReasoningBlock: (text10) => assistantHistory.consumeReasoning(frame, text10),
         textMode,
         peerRegistry,
         blobBaseUrl: options.blobBaseUrl,
@@ -48091,18 +48315,18 @@ function createTimelineFold(agent, frames, options) {
     if (!frame.runId?.trim() && frame.event === "text_complete") {
       flushPendingReasoning(true);
       if (frame.sourceKind !== "session_history") {
-        const text9 = terminalFrameVisibleText(frame).trim();
-        if (text9 && pendingText && sameTextStreamOwner(streamedOwner, frame) && normalizeComparableText(pendingText) === normalizeComparableText(text9)) {
+        const text10 = terminalFrameVisibleText(frame).trim();
+        if (text10 && pendingText && sameTextStreamOwner(streamedOwner, frame) && normalizeComparableText(pendingText) === normalizeComparableText(text10)) {
           return;
         }
-        const duplicateTerminalFollows = text9 && orderedFrames.slice(i2 + 1).some((later) => {
+        const duplicateTerminalFollows = text10 && orderedFrames.slice(i2 + 1).some((later) => {
           if (later.event !== "interaction_complete" && later.event !== "run_completed") {
             return false;
           }
           if (later.sourceKind === "session_history" || !sameTextStreamOwner(frame, later)) {
             return false;
           }
-          return normalizeComparableText(terminalFrameVisibleText(later)) === normalizeComparableText(text9);
+          return normalizeComparableText(terminalFrameVisibleText(later)) === normalizeComparableText(text10);
         });
         if (duplicateTerminalFollows) {
           return;
@@ -48792,9 +49016,9 @@ async function fetchWithConsoleTimeout(input, init, label, timeoutMs = DEFAULT_C
     globalThis.clearTimeout(timer);
   }
 }
-function jsonRpcErrorFromText(text9) {
+function jsonRpcErrorFromText(text10) {
   try {
-    const parsed = JSON.parse(text9);
+    const parsed = JSON.parse(text10);
     const error48 = parsed && typeof parsed === "object" ? parsed.error : void 0;
     return error48 && typeof error48 === "object" ? error48 : void 0;
   } catch {
@@ -48802,11 +49026,11 @@ function jsonRpcErrorFromText(text9) {
   }
 }
 async function consoleResponseFailure(label, response) {
-  const text9 = await response.text().catch(() => "");
-  const preview = responseTextErrorPreview(text9);
+  const text10 = await response.text().catch(() => "");
+  const preview = responseTextErrorPreview(text10);
   const failure = new Error("".concat(label, " ").concat(response.status).concat(preview ? ": ".concat(preview) : ""));
   failure.httpStatus = response.status;
-  const responseRpcError = jsonRpcErrorFromText(text9);
+  const responseRpcError = jsonRpcErrorFromText(text10);
   if (responseRpcError) failure.responseRpcError = responseRpcError;
   return failure;
 }
@@ -48824,11 +49048,11 @@ async function consoleResponseJson(label, response) {
   }
 }
 async function responseErrorPreview(response) {
-  const text9 = await response.text();
-  return responseTextErrorPreview(text9);
+  const text10 = await response.text();
+  return responseTextErrorPreview(text10);
 }
-function responseTextErrorPreview(text9) {
-  const trimmed = text9.trim();
+function responseTextErrorPreview(text10) {
+  const trimmed = text10.trim();
   if (!trimmed) {
     return "";
   }
@@ -49079,10 +49303,10 @@ function replayStreamError(frame) {
 }
 async function streamFramesFromResponse(response, options = {}, mode = "collect") {
   if (!response.ok) {
-    const text9 = await response.text();
+    const text10 = await response.text();
     let parsed;
     try {
-      parsed = JSON.parse(text9);
+      parsed = JSON.parse(text10);
     } catch {
       parsed = void 0;
     }
@@ -49091,7 +49315,7 @@ async function streamFramesFromResponse(response, options = {}, mode = "collect"
     if (response.status === 409 && (replayError || ownerFault?.error === "replay_unavailable")) {
       throw replayStreamError({ id: "", event: "replay_unavailable", data: replayError || parsed });
     }
-    const preview = responseTextErrorPreview(text9);
+    const preview = responseTextErrorPreview(text10);
     const error48 = new Error("interaction stream request failed ".concat(response.status).concat(preview ? ": ".concat(preview) : ""));
     error48.httpStatus = response.status;
     throw error48;
@@ -50864,13 +51088,15 @@ function GatingInboxPanel({
   readOnly = false,
   resource,
   onRefresh,
-  selectedPendingId
+  selectedPendingId,
+  hostAttention,
+  hostDecideSources
 }) {
   const [tab2, setTab] = import_react31.default.useState("pending");
   const [selectedId, setSelectedId] = import_react31.default.useState(null);
   const listRef = import_react31.default.useRef(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
-  const pendingLabel = !resource || resource.status === "ready" ? String(pendingRequests ? pendingRequests.length : pending.length) : "?";
+  const pendingLabel = !resource || resource.status === "ready" ? String(pendingRequests ? pendingRequests.length : pending.length) : resource.status === "unsupported" ? "-" : "?";
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
   import_react31.default.useEffect(() => {
     if (selectedPendingId) {
@@ -50890,13 +51116,7 @@ function GatingInboxPanel({
   return /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating", "data-testid": "gating-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__head", children: [
       /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("h2", { children: "Approvals" }),
-      /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("p", { children: [
-        "\xB7 ",
-        pendingLabel,
-        " pending \xB7 ",
-        automaticallyAllowed.length,
-        " automatically allowed"
-      ] })
+      /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { children: resource?.status === "unsupported" ? "\xB7 not available on this connection" : "\xB7 ".concat(pendingLabel, " pending \xB7 ").concat(automaticallyAllowed.length, " automatically allowed") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__tabs", children: [
       /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(
@@ -50945,117 +51165,136 @@ function GatingInboxPanel({
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gating__list", ref: listRef, children: tab2 === "pending" && resource ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { children: [
-      resource.status !== "ready" ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { role: "status", children: resource.status === "forbidden" ? "Approval access denied" : resource.status === "unsupported" ? "Approvals are not available for this connection" : resource.status === "loading" ? "Loading approvals" : resource.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable" }) : null,
-      onRefresh ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("button", { type: "button", onClick: onRefresh, children: "Refresh approvals" }) : null,
-      resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { children: "No pending approvals." }) : null,
-      resource.requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { tabIndex: -1, "data-approval-id": request.pendingId, "data-selected": selectedId === request.pendingId, className: selectedId === request.pendingId ? "is-selected" : void 0, children: /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(ApprovalCard, { request, resourceStatus: resource.status, decision: resource.decisions[request.pendingId], readOnly: readOnly || resource.readOnly, onDecide }) }, request.pendingId))
-    ] }) : tab2 === "policies" ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gating__empty", role: "status", children: "Policy details are not available in this console." }) : /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(import_jsx_runtime45.Fragment, { children: [
-      tab2 !== "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { className: "gating__audit-note", children: "Approval records do not confirm execution." }),
-      currentList.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__empty", children: [
-        "No ",
-        tab2,
-        " items."
-      ] }),
-      currentList.map(({ raw, record: record8 }, index2) => {
-        const r2 = raw && typeof raw === "object" ? raw : {};
-        const pid = (tab2 === "pending" ? record8.pendingId : record8.auditId) || "item-".concat(index2);
-        const action = record8.actionId || record8.eventType || "Unknown action";
-        const agent = record8.actorId || (tab2 === "pending" ? String(r2.agent || r2.identity || r2.actor || "") : "");
-        const waited = formatWaited(r2);
-        const risk = record8.riskTier;
-        const tierLabel = risk === "unknown" ? "Unknown".concat(record8.recordedRiskTier ? " (".concat(record8.recordedRiskTier, ")") : "") : risk.toUpperCase();
-        const payload = tab2 === "pending" ? payloadSummary(r2) : "";
-        const selected = selectedId === pid;
-        const showActions = tab2 === "pending" && !readOnly;
-        return /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(
-          "div",
+    /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__list", ref: listRef, children: [
+      tab2 === "pending" && resource ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { children: [
+        resource.status !== "ready" ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { role: "status", children: resource.status === "forbidden" ? "Approval access denied" : resource.status === "unsupported" ? "Approvals are not available for this connection" : resource.status === "loading" ? "Loading approvals" : resource.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable" }) : null,
+        onRefresh ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("button", { type: "button", onClick: onRefresh, children: "Refresh approvals" }) : null,
+        resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { children: "No pending approvals." }) : null,
+        resource.requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { tabIndex: -1, "data-approval-id": request.pendingId, "data-selected": selectedId === request.pendingId, className: selectedId === request.pendingId ? "is-selected" : void 0, children: /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
+          ApprovalCard,
           {
-            className: "gitem ".concat(selected ? "is-selected" : ""),
-            "data-risk": risk,
-            "data-testid": "gating-".concat(tab2 === "pending" ? "pending" : "audit", ":").concat(pid),
-            onClick: () => setSelectedId(pid),
-            children: [
-              /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__risk", "aria-hidden": "true" }),
-              /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__id", children: pid.slice(0, 8) }),
-              /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { children: [
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gitem__action", children: action }),
-                payload && /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gitem__payload", children: payload }),
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                  "Tier: ",
-                  tierLabel
-                ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                  "Actor: ",
-                  agent || "Not recorded"
-                ] }),
-                tab2 !== "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(import_jsx_runtime45.Fragment, { children: [
+            request,
+            resourceStatus: resource.status,
+            decision: resource.decisions[request.pendingId],
+            readOnly: readOnly || resource.readOnly,
+            decideLinks: readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : void 0,
+            onDecide
+          }
+        ) }, request.pendingId))
+      ] }) : tab2 === "policies" ? /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gating__empty", role: "status", children: "Policy details are not available in this console." }) : /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(import_jsx_runtime45.Fragment, { children: [
+        tab2 !== "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("p", { className: "gating__audit-note", children: "Approval records do not confirm execution." }),
+        currentList.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__empty", children: [
+          "No ",
+          tab2,
+          " items."
+        ] }),
+        currentList.map(({ raw, record: record8 }, index2) => {
+          const r2 = raw && typeof raw === "object" ? raw : {};
+          const pid = (tab2 === "pending" ? record8.pendingId : record8.auditId) || "item-".concat(index2);
+          const action = record8.actionId || record8.eventType || "Unknown action";
+          const agent = record8.actorId || (tab2 === "pending" ? String(r2.agent || r2.identity || r2.actor || "") : "");
+          const waited = formatWaited(r2);
+          const risk = record8.riskTier;
+          const tierLabel = risk === "unknown" ? "Unknown".concat(record8.recordedRiskTier ? " (".concat(record8.recordedRiskTier, ")") : "") : risk.toUpperCase();
+          const payload = tab2 === "pending" ? payloadSummary(r2) : "";
+          const selected = selectedId === pid;
+          const showActions = tab2 === "pending" && !readOnly;
+          return /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(
+            "div",
+            {
+              className: "gitem ".concat(selected ? "is-selected" : ""),
+              "data-risk": risk,
+              "data-testid": "gating-".concat(tab2 === "pending" ? "pending" : "audit", ":").concat(pid),
+              onClick: () => setSelectedId(pid),
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__risk", "aria-hidden": "true" }),
+                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__id", children: pid.slice(0, 8) }),
+                /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gitem__action", children: action }),
+                  payload && /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("div", { className: "gitem__payload", children: payload }),
                   /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                    "Event: ",
-                    record8.eventType || "Not recorded"
+                    "Tier: ",
+                    tierLabel
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                    "Decision: ",
-                    record8.decision || "Not recorded"
+                    "Actor: ",
+                    agent || "Not recorded"
                   ] }),
-                  record8.approverId && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                    "Approver: ",
-                    record8.approverId
-                  ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
-                    "Outcome: ",
-                    record8.outcome || "Not recorded"
+                  tab2 !== "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(import_jsx_runtime45.Fragment, { children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
+                      "Event: ",
+                      record8.eventType || "Not recorded"
+                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
+                      "Decision: ",
+                      record8.decision || "Not recorded"
+                    ] }),
+                    record8.approverId && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
+                      "Approver: ",
+                      record8.approverId
+                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
+                      "Outcome: ",
+                      record8.outcome || "Not recorded"
+                    ] })
                   ] })
+                ] }),
+                showActions ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { className: "gitem__actions", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
+                    "button",
+                    {
+                      className: "approve",
+                      "data-testid": "gating-action:".concat(pid, ":approve"),
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        onDecide(pid, "approve");
+                      },
+                      children: "Approve"
+                    }
+                  ),
+                  /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
+                    "button",
+                    {
+                      className: "reject",
+                      "data-testid": "gating-action:".concat(pid, ":reject"),
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        onDecide(pid, "reject");
+                      },
+                      children: "Reject"
+                    }
+                  ),
+                  /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
+                    "button",
+                    {
+                      "data-testid": "gating-action:".concat(pid, ":escalate"),
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        onDecide(pid, "escalate");
+                      },
+                      children: "Escalate"
+                    }
+                  )
+                ] }) : /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__actions" }),
+                tab2 === "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { className: "gitem__waited", children: [
+                  "waited",
+                  /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("br", {}),
+                  waited
                 ] })
-              ] }),
-              showActions ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { className: "gitem__actions", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
-                  "button",
-                  {
-                    className: "approve",
-                    "data-testid": "gating-action:".concat(pid, ":approve"),
-                    onClick: (e) => {
-                      e.stopPropagation();
-                      onDecide(pid, "approve");
-                    },
-                    children: "Approve"
-                  }
-                ),
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
-                  "button",
-                  {
-                    className: "reject",
-                    "data-testid": "gating-action:".concat(pid, ":reject"),
-                    onClick: (e) => {
-                      e.stopPropagation();
-                      onDecide(pid, "reject");
-                    },
-                    children: "Reject"
-                  }
-                ),
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(
-                  "button",
-                  {
-                    "data-testid": "gating-action:".concat(pid, ":escalate"),
-                    onClick: (e) => {
-                      e.stopPropagation();
-                      onDecide(pid, "escalate");
-                    },
-                    children: "Escalate"
-                  }
-                )
-              ] }) : /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("span", { className: "gitem__actions" }),
-              tab2 === "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("span", { className: "gitem__waited", children: [
-                "waited",
-                /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("br", {}),
-                waited
-              ] })
-            ]
-          },
-          pid
-        );
-      })
-    ] }) })
+              ]
+            },
+            pid
+          );
+        })
+      ] }),
+      tab2 === "pending" && hostAttention && (hostAttention.items.length || hostAttention.failedSources.length) ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__host", "data-testid": "host-attention-list", children: [
+        hostAttention.items.map((item) => /* @__PURE__ */ (0, import_jsx_runtime45.jsx)(HostAttentionCard, { item }, "".concat(item.sourceId, ":").concat(item.id))),
+        hostAttention.failedSources.length ? /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("p", { className: "gating__host-note", role: "status", children: [
+          "Could not read: ",
+          hostAttention.failedSources.join(", ")
+        ] }) : null
+      ] }) : null
+    ] })
   ] });
 }
 
@@ -52542,9 +52781,9 @@ function evidenceExcerptLines(entries, range, maxLines = 30) {
   const lines = [];
   for (const entry of window2) {
     if (entry.kind !== "message") continue;
-    const text9 = (entry.text || entry.copyText || "").trim();
-    if (!text9) continue;
-    lines.push({ id: entry.id, speaker: entry.identity.label, text: text9 });
+    const text10 = (entry.text || entry.copyText || "").trim();
+    if (!text10) continue;
+    lines.push({ id: entry.id, speaker: entry.identity.label, text: text10 });
     if (lines.length >= maxLines) break;
   }
   return lines;
@@ -54318,20 +54557,20 @@ var LABEL_RIGHT_PAD = 10;
 var TITLE_FONT = { size: 12, weight: 500, family: "--sans" };
 var META_FONT = { size: 10, weight: 400, family: "--mono" };
 var FIT_MIN_SCALE = 0.85;
-function truncate(text9, max) {
-  return text9.length > max ? "".concat(text9.slice(0, max - 1), "\u2026") : text9;
+function truncate(text10, max) {
+  return text10.length > max ? "".concat(text10.slice(0, max - 1), "\u2026") : text10;
 }
-function fitLabel(text9, maxWidth, measure, fallbackChars) {
-  if (!measure) return truncate(text9, fallbackChars);
-  if (measure(text9) <= maxWidth) return text9;
+function fitLabel(text10, maxWidth, measure, fallbackChars) {
+  if (!measure) return truncate(text10, fallbackChars);
+  if (measure(text10) <= maxWidth) return text10;
   let lo = 0;
-  let hi = text9.length;
+  let hi = text10.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (measure("".concat(text9.slice(0, mid).trimEnd(), "\u2026")) <= maxWidth) lo = mid;
+    if (measure("".concat(text10.slice(0, mid).trimEnd(), "\u2026")) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
-  return "".concat(text9.slice(0, lo).trimEnd(), "\u2026");
+  return "".concat(text10.slice(0, lo).trimEnd(), "\u2026");
 }
 function fitViewport(frameWidth, frameHeight, layoutWidth, layoutHeight) {
   if (frameWidth <= 0 || frameHeight <= 0 || layoutWidth <= 0 || layoutHeight <= 0) {
@@ -54396,12 +54635,12 @@ function useLabelMeasurers(ref, mounted) {
       const family = font.family === "--mono" ? families.mono : families.sans;
       const spec = "".concat(font.weight, " ").concat(font.size, "px ").concat(family);
       const cache = /* @__PURE__ */ new Map();
-      return (text9) => {
-        const hit = cache.get(text9);
+      return (text10) => {
+        const hit = cache.get(text10);
         if (hit !== void 0) return hit;
         ctx.font = spec;
-        const width = ctx.measureText(text9).width;
-        cache.set(text9, width);
+        const width = ctx.measureText(text10).width;
+        cache.set(text10, width);
         return width;
       };
     };
@@ -55212,8 +55451,8 @@ function sanitizeLogFrameData(data) {
 }
 function textFromContentBlock(value) {
   if (typeof value === "string") {
-    const text9 = value.trim();
-    return text9 ? text9 : null;
+    const text10 = value.trim();
+    return text10 ? text10 : null;
   }
   if (!isRecord3(value)) return null;
   for (const key of ["text", "body", "content", "result", "summary"]) {
@@ -55230,15 +55469,15 @@ function textFromContentBlock(value) {
 }
 function textFromContent(value) {
   if (Array.isArray(value)) {
-    const text9 = value.map(textFromContentBlock).filter((part) => Boolean(part)).join(" ").replace(/\s+/g, " ").trim();
-    return text9 ? text9 : null;
+    const text10 = value.map(textFromContentBlock).filter((part) => Boolean(part)).join(" ").replace(/\s+/g, " ").trim();
+    return text10 ? text10 : null;
   }
   return textFromContentBlock(value);
 }
 function preferredLogSummary(frame, data) {
   if (frame.event === "user_input") {
-    const text9 = textFromContent(data.content ?? data.input ?? data.prompt);
-    return text9 ? "input=".concat(text9.slice(0, 120)) : null;
+    const text10 = textFromContent(data.content ?? data.input ?? data.prompt);
+    return text10 ? "input=".concat(text10.slice(0, 120)) : null;
   }
   for (const key of ["result", "text", "summary", "body", "message_text"]) {
     const value = data[key];
@@ -56450,7 +56689,8 @@ var Sidebar = import_react41.default.memo(function Sidebar2({
   onOpenControl,
   onOpenOperatorPanel,
   approvals,
-  onOpenApproval
+  onOpenApproval,
+  hostAttentionCount = 0
 }) {
   countRender("Sidebar");
   const [q2, setQ] = import_react41.default.useState("");
@@ -56765,7 +57005,7 @@ var Sidebar = import_react41.default.memo(function Sidebar2({
         children: orderAnnouncement
       }
     ),
-    approvals ? /* @__PURE__ */ (0, import_jsx_runtime55.jsx)(ApprovalAttention, { snapshot: approvals, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
+    approvals || hostAttentionCount ? /* @__PURE__ */ (0, import_jsx_runtime55.jsx)(ApprovalAttention, { snapshot: approvals, hostItems: hostAttentionCount, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("div", { className: "sidebar__mast", children: /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)("div", { children: [
       /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("div", { className: "sidebar__mast-title", children: "Roster" }),
       /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)("div", { className: "sidebar__mast-sub", children: [
@@ -57030,8 +57270,8 @@ function textFromValue(value) {
   if (value && typeof value === "object") {
     const record8 = value;
     const direct = record8.summary ?? record8.message ?? record8.text ?? record8.body ?? record8.reply ?? record8.result ?? record8.content ?? record8.subject ?? record8.request_subject ?? record8.prompt ?? record8.description ?? record8.token;
-    const text9 = textFromValue(direct);
-    if (text9) return text9;
+    const text10 = textFromValue(direct);
+    if (text10) return text10;
   }
   return "";
 }
@@ -57062,14 +57302,14 @@ function sessionHistoryAssistantReply(frame, data) {
     return textFromValue(data.result ?? data.text ?? data.content);
   }
   const blocks = Array.isArray(message.blocks) ? message.blocks : [];
-  const text9 = blocks.map((block) => {
+  const text10 = blocks.map((block) => {
     const record8 = recordOf3(block);
     const blockType = typeof record8.block_type === "string" ? record8.block_type : typeof record8.type === "string" ? record8.type : "";
     if (blockType !== "text") return "";
     const blockData = recordOf3(record8.data);
     return textFromValue(blockData.text ?? record8.text);
   }).filter(Boolean).join(" ").trim();
-  return text9;
+  return text10;
 }
 function agentFor(frame) {
   return frame.identity?.trim() || "_system";
@@ -57861,7 +58101,7 @@ function stripConsoleBlobReferencesFromText(value, references = consoleBlobRefer
 }
 
 // src/panels/transcript-window.ts
-var React27 = __toESM(require("react"));
+var React28 = __toESM(require("react"));
 var TURN_WINDOW_OVERSCAN = 1.5;
 var TURN_WINDOW_MARGIN = 0.5;
 var TURN_FIND_BAND = 20;
@@ -57938,20 +58178,20 @@ function turnSlots(turns, mounted, measurements, gap, parked = []) {
 }
 var NO_ACTIONABLE_TURNS = /* @__PURE__ */ new Set();
 function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIONABLE_TURNS) {
-  const measurements = React27.useRef(/* @__PURE__ */ new Map());
-  const geometry = React27.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
-  const turnsRef = React27.useRef(turns);
+  const measurements = React28.useRef(/* @__PURE__ */ new Map());
+  const geometry = React28.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
+  const turnsRef = React28.useRef(turns);
   turnsRef.current = turns;
-  const keys2 = React27.useMemo(() => turns.map(renderKey), [turns, renderKey]);
-  const keysRef = React27.useRef(keys2);
+  const keys2 = React28.useMemo(() => turns.map(renderKey), [turns, renderKey]);
+  const keysRef = React28.useRef(keys2);
   keysRef.current = keys2;
-  const pins = React27.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
-  const actionableRef = React27.useRef(actionable);
+  const pins = React28.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
+  const actionableRef = React28.useRef(actionable);
   actionableRef.current = actionable;
-  const [plan, setPlan] = React27.useState(null);
-  const planRef = React27.useRef(plan);
+  const [plan, setPlan] = React28.useState(null);
+  const planRef = React28.useRef(plan);
   planRef.current = plan;
-  const replan = React27.useCallback(() => {
+  const replan = React28.useCallback(() => {
     const body = bodyRef.current;
     if (!enabled || !body) return;
     const current = turnsRef.current;
@@ -57977,7 +58217,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     if (sink) sink.TurnWindowPlans = (sink.TurnWindowPlans ?? 0) + 1;
     setPlan(next);
   }, [bodyRef, enabled]);
-  React27.useLayoutEffect(() => {
+  React28.useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!enabled || !body || typeof ResizeObserver === "undefined") return;
     const indexOf = /* @__PURE__ */ new Map();
@@ -58073,7 +58313,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       body.removeEventListener("focusout", onFocus);
     };
   }, [bodyRef, enabled, replan]);
-  React27.useLayoutEffect(() => {
+  React28.useLayoutEffect(() => {
     if (!enabled) return;
     const body = bodyRef.current;
     if (body) {
@@ -58086,13 +58326,13 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     }
   }, [turns, keys2, enabled, bodyRef]);
   const actionableKey = [...actionable].sort().join("\n");
-  const actionableKeyRef = React27.useRef(actionableKey);
-  React27.useEffect(() => {
+  const actionableKeyRef = React28.useRef(actionableKey);
+  React28.useEffect(() => {
     if (actionableKeyRef.current === actionableKey) return;
     actionableKeyRef.current = actionableKey;
     replan();
   }, [actionableKey, replan]);
-  const mount = React27.useCallback((index2) => {
+  const mount = React28.useCallback((index2) => {
     if (index2 < 0 || index2 >= turnsRef.current.length) return false;
     pins.current.jump = /* @__PURE__ */ new Set([index2]);
     replan();
@@ -58108,8 +58348,8 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     body?.addEventListener("keydown", release);
     return true;
   }, [bodyRef, replan]);
-  const pendingFocus = React27.useRef(null);
-  const focusTurn = React27.useCallback((id) => {
+  const pendingFocus = React28.useRef(null);
+  const focusTurn = React28.useCallback((id) => {
     pendingFocus.current = id;
     const index2 = turnsRef.current.findIndex((turn) => turn.id === id);
     if (index2 >= 0) {
@@ -58122,7 +58362,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       element3.focus();
     }
   }, [bodyRef, mount]);
-  const slots = React27.useMemo(() => {
+  const slots = React28.useMemo(() => {
     if (!enabled || !plan) return turns.map((_2, index2) => ({ kind: "turn", index: index2 }));
     const mounted = new Set(plan.mounted.filter((index2) => index2 < turns.length));
     for (let i2 = 0; i2 < turns.length; i2 += 1) {
@@ -58132,7 +58372,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     const parked = plan.parked.filter((index2) => index2 < turns.length && !mounted.has(index2));
     return turnSlots(turns, [...mounted].sort((a, b2) => a - b2), measurements.current, geometry.current.gap, parked);
   }, [enabled, plan, turns, keys2]);
-  React27.useLayoutEffect(() => {
+  React28.useLayoutEffect(() => {
     const id = pendingFocus.current;
     if (!id) return;
     const element3 = bodyRef.current?.querySelector(':scope > [data-conversation-turn-id="'.concat(CSS.escape(id), '"]:not([hidden])'));
@@ -58140,7 +58380,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     pendingFocus.current = null;
     element3.focus();
   });
-  return React27.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
+  return React28.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
 }
 
 // src/panels/ChatPane.tsx
@@ -58241,16 +58481,16 @@ function chatTurnPreview(turn) {
   let title = "";
   let body = "";
   for (const message of turn.messages) {
-    const text9 = msgCopyText(message);
-    if (!text9) {
+    const text10 = msgCopyText(message);
+    if (!text10) {
       continue;
     }
     if (!title && message.kind === "user") {
-      title = text9;
+      title = text10;
       continue;
     }
     if (!body && message.kind !== "user") {
-      body = text9;
+      body = text10;
     }
   }
   if (!title) {
@@ -58266,8 +58506,8 @@ function transcriptFindMatches(messages, query) {
   if (!needle) return [];
   const rows = [];
   for (const message of messages) {
-    const text9 = message.kind === "event" || message.kind === "origin" ? "".concat(message.source?.sentence ?? "", " ").concat(msgCopyText(message)) : msgCopyText(message);
-    if (text9.toLocaleLowerCase().includes(needle)) rows.push(message.scrollRowId ?? message.id);
+    const text10 = message.kind === "event" || message.kind === "origin" ? "".concat(message.source?.sentence ?? "", " ").concat(msgCopyText(message)) : msgCopyText(message);
+    if (text10.toLocaleLowerCase().includes(needle)) rows.push(message.scrollRowId ?? message.id);
   }
   return rows;
 }
@@ -58282,8 +58522,8 @@ function highlightRow(body, rowId, query) {
   const ranges = [];
   const walker = body.ownerDocument.createTreeWalker(row, NodeFilter.SHOW_TEXT);
   for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) {
-    const text9 = (node2.textContent ?? "").toLocaleLowerCase();
-    for (let at = text9.indexOf(needle); needle && at >= 0; at = text9.indexOf(needle, at + needle.length)) {
+    const text10 = (node2.textContent ?? "").toLocaleLowerCase();
+    for (let at = text10.indexOf(needle); needle && at >= 0; at = text10.indexOf(needle, at + needle.length)) {
       const range = body.ownerDocument.createRange();
       range.setStart(node2, at);
       range.setEnd(node2, at + needle.length);
@@ -58362,13 +58602,13 @@ function TranscriptFindBar({
 }
 function transcriptCopyText(messages) {
   return messages.map((message) => {
-    const text9 = message.kind === "event" || message.kind === "origin" ? message.source?.sentence || msgCopyText(message) : msgCopyText(message);
-    if (!text9) return "";
+    const text10 = message.kind === "event" || message.kind === "origin" ? message.source?.sentence || msgCopyText(message) : msgCopyText(message);
+    if (!text10) return "";
     const label = message.kind === "tool" ? "Tool" : message.kind === "thought" ? "Thinking" : message.source ? [message.source.label, message.source.detail].filter(Boolean).join(" - ") : message.kind === "user" ? "User message" : message.who || "Assistant";
     const stamp = formatFullTimestamp(message.createdAt);
     const time4 = stamp ? "[".concat(stamp, "] ") : "";
     const worked = message.workedFor ? "\nWorked for ".concat(message.workedFor) : "";
-    const row = "".concat(time4).concat(label, ": ").concat(text9).concat(worked);
+    const row = "".concat(time4).concat(label, ": ").concat(text10).concat(worked);
     return message.blocks?.some((block) => block.type === "markdown") ? row : row.trim();
   }).filter(Boolean).join("\n\n");
 }
@@ -58651,7 +58891,7 @@ function collectImageTransferPayload(data) {
   return { files: selectImageTransferFiles(directFiles, itemFiles), textPayloads };
 }
 function imageTransferPayloadHasImage(payload) {
-  return payload.files.length > 0 || payload.textPayloads.some((text9) => imageDataUrlsFromText(text9).length > 0 || consoleBlobUrlsFromText(text9).length > 0);
+  return payload.files.length > 0 || payload.textPayloads.some((text10) => imageDataUrlsFromText(text10).length > 0 || consoleBlobUrlsFromText(text10).length > 0);
 }
 async function imageFilesFromTransferPayload(payload) {
   if (payload.files.length > 0) {
@@ -58659,14 +58899,14 @@ async function imageFilesFromTransferPayload(payload) {
   }
   const files = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const text9 of payload.textPayloads) {
-    for (const dataUrl of imageDataUrlsFromText(text9)) {
+  for (const text10 of payload.textPayloads) {
+    for (const dataUrl of imageDataUrlsFromText(text10)) {
       if (seen.has(dataUrl)) continue;
       seen.add(dataUrl);
       const file2 = fileFromImageDataUrl(dataUrl);
       if (file2) files.push(file2);
     }
-    for (const blobUrl of consoleBlobUrlsFromText(text9)) {
+    for (const blobUrl of consoleBlobUrlsFromText(text10)) {
       if (seen.has(blobUrl)) continue;
       seen.add(blobUrl);
       const file2 = await fileFromConsoleBlobUrl(blobUrl);
@@ -58710,7 +58950,7 @@ async function fileFromConsoleBlobUrl(url2) {
   }
 }
 function CopyInlineButton({
-  text: text9,
+  text: text10,
   getText,
   label,
   className = ""
@@ -58723,10 +58963,10 @@ function CopyInlineButton({
     },
     []
   );
-  const disabled = getText ? false : !(text9 ?? "").trim();
+  const disabled = getText ? false : !(text10 ?? "").trim();
   async function copy() {
     if (disabled) return;
-    const value = getText ? getText() : text9 ?? "";
+    const value = getText ? getText() : text10 ?? "";
     if (!value.trim()) return;
     const ok3 = await copyTextToClipboard(value);
     setOutcome(ok3 ? "copied" : "failed");
@@ -59885,9 +60125,9 @@ function ChatPane({
     if (readOnly || sendWithheld) {
       return;
     }
-    const text9 = liveDraftRef.current;
+    const text10 = liveDraftRef.current;
     const submittedRevision = liveDraftRevisionRef.current;
-    if (!text9.trim() && staged.length === 0) {
+    if (!text10.trim() && staged.length === 0) {
       return;
     }
     const files = staged.map((item) => item.file);
@@ -59904,10 +60144,10 @@ function ChatPane({
     const clearedEarly = files.length === 0;
     if (clearedEarly) setComposerText("");
     const restoreIfUntouched = () => {
-      if (clearedEarly && liveDraftRevisionRef.current === submittedRevision) setComposerText(text9);
+      if (clearedEarly && liveDraftRevisionRef.current === submittedRevision) setComposerText(text10);
     };
     try {
-      const sent = await onSend(files, text9);
+      const sent = await onSend(files, text10);
       if (sent) {
         setQuoteError(null);
         staged.forEach((item) => URL.revokeObjectURL(item.previewUrl));
@@ -61974,11 +62214,11 @@ function createVoiceSession(baseUrl, environment) {
     }
     publish({ liveSpeech: next });
   }
-  function finalizeLiveSpeech(itemId2, speaker, text9) {
+  function finalizeLiveSpeech(itemId2, speaker, text10) {
     if (!snapshot.liveSpeech.some((item) => item.itemId === itemId2 && item.speaker === speaker)) return;
     publish({
       liveSpeech: snapshot.liveSpeech.map(
-        (item) => item.itemId === itemId2 && item.speaker === speaker ? { ...item, final: true, text: text9 !== null && text9.length >= item.text.length ? text9 : item.text } : item
+        (item) => item.itemId === itemId2 && item.speaker === speaker ? { ...item, final: true, text: text10 !== null && text10.length >= item.text.length ? text10 : item.text } : item
       )
     });
   }
@@ -63894,16 +64134,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return loadedComposerDraftsRef.current[key];
   }
-  function persistComposerDraft(identity, panelKey, text9, contexts) {
+  function persistComposerDraft(identity, panelKey, text10, contexts) {
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
       if (namespace) {
         const storage = browserComposerStorage();
         if (!storage) throw new Error("Draft storage is unavailable.");
-        saveConsoleComposerDraft(storage, namespace, identity, { text: text9, contexts }, composerIdFor(panelKey));
+        saveConsoleComposerDraft(storage, namespace, identity, { text: text10, contexts }, composerIdFor(panelKey));
       }
-      loadedComposerDraftsRef.current["".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey))] = { text: text9, contexts };
+      loadedComposerDraftsRef.current["".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey))] = { text: text10, contexts };
       return true;
     } catch (error49) {
       setActionError("Draft remains visible but was not saved: ".concat(errorMessage(error49)));
@@ -64458,6 +64698,32 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
+  const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
+  const hostAttentionSources = import_react49.default.useMemo(
+    () => JSON.parse(hostAttentionKey),
+    [hostAttentionKey]
+  );
+  const [hostAttentionState, setHostAttentionState] = import_react49.default.useState();
+  const hostAttention = hostAttentionState?.scope === approvalScope ? hostAttentionState.snapshot : void 0;
+  import_react49.default.useEffect(() => {
+    setHostAttentionState(void 0);
+    const sources = hostAttentionSources;
+    if (!sources.length) return;
+    const scope = approvalScope;
+    return startHostAttentionPolling(sources, (snapshot) => setHostAttentionState({ scope, snapshot }), {
+      fetch: window.fetch.bind(window),
+      visible: () => document.visibilityState !== "hidden",
+      onVisible: (callback) => {
+        const listener = () => {
+          if (document.visibilityState === "visible") callback();
+        };
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      setInterval: (callback, ms) => window.setInterval(callback, ms),
+      clearInterval: (handle2) => window.clearInterval(handle2)
+    });
+  }, [hostAttentionSources, approvalScope]);
   function openApproval(pendingId) {
     setSelectedApprovalId(pendingId);
     dock.openTarget(buildControlTarget2("gating"), "replace_focused");
@@ -65324,7 +65590,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agents.find((c) => c.member_id === item.id);
     if (agent) openAgentChat(agent);
   }
-  async function submitMessageNow(panelId, target, text9, handlingMode, attachments = [], pendingAttempt, dispatchController = sendControllerRef.current) {
+  async function submitMessageNow(panelId, target, text10, handlingMode, attachments = [], pendingAttempt, dispatchController = sendControllerRef.current) {
     if (target.kind !== "agent-chat") return false;
     if (!lifetimeRef.current.active || consoleReadOnlyRef.current || dispatchController !== sendControllerRef.current) return false;
     const panelKey = buildPanelConversationKey2(panelId, target);
@@ -65335,7 +65601,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       (file2) => URL.createObjectURL(file2)
     );
     const userEntry = createUserEntry2(
-      text9,
+      text10,
       attachments.map((file2, index2) => ({
         src: optimisticObjectUrls[index2] || "",
         mediaType: file2.type || "application/octet-stream",
@@ -65374,7 +65640,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const result = (await dispatchController.commands.sendMessage(
         workbenchTarget,
         {
-          content: envelope?.content ?? text9,
+          content: envelope?.content ?? text10,
           origin: envelope?.origin ?? "console:".concat(panelId),
           idempotencyKey: envelope?.idempotency_key ?? createIdempotencyKey(),
           handlingMode: envelope?.handling_mode ?? handlingMode,
@@ -65449,8 +65715,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const identity = target.identity || target.memberId;
     const draftKey = scopedDraftKey(panelKey);
     const rawDraft = composerText ?? (draftByKey[draftKey] || "");
-    const text9 = rawDraft;
-    if (!text9.trim() && attachments.length === 0) return false;
+    const text10 = rawDraft;
+    if (!text10.trim() && attachments.length === 0) return false;
     const stack = getPendingStack(identity);
     const visiblePhase = phaseValueByKey.current[panelKey] ?? phaseRef.current[panelKey] ?? null;
     const agentPhase = agentsRef.current.find(
@@ -65475,7 +65741,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         setActionError("Send quoted context separately from file attachments.");
         return false;
       }
-      const sent = await submitMessageNow(panelId, target, text9, "queue", attachments);
+      const sent = await submitMessageNow(panelId, target, text10, "queue", attachments);
       if (sent) clearSubmittedContexts();
       return sent;
     }
@@ -65487,7 +65753,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         destination: identity,
         origin: "console:".concat(panelId),
         idempotencyKey: createIdempotencyKey(),
-        text: text9,
+        text: text10,
         contexts,
         now: Date.now()
       });
@@ -65579,8 +65845,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const original = getPendingStack(identity).find((candidate) => candidate.id === id);
     if (!original) return;
     const names = pendingRowNames(identity, original.destination);
-    const answer = (text9) => {
-      if (active()) setPendingCheck(identity, id, { phase: "result", text: text9 });
+    const answer = (text10) => {
+      if (active()) setPendingCheck(identity, id, { phase: "result", text: text10 });
     };
     if (!original.envelopeJson) {
       answer("Couldn't check: this message was never sent.");
@@ -65657,9 +65923,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function onStackEdit(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => ({ ...item, editing: item.id === id && item.state === "draft" })));
   }
-  function onStackCommitEdit(identity, id, text9) {
-    if (!text9.trim()) return;
-    setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id && item.state === "draft" ? { ...item, text: text9, editing: false } : item));
+  function onStackCommitEdit(identity, id, text10) {
+    if (!text10.trim()) return;
+    setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id && item.state === "draft" ? { ...item, text: text10, editing: false } : item));
   }
   function onStackCancelEdit(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id ? { ...item, editing: false } : item));
@@ -66390,7 +66656,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           persistComposerDraft(identity, panelKey, value, storedComposerDraft(identity, panelKey).contexts);
         },
         onStagedChange: (action) => setStagedAttachmentsForIdentity(identity, action),
-        onSend: (attachments, text9) => sendScope === sendScopeRef.current ? onSendMessage(panel.id, target, attachments, text9) : false,
+        onSend: (attachments, text10) => sendScope === sendScopeRef.current ? onSendMessage(panel.id, target, attachments, text10) : false,
         onInspect: configuredActionVisibility.inspect ? () => {
           if (agent) handleShowRosterDetails(agent);
         } : void 0,
@@ -66549,6 +66815,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (target.kind === "identity-inspect") {
       return renderInspectPanel(target);
     }
+    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface && hostAttentionSources?.length) {
+      return /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
+        GatingInboxPanel,
+        {
+          pending: [],
+          resource: { scopeKey: approvalScope, status: "unsupported", requests: [], decisions: {}, readOnly: true },
+          audit: [],
+          onDecide: () => {
+          },
+          readOnly: true,
+          hostAttention: hostAttention || { status: "loading", items: [], failedSources: [] }
+        }
+      );
+    }
     if ((target.kind === "routing" || target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface) {
       return /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("div", { className: "console-panel", children: "This view requires a mob runtime control surface." });
     }
@@ -66563,7 +66843,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh: () => void approvalResourceRef.current?.refresh(),
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
-          readOnly: consoleReadOnly
+          readOnly: consoleReadOnly,
+          hostAttention,
+          hostDecideSources: hostAttentionSources
         }
       );
     if (target.kind === "topology")
@@ -66616,7 +66898,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh: () => void approvalResourceRef.current?.refresh(),
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
-          readOnly: consoleReadOnly
+          readOnly: consoleReadOnly,
+          hostAttention,
+          hostDecideSources: hostAttentionSources
         }
       );
     if (target.kind === "logs")
@@ -66731,7 +67015,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("div", { className: "console-panel", children: "Unsupported panel" });
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(
     "div",
     {
       className: "cc-theme-scope meta-shell",
@@ -66803,7 +67087,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                   onOpenControl: openSidebarControl,
                   onOpenOperatorPanel: openOperatorPanel,
                   approvals: activeApprovals,
-                  onOpenApproval: openApproval
+                  onOpenApproval: openApproval,
+                  hostAttentionCount: hostAttention?.items.length || 0
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
@@ -66871,7 +67156,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         )
       ]
     }
-  ) }) });
+  ) }) }) });
 }
 
 // src/index.tsx

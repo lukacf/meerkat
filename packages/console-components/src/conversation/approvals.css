@@ -46,3 +46,9 @@
 .cc-approval-attention[data-pending="true"] .cc-approval-attention__count { color: var(--accent, var(--_cc-member-accent)); }
 .cc-approval-attention:is([data-state="stale"], [data-state="unavailable"]) .cc-approval-attention__count { color: var(--warn, var(--_cc-warning)); }
 .cc-approval-attention__status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.cc-host-attention__source { display: inline-flex; padding: 4px 8px; border: 1px solid var(--_approval-line); border-radius: 999px; font-size: .75em; line-height: 1.3; color: var(--_approval-muted); }
+.cc-host-attention__open { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 14px; border: 1px solid var(--_approval-line); border-radius: 6px; background: transparent; color: var(--_approval-ink); font-weight: 550; text-decoration: none; }
+.cc-host-attention__open:hover { background: color-mix(in srgb, currentColor 7%, transparent); }
+.cc-host-attention__open:focus-visible { outline: 2px solid var(--accent, var(--_cc-link, #6ba1e6)); outline-offset: 3px; }
+.gating__host { margin-inline: 18px; }
+.gating__host-note { margin: 8px 0; font-size: .85em; color: var(--warn, #d2b579); }

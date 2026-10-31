@@ -167,9 +167,10 @@ pub use console_aggregator::{
 };
 pub use console_config::{
     ConsoleActionsUiConfig, ConsoleAgentBadgeConfig, ConsoleAgentListConfig,
-    ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleBrandingConfig, ConsoleConfigError,
-    ConsoleEnvironmentConfig, ConsoleLayoutConfig, ConsoleRailFilterPresetConfig,
-    ConsoleRailUiConfig, ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleUiConfig,
+    ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleAttentionSourceConfig,
+    ConsoleAttentionUiConfig, ConsoleBrandingConfig, ConsoleConfigError, ConsoleEnvironmentConfig,
+    ConsoleLayoutConfig, ConsoleRailFilterPresetConfig, ConsoleRailUiConfig,
+    ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleUiConfig,
     load_console_ui_config_from_path_for_realm, load_console_ui_config_from_toml,
     load_console_ui_config_from_toml_for_realm,
 };

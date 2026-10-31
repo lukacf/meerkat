@@ -1,6 +1,6 @@
 module(
     name = "meerkat_meta",
-    version = "0.9.6",
+    version = "0.9.7",
 )
 
 bazel_dep(name = "rules_rust", version = "0.70.0")

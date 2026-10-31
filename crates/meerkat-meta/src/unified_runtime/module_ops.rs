@@ -243,6 +243,10 @@ impl UnifiedRuntime {
         self.module_runtime.lock().await.merged_events().to_vec()
     }
 
+    /// Answer `request` from the merged events, after a drain of the mob
+    /// event router ([`Self::drain_mob_agent_events`]). That drain can wait
+    /// on the event log store while the log's intake buffer is full, so this
+    /// call can too; the wait is cancel-safe.
     pub async fn subscribe_events(
         &self,
         request: SubscribeRequest,

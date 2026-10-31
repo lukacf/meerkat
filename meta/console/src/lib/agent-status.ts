@@ -78,6 +78,7 @@ export function isAgentWorking(agent: AgentStatusFields, options: AgentWorkingOp
 /** How healthy an agent is, as one kind. */
 export type AgentHealthKind =
   | "healthy"
+  | "working"
   | "degraded"
   | "needs_repair"
   | "stalled"
@@ -86,10 +87,14 @@ export type AgentHealthKind =
   | "retired"
   | "unobserved";
 
+/** A mark's tone: the kit's tones, and `live` for an agent working now (A2.4). */
+export type AgentStatusTone = Tone | "live";
+
 export interface AgentHealth {
   kind: AgentHealthKind;
-  /** The tone of its mark (A2.4): crit for stuck, warn for needs attention. */
-  tone: Tone;
+  /** The tone of its mark (A2.4): crit for stuck, warn for needs attention,
+   * live for an agent working now. */
+  tone: AgentStatusTone;
   /** The word people read: "Stalled", "Degraded", "Healthy". */
   word: string;
   /** Whether the health is a problem someone should look at. */
@@ -98,6 +103,7 @@ export interface AgentHealth {
 
 const HEALTH: Readonly<Record<AgentHealthKind, AgentHealth>> = {
   healthy: { kind: "healthy", tone: "ok", word: "Healthy", problem: false },
+  working: { kind: "working", tone: "live", word: "Working", problem: false },
   degraded: { kind: "degraded", tone: "warn", word: "Degraded", problem: true },
   needs_repair: { kind: "needs_repair", tone: "warn", word: "Needs repair", problem: true },
   stalled: { kind: "stalled", tone: "crit", word: "Stalled", problem: true },
@@ -112,9 +118,12 @@ const HEALTH: Readonly<Record<AgentHealthKind, AgentHealth>> = {
  * and the console's degraded label: retired and retiring agents first, then
  * broken, stalled (`progress.health` "wedged"), needs repair, degraded
  * (`progress.health` "degraded", a `console_degraded` label or a degraded
- * state), then not observed; everything else is healthy.
+ * state). The team runtime cannot judge a busy member's health and reports
+ * it `unknown`: a working agent then reads Working (never "Unknown"), and
+ * only an idle one reads Not observed, as does a record the console holds
+ * no observation of. Everything else is healthy.
  */
-export function agentHealth(agent: AgentStatusFields): AgentHealth {
+export function agentHealth(agent: AgentStatusFields, options: AgentWorkingOptions = {}): AgentHealth {
   const state = agentStateWord(agent);
   if (state === "retiring") return HEALTH.retiring;
   if (isAgentRetired(agent)) return HEALTH.retired;
@@ -127,6 +136,9 @@ export function agentHealth(agent: AgentStatusFields): AgentHealth {
     || state.includes("degrade")
   ) {
     return HEALTH.degraded;
+  }
+  if (agent.progress?.health === "unknown") {
+    return isAgentWorking(agent, options) ? HEALTH.working : HEALTH.unobserved;
   }
   if (agent.unobserved) return HEALTH.unobserved;
   return HEALTH.healthy;

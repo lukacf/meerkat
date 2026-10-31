@@ -79,6 +79,21 @@ describe("the one health rule", () => {
       .toBe("unobserved/locked/Not observed/false");
   });
 
+  it("reads a busy member's unknown health as working, and only an idle one's as not observed", () => {
+    // The team runtime cannot judge a busy member's health and reports it unknown.
+    const busy = agentHealth(agent({ response_phase: "tool-executing", progress: progress("run_open", "unknown") }));
+    expect([busy.kind, busy.tone, busy.word, busy.problem]).toEqual(["working", "live", "Working", false]);
+    expect(agentHealth(agent({ response_phase: null, progress: progress("run_open", "unknown") })).word).toBe("Working");
+    expect(agentHealth(agent({ progress: progress("unknown", "unknown") }), { openRun: true }).word).toBe("Working");
+    const idle = agentHealth(agent({ response_phase: null, progress: progress("idle", "unknown") }));
+    expect([idle.kind, idle.tone, idle.word]).toEqual(["unobserved", "locked", "Not observed"]);
+    // A known health still wins, and a busy healthy agent is healthy.
+    expect(agentHealth(agent({ response_phase: "generating", progress: progress("run_open") })).word).toBe("Healthy");
+    expect(agentHealth(agent({ state: "broken", progress: progress("run_open", "unknown") })).word).toBe("Broken");
+    expect(agentHealth(agent({ state: "retired", progress: progress("idle", "unknown") })).word).toBe("Retired");
+    expect(agentHealth(agent({ response_phase: "generating", progress: progress("run_open", "unknown") })).word).not.toMatch(/unknown/i);
+  });
+
   it("reads the member state without case or padding", () => {
     expect(agentStateWord({ state: "  Active " })).toBe("active");
     expect(isAgentRetired({ state: "STOPPED" })).toBe(true);

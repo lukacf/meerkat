@@ -520,7 +520,10 @@ struct Inner {
     /// the first pass, so events from before a restart are not pushed again.
     pushed_cursor: std::sync::Mutex<Option<u64>>,
     /// Applies and reconciles of declarations pass one at a time, each
-    /// reading the applied declarations and marks as they stand then.
+    /// reading the applied declarations and marks as they stand then, and
+    /// holding the gate from the revision it records to the last record it
+    /// writes. `declarations/get` reads under it too, so it never sees a
+    /// reconcile between its writes.
     declarations_gate: tokio::sync::Mutex<()>,
     /// Whether this boot warned that its options declare the applied
     /// revision with other content.
@@ -750,7 +753,8 @@ impl AnnouncementService {
         self.apply_declared(declarations).await
     }
 
-    /// What the declarations manage now (contract 4.6).
+    /// What the declarations manage now (contract 4.6), once a reconcile in
+    /// flight has finished.
     pub async fn declarations(
         &self,
     ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
@@ -798,7 +802,8 @@ impl AnnouncementService {
     }
 
     /// Hold the declarations gate a reconcile takes, so a test can keep one
-    /// waiting.
+    /// waiting. A `declarations/get` waits for it too, so a test asks none
+    /// while it holds the gate.
     #[cfg(test)]
     pub(crate) async fn hold_declarations(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.inner.declarations_gate.lock().await

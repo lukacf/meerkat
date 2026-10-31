@@ -151,6 +151,8 @@ impl AnnouncementService {
             self.reconcile_applied(&own).await?;
             self.reconcile_roles().await?;
         }
+        // The view takes the gate itself, so it is read once this apply's
+        // gate is released: never inside the block above.
         self.declared_view().await
     }
 
@@ -1013,7 +1015,15 @@ impl AnnouncementService {
     /// `declarations/get`: the applied revision and digest, every record the
     /// declarations manage or could not make, and the children of the role
     /// templates they made.
+    ///
+    /// It reads under the declarations gate, which every reconcile holds
+    /// from the revision it records to the last record it writes: a read
+    /// waits for a reconcile in flight (at startup, an apply, a mob set
+    /// change or a retry) and never reports a revision with only the records
+    /// that reconcile had reached. No caller holds the gate when it calls
+    /// this.
     pub(super) async fn declared_view(&self) -> Result<DeclarationsView, AnnouncementError> {
+        let _gate = self.inner.declarations_gate.lock().await;
         let own = self.declaring_mob()?;
         let (revision, digest) = match self.inner.store.applied_declarations().await? {
             Some(applied) => (applied.revision, applied.digest),

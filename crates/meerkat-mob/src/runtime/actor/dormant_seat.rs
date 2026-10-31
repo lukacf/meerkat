@@ -174,16 +174,36 @@ impl MobActor {
             .state()
             .identity_to_runtime
             .contains_key(&dsl_identity);
+        // A fresh life of an identity no member holds follows the identity's
+        // last incarnation: the generation MobMachine retains for it (none
+        // for an identity no incarnation preceded since the mob's last
+        // reset). The rotation is this request's, and the seat that takes it
+        // is an ordinary one: its row records the generation it follows.
+        let fresh_life_after = if seated {
+            None
+        } else {
+            self.dsl_authority
+                .state()
+                .identity_runtime_generations
+                .get(&dsl_identity)
+                .map(|generation| crate::ids::Generation::new(generation.0))
+        };
         match self
             .plan_dormant_seat(spec, SeatPlanMode::Rotation, None)
             .await?
         {
-            DormantSeatPlanEntry::Seat(candidate) => Ok(MemberRotationPlan::Seat {
-                candidate,
-                seated,
-                endpoint_source: self.member_residency.seat_endpoints.clone(),
-            }),
-            DormantSeatPlanEntry::Embody(spec) if !seated => Ok(MemberRotationPlan::Embody(spec)),
+            DormantSeatPlanEntry::Seat(mut candidate) => {
+                candidate.fresh_life_after = fresh_life_after;
+                Ok(MemberRotationPlan::Seat {
+                    candidate,
+                    seated,
+                    endpoint_source: self.member_residency.seat_endpoints.clone(),
+                })
+            }
+            DormantSeatPlanEntry::Embody(mut spec) if !seated => {
+                spec.fresh_life_after = fresh_life_after;
+                Ok(MemberRotationPlan::Embody(spec))
+            }
             _ => Err(MobError::Internal(format!(
                 "the rotation of '{agent_identity}' planned no seat"
             ))),
@@ -549,6 +569,8 @@ impl MobActor {
             // Decided by the preparation: a revival's archived session.
             session_archived: false,
             history_unavailable: spec.history_unavailable.clone(),
+            // Set by the plan of a rotation of an identity no member holds.
+            fresh_life_after: None,
             resume_from_role: spec.launch_mode.resume_from_role().cloned(),
             runtime_mode,
             labels: spec.labels.clone().unwrap_or_default(),
@@ -2237,6 +2259,13 @@ impl SettledSeatChunk {
                     // A fresh seat of an identity whose archived session is
                     // gone from the store records the notice.
                     .with_history_unavailable(seat.candidate.history_unavailable.clone())
+                    // A fresh life of an identity no member held (a rotation's
+                    // request) names the incarnation it follows.
+                    .with_seat_rotation(
+                        seat.candidate
+                            .fresh_life_after
+                            .map(crate::runtime::SeatRotation::fresh_life_after),
+                    )
                     // A resume seat that takes another role than its session
                     // was last built under records the declared migration,
                     // which the session's next build declares.

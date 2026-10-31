@@ -42,16 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `new` constructor, so the record can grow without another break.
 
 - An identity runtime over a host's own `SessionBridge` that keeps the
-  defaults of the new member lifecycle journal reads (see Added), or answers
-  the head but not the pages, or cannot read an identity's binding, runs no
-  lifecycle side effect of a step Core journals: no retirement hook for an
-  incarnation Core ended, no distillation of a reset's outgoing session, no
-  exit interview of an unlisted or deleted identity, and no `after_create`
-  for a seat. It is never silent: the runtime reports it once on the error
-  hook (`lifecycle_projection_off`), and `meta/status` and the JSON
-  `/healthz` summary read it off, degraded. `MobSessionBridge`, and the
-  `PublicSessionBridge` that wraps it, answer both reads; a bridge that wraps
-  another forwards both, as it forwards the binding reads.
+  defaults of the new member lifecycle journal reads or of `member_standing`
+  (see Added), or answers the head but not the pages, or cannot read an
+  identity's binding, runs no lifecycle side effect of a step Core journals:
+  no retirement hook for an incarnation Core ended, no distillation of a
+  reset's outgoing session, no exit interview of an unlisted or deleted
+  identity, and no `after_create` for a seat. It is never silent: the
+  runtime reports it once on the error hook (`lifecycle_projection_off`),
+  and `meta/status` and the JSON `/healthz` summary read it off, degraded.
+  `MobSessionBridge`, and the `PublicSessionBridge` that wraps it, answer
+  the three reads; a bridge that wraps another forwards all three, as it
+  forwards the binding reads.
 
 - Each lifecycle side effect of an identity is bounded: a gateway host's
   retirement hook (`GatewayHostComposition::identity_member_retired`) for an
@@ -77,14 +78,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when it stopped are not run. That release owed them in memory only, and
   lost them with the process.
 
-- A host's own `SessionBridge` must answer `member_lifecycle_journal_head`
-  and `member_lifecycle_journal_page` (and Core's binding reads), or forward
-  them, for any lifecycle side effect to run. One that does not is reported
-  once at start as the error event `lifecycle_projection_off`, logged at
-  ERROR, and `meta/status` (`lifecycle_projection.state`) and the JSON
-  `/healthz` summary read `off`, degraded. A wrapper that keeps the default
-  of `mob_incarnation` instead of forwarding it only has a seat step refused,
-  retryable, while the head of Core's journal does not read.
+- A host's own `SessionBridge` must answer `member_lifecycle_journal_head`,
+  `member_lifecycle_journal_page` and `member_standing` (and Core's binding
+  reads), or forward them, for any lifecycle side effect to run. One that
+  does not is reported once at start as the error event
+  `lifecycle_projection_off`, logged at ERROR, and `meta/status`
+  (`lifecycle_projection.state`) and the JSON `/healthz` summary read `off`,
+  degraded. A wrapper that keeps the default of `mob_incarnation` instead of
+  forwarding it only has a seat step refused, retryable, while the head of
+  Core's journal does not read.
+
+- Whether any of a failed reset or delete reached Core is read from Core's
+  journal (see Changed). Over a host's own `SessionBridge` whose journal does
+  not read, a failed reset or delete keeps what it recorded whatever the
+  bridge answered, Core's typed refusal included, and the identity's next
+  roster compile carries the rotation out; forward the journal reads so a
+  reset Core refused stays refused.
 
 - A host's retirement hook or `after_create` that has not answered within 30
   seconds is called again, at most three times in all, then reported
@@ -288,7 +297,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `identity_first`; each is `#[non_exhaustive]` (each fact variant too), built
   with its constructor (`MemberLifecycleJournalHead::new`,
   `MemberLifecycleFact::seated`, `retired`, `mob_reset`, and so on), so the
-  facts can say more of their step without another break.
+  facts can say more of their step without another break. A fact carries
+  what Core's journal says of its step: a seat its role, session, identity
+  entry, whether its archived session was gone, and the rotation that
+  seated it (Core's `SeatRotation`: a rotation's terminal step, naming the
+  incarnation the same step retired, or a fresh life after the identity's
+  last incarnation); a retirement its role, session, identity entry, cause
+  and the rotation whose terminal step retired it (Core's
+  `RetiredRotation`: its target, successor and successor role).
+  `RetirementStarted`, `EntryAdopted` and `LegacyReset` carry the other
+  kinds Core journals, so the bridge drops none. `member()` names a fact's
+  member, and the `with_` builders (`with_session`, `with_identity_entry`,
+  `with_seat_rotation`, `with_retired_rotation`, `with_cause`) add what a
+  constructor leaves out.
+
+- `SessionBridge::member_standing` answers where Core's member of an
+  identity stands now (`MemberStanding`: `Unseated`, `Seated { generation }`
+  or `Retiring { generation }`, built with `MemberStanding::unseated`,
+  `seated` and `retiring`; `generation()` names the incarnation that holds
+  the identity), read from the machine state the mob's actor last published
+  (`MobHandle::identity_entry`): no store read, and it wakes no member. The
+  lifecycle projection reads it to tell whether a seat's incarnation is still
+  Core's, and a roster pass to tell whether Core started an unlisting's
+  retirement (see Changed). It defaults to `Unsupported`; `MobSessionBridge`
+  answers it (`Unsupported` for a mob handle whose principal may not list the
+  mob's members), and `PublicSessionBridge` forwards it.
+
+- `LifecycleEffectIntent` records the head of Core's journal its step read
+  before it asked Core (`asked_after`), whether Core had retired the
+  incarnation before the step asked for the identity's fresh life
+  (`predecessor_retired`), and the record of the step that ended that
+  incarnation which it replaced before the projection reached that end
+  (`replaced`). All three are serde-default, with builders
+  (`with_asked_after`, `with_predecessor_retired`, `with_replaced`).
 
 - `SessionBridge::mob_incarnation` names the incarnation of the bridge's mob
   without a store read; it defaults to `None`, and `MobSessionBridge` (and
@@ -422,11 +463,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   metadata store is durable (see Upgrade), and a repeat changes nothing the
   stopped process completed: the exit interview is queued once (in a store
   that keys it by its step), and a repeated distillation reads the session
-  again. Each Meta verb records what its step owes before it asks Core (Core's
-  journal does not say whether a rotation was a reset, a delete or a role
-  move), for an incarnation the identity spawned only: a reset over a member
-  a host made under the identity's member id records nothing for it. Nothing
-  is projected on a candidate launch, whose verbs change no stored member. In
+  again. What each step was is read from the facts Core journals with it:
+  which rotation a retirement ended in and the seat the same step made
+  (under which role), each incarnation's session, why Core's seal unlisted
+  an identity, and which incarnation a fresh life follows; never from where
+  facts sit in the journal, or from Core's member history. Each Meta verb
+  records what its step owes before it asks Core (Core's journal does not
+  say whether a rotation was a reset, a delete or a role move), for an
+  incarnation the identity spawned only: a reset over a member a host made
+  under the identity's member id records nothing for it. Nothing is
+  projected on a candidate launch, whose verbs change no stored member. In
   particular:
   - the retirement hook is also called for the incarnation a reset, a
     delete, a role move or a rotation ends, with the new causes
@@ -440,11 +486,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     (`agent_runtime_id`). A release (`retire`, a scoped retire) still calls
     it once, before the release answers;
   - `after_create` is called once Core's journal records the seat, with no
-    lock of the identity held, as before, and only while Core still binds
-    that incarnation: a seat whose incarnation ended before the call is told
-    nothing, its retirement standing for it. A call a restart moved to the
-    next start reports the identity's roster labels and no system prompt,
-    since the build that made the seat ended with the stopped process;
+    lock of the identity held, as before, and only while Core still holds
+    that incarnation (Core's standing of the identity's member, or Core's
+    journal for a seat that standing does not show yet): a seat whose
+    incarnation ended before the call is told nothing, its retirement
+    standing for it. A call a restart moved to the next start reports the
+    identity's roster labels and no system prompt, since the build that made
+    the seat ended with the stopped process;
   - each side effect is bounded. A hook or `after_create` call that has not
     answered within 30 seconds, or an exit interview write that failed, is
     attempted again, at most three times in all; an answer the host gives is
@@ -485,9 +533,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     bridge cannot place, counts as none. A step whose record cannot be
     written (a reload's and a respawn's too) is refused the same way, as
     `IdentityHistoryUnavailable`;
-  - a roster pass that lists an identity again takes back an unlisting Core
-    never carried out, and a step Core refused before any of it started puts
-    back what an earlier step recorded for the same incarnation;
+  - a roster pass that lists an identity again takes back an unlisting
+    whose retirement Core never started (Core's standing shows that
+    incarnation seated, not retiring). A reset or a delete reads the head of
+    Core's journal before it asks Core; when it fails and no fact of the
+    identity's member follows that head, nothing of it reached Core, so it
+    takes back what it recorded and puts back what an earlier step recorded
+    for the same incarnation. Otherwise (or when the journal does not read)
+    it keeps both, and the identity's next roster compile carries the
+    rotation out. The bridge's error picks only the kind of answer;
+  - a reset or a delete of an identity whose last incarnation Core had
+    already retired owes the session that incarnation left the verb's
+    memory side effects (the reset's distillation behind its boundary; the
+    delete's scope drop and exit interview), with no retirement hook. They
+    run from Core's journal, at the fresh life's seat, which Core journals
+    as the life after that incarnation, so a restart in between runs them
+    too; before, the reset distilled in a task of its own process and the
+    delete ran them inline, and a kill lost them. The verb's record keeps
+    the one of the step that ended the incarnation (an unlisting) while the
+    projection has not reached that end, so both run;
   - an identity runtime that no identity context serves is bound by the
     public view an embedder hands the RPC handler, or by its restore, and so
     runs the side effects of its steps; one that nothing binds records
@@ -495,10 +559,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a graceful shutdown lets the projection reach the journal's head within
     half of the runtime's event drain window; the post-stop drain and the
     metadata settle keep the rest, and what the projection does not reach
-    runs at the next start. The distillation of a reset's incarnation Core
-    had already retired is joined by the shutdown the same way. The shutdown
-    no longer joins `after_create` calls or drains reset distillations of its
-    own.
+    runs at the next start. The shutdown no longer joins `after_create`
+    calls or drains reset distillations of its own: a reset's distillation,
+    also of an incarnation Core had already retired, is the projection's.
 
 ### Fixed
 
@@ -638,26 +701,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its decisions and visibility policy. A schedule of a deleted agent stays
   until it is deleted, and fires into a new agent declared later under the
   same name while its sender may still send to it.
-- The lifecycle projection decides some facts of an identity's lifecycle
-  that Core's member lifecycle journal does not carry yet; each moves to
-  Core's journal once it says so:
-  - whether Core's rotation started at all, read from the bridge's error
-    when Core refused or failed it (a step that may have started keeps what
-    it recorded);
-  - whether an identity spawned a member, read from the durable-identity
-    marker or the identity label on Core's binding;
-  - which retirement and seat form one rotation, read from their positions
-    in the journal (a retirement followed at the next cursor by the same
-    member's seat at a later generation);
-  - whether a seat's incarnation is still current, read from Core's latest
-    binding of the identity;
-  - whether Core never carried out an unlisting a later roster pass undid,
-    read from Core still binding the incarnation it named live (Core
-    journals the start of a retirement, which the bridge does not read
-    yet);
-  - why Core rotated an identity no Meta verb asked it to rotate (`rotated`
-    or `role_move`, read from Core's member history); Core's legacy member
-    resets owe nothing.
+- The lifecycle projection reads whether an identity spawned a member from
+  the durable-identity marker or the identity label on Core's binding, in
+  one place, a fact Core's member lifecycle journal does not carry yet; it
+  moves to Core's journal once it says so.
 
 ## [0.9.7] - 2026-10-30
 

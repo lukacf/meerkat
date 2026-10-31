@@ -375,6 +375,16 @@ them.
   `live_session_own_operator_instruction_entry_placement`, so an
   implementation must answer it.
 
+- `meerkat-machine-schema`, `meerkat-runtime`: a model routing request onto a
+  target that cannot carry the session's transcript is denied by
+  `MeerkatMachine` (see Added). The inputs `RequestFiniteSwitchTurn` and
+  `RequestUntilChangedSwitchTurn` gain the field `target_carries_transcript`,
+  so code that builds them literally must set it, and the machine gains the
+  transitions `RequestFiniteSwitchTurnTranscriptUnsupported` and
+  `RequestUntilChangedSwitchTurnTranscriptUnsupported`.
+  `SessionLlmReconfigureHost` gains `switch_target_carries_session_transcript`,
+  with a default that carries every target.
+
 - `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
   `SessionDocumentMachine` holds each session's operator-instruction state
   (see Added). The generated session-document authority
@@ -769,9 +779,15 @@ them.
   System rows only in its leading prompt or on such a backend, an entry
   beside another System row on such a backend) is refused typed: a live
   change before any client for the target is built (`ValidationFailed`, and
-  the session service's own hot swap refuses it too), a sticky model
-  fallback skips the target (`request_unsupported`), and a resumed build
-  refuses (`BuildAgentError::Config`).
+  the session service's own hot swap refuses it too; a session staged before
+  its first build is judged on the session that build resumes), a model
+  routing request (a committed `brain_swap` among them) is denied by the
+  routing machine (`capability_policy`) instead of being held, so the
+  session keeps serving on its current model, a sticky model fallback skips
+  the target (`request_unsupported`; it judges every entry row of the
+  request, rows a fork copied included), and a resumed build refuses
+  (`BuildAgentError::Config`) and bootstraps no client for a committed
+  routing target that cannot carry them.
   `Session::own_operator_instruction_entry_placement` says where they stand
   (`InstructionEntryPlacement`). A compaction folds every
   entry row into one snapshot of the instructions in effect after the
@@ -792,6 +808,13 @@ them.
   and the fold source.
 
 ### Changed
+
+- `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
+  answers no for an OpenAI backend kind this version does not know (it
+  answered yes), as for a binding the config does not resolve. A capability
+  surface read through such a binding no longer claims ordered System
+  messages after the leading prefix, so instruction activations there are
+  refused.
 
 - `meerkat-core`: a `policy_denied` tool error's model-facing message now
   reads `Tool call denied (<code>): <message>` from the denial itself, for an

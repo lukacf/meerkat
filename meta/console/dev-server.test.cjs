@@ -55,9 +55,11 @@ test("npm run dev pre-bundles the MCP client and core with their sub-path import
     cacheDir: path.join(__dirname, ".tmp", "dev-server-deps"),
     logLevel: "silent",
   }, "serve");
-  // The same pre-bundle the dev server runs at startup.
+  // The same pre-bundle the dev server runs at startup. The console imports
+  // the MCP core and ext-apps' app bridge; the bridge imports the MCP client,
+  // which is bundled inside it.
   const { optimized } = await optimizeDeps(config, true);
-  for (const dependency of ["@modelcontextprotocol/client", "@modelcontextprotocol/core"]) {
+  for (const dependency of ["@modelcontextprotocol/core", "@modelcontextprotocol/ext-apps/app-bridge"]) {
     assert.ok(dependency in optimized, `${dependency} is not pre-bundled: ${Object.keys(optimized).join(", ")}`);
   }
 });

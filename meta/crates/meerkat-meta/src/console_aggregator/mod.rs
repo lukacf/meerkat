@@ -10,6 +10,9 @@ mod delta_compaction;
 #[cfg(test)]
 mod delta_compaction_tests;
 pub(crate) mod faults;
+mod last_activity;
+#[cfg(test)]
+mod last_activity_tests;
 mod member_cut;
 #[cfg(test)]
 mod member_cut_tests;
@@ -253,6 +256,11 @@ struct AggregatorInner {
     /// [`delta_compaction`]), shared with every policy view: a dedupe cache
     /// over the console log's durable rows, holding no lifecycle.
     streamed_blocks: Arc<tokio::sync::Mutex<delta_compaction::StreamedBlocks>>,
+    /// Each identity's newest activity time for `/console/experience`,
+    /// shared with every policy view: read from the log on an identity's
+    /// first read, and again only after its entry is dropped, and kept
+    /// current by [`append_frame`] (see [`last_activity`]).
+    last_activity: Arc<last_activity::LastActivityCache>,
     /// Test seam: replaces the runtime's admission evidence for sends.
     #[cfg(test)]
     send_admission_override: std::sync::Mutex<Option<Arc<dyn send_recovery::SendAdmissionReader>>>,
@@ -922,6 +930,10 @@ impl MetaConsoleAggregator {
         let _ = activity.wait_for(|in_flight| *in_flight == 0).await;
     }
 
+    /// An aggregator over `store`. Its in-memory last activity follows the
+    /// frames this aggregator appends: a second aggregator over the same
+    /// store keeps its own and sees only its own appends, so a store should
+    /// have one aggregator, with policy views for other readers.
     pub fn new(store: Arc<dyn ConsoleLogStore>) -> Self {
         Self::new_with_options(store, ConsoleAggregatorOptions::default())
     }
@@ -973,6 +985,7 @@ impl MetaConsoleAggregator {
                 streamed_blocks: Arc::new(tokio::sync::Mutex::new(
                     delta_compaction::StreamedBlocks::default(),
                 )),
+                last_activity: Arc::new(last_activity::LastActivityCache::default()),
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
@@ -1062,6 +1075,7 @@ impl MetaConsoleAggregator {
                 live_projection_shutdowns: std::sync::Mutex::new(BTreeMap::new()),
                 send_dispatch_claims: owner.send_dispatch_claims.clone(),
                 streamed_blocks: owner.streamed_blocks.clone(),
+                last_activity: owner.last_activity.clone(),
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
@@ -1138,6 +1152,9 @@ impl MetaConsoleAggregator {
         self.inner.event_tx.subscribe()
     }
 
+    /// The console log this aggregator writes. A frame appended here
+    /// directly, not through the aggregator, is not seen by the in-memory
+    /// last activity of an identity the aggregator has already read.
     pub fn store(&self) -> Arc<dyn ConsoleLogStore> {
         self.inner.store.clone()
     }
@@ -1613,13 +1630,21 @@ impl MetaConsoleAggregator {
     }
 
     /// The last console activity of each named identity, in milliseconds
-    /// since the epoch ([`ConsoleLogStore::latest_activity_times`]). It reads
-    /// the console log alone: it enters no member actor and wakes no member.
+    /// since the epoch. An identity is read from the console log on its first
+    /// read here ([`ConsoleLogStore::latest_activity_times`], a chunk of
+    /// identities per call), and again only after an operator's retire or
+    /// delete, an eviction or a clear drops its entry; in between it is kept
+    /// current in memory from the frames this aggregator appends (see
+    /// [`last_activity`]), and a read touches no store. It enters no member
+    /// actor and wakes no member.
     pub(crate) async fn last_activity_for_identities(
         &self,
         identities: &[String],
     ) -> ConsoleLogResult<HashMap<String, u64>> {
-        self.inner.store.latest_activity_times(identities).await
+        self.inner
+            .last_activity
+            .read(self.inner.store.as_ref(), identities)
+            .await
     }
 
     /// The spawn registry's labels for each record, in record order: what the
@@ -2285,7 +2310,7 @@ impl MetaConsoleAggregator {
             .projection_owner
             .as_deref()
             .unwrap_or(&self.inner);
-        owner.store.clear_frames().await?;
+        owner.last_activity.clear(owner.store.as_ref()).await?;
         owner
             .notice_observations
             .lock()
@@ -2935,10 +2960,7 @@ impl MetaConsoleAggregator {
         let _ = SendState::Requested
             .apply(SendTransition::PersistAccepted)
             .map_err(ConsoleSendError::State)?;
-        let outcome = self
-            .inner
-            .store
-            .append_if_absent(new_frame)
+        let outcome = append_frame(&self.inner, new_frame)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -3426,10 +3448,7 @@ impl MetaConsoleAggregator {
             caused_by_frame_id: None,
         };
         redact_frame(host_policy.as_ref(), &mut new_frame);
-        let outcome = self
-            .inner
-            .store
-            .append_if_absent(new_frame)
+        let outcome = append_frame(&self.inner, new_frame)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -8207,13 +8226,26 @@ async fn append_and_emit_frame(
         }
     }
     redact_frame(policy.as_ref(), &mut frame);
-    let outcome = inner.store.append_if_absent(frame).await?;
+    let outcome = append_frame(inner, frame).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame.clone(),
         });
     }
     Ok(outcome)
+}
+
+/// Append one frame to the console log. Every frame this aggregator writes
+/// goes through here, so the in-memory last activity ([`last_activity`])
+/// merges each acting frame the log stores.
+async fn append_frame(
+    inner: &AggregatorInner,
+    frame: NewConsoleFrame,
+) -> ConsoleLogResult<AppendOutcome> {
+    inner
+        .last_activity
+        .append(inner.store.as_ref(), frame)
+        .await
 }
 
 async fn update_frame_status_and_emit(
@@ -8247,7 +8279,7 @@ async fn update_frame_status_and_emit(
         parent_frame_id: Some(updated.id.clone()),
         caused_by_frame_id: Some(updated.id.clone()),
     };
-    let outcome = inner.store.append_if_absent(update_marker).await?;
+    let outcome = append_frame(inner, update_marker).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame,

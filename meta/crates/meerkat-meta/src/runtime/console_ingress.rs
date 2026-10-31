@@ -134,6 +134,14 @@ pub struct ConsoleLiveSnapshot {
     /// has no known activity. Reading it enters no member, so it wakes none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_activity_ms: BTreeMap<String, u64>,
+    /// The id of the mob whose members the topology shows, when one mob is
+    /// known: a runtime's console serves its own mob, and a shared console
+    /// one registered runtime's mob. The experience carries it as
+    /// `topology.live_snapshot.mob_id`, and the console names the topology's
+    /// team from it. `None` names no team: a shared console over several
+    /// runtimes or none, or a snapshot whose host sets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<String>,
 }
 
 fn console_member_console_identity(member: &ConsoleMember) -> &str {
@@ -175,7 +183,16 @@ impl ConsoleLiveSnapshot {
                 .is_none()
                 .then(|| UnobservedFacts::new(UnobservedReason::NotObserved, &["running"])),
             last_activity_ms: BTreeMap::new(),
+            mob_id: None,
         }
+    }
+
+    /// The snapshot naming the mob whose members its topology shows
+    /// ([`Self::mob_id`]).
+    #[must_use]
+    pub(crate) fn with_mob_id(mut self, mob_id: Option<String>) -> Self {
+        self.mob_id = mob_id;
+        self
     }
 
     /// The snapshot with each identity's last console activity
@@ -1406,6 +1423,11 @@ fn build_console_experience_contract(
     if let Some(unobserved) = &live_snapshot.unobserved {
         body["health_overview"]["live_snapshot"]["unobserved"] = unobserved.to_value();
     }
+    // The team the topology shows, by the id of the mob whose members are its
+    // nodes. Without it the console names no team.
+    if let Some(mob_id) = &live_snapshot.mob_id {
+        body["topology"]["live_snapshot"]["mob_id"] = Value::String(mob_id.clone());
+    }
     if let Some(fetch_timeout_ms) = console_policy.fetch_timeout_ms {
         body["console_policy"] = serde_json::json!({
             "fetch_timeout_ms": fetch_timeout_ms,
@@ -2547,6 +2569,62 @@ mod last_activity_tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+mod topology_mob_tests {
+    use super::*;
+    use crate::decisions::ConsolePolicy;
+    use serde_json::Value;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn member(identity: &str) -> ConsoleMember {
+        ConsoleMember {
+            agent_identity: identity.to_string(),
+            role: "analyst".to_string(),
+            state: "active".to_string(),
+            model_capabilities: ConsoleModelCapabilities::default(),
+            runtime_mode: None,
+            session_id: None,
+            wired_to: Vec::new(),
+            labels: BTreeMap::new(),
+            progress: None,
+        }
+    }
+
+    /// The experience names the mob its topology shows by the snapshot's
+    /// own mob id, at `topology.live_snapshot.mob_id`, with members or
+    /// without, and leaves it out when the snapshot names none: the runtime
+    /// id never stands in for it.
+    #[test]
+    fn topology_names_its_mob_only_from_the_snapshot_mob_id() {
+        let snapshot = |members: Vec<ConsoleMember>| {
+            ConsoleLiveSnapshot::new(
+                Some("runtime-7".to_string()),
+                Some(true),
+                Vec::new(),
+                Vec::new(),
+                members,
+                true,
+            )
+        };
+        let mob_id = |snapshot: &ConsoleLiveSnapshot| {
+            build_console_experience_contract(
+                &[],
+                snapshot,
+                &ConsolePolicy::default(),
+                &BTreeSet::new(),
+            )
+            .pointer("/topology/live_snapshot/mob_id")
+            .cloned()
+        };
+        for members in [Vec::new(), vec![member("router")]] {
+            let named = snapshot(members.clone()).with_mob_id(Some("ops-team".to_string()));
+            assert_eq!(mob_id(&named), Some(Value::from("ops-team")));
+            assert_eq!(mob_id(&snapshot(members)), None);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 mod access_priming_tests {
     use super::*;
     use crate::access::{ACTION_AGENT_VIEW, AccessControlConfig, AccessEffect, AccessRule};
@@ -2630,6 +2708,7 @@ mod access_priming_tests {
             has_mob_runtime: true,
             unobserved: None,
             last_activity_ms: BTreeMap::new(),
+            mob_id: None,
         };
         // The first poll records the roster.
         prime_access_attributes(&controller, &snapshot);

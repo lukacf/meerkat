@@ -114,8 +114,10 @@ describe("TopologyPanel", () => {
     expect(container.querySelector(".topo-roletree__role .topo-roletree__label")?.getAttribute("title")).toBe("memory-steward");
     expect(screen.getByTestId("topology-node:router:main").textContent).toBe("Router main");
     expect(screen.getByTestId("topology-node:identity:queue-agent").textContent).toBe("Queue agent");
-    rerender(<TopologyPanel activity={[]} agents={[]} nodes={nodes} view="roles" teamName="Operations team" />);
+    expect(container.querySelector(".topo-roletree__mob .topo-roletree__label")?.hasAttribute("title")).toBe(false);
+    rerender(<TopologyPanel activity={[]} agents={[]} nodes={nodes} view="roles" teamName="Operations team" teamKey="ops" />);
     expect(labels()[0]).toBe("Operations team");
+    expect(container.querySelector(".topo-roletree__mob .topo-roletree__label")?.getAttribute("title")).toBe("ops");
   });
 
   test("does not treat a mutation callback as authority", () => {

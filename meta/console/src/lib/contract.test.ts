@@ -317,6 +317,21 @@ test("console experience contract names required top-level projection fields", (
   ]);
 });
 
+test("the topology's team field is the one the Rust experience builder writes", () => {
+  // The gateway names the mob its topology shows at topology.live_snapshot.mob_id.
+  const builder = readFileSync(
+    resolve(process.cwd(), "../crates/meerkat-meta/src/runtime/console_ingress.rs"),
+    "utf8",
+  );
+  assert.match(builder, /body\["topology"\]\["live_snapshot"\]\["mob_id"\]/);
+  // Both experience types the console reads declare it there.
+  for (const path of ["src/types.ts", "../packages/console-core/src/runtime-types.ts"]) {
+    const types = readFileSync(resolve(process.cwd(), path), "utf8");
+    const topology = /topology\?: ConsoleExperienceSection<\{[\s\S]*?\n {2}\}>;/.exec(types)?.[0] || "";
+    assert.match(topology, /live_snapshot\?: \{[\s\S]*\bmob_id\?: string;/, path);
+  }
+});
+
 function parseAxumRoutes(source: string): Set<string> {
   const routes = new Set<string>();
   const routePattern = /\.route\(\s*"([^"]+)"\s*,\s*(get|post)\s*\(/gs;

@@ -255,7 +255,8 @@ describe("Topology roles root", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(() => window.localStorage.clear());
 
-  it("names the team, never the console's title", async () => {
+  /// The Roles root's name and tooltip for an experience.
+  async function rolesRoot(overrides: Record<string, unknown>): Promise<{ name: string | null; title: string | null }> {
     seedDock(true);
     window.localStorage.setItem("meta-console-topology-view", "roles");
     const harness = transport();
@@ -263,11 +264,32 @@ describe("Topology roles root", () => {
       ...experience(),
       console_config: { title: "Acme Operations Console" },
       agent_sidebar: { ...experience().agent_sidebar, title: "Agents" },
+      ...overrides,
     }) as never;
     const view = render(<ConsoleApp baseUrl="" transport={harness} />);
     await waitFor(() => expect(view.container.querySelector(".topo-roletree__label") !== null).toBe(true));
-    expect(view.container.querySelector(".topo-roletree__label")?.textContent).toBe("Team");
+    const root = view.container.querySelector(".topo-roletree__label");
+    const named = { name: root?.textContent ?? null, title: root?.getAttribute("title") ?? null };
     view.unmount();
+    window.localStorage.clear();
+    return named;
+  }
+
+  const withMobId = (mob_id: string) => ({ topology: { live_snapshot: { nodes: [], node_count: 0, mob_id } } });
+  const panelRuntime = (label: string) => ({ key: `runtime-${label}`, label, namespace: label, memory: false, workgraph: false });
+
+  it("names the team by the mob id the experience names, in words, never the console's title", async () => {
+    expect(await rolesRoot(withMobId("ops-team"))).toEqual({ name: "Ops team", title: "ops-team" });
+    expect(await rolesRoot({ runtime_id: "console-aggregator", ...withMobId("foresight-studio") }))
+      .toEqual({ name: "Foresight studio team", title: "foresight-studio" });
+  });
+
+  it("reads Team when the experience names no mob, whatever its runtime id says", async () => {
+    expect(await rolesRoot({ runtime_id: "ops-team" })).toEqual({ name: "Team", title: null });
+    expect(await rolesRoot({
+      runtime_id: "console-aggregator",
+      panel_runtimes: [panelRuntime("foresight-studio")],
+    })).toEqual({ name: "Team", title: null });
   });
 });
 

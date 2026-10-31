@@ -5,7 +5,7 @@ import {
   createConsoleContextRecord, createConsoleSendAttempt, createHttpConsoleTransport,
   createMetaConsoleController, createPendingApprovalResource, finishConsoleSendAttempt,
   mapFramesToTimelineEntries, serializeConsoleContextMessage,
-  type ConsoleFrame, type ConsoleTransportState, type ConversationRichMarkdownBlock,
+  type ConsoleExperience, type ConsoleFrame, type ConsoleTransportState, type ConversationRichMarkdownBlock,
 } from "@console-core";
 import {
   ApprovalCard, Button, ConsoleConversationPanel, ConsoleTransportStatus, ConversationMarkdown,
@@ -76,6 +76,12 @@ const unnamedCollapsible = <Button collapsible>Refresh</Button>;
 // @ts-expect-error An icon-only button has no visible label, so it needs an aria-label.
 const unnamedIcon = <Button iconOnly icon="+" />;
 void namedCollapsible; void namedIcon; void unnamedCollapsible; void unnamedIcon;
+// The experience names the topology's team by its mob id, a typed field.
+type TopologySnapshot = NonNullable<NonNullable<ConsoleExperience["topology"]>["live_snapshot"]>;
+const namedTopology: TopologySnapshot = { nodes: [], node_count: 0, mob_id: "ops-team" };
+// @ts-expect-error The topology's team is named by a mob id string.
+const invalidTopologyTeam: TopologySnapshot = { mob_id: 7 };
+void namedTopology; void invalidTopologyTeam;
 void controller.transport.send({ identity: viewportKey.identity, content, origin: "console:fixture", idempotencyKey: "key:fixture", handlingMode: "steer" });
 void createConsoleApp(document.createElement("div"), { baseUrl: "/console", storageNamespace: viewportKey.authority, markdownUrlPolicy: urlPolicy });
 

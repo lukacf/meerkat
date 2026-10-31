@@ -71,7 +71,8 @@ Returns experience metadata describing the current runtime state. This is the pr
     "title": "Topology",
     "live_snapshot": {
       "nodes": [...],
-      "node_count": 5
+      "node_count": 5,
+      "mob_id": "ops-team"
     }
   },
   "health_overview": {
@@ -91,14 +92,28 @@ An agent row in `agent_sidebar.live_snapshot.agents`, and its rows in
 `identity_status` and `health_overview`, can carry `last_activity_ms`: the
 newest time, in milliseconds since the epoch, that the console's frame log
 recorded the agent acting (a live runtime event, a console send or a tool
-application), looked for among the agent's newest 512 frames. Frames rebuilt
-from session history or synthesized by the console do not count, and neither
-do lifecycle records (respawn, retire, reset, delete), interaction failures
-and memory events, which record something done to the agent. The field is
-advisory: a row without it has no known activity, which includes an agent
-whose newest acting frame is older than its newest 512 frames, and reading it
-wakes no agent. A row answered pending (below) keeps it, since the frame log
-answers it, not the read model.
+application). Frames rebuilt from session history or synthesized by the
+console do not count, and neither do lifecycle records (respawn, retire,
+reset, delete), interaction failures and memory events, which record
+something done to the agent. The field is advisory: a row without it has no
+known activity, and reading it wakes no agent. A row answered pending (below)
+keeps it, since the frame log answers it, not the read model.
+
+The gateway reads each agent's newest acting frame from the log on the first
+experience after it starts that lists the agent, 256 agents per store call,
+and keeps the time in memory after that. At 10,000 agents that first read
+takes about 56 ms in all when the agents' newest frames record them acting,
+and longer when many of those frames do not (rebuilt history, for example),
+at about 0.4 to 0.9 microseconds per such frame. A retire, a delete or a
+clear made meanwhile waits for at most one such call, and so do the console
+writes queued behind it.
+
+`topology.live_snapshot.mob_id` is the id of the mob whose members the
+topology shows, when one mob is known: a runtime's console reports its own
+mob, and a shared console the mob of its one registered runtime. It is absent
+on a shared console over several runtimes or none, and from a snapshot a host
+builds without it. The console names the topology's team from it, never from
+`runtime_id`.
 
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for

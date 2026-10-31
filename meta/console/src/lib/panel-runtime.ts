@@ -1,5 +1,11 @@
 import type { ConsoleWorkbenchTarget } from "@console-core";
 
+/**
+ * The `runtime_id` of a shared console's experience: a console over the
+ * runtimes registered with it, not one runtime's team.
+ */
+export const SHARED_CONSOLE_RUNTIME_ID = "console-aggregator";
+
 export interface PanelRuntime {
   key: string;
   label: string;

@@ -132,6 +132,20 @@ export function topologyNodeAgent<A extends { identity?: string; member_id: stri
   return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
 }
 
+/**
+ * The id of the team (the mob) whose members the Topology shows, as the
+ * experience names it (`topology.live_snapshot.mob_id`). Undefined when it
+ * names none, so the Roles root reads "Team". The runtime id is a runtime's
+ * key, not a team's name, and is never read for it.
+ */
+export function topologyTeamKey(
+  experience: {
+    topology?: { live_snapshot?: { mob_id?: string } };
+  } | null | undefined,
+): string | undefined {
+  return experience?.topology?.live_snapshot?.mob_id?.trim() || undefined;
+}
+
 type AgentChatDockTarget = ConsoleDockTarget & { kind: "agent-chat"; memberId?: string; identity?: string };
 
 function agentChatTarget(target: ConsoleDockTarget | null | undefined): AgentChatDockTarget | null {

@@ -13973,15 +13973,18 @@ async fn build_live_snapshot(
         })
         .collect::<Vec<_>>();
     agents.sort_by(|left, right| left.label.cmp(&right.label));
+    // The topology shows this runtime's own mob, the team it serves.
+    let mob_id = runtime.handle().mob_id().to_string();
     (
         ConsoleLiveSnapshot::new(
-            Some(runtime.handle().mob_id().to_string()),
+            Some(mob_id.clone()),
             running,
             loaded_modules,
             agents,
             members,
             true,
-        ),
+        )
+        .with_mob_id(Some(mob_id)),
         pending,
     )
 }
@@ -15900,6 +15903,12 @@ async fn build_aggregator_live_snapshot(
     } else {
         config_module_ids.to_vec()
     };
+    // The topology shows one team only while one runtime is registered: its
+    // mob. Over several runtimes it spans their teams and names none.
+    let mob_id = match aggregator.panel_runtimes()?.as_slice() {
+        [only] => Some(only.runtime.handle().mob_id().to_string()),
+        _ => None,
+    };
     Ok(ConsoleLiveSnapshot::new(
         Some("console-aggregator".to_string()),
         aggregator.registered_runtimes_running(),
@@ -15907,7 +15916,8 @@ async fn build_aggregator_live_snapshot(
         agents,
         members,
         true,
-    ))
+    )
+    .with_mob_id(mob_id))
 }
 
 /// The console document may only be framed by its own origin. A host page

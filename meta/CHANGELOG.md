@@ -584,23 +584,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pass never waits for a reconcile in progress, and after a retry fails, it
   is tried again at the first health pass after the dispatcher's
   failed-round pause (30 seconds by default).
-- A declarations reconcile waits on any one call for at most 30 seconds,
-  the time the dispatcher waits for the startup reconcile: a store call, a
+- Whatever holds the declarations gate (a reconcile, an apply or a
+  `declarations/get`) waits on any one call for at most 30 seconds, the
+  time the dispatcher waits for the startup reconcile: a store call, a
   read of this gateway's runtime (a member check, a mob's roster or event
   log, the hosted mobs) or the schedule service's reconcile of a source's
   runner. Before, one call that never answered, such as one to a wedged
-  child mob or a host store commit that never settled, held the reconcile
-  as long as it lasted, and with it `declarations/apply`,
-  `declarations/get` and, when the health pass retried the declarations (a
-  pending record, say), the dispatcher's round and every delivery after it.
-  The reconcile now stops at the first call past the bound, as a storage
-  failure stops it: a warning names the call, the records it had not
-  reached stay as they were, and an apply that meets it is refused
-  `native_unavailable` (a storage failure, for a store call). The call
-  itself still runs to its end, and the health pass finishes the reconcile
-  once it answers. After any failed retry the next one now waits the
-  failed-round pause from the end of the failed one, so a call that stays
-  wedged holds a round at most once per pause.
+  child mob or a host store commit that never settled, held the gate as
+  long as it lasted, and with it `declarations/apply`, `declarations/get`
+  and, when the health pass retried the declarations (a pending record,
+  say), the dispatcher's round and every delivery after it. The holder now
+  stops at the first call past the bound, as a storage failure stops it,
+  and releases the gate: a warning names the call, a reconcile leaves the
+  records it had not reached as they were, and an apply or a read that
+  meets it is refused `native_unavailable` (a storage failure, for a store
+  call). The call itself still runs to its end, and until it does, a
+  holder that would make the same call stops at once instead of waiting
+  or calling again, so retries never pile up on it. The health pass
+  finishes a stopped reconcile once the call answers; after any failed
+  retry the next one now waits the failed-round pause from the end of the
+  failed one. A read's own wait for the gate is unchanged, and it never
+  answers a partial view.
 
 ### Known limitations
 

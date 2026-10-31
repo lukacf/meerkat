@@ -1014,7 +1014,7 @@ pub(crate) fn project_verified_operator_instruction_messages_in_place(
     }
 }
 
-/// [`project_operator_instruction_messages_in_place`] over a copy.
+/// `project_operator_instruction_messages_in_place` over a copy.
 pub fn materialize_operator_instruction_messages(
     session_id: &SessionId,
     messages: &[Message],

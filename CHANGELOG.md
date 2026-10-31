@@ -1513,18 +1513,20 @@ them.
   never wedges a retirement or a destroy. A member's session takes no
   session-level write of its own host (`owned_by_mob`) from the moment a mob
   seats it, so a mob's first write never replaces a write the host was told
-  was recorded. A member seated over an existing session whose own host
-  wrote its target before (an attach) hands that target to the mob at the
-  mob's first delivery, in one session-document step
-  (`Session::record_instruction_target`). A member is delivered to only once
-  its spawn has activated (`MemberInstructionDeferReason::SpawnInFlight`
+  was recorded; the member binding is never cleared, so a session a mob seated
+  keeps refusing its host's own writes after the member retires with the
+  session kept, or after a failed attach rolls back. A member seated over an
+  existing session whose own host wrote its target before (an attach) hands
+  that target to the mob at the mob's first delivery, in one session-document
+  step (`Session::record_instruction_target`). A member is delivered to only
+  once its spawn has activated (`MemberInstructionDeferReason::SpawnInFlight`
   until then), so a failed activation rolls it back with its session
-  untouched. A blocked member is owed
-  again by a new revision of a slot that selects it, a seat or a restart. A
-  restart replays the records and the obligations, a delivery wave's records
-  are journaled, and a crash in the middle of a fan-out delivers the
-  remaining members once; a write whose journal row landed although its
-  append answered an error is committed, never dropped by the next write.
+  untouched. A blocked member is owed again by a new revision of a slot that
+  selects it, a seat or a restart. A restart replays the records and the
+  obligations, a delivery wave's records are journaled, and a crash in the
+  middle of a fan-out delivers the remaining members once; a write whose
+  journal row landed although its append answered an error is committed, never
+  dropped by the next write.
   `MobHandle::operator_instruction_status`
   (`ReadHistory`) reads, without waking anyone and in one session read per
   page, the records and per member

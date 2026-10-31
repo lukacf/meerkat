@@ -1402,24 +1402,27 @@ read is reported with the reason, and the page still answers.
 A member's session target belongs to its mob: another mob's delivery to it
 is refused (`owned_by_other_mob`) until the owning mob releases it, which a
 mob does when a member whose session its host keeps retires and when the mob
-is destroyed. A destroy goes on past every member whose release does not
-land and answers incomplete naming each of them, still seated, so one retry
-releases them all; a member session whose operator-instruction state does
-not read has nothing to release and never holds up a retirement or a
-destroy. A member's session refuses its own host's session-level writes
+is destroyed. A destroy goes on past every member whose release does not land
+and answers incomplete naming each of them, still seated, so one retry
+releases them all; a member session whose operator-instruction state does not
+read has nothing to release and never holds up a retirement or a destroy. A
+member's session refuses its own host's session-level writes
 (`SessionServiceInstructionExt::set_session_instruction` answers
 `owned_by_mob`) from the moment a mob seats it, even before the mob writes
 anything, so the mob's first write never replaces a write the host was told
 was recorded; write to a member through `MobHandle::set_operator_instruction`
-with a member target instead. A member seated over an existing session whose
-own host wrote its target before (an attach) hands that target to the mob at
-the mob's first delivery: the mob's snapshot replaces what the host wrote.
-That first delivery waits until the member's spawn has activated, so an
-attach whose activation fails rolls back with the host's session untouched.
-A blocked member stays blocked until a write with a new revision of a slot
-that selects it, a new seat of the member, or a restart; an exact repeat of
-a write does not unblock it. A reset clears the records and keeps the generation moving
-forward, so a session never sees an older snapshot replace a newer one. A
+with a member target instead. The member binding a mob stamps on a session is
+never cleared, so a session a mob seated keeps refusing its host's own writes
+after the member retires with the session kept, or after a failed attach rolls
+back. A member seated over an existing session whose own host wrote its target
+before (an attach) hands that target to the mob at the mob's first delivery:
+the mob's snapshot replaces what the host wrote. That first delivery waits
+until the member's spawn has activated, so an attach whose activation fails
+rolls back with the host's session untouched. A blocked member stays blocked
+until a write with a new revision of a slot that selects it, a new seat of the
+member, or a restart; an exact repeat of a write does not unblock it. A reset
+clears the records and keeps the generation moving forward, so a session never
+sees an older snapshot replace a newer one. A
 placed member is reported blocked (`member_host_unsupported`) until member
 hosts take deliveries. A mob that recorded operator instructions journals
 them at mob event schema 10, which a release before operator instructions

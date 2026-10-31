@@ -1793,3 +1793,176 @@ async fn the_bridge_forwards_every_lifecycle_fact() {
     );
     let _ = boot.runtime.shutdown().await;
 }
+
+/// A host's legacy respawn of an identity's member (`MobHandle::respawn`)
+/// is two of Core's steps: Core retires the incarnation, then seats the next
+/// one on a fresh session, and that seat names the incarnation it follows
+/// (`SeatRotation::RespawnAfter`, from MobMachine's respawn hold). The
+/// respawn owes what a rotation no Meta verb asked for owes: the hook hears
+/// of the retired incarnation as `rotated`, and the session it left is
+/// distilled, once.
+///
+/// RED before the projection read a respawn's seat: Core's retirement read
+/// as one no Meta verb asked for, which owes nothing, and the seat as a
+/// plain one, so the hook heard nothing and nothing was distilled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_s_legacy_respawn_reaches_the_hook_as_rotated_and_distills_the_old_session() {
+    const MOB: &str = "lifecycle-fact-legacy-respawn";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let transcripts = Arc::new(RecordingTranscripts::default());
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            memory: Some(memory_injector(
+                &temp.path().join("memory"),
+                Arc::clone(&transcripts) as Arc<dyn TranscriptSource>,
+            )),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let first = boot.session_of(&alpha.identity).await;
+    boot.runtime
+        .mob_handle()
+        .ensure_member_live(&member_id(&alpha.identity))
+        .await
+        .expect("the host wakes alpha's member");
+    boot.runtime
+        .mob_handle()
+        .respawn(member_id(&alpha.identity), None)
+        .await
+        .expect("the host respawns alpha's member");
+    let records = member_records(&boot, &alpha.identity).await;
+    assert!(
+        records.iter().any(|record| matches!(
+            &record.fact,
+            MemberLifecycleFact::Seated {
+                generation: 1,
+                session: Some(session),
+                rotation: Some(meerkat_mob::SeatRotation::RespawnAfter { predecessor, .. }),
+                ..
+            } if *session != first && predecessor.get() == 0
+        )),
+        "the respawn's seat runs on a fresh session and names the incarnation it follows: \
+         {records:#?}"
+    );
+
+    boot.identities.settle_lifecycle_projection().await;
+    eventually("the respawn's retirement hook", || {
+        (!hook_calls_of(&seen, &alpha.identity).is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    let calls = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|retired| retired.identity == alpha.identity)
+        .map(|retired| (retired.cause.as_str().to_string(), retired.generation))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![("rotated".to_string(), 0)],
+        "the respawn's retired incarnation reaches the hook as a rotation, once"
+    );
+    assert_eq!(
+        transcripts.reads_of(&first),
+        1,
+        "the session the respawn retired is distilled once"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A retirement Core's seal unlisted names its cause in Core's journal
+/// (`Retired.cause`), and no Meta verb recorded anything for it: it owes the
+/// unlisting's side effects from that fact alone, and the hook hears of the
+/// incarnation as unlisted. The row writes the retirement, with its facts,
+/// into the stopped mob's journal, as Core records the end of a sealed
+/// identity entry's member, and the next start reads it through the bridge.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retirement_core_s_seal_unlisted_owes_the_unlisting_from_its_own_fact() {
+    const NAME: &str = "a_retirement_core_s_seal_unlisted_owes_the_unlisting_from_its_own_fact";
+    const MOB: &str = "lifecycle-fact-sealed-retirement";
+    let alpha = member(ALPHA);
+    if let Some(state) = child_state() {
+        let boot = boot(&state, MOB, vec![alpha.clone()], Wiring::default()).await;
+        let session = boot.session_of(&alpha.identity).await;
+        std::fs::write(state.join("sealed-session"), session.to_string())
+            .expect("note the session the seal's retirement names");
+        let _ = boot.runtime.shutdown().await;
+        exit_now::<()>();
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    let sealed = SessionId::parse(
+        &std::fs::read_to_string(temp.path().join("sealed-session"))
+            .expect("the child noted alpha's session"),
+    )
+    .expect("a session id");
+    {
+        use meerkat_mob::MobEventStore as _;
+        meerkat_mob::SqliteMobStores::open(temp.path().join("mob.sqlite3"))
+            .expect("open the stopped mob's store")
+            .event_store()
+            .append(meerkat_mob::NewMobEvent::for_test(
+                meerkat_mob::MobId::from(MOB),
+                meerkat_mob::MobEventKind::MemberRetired {
+                    agent_identity: member_id(&alpha.identity),
+                    generation: meerkat_mob::Generation::new(0),
+                    role: meerkat_mob::ProfileName::from("lead"),
+                    session_archived: false,
+                    facts: meerkat_mob::MemberRetiredFacts::for_test(
+                        Some(sealed.clone()),
+                        Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                        None,
+                        None,
+                    ),
+                },
+            ))
+            .await
+            .expect("append the seal's retirement");
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let records = member_records(&boot, &alpha.identity).await;
+    assert!(
+        records.iter().any(|record| matches!(
+            &record.fact,
+            MemberLifecycleFact::Retired {
+                generation: 0,
+                session: Some(session),
+                cause: Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                rotation: None,
+                ..
+            } if *session == sealed
+        )),
+        "the bridge forwards the retirement's session and cause: {records:#?}"
+    );
+    eventually("the unlisting's retirement hook", || {
+        (!hook_calls_of(&seen, &alpha.identity).is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        hook_calls_of(&seen, &alpha.identity),
+        vec!["unlisted".to_string()],
+        "the seal's retirement owes the unlisting's side effects, once"
+    );
+    let _ = boot.runtime.shutdown().await;
+}

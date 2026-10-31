@@ -502,7 +502,8 @@ pub enum SeatRotation {
     /// A respawn seated the incarnation in two machine steps
     /// ([`super::MobHandle::respawn`] or
     /// [`super::MobHandle::respawn_with_successor_spec`] of a member no
-    /// identity entry holds): the retirement of `predecessor` held the
+    /// identity entry holds, or the replacement an identity reconcile seats
+    /// for the member it retired): the retirement of `predecessor` held the
     /// identity's topology for its successor (MobMachine's respawn hold),
     /// and this seat's step took the hold. The retirement, a step of its
     /// own, names no rotation.
@@ -1309,9 +1310,9 @@ pub(crate) fn fresh_life_rotation(
 /// ([`SeatRotation::RespawnAfter`]): the incarnation the respawn retired,
 /// the generation MobMachine retains for the identity in `state`, the
 /// machine state before the spawn's membership step, which takes the hold
-/// (`pending_respawn_topology`: a respawn's retirement installs it at its
-/// start and keeps it at its end, for its successor). None when the machine
-/// holds no respawn for the identity.
+/// (`pending_respawn_topology`: a respawn's retirement, or an identity
+/// reconcile's, installs it at its start and keeps it at its end, for its
+/// successor). None when the machine holds no respawn for the identity.
 pub(crate) fn respawn_rotation(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,

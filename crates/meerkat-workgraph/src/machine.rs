@@ -3317,4 +3317,83 @@ mod tests {
             serde_json::json!(["e1"])
         );
     }
+
+    /// Guard: "withdrawn" is derived data. An accepted withdrawal moves the
+    /// machine state exactly as any evidence addition does (revision and
+    /// evidence count) and nothing else: no lifecycle phase, terminal fact or
+    /// confirmation accounting.
+    #[test]
+    fn an_accepted_withdrawal_moves_only_the_revision_and_the_evidence_count() {
+        let now = Utc::now();
+        let assert_counted_only = |before: &WorkItem, after: &WorkItem| {
+            let mut expected = before.machine_state.clone();
+            expected.revision += 1;
+            expected.evidence_count += 1;
+            assert_eq!(after.machine_state, expected);
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.terminal_at, before.terminal_at);
+        };
+
+        // A completed item accepts a withdrawal and stays completed.
+        let item = with_wire_evidence(
+            create("withdrawal after close", now),
+            serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+            now,
+        );
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("close completed");
+        let withdrawn = add_wire_evidence(
+            closed.clone(),
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] }),
+            now,
+        )
+        .expect("a withdrawal after close is admitted");
+        assert_counted_only(&closed, &withdrawn);
+        assert_eq!(withdrawn.status, WorkStatus::Completed);
+
+        // A host-confirmed item keeps its confirmation through an unrelated
+        // withdrawal and still closes completed.
+        let item = with_wire_evidence(
+            create_with_policy(
+                "withdrawal beside a confirmation",
+                WorkCompletionPolicy::HostConfirmed,
+                now,
+            ),
+            serde_json::json!([
+                { "kind": "acceptance", "id": "c1", "confirmation_kind": "host_confirmation" },
+                { "kind": "finding", "id": "e1" }
+            ]),
+            now,
+        );
+        let withdrawn = add_wire_evidence(
+            item.clone(),
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] }),
+            now,
+        )
+        .expect("an unrelated withdrawal is admitted");
+        assert_counted_only(&item, &withdrawn);
+        let (closed, _) = WorkGraphMachine::close_item(
+            withdrawn.clone(),
+            CloseWorkItemRequest {
+                id: withdrawn.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: withdrawn.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("the confirmation still satisfies the completion policy");
+        assert_eq!(closed.status, WorkStatus::Completed);
+    }
 }

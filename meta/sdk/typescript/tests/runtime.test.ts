@@ -3160,6 +3160,23 @@ describe("MobHandle.workgraphAddEvidence()", () => {
       evidence: { kind: "self_attest", id: "ev-1", summary: "done" },
     });
   });
+
+  it("sends the ids the evidence withdraws", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({ item: WG_ITEM_WIRE }));
+
+    await handle.workgraphAddEvidence("work_1", 3, {
+      kind: "note",
+      id: "ev-2",
+      withdraws: ["ev-1"],
+    });
+    assert.equal(calls[0].method, "meta/workgraph/evidence/add");
+    assert.deepEqual(calls[0].params, {
+      id: "work_1",
+      expected_revision: 3,
+      evidence: { kind: "note", id: "ev-2", withdraws: ["ev-1"] },
+    });
+  });
 });
 
 describe("MobHandle.workgraphEscalatePolicy()", () => {

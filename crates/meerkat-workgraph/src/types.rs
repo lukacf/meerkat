@@ -2582,4 +2582,34 @@ mod tests {
         let item = item_with_evidence(vec![finding("e1"), withdrawal("w1"), withdrawal("w2")]);
         assert_eq!(withdrawn(&item), [true, false, false, false]);
     }
+
+    /// Guard: the hand-written `WorkItem` schema inlines the evidence shape,
+    /// and the SDK generator reuses the derived `WorkEvidenceRef` type for it
+    /// only while the two agree (otherwise it mints a `WorkItem*` twin). The
+    /// inline properties are the derived ones, and `withdraws` has the
+    /// derived shape.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn manual_work_item_schema_inlines_the_derived_evidence_shape() {
+        let derived =
+            serde_json::to_value(schemars::schema_for!(WorkEvidenceRef)).expect("derived schema");
+        let manual = serde_json::to_value(schemars::schema_for!(WorkItem)).expect("manual schema");
+        let inline = &manual["properties"]["evidence_refs"]["items"];
+        let property_names = |schema: &serde_json::Value| -> BTreeSet<String> {
+            schema["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(property_names(inline), property_names(&derived));
+
+        let mut derived_withdraws = derived["properties"]["withdraws"].clone();
+        derived_withdraws
+            .as_object_mut()
+            .expect("derived withdraws schema")
+            .remove("description");
+        assert_eq!(inline["properties"]["withdraws"], derived_withdraws);
+    }
 }

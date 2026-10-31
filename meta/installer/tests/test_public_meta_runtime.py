@@ -211,12 +211,14 @@ STANDALONE_META = "https://github.com/lukacf/meerkat-meta/releases/download/v"
 MONOREPO_META = "https://github.com/lukacf/meerkat/releases/download/meta-v"
 
 
-# Meta releases up to 0.9.6 stay in the standalone repository under v tags;
-# later ones come from the monorepo under meta-v tags (its v tags are Core's).
+# Meta releases up to 0.9.7 stay in the standalone repository under v tags
+# (0.9.7, the last of them, was published there); later ones come from the
+# monorepo under meta-v tags (its v tags are Core's).
 @pytest.mark.parametrize("version,release", [
     ("0.8.47", "https://github.com/lukacf/meerkat-mobkit/releases/download/v0.8.47"),
     ("0.9.4", STANDALONE_META + "0.9.4"), ("0.9.6", STANDALONE_META + "0.9.6"),
-    ("0.9.7", MONOREPO_META + "0.9.7"), ("0.10.0", MONOREPO_META + "0.10.0"), ("1.0.0", MONOREPO_META + "1.0.0")])
+    ("0.9.7", STANDALONE_META + "0.9.7"), ("0.9.8", MONOREPO_META + "0.9.8"),
+    ("0.10.0", MONOREPO_META + "0.10.0"), ("1.0.0", MONOREPO_META + "1.0.0")])
 def test_meta_versions_download_from_the_repository_that_released_them(tmp_path, monkeypatch, version, release):
     module = gateway_installer(tmp_path, monkeypatch, "x86_64-unknown-linux-gnu", version)
     meta = version != "0.8.47"
@@ -227,7 +229,8 @@ def test_meta_versions_download_from_the_repository_that_released_them(tmp_path,
 
 
 @pytest.mark.parametrize("version,release", [("0.9.4", STANDALONE_META + "0.9.4"),
-    ("0.9.6", STANDALONE_META + "0.9.6"), ("0.9.7", MONOREPO_META + "0.9.7")])
+    ("0.9.6", STANDALONE_META + "0.9.6"), ("0.9.7", STANDALONE_META + "0.9.7"),
+    ("0.9.8", MONOREPO_META + "0.9.8")])
 def test_meta_install_reads_its_release_and_keeps_the_receipt_shape(tmp_path, monkeypatch, version, release):
     target = "x86_64-unknown-linux-gnu"
     module = gateway_installer(tmp_path, monkeypatch, target, version)

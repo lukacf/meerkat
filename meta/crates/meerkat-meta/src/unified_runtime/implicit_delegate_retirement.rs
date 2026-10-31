@@ -1476,8 +1476,7 @@ comms = true
             async fn lifecycle_effect_intent(
                 &self,
                 _mob_id: &str,
-                _identity: &str,
-                _generation: u64,
+                _key: &crate::LifecycleIntentKey,
             ) -> Result<Option<crate::LifecycleEffectIntent>, MetadataStoreError> {
                 Ok(None)
             }
@@ -1490,8 +1489,7 @@ comms = true
             async fn clear_lifecycle_effect_intent(
                 &self,
                 _mob_id: &str,
-                _identity: &str,
-                _generation: u64,
+                _key: &crate::LifecycleIntentKey,
             ) -> Result<(), MetadataStoreError> {
                 Ok(())
             }

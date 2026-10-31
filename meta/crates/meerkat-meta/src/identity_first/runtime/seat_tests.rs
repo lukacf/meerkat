@@ -5671,12 +5671,13 @@ async fn a_relisted_identity_whose_unlisting_core_started_keeps_its_effects() {
 /// The roster's unlisting of an identity records what it owes and Core
 /// retires its member, and before the projection reaches that retirement a
 /// reset gives the identity, which no member holds now, its fresh life (the
-/// roster listed it again). The reset's record for the incarnation Core had
-/// retired keeps the unlisting's, which the projection reads at that
-/// retirement: the hook hears of the incarnation as unlisted, its session is
-/// distilled as the unlisting's and again as the reset's, and both records
-/// are consumed. Had the reset's record replaced the unlisting's outright,
-/// the hook would hear nothing of the incarnation.
+/// roster listed it again). The reset's record for the fresh life after the
+/// incarnation Core had retired has a key of its own, apart from the
+/// unlisting's, which the projection reads at that retirement: the hook
+/// hears of the incarnation as unlisted, its session is distilled as the
+/// unlisting's and again as the reset's, and both records are consumed.
+/// Had the reset's record replaced the unlisting's, the hook would hear
+/// nothing of the incarnation.
 #[tokio::test]
 async fn a_reset_before_the_projection_reads_an_unlisting_keeps_the_unlisting_s_effects() {
     let alice = identity("personal:alice");

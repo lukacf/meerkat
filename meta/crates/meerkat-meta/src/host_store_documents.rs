@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
     IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
-    LifecycleProjectionCursor, MemberIdleRetireOverrideRecord, MetadataStoreError,
-    PersistentMetadataStore, decode_identity_record, encode_identity_record,
-    lifecycle_effect_failure_order,
+    LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionCursor,
+    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore,
+    decode_identity_record, encode_identity_record, lifecycle_effect_failure_order,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -117,12 +117,21 @@ fn lifecycle_cursor_key(mob_id: &str) -> String {
     format!("{LIFECYCLE_PREFIX}{mob_id}")
 }
 
-/// The lifecycle effect intent of `identity`'s `generation`, injective over
-/// (mob id, generation, identity): the mob id's length comes first, and the
-/// generation, a number, ends at its `/`.
-fn lifecycle_effect_key(mob_id: &str, identity: &str, generation: u64) -> String {
+/// The lifecycle effect intent `key` names, injective over (mob id,
+/// generation, slot, identity): the mob id's length comes first, and the
+/// generation, a number, ends at its `/`, or at `.after/` for a fresh
+/// life's intent.
+fn lifecycle_effect_key(mob_id: &str, key: &LifecycleIntentKey) -> String {
+    let generation = key.generation;
+    let identity = &key.identity;
+    // The generation's digits end at `/` for the intent of the step that
+    // ends the incarnation, and at `.after/` for a fresh life's.
+    let slot = match key.slot {
+        LifecycleIntentSlot::End => "",
+        LifecycleIntentSlot::FreshLifeAfter => ".after",
+    };
     format!(
-        "{EFFECT_PREFIX}{}:{mob_id}{generation}/{identity}",
+        "{EFFECT_PREFIX}{}:{mob_id}{generation}{slot}/{identity}",
         mob_id.len()
     )
 }
@@ -911,10 +920,9 @@ impl PersistentMetadataStore for SpiMetadataStore {
     async fn lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError> {
-        let key = lifecycle_effect_key(mob_id, identity, generation);
+        let key = lifecycle_effect_key(mob_id, key);
         let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
             return Ok(None);
         };
@@ -925,7 +933,7 @@ impl PersistentMetadataStore for SpiMetadataStore {
         &self,
         intent: &LifecycleEffectIntent,
     ) -> Result<(), MetadataStoreError> {
-        let key = lifecycle_effect_key(&intent.mob_id, &intent.identity, intent.generation);
+        let key = lifecycle_effect_key(&intent.mob_id, &intent.key());
         let document = encode_identity_record(intent)?.into_bytes();
         self.documents
             .write(&key, Some(document))
@@ -936,11 +944,10 @@ impl PersistentMetadataStore for SpiMetadataStore {
     async fn clear_lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<(), MetadataStoreError> {
         self.documents
-            .write(&lifecycle_effect_key(mob_id, identity, generation), None)
+            .write(&lifecycle_effect_key(mob_id, key), None)
             .await
             .map_err(io_error)
     }

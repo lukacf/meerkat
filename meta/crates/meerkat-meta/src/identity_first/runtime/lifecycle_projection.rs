@@ -82,9 +82,9 @@
 //! step, keyed by the incarnation the step ends, for an incarnation the
 //! identity spawned only; a reset or a delete of an identity whose last
 //! incarnation Core had already retired keys it by that incarnation, and the
-//! projection reads it at the fresh life's seat, which names it (the record
-//! of the step that ended that incarnation, when the projection has not
-//! reached that end yet, is kept in it and read at that end). A rotation
+//! projection reads it at the fresh life's seat, which names it. That record
+//! has a key of its own, apart from the record of the step that ended the
+//! incarnation, so consuming one never removes the other. A rotation
 //! records the head of Core's journal it read before it asked Core: when it
 //! fails, a fact of the identity's member past that head says the rotation
 //! reached Core, and none says nothing of it did, so it takes its record
@@ -659,6 +659,15 @@ impl PreparedRetirement {
     /// retired.
     pub(super) fn live_generation(&self) -> Option<u64> {
         (!self.predecessor_retired).then_some(self.generation)
+    }
+
+    /// The key of the record the step wrote.
+    fn key(&self) -> LifecycleIntentKey {
+        if self.predecessor_retired {
+            LifecycleIntentKey::fresh_life_after(self.identity.as_str(), self.generation)
+        } else {
+            LifecycleIntentKey::new(self.identity.as_str(), self.generation)
+        }
     }
 }
 
@@ -1954,11 +1963,7 @@ impl IdentityRuntime {
             Some(earlier) => store.set_lifecycle_effect_intent(&earlier).await,
             None => {
                 store
-                    .clear_lifecycle_effect_intent(
-                        &mob_id,
-                        prepared.identity.as_str(),
-                        prepared.generation,
-                    )
+                    .clear_lifecycle_effect_intent(&mob_id, &prepared.key())
                     .await
             }
         };
@@ -2117,6 +2122,24 @@ impl IdentityRuntime {
             if !listed.contains(&identity) {
                 continue;
             }
+            // Under the identity's lifecycle lock, which a step holds while
+            // it records: the record is taken back only while it is still
+            // the unlisting's, never one a step recorded since.
+            let lifecycle_lock = self.lifecycle_lock_for(&identity).await;
+            let _lifecycle_guard = lifecycle_lock.lock().await;
+            match store.lifecycle_effect_intent(&mob_id, &intent.key()).await {
+                Ok(Some(current)) if current == intent => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        %identity,
+                        %error,
+                        "the unlisting of a relisted identity did not read again; a later pass \
+                         takes it back"
+                    );
+                    continue;
+                }
+            }
             let standing = match bridge.member_standing(&identity).await {
                 Ok(standing) => standing,
                 Err(BridgeError::Unsupported { .. }) => {
@@ -2140,7 +2163,7 @@ impl IdentityRuntime {
             );
             if never_started
                 && let Err(error) = store
-                    .clear_lifecycle_effect_intent(&mob_id, &intent.identity, intent.generation)
+                    .clear_lifecycle_effect_intent(&mob_id, &intent.key())
                     .await
             {
                 tracing::warn!(
@@ -2185,41 +2208,28 @@ impl IdentityRuntime {
             return Ok(None);
         }
         let (store, mob_id) = self.identity_record_store();
+        let record = LifecycleEffectIntent::new(
+            mob_id.clone(),
+            incarnation,
+            identity.as_str(),
+            intent.generation,
+            intent.verb,
+            intent.session_id,
+            unix_ms_now(),
+        )
+        .with_asked_after(intent.asked_after)
+        .with_predecessor_retired(intent.predecessor_retired);
+        // The record it replaces is the one under its own key: a fresh
+        // life's record never replaces the record of the step that ended
+        // the incarnation it follows.
         let earlier = store
-            .lifecycle_effect_intent(&mob_id, identity.as_str(), intent.generation)
+            .lifecycle_effect_intent(&mob_id, &record.key())
             .await
             .map_err(|error| {
                 format!("reading the incarnation's lifecycle effect intent: {error}")
             })?;
-        // A step for an incarnation Core had already retired keeps the
-        // intent of the step that ended it, which the projection has not
-        // consumed yet: the projection reads that one at the incarnation's
-        // retirement.
-        let replaced = earlier
-            .as_ref()
-            .filter(|earlier| intent.predecessor_retired && earlier.incarnation == incarnation)
-            .and_then(|earlier| {
-                if earlier.predecessor_retired {
-                    earlier.replaced.as_deref().cloned()
-                } else {
-                    Some(earlier.clone())
-                }
-            });
         store
-            .set_lifecycle_effect_intent(
-                &LifecycleEffectIntent::new(
-                    mob_id,
-                    incarnation,
-                    identity.as_str(),
-                    intent.generation,
-                    intent.verb,
-                    intent.session_id,
-                    unix_ms_now(),
-                )
-                .with_asked_after(intent.asked_after)
-                .with_predecessor_retired(intent.predecessor_retired)
-                .with_replaced(replaced),
-            )
+            .set_lifecycle_effect_intent(&record)
             .await
             .map_err(|error| format!("recording the step's lifecycle effect intent: {error}"))?;
         Ok(Some(earlier))
@@ -2408,10 +2418,7 @@ impl IdentityRuntime {
         }
         let (store, mob_id) = self.identity_record_store();
         for key in keys {
-            match store
-                .clear_lifecycle_effect_intent(&mob_id, &key.identity, key.generation)
-                .await
-            {
+            match store.clear_lifecycle_effect_intent(&mob_id, &key).await {
                 Ok(()) => {
                     lock(&self.lifecycle_projection.record)
                         .uncleared
@@ -2446,7 +2453,7 @@ impl IdentityRuntime {
             .take(STALE_INTENT_SWEEP)
         {
             if let Err(error) = store
-                .clear_lifecycle_effect_intent(&mob_id, &intent.identity, intent.generation)
+                .clear_lifecycle_effect_intent(&mob_id, &intent.key())
                 .await
             {
                 tracing::warn!(
@@ -2593,8 +2600,14 @@ impl IdentityRuntime {
                     let Some(identity) = meta_identity(member) else {
                         continue;
                     };
+                    // The record of the step that ended the incarnation;
+                    // what a reset or a delete recorded for the fresh life
+                    // after it has a key of its own, read at that seat.
                     let intent = store
-                        .lifecycle_effect_intent(&mob_id, identity.as_str(), *generation)
+                        .lifecycle_effect_intent(
+                            &mob_id,
+                            &LifecycleIntentKey::new(identity.as_str(), *generation),
+                        )
                         .await
                         .map_err(|error| {
                             format!(
@@ -2602,20 +2615,9 @@ impl IdentityRuntime {
                                  generation {generation}: {error}"
                             )
                         })?;
-                    // What a reset or a delete recorded for an incarnation
-                    // Core had retired before it is read at the fresh life it
-                    // seats, not here; the intent of the step that ended the
-                    // incarnation, which it replaced, is read here.
-                    let intent = match intent {
-                        Some(intent) if intent.predecessor_retired => {
-                            intent.replaced.map(|replaced| *replaced)
-                        }
-                        Some(intent) => {
-                            consumed.push(intent.key());
-                            Some(intent)
-                        }
-                        None => None,
-                    };
+                    if let Some(intent) = intent.as_ref() {
+                        consumed.push(intent.key());
+                    }
                     // An intent of an earlier incarnation of the mob names
                     // another journal's step.
                     let intent = intent.filter(|intent| intent.incarnation == incarnation);
@@ -2762,15 +2764,17 @@ impl IdentityRuntime {
     ) -> Result<FreshLifeOwes, PageError> {
         let (store, mob_id) = self.identity_record_store();
         let Some(intent) = store
-            .lifecycle_effect_intent(&mob_id, identity.as_str(), predecessor)
+            .lifecycle_effect_intent(
+                &mob_id,
+                &LifecycleIntentKey::fresh_life_after(identity.as_str(), predecessor),
+            )
             .await
             .map_err(|error| {
                 format!(
-                    "reading the lifecycle effect intent of {identity} at generation \
-                     {predecessor}: {error}"
+                    "reading the fresh life's lifecycle effect intent of {identity} after \
+                     generation {predecessor}: {error}"
                 )
             })?
-            .filter(|intent| intent.predecessor_retired)
         else {
             return Ok(FreshLifeOwes::default());
         };

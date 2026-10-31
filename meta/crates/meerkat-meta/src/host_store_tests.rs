@@ -2785,7 +2785,7 @@ async fn identity_tool_records_and_rotations_round_trip_through_the_realm_docume
 async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     use crate::runtime::{
         LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
-        LifecycleProjectionBacklog, LifecycleProjectionCursor,
+        LifecycleIntentKey, LifecycleProjectionBacklog, LifecycleProjectionCursor,
     };
     let fixture = Fixture::new();
     let mob_id = unique_mob_id("lifecycle-records");
@@ -2851,10 +2851,18 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     );
     assert_eq!(
         store
-            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .lifecycle_effect_intent(&mob_id, &LifecycleIntentKey::new(ALICE, 3))
             .await
             .expect("read the intent"),
         Some(intent.clone())
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, &LifecycleIntentKey::fresh_life_after(ALICE, 3))
+            .await
+            .expect("read the fresh life's intent"),
+        None,
+        "an incarnation's two intents are kept apart"
     );
     assert_eq!(
         store
@@ -2872,19 +2880,19 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     );
     assert_eq!(
         store
-            .lifecycle_effect_intent(&mob_id, ALICE, 4)
+            .lifecycle_effect_intent(&mob_id, &LifecycleIntentKey::new(ALICE, 4))
             .await
             .expect("read another generation's intent"),
         None,
         "intents are per generation"
     );
     store
-        .clear_lifecycle_effect_intent(&mob_id, ALICE, 3)
+        .clear_lifecycle_effect_intent(&mob_id, &LifecycleIntentKey::new(ALICE, 3))
         .await
         .expect("clear the intent");
     assert_eq!(
         store
-            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .lifecycle_effect_intent(&mob_id, &LifecycleIntentKey::new(ALICE, 3))
             .await
             .expect("read the intent"),
         None,

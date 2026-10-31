@@ -2785,8 +2785,11 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// The ChatGPT backend carries no System row after the leading prefix,
+    /// and an OpenAI backend kind this version does not know fails closed: it
+    /// may be such a backend.
     #[test]
-    fn only_a_chatgpt_backend_profile_refuses_mid_conversation_system_messages() {
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_mid_conversation_system_messages() {
         let backend = |provider, backend_kind: &str| BackendProfile {
             id: "backend".to_string(),
             provider,
@@ -2795,14 +2798,16 @@ mod tests {
             options: serde_json::Value::Null,
             server: None,
         };
-        assert!(
-            !backend(Provider::OpenAI, "chatgpt_backend").admits_mid_conversation_system_messages()
-        );
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind).admits_mid_conversation_system_messages(),
+                "{backend_kind}"
+            );
+        }
         for (provider, backend_kind) in [
             (Provider::OpenAI, "openai_api"),
             (Provider::OpenAI, "azure_openai"),
             (Provider::OpenAI, "copilot"),
-            (Provider::OpenAI, "a_backend_this_version_does_not_know"),
             (Provider::Anthropic, "anthropic_api"),
             (Provider::Gemini, "google_genai"),
         ] {

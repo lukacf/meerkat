@@ -1613,4 +1613,75 @@ provider = "not-a-provider"
         assert_eq!(registry.default_model(Provider::OpenAI), Some(OPENAI_MODEL));
         assert_eq!(registry.default_model(Provider::Gemini), Some(VIDEO_MODEL));
     }
+
+    /// The test catalog with every row claiming ordered System messages after
+    /// the leading prefix, so what a backend takes away from a row shows.
+    fn mid_conversation_catalog() -> ModelCatalog {
+        use crate::model_profile::capabilities::ModelCapabilities;
+        use std::sync::LazyLock;
+
+        static CAPABILITIES: LazyLock<Vec<ModelCapabilities>> = LazyLock::new(|| {
+            TEST_CATALOG
+                .capabilities
+                .iter()
+                .map(|capabilities| ModelCapabilities {
+                    supports_mid_conversation_system_messages: true,
+                    ..*capabilities
+                })
+                .collect()
+        });
+        ModelCatalog {
+            capabilities: CAPABILITIES.as_slice(),
+            ..test_catalog()
+        }
+    }
+
+    /// A named OpenAI binding whose backend kind this version does not know
+    /// does not claim ordered System messages after the leading prefix, as a
+    /// named binding the config does not resolve does not: either may be a
+    /// backend whose wire refuses them. The public API keeps the row's claim.
+    #[test]
+    fn an_unknown_openai_backend_kind_claims_no_mid_conversation_system_messages() {
+        let mut unknown =
+            crate::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]);
+        let Some(backend) = unknown.backend.get_mut("default_openai") else {
+            panic!("the inline realm has an OpenAI backend");
+        };
+        backend.backend_kind = "a_backend_this_version_does_not_know".to_string();
+        let mut config = Config::default();
+        config.realm.insert("unknown_realm".to_string(), unknown);
+        config.realm.insert(
+            "public_realm".to_string(),
+            crate::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]),
+        );
+        let registry = ModelRegistry::from_config(&config, mid_conversation_catalog())
+            .unwrap_or_else(|error| panic!("registry construction failed: {error}"));
+        let claims = |realm: &'static str| {
+            let identity = crate::SessionLlmIdentity {
+                model: OPENAI_MODEL.to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: Some(crate::AuthBindingRef {
+                    realm: crate::RealmId::from_known_valid(realm),
+                    binding: crate::BindingId::from_known_valid("default_openai"),
+                    profile: None,
+                    origin: crate::BindingOrigin::Configured,
+                }),
+            };
+            registry
+                .profile_for_identity(&config, &identity)
+                .unwrap_or_else(|| panic!("the test catalog has an OpenAI row"))
+                .supports_mid_conversation_system_messages
+        };
+        assert!(claims("public_realm"), "the public API carries them");
+        assert!(
+            !claims("missing_realm"),
+            "a binding the config does not resolve has an unknown backend"
+        );
+        assert!(
+            !claims("unknown_realm"),
+            "an OpenAI backend kind this version does not know fails closed"
+        );
+    }
 }

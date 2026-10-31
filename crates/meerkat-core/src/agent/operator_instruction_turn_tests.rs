@@ -867,7 +867,10 @@ async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
 
 /// On a wire that carries one leading System row, an entry the session wrote
 /// itself is carried only as the request's one System row: an entry beside
-/// the prompt, or beside another entry, is not. A request's placement judges
+/// the prompt, or beside another entry (with or without a prompt), is not.
+/// A row a fork copied is neither the session's own entry nor another System
+/// row (the request leaves it out on such a wire), so a fork child's own
+/// entry beside copied rows alone is carried. A request's placement judges
 /// every entry row it holds.
 #[test]
 fn an_entry_beside_another_system_row_is_carried_only_where_the_wire_takes_them_all() {
@@ -908,5 +911,39 @@ fn an_entry_beside_another_system_row_is_carried_only_where_the_wire_takes_them_
         meerkat_core::InstructionEntryPlacement::of_request(alone.messages())
             .refusal(InstructionLowering::Unavailable),
         None
+    );
+
+    // Two entries of its own and no prompt: each stands beside the other.
+    let mut two_entries = Session::new();
+    for (key, body) in [("tone", "Formal."), ("units", "Metric.")] {
+        two_entries
+            .append_operator_instruction_activation_for_test("app.example", key, 1, body)
+            .unwrap();
+    }
+    assert_eq!(
+        two_entries
+            .own_operator_instruction_entry_placement()
+            .unwrap()
+            .refusal(InstructionLowering::Unavailable),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::BesideAnotherSystemRow),
+        "two entries are two System rows"
+    );
+
+    // A fork child's own entry beside the row it copied, and no prompt.
+    let mut child = alone.fork();
+    child
+        .append_operator_instruction_activation_for_test("app.example", "units", 1, "Metric.")
+        .unwrap();
+    assert_eq!(
+        entry_rows(child.messages()).len(),
+        2,
+        "the copied row and the child's own"
+    );
+    let placement = child.own_operator_instruction_entry_placement().unwrap();
+    assert!(!placement.is_empty(), "the child's own entry is judged");
+    assert_eq!(
+        placement.refusal(InstructionLowering::Unavailable),
+        None,
+        "a copied row is neither an own entry nor another System row"
     );
 }

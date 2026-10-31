@@ -589,10 +589,12 @@ fn generic_rewrite_cannot_mint_move_or_erase_entry_rows() {
 }
 
 /// An entry keeps its order among the System rows of its gap (the rows
-/// between two conversation rows) as well as its place among the
-/// conversation rows. A generic rewrite cannot put the first-run entry
-/// before the head prompt, an ordinary System row or the first version of a
-/// keyed prompt (which stands where the row it adopted stood), nor move a
+/// between two conversation rows) that the model reads, as well as its
+/// place among the conversation rows. A generic rewrite cannot put the
+/// first-run entry before the head prompt, an ordinary System row, the first
+/// version of a keyed prompt (which stands where the row it adopted stood)
+/// or the newest version of a keyed prompt (the only one the model reads,
+/// even while an older version still stands before the entry), nor move a
 /// snapshot off the end of the leading System prefix.
 #[test]
 fn generic_rewrite_cannot_move_an_entry_among_the_system_rows_of_its_gap() {
@@ -627,6 +629,38 @@ fn generic_rewrite_cannot_move_an_entry_among_the_system_rows_of_its_gap() {
     )));
     let rows = session.messages().to_vec();
     assert_refused(&mut session, 0, 2, vec![rows[1].clone(), rows[0].clone()]);
+
+    // [prompt version one, prompt version two, delta 1, user turn]: delta 1
+    // before version two, the version the model reads. Version one still
+    // stands before the entry, but the model would read the entry before the
+    // head prompt.
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    session
+        .update_system_prompt(prompt_update(None, Some(0), "Prompt version one."))
+        .expect("the head prompt is adopted in place");
+    session
+        .update_system_prompt(prompt_update(Some(1), None, "Prompt version two."))
+        .expect("a later version is inserted right after the current one");
+    let entry = mint_operator_instruction_delta(
+        header(session.id(), 1),
+        vec![active("app.example", "tone", 1, "Answer in a formal tone.")],
+        vec![activate(
+            "app.example",
+            "tone",
+            1,
+            None,
+            "Answer in a formal tone.",
+        )],
+        at(),
+    )
+    .unwrap();
+    session.append_operator_instruction_entry(entry).unwrap();
+    session.push(Message::User(UserMessage::text(
+        "What is the boiling point?",
+    )));
+    let rows = session.messages().to_vec();
+    assert_refused(&mut session, 1, 3, vec![rows[2].clone(), rows[1].clone()]);
 
     // [head prompt, context, snapshot, user turn]: the snapshot before the
     // context row, off the end of the leading System prefix.

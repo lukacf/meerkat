@@ -617,6 +617,60 @@ async fn an_entry_a_run_checkpoint_made_durable_is_never_taken_back() {
     assert_eq!(entries[0].run_id(), last_run_id(messages).as_ref());
 }
 
+/// A checkpoint that holds the entry makes it durable whether or not its run
+/// started: the conclusion of a run start whose run never started refuses to
+/// take that entry back, and the entry and the recorded target stay as the
+/// run start left them. No run loop checkpoints a run before it starts it,
+/// so the row notes the checkpoint itself.
+#[tokio::test]
+async fn an_entry_a_checkpoint_holds_is_not_taken_back_though_its_run_never_started() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let state_before = instruction_state(agent.session());
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let transcript_applied = request_json(agent.session().messages());
+    let state_applied = instruction_state(agent.session());
+    assert_ne!(
+        state_applied, state_before,
+        "the run start records the change it applied"
+    );
+    agent.note_operator_instruction_checkpoint();
+
+    let error =
+        conclude_turn(&mut agent).expect_err("the entry a checkpoint holds is not taken back");
+    assert!(
+        matches!(&error, AgentError::InternalError(detail) if detail.contains("checkpoint")),
+        "{error:?}"
+    );
+    assert_eq!(
+        request_json(agent.session().messages()),
+        transcript_applied,
+        "the entry stays where the run start appended it"
+    );
+    assert_eq!(entry_identities(agent.session().messages()).len(), 1);
+    assert_eq!(
+        instruction_state(agent.session()),
+        state_applied,
+        "the recorded target stays as the run start left it"
+    );
+    assert!(client.requests().is_empty(), "no run started");
+}
+
 /// A run id a run start reserves belongs to the run that follows it. When
 /// the turn authority already started that run, as a runtime starts the run
 /// it dispatched, the run runs under the authority's id; a later run that

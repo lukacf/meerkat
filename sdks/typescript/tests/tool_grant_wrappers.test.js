@@ -7,6 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MeerkatClient } from "../dist/client.js";
+import { CapabilityUnavailableError } from "../dist/index.js";
 
 const SESSION_ID = "019a2b3c-0000-7000-8000-000000000001";
 const GRANT_ID = "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10";
@@ -158,6 +159,35 @@ describe("scoped tool grant wrappers", () => {
     await client.createSession("hello");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].params.grant_gated_tools, undefined);
+  });
+
+  // Released contract 0.9.8 has no grant gate: its session/create ignores
+  // `grant_gated_tools` and builds the session with the gated tools ungated.
+  const refusedByReleased098 = (error) =>
+    error instanceof CapabilityUnavailableError
+    && error.code === "CAPABILITY_UNAVAILABLE"
+    && /grantGatedTools needs a server contract >= 0\.9\.9; this server reports 0\.9\.8/
+      .test(error.message);
+
+  it("a grant gate is refused before a released 0.9.8 server could drop it", async () => {
+    const { client, calls } = fakeClient({ "session/create": RUN_RESULT }, "0.9.8");
+    const gated = { grantGatedTools: { families: ["shell"] } };
+
+    await assert.rejects(client.createSession("hello", gated), refusedByReleased098);
+    await assert.rejects(client.createDeferredSession("hello", gated), refusedByReleased098);
+    assert.deepEqual(calls, []);
+  });
+
+  it("a streaming create refuses a grant gate before writing to a released 0.9.8 server", () => {
+    const { client } = fakeClient({}, "0.9.8");
+    const written = [];
+    client.process = { stdin: { write: (line) => written.push(line) } };
+
+    assert.throws(
+      () => client.createSessionStreaming("hello", { grantGatedTools: { families: ["shell"] } }),
+      refusedByReleased098,
+    );
+    assert.deepEqual(written, []);
   });
 
   it("a streaming create refuses a grant gate before writing to an older server", () => {

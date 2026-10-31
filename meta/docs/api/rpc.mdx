@@ -3431,6 +3431,17 @@ the applied one, so an apply made at runtime stands across a restart until
 the options move past it; options at the applied revision with other
 content are logged once as a warning.
 
+A call the reconcile makes that does not answer within 30 seconds (a store
+call, a read of this gateway's runtime, or the schedule service) stops it
+there, as a storage failure does: the apply answers `native_unavailable`
+(`-32047`), or `-32000` for a store call, and may already have recorded its
+revision and made part of it, so retry it with the same revision and
+declarations; the records it had not reached are finished at the next
+health pass once the call answers. Until that call ends, a reconcile or a
+read that would call the same method stops at once. `declarations/get`,
+and an apply's read of its result, answer `-32000` when one of their store
+reads does not answer within 30 seconds or meets one still running.
+
 `declarations/get` reads the applied `revision` (0 before any) and its
 `digest`, and `records`, one per declared source and subscription and one
 per child of a declared role template: `{kind, id, status, refusal?,

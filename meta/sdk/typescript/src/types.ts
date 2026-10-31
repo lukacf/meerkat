@@ -4277,11 +4277,13 @@ export interface WorkGraphEvidenceRef {
   readonly confirmationKind: string | null;
   readonly confirmingOwnerKey: WorkGraphOwnerKey | null;
   /**
-   * Ids of earlier evidence on the same item that this ref withdraws (empty
-   * when it withdraws nothing). A ref is withdrawn when a later ref on the
-   * item lists its id; nothing is removed.
+   * Ids of earlier evidence on the same item that this ref withdraws. A ref
+   * is withdrawn when a later ref on the item lists its id; nothing is
+   * removed. Optional, so a ref a caller builds still type-checks: a missing
+   * field withdraws nothing, and `parseWorkGraphEvidenceRef` always sets it
+   * (`[]` when the gateway sends none).
    */
-  readonly withdraws: readonly string[];
+  readonly withdraws?: readonly string[];
 }
 
 export function parseWorkGraphEvidenceRef(raw: unknown): WorkGraphEvidenceRef {

@@ -341,10 +341,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of an unknown id, of the ref's own id, of another withdrawal, or of
   confirmation or execution evidence is refused `-32602`. `goal/confirm`
   still accepts only `kind`, `id`, `label` and `summary` in its evidence.
-  The TypeScript SDK sends the field (`WorkGraphEvidenceInput.withdraws`, for
-  `workgraphAddEvidence`) and reads it (`WorkGraphEvidenceRef.withdraws`,
-  empty when absent); the Python SDK passes evidence dicts through,
-  `withdraws` included.
+  The TypeScript SDK sends it (the optional `WorkGraphEvidenceInput.withdraws`,
+  for `workgraphAddEvidence`) and reads it into the optional
+  `WorkGraphEvidenceRef.withdraws`, which `parseWorkGraphEvidenceRef` always
+  sets (`[]` when absent), so a ref a caller builds still type-checks; the
+  Python SDK passes evidence dicts through, `withdraws` included.
 
 ### Changed
 

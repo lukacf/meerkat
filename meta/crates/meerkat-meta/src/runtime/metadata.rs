@@ -505,6 +505,14 @@ pub struct LifecycleEffectIntent {
     /// on `session_id`, with no retirement hook.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub predecessor_retired: bool,
+    /// For a step whose incarnation Core had already retired
+    /// (`predecessor_retired`): the intent of the step that ended that
+    /// incarnation, which this one replaced before the projection reached
+    /// the incarnation's retirement (an unlisting, say). The projection
+    /// reads it at that retirement, and this intent at the fresh life's
+    /// seat. `None` when it replaced none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<Box<LifecycleEffectIntent>>,
 }
 
 impl LifecycleEffectIntent {
@@ -529,6 +537,7 @@ impl LifecycleEffectIntent {
             recorded_at_ms,
             asked_after: None,
             predecessor_retired: false,
+            replaced: None,
         }
     }
 
@@ -545,6 +554,15 @@ impl LifecycleEffectIntent {
     #[must_use]
     pub fn with_predecessor_retired(mut self, predecessor_retired: bool) -> Self {
         self.predecessor_retired = predecessor_retired;
+        self
+    }
+
+    /// The intent, with the intent of the step that ended its incarnation
+    /// that it replaced before the projection reached that end
+    /// (`replaced`).
+    #[must_use]
+    pub fn with_replaced(mut self, replaced: Option<LifecycleEffectIntent>) -> Self {
+        self.replaced = replaced.map(Box::new);
         self
     }
 

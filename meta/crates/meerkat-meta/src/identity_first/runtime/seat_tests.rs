@@ -2844,9 +2844,10 @@ async fn a_declared_migration_over_a_done_first_boot_row_ends_its_host_preparati
 }
 
 /// A reset Core refuses before any of it starts (here: the mob is not
-/// running) answers the typed retryable refusal and takes its rotation
-/// record back, so no later roster compile or restart resets the identity.
-/// A record an earlier reset left is put back as it was.
+/// running) answers the typed retryable refusal; Core's journal holds no
+/// fact of it, so it takes its rotation record back, and no later roster
+/// compile or restart resets the identity. A record an earlier reset left
+/// is put back as it was.
 #[tokio::test]
 async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
@@ -2855,6 +2856,7 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         refuses_rotation: true,
         ..SeatCore::default()
     });
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     for who in [&alice, &bob] {
         register_live(&runtime, &core.core, spec(who), 0, SessionId::new())
@@ -3565,8 +3567,8 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later()
 }
 
 /// A reset whose fresh life spec cannot be lowered is refused before Core
-/// is asked: its record is taken back, and no later compile resets the
-/// identity.
+/// is asked: Core's journal holds no fact of it, so its record is taken
+/// back, and no later compile resets the identity.
 #[tokio::test]
 async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
@@ -3574,6 +3576,7 @@ async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() 
     *lock(&core.refuse_before_core) = Some(BridgeError::InvalidInput(
         "lowering the fresh life spec failed".to_string(),
     ));
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
         .await
@@ -3669,10 +3672,10 @@ async fn a_member_route_refusal_of_a_kickoff_seat_is_final_and_typed() {
 
 /// A reset of an identity Core does not hold that owes a kickoff is Core's
 /// live spawn of its fresh life. Refused for its member route, it is final
-/// and leaves nothing to carry out: none of the rotation started, so its
-/// record is taken back, a restart hands the mob no host-pending identity
-/// for it, and the next compile rotates nothing (its seat, the same live
-/// spawn, is refused final again).
+/// and leaves nothing to carry out: none of the rotation started (Core's
+/// journal holds no fact of it), so its record is taken back, a restart
+/// hands the mob no host-pending identity for it, and the next compile
+/// rotates nothing (its seat, the same live spawn, is refused final again).
 #[tokio::test]
 async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
@@ -3680,6 +3683,7 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
         route_refused: vec![alice.clone()],
         ..SeatCore::default()
     });
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     let records = Arc::new(crate::runtime::InMemoryMetadataStore::new());
     runtime.set_identity_records(records.clone(), "route-refused".to_string());
@@ -5519,6 +5523,68 @@ async fn a_relisted_identity_whose_unlisting_core_started_keeps_its_effects() {
     assert_eq!(calls[0].cause.as_str(), "unlisted", "{calls:?}");
 }
 
+/// The roster's unlisting of an identity records what it owes and Core
+/// retires its member, and before the projection reaches that retirement a
+/// reset gives the identity, which no member holds now, its fresh life (the
+/// roster listed it again). The reset's record for the incarnation Core had
+/// retired keeps the unlisting's, which the projection reads at that
+/// retirement: the hook hears of the incarnation as unlisted, its session is
+/// distilled as the unlisting's and again as the reset's, and both records
+/// are consumed. Had the reset's record replaced the unlisting's outright,
+/// the hook would hear nothing of the incarnation.
+#[tokio::test]
+async fn a_reset_before_the_projection_reads_an_unlisting_keeps_the_unlisting_s_effects() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    runtime.set_identity_records(Arc::clone(&records), "unlisted-then-reset".to_string());
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+
+    // The unlisting records what it owes, and Core retires the member; the
+    // projection has not read the retirement yet.
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    core.core.retire(&live);
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset gives the identity its fresh life");
+
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "unlisted", "{calls:?}");
+    assert_eq!(
+        reads.reads_of(&session),
+        2,
+        "the session is distilled as the unlisting's and as the reset's"
+    );
+    assert!(
+        records
+            .lifecycle_effect_intents("unlisted-then-reset")
+            .await
+            .expect("the intents read")
+            .is_empty(),
+        "both records are consumed"
+    );
+}
+
 /// Source guard: the lifecycle projection and the verbs decide no
 /// lifecycle fact Core's journal carries. No retirement and seat are paired
 /// by their positions in the journal (`rotation_successor`, a retirement
@@ -5569,8 +5635,9 @@ fn the_identity_runtime_decides_no_fact_core_s_journal_carries() {
 
 /// Source guard: the label or marker a member's binding carries is read for
 /// the identity's membership in an allowlisted set of places only, which
-/// empties once membership is read from Core's identity entry fact. The lifecycle projection reads Core's member history once per page,
-/// inside its membership helper (`page_members`), and asks
+/// empties once membership is read from Core's identity entry fact. The
+/// lifecycle projection reads Core's member history once per page, inside
+/// its membership helper (`page_members`), and asks
 /// `binding_spawned_for_identity` there and in a verb's preparation only.
 #[test]
 fn membership_is_read_from_a_binding_s_label_only_where_allowed() {

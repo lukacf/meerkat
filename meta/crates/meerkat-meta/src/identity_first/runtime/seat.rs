@@ -1440,29 +1440,35 @@ impl IdentityRuntime {
                 // The rotation retires the identity's live incarnation and
                 // seats the next one on a fresh session, recorded before
                 // Core is asked as what it is: a first-boot `Fresh` row's,
-                // a reset; a role move's, a role move. A rotation a crash
-                // interrupted is the verb's that recorded its own.
-                let retiring = match &planned.plan {
-                    SeatPlan::Rotate { from_row: false } => None,
-                    SeatPlan::RotateRole { .. } => {
-                        self.prepare_lifecycle_retirement(
-                            identity,
-                            crate::runtime::LifecycleEffectVerb::RoleMove,
-                        )
-                        .await?
-                    }
-                    _ => {
-                        self.prepare_lifecycle_retirement(
-                            identity,
-                            crate::runtime::LifecycleEffectVerb::Reset,
-                        )
-                        .await?
+                // a reset; a role move's, a role move. The record keeps the
+                // head of Core's journal read before Core is asked. A
+                // rotation a crash interrupted is the verb's that recorded
+                // its own.
+                let (retiring, asked_after) = match &planned.plan {
+                    SeatPlan::Rotate { from_row: false } => (None, None),
+                    plan => {
+                        let verb = if matches!(plan, SeatPlan::RotateRole { .. }) {
+                            crate::runtime::LifecycleEffectVerb::RoleMove
+                        } else {
+                            crate::runtime::LifecycleEffectVerb::Reset
+                        };
+                        let asked_after = self.lifecycle_journal_head().await;
+                        let retiring = self
+                            .prepare_lifecycle_retirement(identity, verb, asked_after)
+                            .await?;
+                        (retiring, asked_after)
                     }
                 };
                 let session_id = match bridge.rotate_member(identity, &planned.spec, draft).await {
                     Ok(session_id) => session_id,
                     Err(error) => {
-                        if super::nothing_of_the_rotation_started(&error) {
+                        // What the rotation recorded is taken back when
+                        // nothing of it reached Core's journal; otherwise it
+                        // may have started, and stays.
+                        if retiring.is_some()
+                            && self.lifecycle_step_reach(identity, asked_after).await
+                                == super::lifecycle_projection::StepReach::NotReached
+                        {
                             self.abandon_lifecycle_retirement(retiring).await;
                         }
                         return Err(match deterministic_build_rejection_reason(&error) {

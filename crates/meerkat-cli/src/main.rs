@@ -18528,6 +18528,21 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::bind_seated_member_session(
+            &self.inner,
+            session_id,
+            mob_id,
+            member,
+        )
+        .await
+    }
+
     #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,

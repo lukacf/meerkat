@@ -4192,6 +4192,17 @@ macro_rules! delegate_mob_session_service {
                 self.inner.read_member_instructions(session_ids).await
             }
 
+            async fn bind_seated_member_session(
+                &self,
+                session_id: &meerkat_core::SessionId,
+                mob_id: &str,
+                member: &str,
+            ) -> Result<(), meerkat_core::service::SessionError> {
+                self.inner
+                    .bind_seated_member_session(session_id, mob_id, member)
+                    .await
+            }
+
             // Forwarded exactly: the inner service observes the durable
             // source from authority, catalog and lifecycle rows without a
             // body read. Required since meerkat 0.8.47; a wrapper that
@@ -5698,6 +5709,17 @@ impl MobSessionService for AfterCreateMobSessionService {
         >,
     > {
         self.inner.read_member_instructions(session_ids).await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .bind_seated_member_session(session_id, mob_id, member)
+            .await
     }
 
     // Forwarded exactly: the body-free durable-source observation behind

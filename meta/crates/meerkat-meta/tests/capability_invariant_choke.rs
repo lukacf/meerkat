@@ -251,16 +251,19 @@ fn both_wrappers_forward_the_cold_predecessor_settlement() {
 }
 
 /// Both production `MobSessionService` wrappers forward a mob member's
-/// operator-instruction delivery, its release and its read to the service
-/// they wrap. Their trait defaults refuse typed (`durability_unavailable`),
-/// so a wrapper without a forward compiles and blocks every member's
-/// operator instructions behind it.
+/// operator-instruction delivery, its release, its read and a dormant resume
+/// seat's member binding to the service they wrap. Their trait defaults
+/// refuse typed (`durability_unavailable`, `Unsupported`), so a wrapper
+/// without a forward compiles and blocks every member's operator
+/// instructions behind it, or refuses its dormant resume seats over a host's
+/// session.
 #[test]
 fn both_wrappers_forward_the_member_instruction_methods() {
-    const FORWARDS: [&str; 3] = [
+    const FORWARDS: [&str; 4] = [
         ".record_member_instruction_target(",
         ".release_member_instruction_target(",
         ".read_member_instructions(",
+        ".bind_seated_member_session(",
     ];
     let production = production_source(RUNTIME_SOURCE);
     let delegation = production

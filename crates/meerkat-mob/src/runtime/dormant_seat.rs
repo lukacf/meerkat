@@ -707,6 +707,29 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             }
         }
     };
+    // A resume seat over a session that names no member binding (its host's
+    // own, or one a build before member bindings wrote) makes it the member's
+    // session at the seat, as a build of this mob would: the binding its
+    // comms name implies is stamped store-only before the seat commits, so
+    // its host's later operator-instruction writes are refused and the mob's
+    // first snapshot takes over the target its host wrote before, with no
+    // wake. A session a build of this mob created already names it.
+    if candidate.launch == DormantSeatLaunch::Resume
+        && !candidate.session_unborn
+        && !candidate.session_archived
+    {
+        let unbound = session_service
+            .load_persisted_session_metadata(&session_id)
+            .await
+            .map_err(|error| refused(MobError::from(error)))?
+            .is_some_and(|metadata| metadata.mob_member_binding().is_none());
+        if unbound {
+            session_service
+                .bind_seated_member_session(&session_id, mob_id.as_str(), agent_identity.as_str())
+                .await
+                .map_err(|error| refused(MobError::from(error)))?;
+        }
+    }
     let endpoint = match endpoint_source {
         MemberSeatEndpointSource::Network => None,
         MemberSeatEndpointSource::SessionScopedInproc { identity_root } => {

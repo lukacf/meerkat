@@ -750,8 +750,10 @@ them.
   member sessions of one status page, one answer per session in order), each
   defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
   durable session owner must forward them for its mob's members to receive
-  instructions (Core's CLI and RPC wrappers and Meta's wrappers forward
-  them).
+  instructions, and `bind_seated_member_session` (a dormant resume seat's
+  member binding on a session that names none, store-only), defaulting to a
+  typed `Unsupported` refusal that refuses such a seat (Core's CLI and RPC
+  wrappers and Meta's wrappers forward all four).
 
 - `meerkat-workgraph`: `WorkEvidenceRef` gains the public field `withdraws`
   (`BTreeSet<String>`, the ids of earlier evidence on the same item that the

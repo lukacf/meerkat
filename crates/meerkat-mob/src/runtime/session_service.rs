@@ -1479,6 +1479,32 @@ pub trait MobSessionService:
             .collect()
     }
 
+    /// Stamp the member binding a dormant resume seat implies on the seat's
+    /// stored session, store-only, before the seat commits
+    /// ([`meerkat_session::PersistentSessionService::bind_seated_member_session`]):
+    /// a session that names no member binding (its host's own) becomes the
+    /// member's at the seat, without a wake, so its host's
+    /// operator-instruction writes are refused from then on and the mob's
+    /// first snapshot takes over the target its host wrote before. A dormant
+    /// seat asks it only for a resume seat whose session names no binding.
+    ///
+    /// The default is a typed refusal, never a silent success: a wrapper over
+    /// a durable session owner must forward it, or its dormant resume seats
+    /// over such a session are refused.
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        let _ = (session_id, mob_id, member);
+        Err(SessionError::Unsupported(
+            "this session service binds no dormant seat's member session; a wrapper must \
+             forward bind_seated_member_session"
+                .to_string(),
+        ))
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.
@@ -3664,6 +3690,18 @@ where
         >,
     > {
         self.read_sessions_instructions(session_ids).await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::bind_seated_member_session(
+            self, session_id, mob_id, member,
+        )
+        .await
     }
 
     async fn publish_boundary_appends_discarded_for_actor(

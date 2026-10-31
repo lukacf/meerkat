@@ -64,13 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Upgrade
 
 - A host's own `MobSessionService` wrapper (around the session service it
-  passes to `MobBootstrapSpec::new`) must forward the three member
+  passes to `MobBootstrapSpec::new`) must forward the four member
   operator-instruction methods Meerkat 0.9.9 adds,
-  `record_member_instruction_target`, `release_member_instruction_target`
-  and `read_member_instructions`, to the service it wraps. Their defaults
-  refuse typed (`durability_unavailable`), so a wrapper that keeps them
-  compiles and blocks the operator instructions of every member behind it;
-  Meta's own wrappers forward them (see Changed).
+  `record_member_instruction_target`, `release_member_instruction_target`,
+  `read_member_instructions` and `bind_seated_member_session`, to the service
+  it wraps. Their defaults refuse typed (`durability_unavailable`, and
+  `Unsupported` for the last), so a wrapper that keeps them compiles, blocks
+  the operator instructions of every member behind it and refuses a dormant
+  resume seat over a host's own session; Meta's own wrappers forward them
+  (see Changed).
 
 - A rollback to Meta 0.9.7 (on Core 0.9.8) or Meta 0.9.6 (on Core 0.9.7)
   does not resume a gateway whose own mob recorded an operator instruction:
@@ -369,8 +371,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Both of Meta's mob session service wrappers (the pre-build delegation and
   the after-create wrapper) forward a mob member's operator-instruction
-  delivery, release and read to the session service they wrap, so a mob's
-  operator instructions reach its members behind them.
+  delivery, release and read, and a dormant resume seat's member binding, to
+  the session service they wrap, so a mob's operator instructions reach its
+  members behind them.
 
 - `meta/fork_helper` on the Console answers a source agent the console's
   visibility policy hides as unknown (`-32001`, `data.kind`

@@ -5891,6 +5891,50 @@ impl MobSessionService for MockSessionService {
         reads
     }
 
+    /// Stamps the binding the stored session's comms name implies, store-only,
+    /// as the persistent owner does: only on a session that names no binding
+    /// and whose comms name is this member's, and never on a live one.
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        if self.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let mut persisted = self.persisted_sessions.write().await;
+        let session = persisted
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let Some(mut metadata) = session.session_metadata() else {
+            return Ok(());
+        };
+        if metadata.mob_member_binding.is_some() {
+            return Ok(());
+        }
+        let Some(name) = metadata
+            .comms_name
+            .as_deref()
+            .and_then(|name| name.parse::<meerkat_core::MemberCommsName>().ok())
+        else {
+            return Ok(());
+        };
+        if name.mob_id() != mob_id || name.member() != member {
+            return Ok(());
+        }
+        metadata.mob_member_binding = Some(name.to_member_binding());
+        session
+            .set_session_metadata(metadata)
+            .expect("mock session metadata should serialize");
+        Ok(())
+    }
+
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {
         *self
             .member_comms_identity_root

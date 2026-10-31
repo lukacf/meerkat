@@ -8016,6 +8016,79 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     pub const TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND: std::time::Duration =
         std::time::Duration::from_secs(1);
 
+    /// Stamp the member binding a dormant resume seat implies on the seat's
+    /// durable session, store-only, before the seat commits: the binding its
+    /// own comms name implies, when that name is the member `member` of mob
+    /// `mob_id` and the session names no binding yet (a session its host
+    /// created, or one a build before member bindings wrote). From then on
+    /// the session is a mob member's, as a build of the mob would have made
+    /// it: its host's operator-instruction writes are refused, and the mob's
+    /// first snapshot takes over the target its host wrote before. A session
+    /// that already names a binding, or whose comms name is not that
+    /// member's, is left as it is (its first wake admits or refuses it). A
+    /// live session is refused (`Busy`): a dormant seat binds a session no
+    /// runtime serves.
+    pub async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        let mut session = self
+            .load_durable_session_body(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let Some(mut metadata) = session.try_session_metadata().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to decode metadata while seating session {session_id}: {error}"
+            )))
+        })?
+        else {
+            return Ok(());
+        };
+        if metadata.mob_member_binding.is_some() {
+            return Ok(());
+        }
+        let Some(name) = metadata
+            .comms_name
+            .as_deref()
+            .and_then(|name| name.parse::<meerkat_core::MemberCommsName>().ok())
+        else {
+            return Ok(());
+        };
+        if name.mob_id() != mob_id || name.member() != member {
+            return Ok(());
+        }
+        if self.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        metadata.mob_member_binding = Some(name.to_member_binding());
+        session.set_session_metadata(metadata).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to stamp the member binding onto seated session {session_id}: {error}"
+            )))
+        })?;
+        match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                self.save_normalized_session(session).await?;
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                self.persist_detached_head_canonical_session(session, "seated member binding")
+                    .await?;
+            }
+            profile => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "unsupported runtime session persistence profile {profile} while seating session {session_id}"
+                ))));
+            }
+        }
+        Ok(())
+    }
+
     /// Stamp one DETACHED fork session with the exact mob member binding it is
     /// being seated as.
     ///

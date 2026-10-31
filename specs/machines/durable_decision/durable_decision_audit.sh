@@ -11,7 +11,7 @@
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's step
-# bound and its twelve invariants, and checks them over the whole bounded
+# bound and its fourteen invariants, and checks them over the whole bounded
 # space (safety) with TLC coverage: every wrapper in covered_actions below
 # (one per generated arm, a per-phase arm's phases sharing one, and the
 # owner's commit) must generate a successor state, and the space must keep
@@ -39,7 +39,11 @@
 #     (PermitAcrossDeadlineExecuted);
 #   - a release after the deadline records the expiry
 #     (ReleaseAfterDeadlineExpires);
-#   - an authorization at the deadline refused (AuthorizeAtDeadlineRefused).
+#   - an authorization at the deadline refused (AuthorizeAtDeadlineRefused);
+#   - a decision observed before the first presentation refused, then an
+#     approval (DecidedBeforePresentationRefused);
+#   - an approval observed in the same millisecond as the first presentation
+#     (ApprovedAtThePresentation).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -63,7 +67,18 @@
 #     (AuditNoPermitAtOrAfterDeadline);
 #   - a release that leaves the permit outstanding (AuditReleaseClearsPermit);
 #   - a deadline observation that drops the outstanding permit, orphaning
-#     the owner's commit (AuditCommittedIsSettleable).
+#     the owner's commit (AuditCommittedIsSettleable);
+#   - an approval and a rejection that keep the presentation check and drop
+#     the order, and a refusal of a decision observed in the same
+#     millisecond as the first presentation
+#     (AuditDecisionFollowsPresentation);
+#   - a presentation that overwrites the first presentation time with its
+#     own, and one to another audience recorded as the approver's
+#     (AuditFirstPresentationIsTheEarliest);
+#   - a presentation at 0 recorded as the first presentation
+#     (first_presentation_is_a_reading, a generated invariant), and a
+#     decision accepted on a carried presentation at 0
+#     (AuditDecisionFollowsPresentation).
 # The executor's obligations are assumed, not checked: the machine records
 # that a permit is outstanding, not who holds it or whether a commit landed.
 # The audit models one executor per decision (one owner drives the permit),
@@ -101,7 +116,7 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 # green run found at the lane's bound; a run at a smaller bound is not held
 # to it.
 default_steps=6
-safety_states=13863
+safety_states=36073
 min_distinct_states=$(( safety_states * 9 / 10 ))
 
 # Every wrapper must fire. TLC names an arm after the audit's wrapper, so
@@ -117,6 +132,7 @@ covered_actions=(
   AuditPresentRefusedSubjectChanged
   AuditPresentRefusedIncomplete
   AuditPresentToApprover
+  AuditPresentRefusedUntimed
   AuditPresentRefusedWrongApproverAudience
   AuditPresentToReviewer
   AuditPresentRefusedWrongReviewerAudience
@@ -128,6 +144,7 @@ covered_actions=(
   AuditDecideRefusedNotEligible
   AuditDecideRefusedSelfApproval
   AuditDecideRefusedPresentationIncomplete
+  AuditDecideRefusedDecidedBeforePresentation
   AuditDecideApproved
   AuditDecideRejected
   AuditDecideRefusedNotOpen
@@ -204,7 +221,9 @@ audit_invariants=(
   AuditNoticeOwedOnceAtTheEnd
   AuditNoPermitAtOrAfterDeadline
   AuditReleaseClearsPermit
+  AuditDecisionFollowsPresentation
   AuditCommittedIsSettleable
+  AuditFirstPresentationIsTheEarliest
 )
 
 # usage: write_cfg <file> <first invariant or ""> <extra invariant lines>
@@ -318,7 +337,7 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   EscalatedThenHumanApproved StaleDigestThenApproved DecideAtDeadlineExpires \
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
-  AuthorizeAtDeadlineRefused; do
+  AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -409,16 +428,22 @@ PY
   edits="${work_dir}/edits"
 
   # An approval with one attestation guard dropped: no evidence, another
-  # subject digest, no presentation, the requester as decider, another
-  # approver id.
+  # subject digest, the requester as decider, another approver id; and no
+  # presentation (the guard that the decision was observed at or after a
+  # presentation, which is also its presence check).
   for mutant in "no_evidence|(arg_evidence_digest # None)" \
     "stale_subject|(digest = subject_digest)" \
-    "no_presentation|(IF carries_presentation THEN TRUE ELSE presented_to_approver)" \
     "self_approval|(decider # requester)" \
     "other_approver_id|(arg_approver_id = approver_id)"; do
     printf 'DecideApproved\n/\\ %s\n/\\ TRUE\n' "${mutant#*|}" > "${edits}"
     mutate "approve_${mutant%%|*}" AuditApprovalIsAttested "${edits}"
   done
+  cat > "${edits}" <<'EOF'
+DecideApproved
+/\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((carried_presentation_at_ms # None) /\ ((IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)))
+/\ TRUE
+EOF
+  mutate approve_no_presentation AuditApprovalIsAttested "${edits}"
 
   cat > "${edits}" <<'EOF'
 DecideRejected
@@ -495,5 +520,63 @@ EOF
 
   frame_update ExpireApprovedSettlementOwed permit_issued FALSE > "${edits}"
   mutate deadline_drops_permit AuditCommittedIsSettleable "${edits}"
+
+  # A decision that keeps the presentation check and drops the order: each
+  # presentation time compares as at or before any observed time.
+  for arm in DecideApproved DecideRejected; do
+    cat > "${edits}" <<EOF
+${arm}
+first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)
+first_presented_to_approver_at_ms["value"] ELSE None) >= 0)
+--
+${arm}
+carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)
+carried_presentation_at_ms["value"] ELSE None) >= 0)
+EOF
+    case "${arm}" in
+      DecideApproved) name=approve_before_presentation ;;
+      *) name=reject_before_presentation ;;
+    esac
+    mutate "${name}" AuditDecisionFollowsPresentation "${edits}"
+  done
+
+  cat > "${edits}" <<'EOF'
+DecideRefusedDecidedBeforePresentation
+(observed_at_ms < (IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN
+(observed_at_ms <= (IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN
+EOF
+  mutate refuse_at_the_presentation AuditDecisionFollowsPresentation "${edits}"
+
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+earliest_presentation(first_presented_to_approver_at_ms, Some(presented_at_ms))
+Some(presented_at_ms)
+EOF
+  mutate first_presentation_overwritten AuditFirstPresentationIsTheEarliest "${edits}"
+
+  # A presentation to any audience recorded as the approver's: the audit
+  # reads the audience from the input, not from the arm that fired.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ (audience = approver_id)
+/\ TRUE
+EOF
+  mutate present_to_another_audience AuditFirstPresentationIsTheEarliest "${edits}"
+
+  # A presentation at 0, no reading, recorded as the first presentation.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ (presented_at_ms # 0)
+/\ TRUE
+EOF
+  mutate present_untimed first_presentation_is_a_reading "${edits}"
+
+  # A decision accepted on a carried presentation at 0.
+  cat > "${edits}" <<'EOF'
+DecideApproved
+/\ (carried_presentation_at_ms # Some(0))
+/\ TRUE
+EOF
+  mutate decide_carries_untimed AuditDecisionFollowsPresentation "${edits}"
 fi
 echo "durable decision audit passed at model_step_count <= ${max_steps}"

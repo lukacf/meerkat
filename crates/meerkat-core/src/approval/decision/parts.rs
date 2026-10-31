@@ -112,6 +112,8 @@ pub struct PresentationRecord {
     pub channel_ref: DecisionReference,
     pub message_ref: DecisionReference,
     /// The host's clock reading of the presentation, in UNIX milliseconds.
+    /// A time of 0 is no reading: the decision's machine refuses a
+    /// presentation to the approver at 0, recorded or carried.
     pub at_ms: u64,
 }
 

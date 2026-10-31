@@ -837,16 +837,18 @@ fi
 # fact, expiry, withdrawal and the requester notice an ended decision owes)
 # is model-checked by a hand-written audit over the generated model: every
 # input in every phase, through one wrapper per arm, under every generated
-# invariant plus eleven step properties (terminals latch; approvals and
+# invariant plus twelve step properties (terminals latch; approvals and
 # rejections attested; execution only from Approved with the held binding;
 # expiry only at the deadline and, for an approved decision, only without
 # an outstanding permit or by its release; withdrawal only while open by the
 # requester or the host; the sealed binding never changes; the notice owed
 # once at the end; no permit at or after the deadline; a release clears the
-# permit) and one state invariant (an owner's commit stays settleable). It
-# requires every wrapper to fire, thirteen witnesses reached and refuses
-# seventeen seeded defects (--mutants). 6 steps reach every witness. It runs
-# alone in shard audits-j.
+# permit; a human decision decided only when observed at or after its first
+# presentation, and refused for the order only before it) and two state
+# invariants (an owner's commit stays settleable; the first presentation
+# time is the earliest). It requires every wrapper to fire, fifteen
+# witnesses reached and refuses twenty-four seeded defects (--mutants). 6
+# steps reach every witness. It runs alone in shard audits-j.
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then
   echo "error: durable decision audit runner is missing from workspace runfiles: ${durable_decision_audit}" >&2
@@ -952,9 +954,9 @@ run_machine_verify() {
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it. The hosted audits-g and audits-i have not been
 # measured yet;
-# audits-j = durable decision with --mutants, alone: its safety run (13863
-# distinct states at 6 steps, 16 s), thirteen witness runs and seventeen
-# mutant runs took 54 s on a 4-worker local run (about 85-125 s hosted at
+# audits-j = durable decision with --mutants, alone: its safety run (36073
+# distinct states at 6 steps, 65 s), fifteen witness runs and twenty-four
+# mutant runs took 146 s on a 4-worker local run (about 235-340 s hosted at
 # the 1.6-2.3x runner factor), not yet measured on a hosted runner.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the

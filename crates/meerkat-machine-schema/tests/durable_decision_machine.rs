@@ -141,11 +141,14 @@ struct Decision {
     digest: &'static str,
     evidence: Option<&'static str>,
     eligible: bool,
-    carries_presentation: bool,
+    carried_presentation_at_ms: Option<u64>,
+    observed_at_ms: u64,
     now_ms: u64,
 }
 
 impl Decision {
+    /// Carries a presentation shown at `HELD_AT + 5`, and was observed at
+    /// `HELD_AT + 10`, when the owner decides it.
     fn valid(approve: bool) -> Self {
         Self {
             approve,
@@ -154,7 +157,8 @@ impl Decision {
             digest: SUBJECT,
             evidence: Some(EVIDENCE),
             eligible: true,
-            carries_presentation: true,
+            carried_presentation_at_ms: Some(HELD_AT + 5),
+            observed_at_ms: HELD_AT + 10,
             now_ms: HELD_AT + 10,
         }
     }
@@ -167,7 +171,8 @@ impl Decision {
             digest: digest(self.digest),
             evidence_digest: self.evidence.map(str::to_owned),
             eligible: self.eligible,
-            carries_presentation: self.carries_presentation,
+            carried_presentation_at_ms: self.carried_presentation_at_ms,
+            observed_at_ms: self.observed_at_ms,
             now_ms: self.now_ms,
         }
     }
@@ -183,11 +188,24 @@ fn review(verdict: DurableDecisionReviewVerdict, reviewer: &str, now_ms: u64) ->
     }
 }
 
+/// A presentation recorded when it was shown (`now_ms`).
 fn present(audience: &str, subject: &str, complete: bool, now_ms: u64) -> Input {
+    present_at(audience, subject, complete, now_ms, now_ms)
+}
+
+/// A presentation shown at `presented_at_ms` and recorded at `now_ms`.
+fn present_at(
+    audience: &str,
+    subject: &str,
+    complete: bool,
+    presented_at_ms: u64,
+    now_ms: u64,
+) -> Input {
     Input::Present {
         audience: party(audience),
         digest: digest(subject),
         complete,
+        presented_at_ms,
         now_ms,
     }
 }
@@ -661,7 +679,7 @@ fn hold_replays_the_same_binding_and_refuses_another() {
 
 #[test]
 fn each_decide_conjunct_alone_refuses() {
-    let rows: [(&str, Decision, DurableDecisionRefusal); 6] = [
+    let rows: [(&str, Decision, DurableDecisionRefusal); 7] = [
         (
             "evidence",
             Decision {
@@ -705,10 +723,18 @@ fn each_decide_conjunct_alone_refuses() {
         (
             "presentation",
             Decision {
-                carries_presentation: false,
+                carried_presentation_at_ms: None,
                 ..Decision::valid(true)
             },
             DurableDecisionRefusal::PresentationIncomplete,
+        ),
+        (
+            "presentation order",
+            Decision {
+                observed_at_ms: HELD_AT + 4,
+                ..Decision::valid(true)
+            },
+            DurableDecisionRefusal::DecidedBeforePresentation,
         ),
     ];
     for approve in [true, false] {
@@ -749,7 +775,7 @@ fn each_decide_conjunct_alone_refuses() {
     let approved = apply(
         &mut authority,
         Decision {
-            carries_presentation: false,
+            carried_presentation_at_ms: None,
             ..Decision::valid(true)
         }
         .input(),
@@ -774,7 +800,7 @@ fn each_decide_conjunct_alone_refuses() {
     ] {
         let refused = apply(&mut authority, input);
         assert_eq!(refusal(&refused), reason);
-        assert!(!authority.state().presented_to_approver);
+        assert_eq!(authority.state().first_presented_to_approver_at_ms, None);
     }
 }
 
@@ -793,9 +819,10 @@ fn the_first_valid_decision_wins_and_end_phases_latch() {
     assert_eq!(state.lifecycle_phase, Phase::Approved);
     assert_eq!(state.evidence_digest.as_deref(), Some(EVIDENCE));
     assert_eq!(state.decided_at_ms, Some(HELD_AT + 10));
-    assert!(
-        state.presented_to_approver,
-        "a carried presentation is recorded"
+    assert_eq!(
+        state.first_presented_to_approver_at_ms,
+        Some(HELD_AT + 5),
+        "a carried presentation is recorded with the time it was shown"
     );
     assert_eq!(state.ended_at_ms, None);
     assert_eq!(state.notice, DurableDecisionNotice::NotDue);
@@ -826,6 +853,178 @@ fn the_first_valid_decision_wins_and_end_phases_latch() {
         ] {
             apply(&mut authority, input);
             assert_eq!(authority.state(), &before, "{phase:?} stays latched");
+        }
+    }
+}
+
+/// A human decision is ordered after the approver's first presentation:
+/// observed before it, the decision is refused `DecidedBeforePresentation`
+/// and changes nothing; observed in the same millisecond or later, it is
+/// decided. The first presentation is the earliest one, recorded or
+/// carried, in whatever order the presentations arrive; with none at all
+/// the decision stays `PresentationIncomplete`.
+#[test]
+fn a_human_decision_is_ordered_after_its_first_presentation() {
+    const SHOWN_AT: u64 = HELD_AT + 20;
+    let observed = |observed_at_ms: u64, carried: Option<u64>, approve: bool| Decision {
+        carried_presentation_at_ms: carried,
+        observed_at_ms,
+        ..Decision::valid(approve)
+    };
+
+    // A recorded presentation: a millisecond before it is refused, an
+    // approval and a rejection alike; the same millisecond decides.
+    for (approve, decided) in [(true, Phase::Approved), (false, Phase::Rejected)] {
+        let mut authority = authority_in(Phase::Open);
+        apply(
+            &mut authority,
+            present_at(APPROVER, SUBJECT, true, SHOWN_AT, HELD_AT + 1),
+        );
+        assert_eq!(
+            authority.state().first_presented_to_approver_at_ms,
+            Some(SHOWN_AT)
+        );
+        let before = authority.state().clone();
+        let refused = apply(
+            &mut authority,
+            observed(SHOWN_AT - 1, None, approve).input(),
+        );
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::DecidedBeforePresentation,
+            "approve {approve}"
+        );
+        assert_eq!(authority.state(), &before, "the refusal changes nothing");
+        apply(&mut authority, observed(SHOWN_AT, None, approve).input());
+        assert_eq!(
+            authority.state().lifecycle_phase,
+            decided,
+            "the same millisecond decides"
+        );
+    }
+
+    // A presentation the decision event carries orders it the same way, and
+    // is recorded with its time.
+    let mut authority = authority_in(Phase::Open);
+    let before = authority.state().clone();
+    let refused = apply(
+        &mut authority,
+        observed(SHOWN_AT - 1, Some(SHOWN_AT), true).input(),
+    );
+    assert_eq!(
+        refusal(&refused),
+        DurableDecisionRefusal::DecidedBeforePresentation
+    );
+    assert_eq!(authority.state(), &before, "the refusal changes nothing");
+    let approved = apply(
+        &mut authority,
+        observed(SHOWN_AT, Some(SHOWN_AT), true).input(),
+    );
+    assert_eq!(labels(&approved), ["Approved"]);
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(SHOWN_AT)
+    );
+
+    // The earliest presentation counts: a carried one shown before the
+    // recorded one admits a decision observed between the two.
+    let mut authority = authority_in(Phase::Open);
+    apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, SHOWN_AT, HELD_AT + 1),
+    );
+    let approved = apply(
+        &mut authority,
+        observed(SHOWN_AT - 3, Some(SHOWN_AT - 5), true).input(),
+    );
+    assert_eq!(labels(&approved), ["Approved"]);
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(SHOWN_AT - 5)
+    );
+
+    // A later presentation never moves the first one; an earlier one,
+    // recorded late, does.
+    let mut authority = authority_in(Phase::Open);
+    apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, SHOWN_AT, HELD_AT + 1),
+    );
+    apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, SHOWN_AT + 10, HELD_AT + 2),
+    );
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(SHOWN_AT)
+    );
+    apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, SHOWN_AT - 10, HELD_AT + 3),
+    );
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(SHOWN_AT - 10)
+    );
+    let approved = apply(&mut authority, observed(SHOWN_AT - 10, None, true).input());
+    assert_eq!(labels(&approved), ["Approved"]);
+
+    // With no presentation at all, no observed time decides: the decision
+    // stays `PresentationIncomplete`.
+    for observed_at_ms in [0, SHOWN_AT, DEADLINE - 1] {
+        let mut authority = authority_in(Phase::Open);
+        let refused = apply(&mut authority, observed(observed_at_ms, None, true).input());
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::PresentationIncomplete,
+            "observed at {observed_at_ms}"
+        );
+    }
+}
+
+/// A presentation time of 0 is no reading of when the approver was shown
+/// the decision: a presentation recorded at 0 is refused
+/// `PresentationIncomplete` and records nothing, and a decision carrying a
+/// presentation at 0 is refused the same way, a recorded presentation
+/// notwithstanding.
+#[test]
+fn a_presentation_time_of_zero_is_no_presentation() {
+    let mut authority = authority_in(Phase::Open);
+    let before = authority.state().clone();
+    let refused = apply(
+        &mut authority,
+        present_at(APPROVER, SUBJECT, true, 0, HELD_AT + 1),
+    );
+    assert_eq!(
+        refusal(&refused),
+        DurableDecisionRefusal::PresentationIncomplete
+    );
+    assert_eq!(authority.state(), &before, "nothing is recorded");
+
+    for recorded in [false, true] {
+        let mut authority = authority_in(Phase::Open);
+        if recorded {
+            apply(
+                &mut authority,
+                present_at(APPROVER, SUBJECT, true, HELD_AT + 1, HELD_AT + 1),
+            );
+        }
+        let before = authority.state().clone();
+        for approve in [true, false] {
+            let refused = apply(
+                &mut authority,
+                Decision {
+                    carried_presentation_at_ms: Some(0),
+                    ..Decision::valid(approve)
+                }
+                .input(),
+            );
+            assert_eq!(
+                refusal(&refused),
+                DurableDecisionRefusal::PresentationIncomplete,
+                "recorded {recorded}, approve {approve}"
+            );
+            assert_eq!(authority.state(), &before, "the refusal changes nothing");
         }
     }
 }
@@ -1380,6 +1579,13 @@ fn recover_from_state_refuses_each_torn_shape() {
             "reviewer_presentation_needs_a_reviewer",
             State {
                 presented_to_reviewer: true,
+                ..open.clone()
+            },
+        ),
+        (
+            "first_presentation_is_a_reading",
+            State {
+                first_presented_to_approver_at_ms: Some(0),
                 ..open.clone()
             },
         ),

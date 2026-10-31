@@ -65,7 +65,7 @@ fn stored(
         approver_id: format!("approver:{}", descriptor.approver_id),
         reviewer: None,
         stage: DecisionStage::Human,
-        presented_to_approver: false,
+        first_presented_to_approver_at_ms: None,
         presented_to_reviewer: false,
         evidence_digest: None,
         decided_at_ms: None,

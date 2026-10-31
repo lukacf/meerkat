@@ -59,8 +59,8 @@ pub enum DecisionRefusal {
     Expired,
     /// The presented digest is not the held subject digest.
     SubjectChanged,
-    /// The presentation did not cover the whole held subject, or none
-    /// reached the deciding party.
+    /// The presentation did not cover the whole held subject, none reached
+    /// the deciding party, or it was shown at 0 (no reading of when).
     PresentationIncomplete,
     /// The presentation was shown to a party that does not decide now.
     WrongAudience,
@@ -90,6 +90,9 @@ pub enum DecisionRefusal {
     SettlementOwed,
     /// No notice is owed, or the receipt contradicts the settled one.
     NotOwed,
+    /// The human decision was observed before the decision's first
+    /// presentation to the approver.
+    DecidedBeforePresentation,
 }
 
 impl DecisionRefusal {
@@ -117,6 +120,7 @@ impl DecisionRefusal {
             Self::NotAuthorized => "not_authorized",
             Self::SettlementOwed => "settlement_owed",
             Self::NotOwed => "not_owed",
+            Self::DecidedBeforePresentation => "decided_before_presentation",
         }
     }
 }
@@ -144,6 +148,7 @@ impl From<DurableDecisionRefusal> for DecisionRefusal {
             DurableDecisionRefusal::NotAuthorized => Self::NotAuthorized,
             DurableDecisionRefusal::SettlementOwed => Self::SettlementOwed,
             DurableDecisionRefusal::NotOwed => Self::NotOwed,
+            DurableDecisionRefusal::DecidedBeforePresentation => Self::DecidedBeforePresentation,
         }
     }
 }
@@ -294,7 +299,7 @@ pub(super) fn machine_state(state: &DecisionMachineState) -> DurableDecisionMach
             DecisionStage::Human => DurableDecisionStage::Human,
             DecisionStage::Review => DurableDecisionStage::Review,
         },
-        presented_to_approver: state.presented_to_approver,
+        first_presented_to_approver_at_ms: state.first_presented_to_approver_at_ms,
         presented_to_reviewer: state.presented_to_reviewer,
         evidence_digest: state.evidence_digest.clone(),
         decided_at_ms: state.decided_at_ms,
@@ -344,7 +349,7 @@ fn stored_state(
             DurableDecisionStage::Human => DecisionStage::Human,
             DurableDecisionStage::Review => DecisionStage::Review,
         },
-        presented_to_approver: state.presented_to_approver,
+        first_presented_to_approver_at_ms: state.first_presented_to_approver_at_ms,
         presented_to_reviewer: state.presented_to_reviewer,
         evidence_digest: state.evidence_digest.clone(),
         decided_at_ms: state.decided_at_ms,
@@ -852,7 +857,12 @@ impl DurableDecisionService {
     /// Record a presentation of the decision's rendering. Only a complete
     /// presentation of the held subject to the party that decides now (the
     /// approver id in the human stage, the reviewer in the review stage)
-    /// counts; it is kept as that audience's latest.
+    /// counts; it is kept as that audience's latest. The decision's machine
+    /// keeps, from the presentation's own time (`at_ms`), when a
+    /// presentation first reached the approver: a human decision observed
+    /// before that is refused. A presentation to the approver at 0 is no
+    /// reading of when it was shown, and is refused as
+    /// `PresentationIncomplete`.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `SubjectChanged`,
@@ -870,6 +880,7 @@ impl DurableDecisionService {
                 audience: audience_party(&presentation.audience),
                 digest: machine_digest(&presentation.subject_digest),
                 complete: presentation.shows_every_part_of(&loaded.row.descriptor.rendering),
+                presented_at_ms: presentation.at_ms,
                 now_ms,
             };
             let (effects, state) = transition(loaded, input)?;
@@ -887,13 +898,20 @@ impl DurableDecisionService {
 
     /// Decide an open decision in its human stage with one attested human
     /// decision. The decider's eligibility to act for the approver id is
-    /// checked when the decision commits; the first valid decision wins.
+    /// checked when the decision commits; the first valid decision wins. The
+    /// decision's machine orders it by the time its ingress observed it
+    /// ([`AttestedDecision::observed_at_ms`]): observed before the
+    /// decision's first presentation to the approver (recorded, or the one
+    /// the decision carries), it is refused; observed in the same
+    /// millisecond or later, it may decide. A decision carrying a
+    /// presentation at 0 is refused as `PresentationIncomplete`.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `EvidenceRequired`, `SubjectChanged`,
-    /// `NotEligible`, `SelfApproval`, `PresentationIncomplete`, `ReviewStage`,
-    /// `NotOpen` or `Expired`; [`DecisionError::CandidateLaunch`]; store,
-    /// clock and unreadable-row failures.
+    /// `NotEligible`, `SelfApproval`, `PresentationIncomplete`,
+    /// `DecidedBeforePresentation`, `ReviewStage`, `NotOpen` or `Expired`;
+    /// [`DecisionError::CandidateLaunch`]; store, clock and unreadable-row
+    /// failures.
     pub fn decide(
         &self,
         decision_id: &DecisionId,
@@ -919,7 +937,8 @@ impl DurableDecisionService {
                 digest: machine_digest(decision.presented_digest()),
                 evidence_digest: Some(evidence_digest.as_str().to_owned()),
                 eligible: eligibility.check_current().is_ok(),
-                carries_presentation: carried.is_some(),
+                carried_presentation_at_ms: carried.map(|presentation| presentation.at_ms),
+                observed_at_ms: decision.observed_at_ms(),
                 now_ms,
             };
             let (effects, state) = transition(loaded, input)?;

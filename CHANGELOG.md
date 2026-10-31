@@ -671,6 +671,29 @@ them.
   and `PersistenceBundle::with_candidate_launch_decisions` narrows it, one
   way, for a candidate launch. `meerkat-rpc`: `SessionRuntime::decision_service`.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-machine-schema`: a durable
+  decision is decided only after it was shown. `AttestedDecision::new` takes
+  `observed_at_ms`, the time the trusted ingress observed the decision event
+  (`AttestedDecision::observed_at_ms`), and the human evidence records it in
+  an optional field: evidence recorded without it decodes and keeps its
+  digest. `DurableDecisionMachine` keeps the earliest time a complete
+  presentation reached the approver (a recorded presentation's own `at_ms`,
+  or the presentation the decision event carries) and refuses a human
+  decision observed before it as `DecidedBeforePresentation`
+  (`DecisionRefusal::DecidedBeforePresentation`, token
+  `decided_before_presentation`). A decision observed in the same
+  millisecond is decided, and one with no presentation stays
+  `presentation_incomplete`. A presentation time of 0 is no reading: a
+  presentation to the approver recorded at 0 is refused as
+  `presentation_incomplete`, and so is a decision whose event carries one,
+  even after a valid presentation was recorded; neither becomes the first
+  presentation. The observed time is the ingress's reading and a
+  presentation's time the host clock's. An ingress clock that truncates or
+  runs behind can only cause a retryable refusal; one that runs ahead of the
+  host's by d (a rounding clock, by up to half its unit) lets a decision made
+  up to d before the presentation be accepted, so the ingress must bound
+  that skew.
+
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
   with the same notice record as `PromptInput::detached_job_completed`.

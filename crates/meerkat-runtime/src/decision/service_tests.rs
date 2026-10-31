@@ -35,6 +35,12 @@ use super::{
 
 const HELD_AT: u64 = 1_000;
 const DEADLINE: u64 = 61_000;
+/// When the ingress observed the rows' default decision event: just after
+/// the default presentation, shown at `HELD_AT`.
+const OBSERVED_AT: u64 = HELD_AT + 1;
+/// When the presentation-order rows show the decision to the approver:
+/// after the hold, so a decision can be observed before, at or after it.
+const PRESENTED_AT: u64 = HELD_AT + 100;
 
 /// A store that records the calls it serves and can refuse the next
 /// conditional writes as conflicts, as another owner's writes would.
@@ -256,8 +262,35 @@ fn presentation(rendering: &DecisionRendering) -> PresentationRecord {
     )
 }
 
-/// `decider`'s attested decision on the rendering whose digest is `digest`.
+/// `decider`'s attested decision on the rendering whose digest is `digest`,
+/// observed just after the default presentation ([`OBSERVED_AT`]).
 fn attested(decider: &str, digest: Sha256Digest, approve: bool) -> AttestedDecision {
+    attested_at(decider, digest, approve, OBSERVED_AT)
+}
+
+/// The complete one-part presentation of `rendering` to the approver id,
+/// shown at `at_ms`.
+fn presentation_at(rendering: &DecisionRendering, at_ms: u64) -> PresentationRecord {
+    PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        None,
+        reference("chat"),
+        reference("message-1"),
+        at_ms,
+    )
+}
+
+/// `decider`'s attested decision on the rendering whose digest is `digest`,
+/// whose ingress observed the decision event at `observed_at_ms`.
+fn attested_at(
+    decider: &str,
+    digest: Sha256Digest,
+    approve: bool,
+    observed_at_ms: u64,
+) -> AttestedDecision {
     let approver = AuthenticatedApprover::new(
         principal(PrincipalKind::Human, decider),
         ApprovalAssurance::PersonAuthenticated,
@@ -267,11 +300,22 @@ fn attested(decider: &str, digest: Sha256Digest, approve: bool) -> AttestedDecis
         approver,
         DecisionIngress::new("console").expect("ingress"),
         reference("event-1"),
+        observed_at_ms,
         approver_id(),
         digest,
         approve,
     )
     .expect("attested decision")
+}
+
+/// When the evidence of the decided `row` says its ingress observed the
+/// decision event, read from the evidence's stored encoding.
+fn recorded_observed_at(row: &StoredDecision) -> Option<u64> {
+    let outcome = row.outcome.as_ref()?;
+    serde_json::to_value(&outcome.evidence)
+        .expect("encode the evidence")
+        .get("observed_at_ms")
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn service_over(store: &Arc<CountingStore>, clock: &Arc<ManualClock>) -> DurableDecisionService {
@@ -348,7 +392,10 @@ fn a_decide_with_the_canonical_digest_after_a_complete_presentation_approves() {
     let presented = service
         .present(&decision_id, &presentation(&rendering))
         .expect("present");
-    assert!(presented.state.presented_to_approver);
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT)
+    );
     assert_eq!(presented.presentations, vec![presentation(&rendering)]);
 
     let decided = service
@@ -511,6 +558,247 @@ fn stale_eligibility_refuses_at_commit() {
     assert!(stored.outcome.is_none());
 }
 
+/// A decision observed before the decision's first presentation to the
+/// approver is refused `decided_before_presentation`, an approval and a
+/// rejection alike, whether the presentation was recorded first or carried
+/// by the decision event; the refusal changes nothing.
+#[test]
+fn a_decide_observed_before_the_first_presentation_is_refused() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+
+    // Shown to the approver at PRESENTED_AT, decided a millisecond before.
+    let recorded = hold("subject:recorded");
+    let presented = service
+        .present(&recorded, &presentation_at(&rendering, PRESENTED_AT))
+        .expect("present");
+    for approve in [true, false] {
+        let refused = service
+            .decide(
+                &recorded,
+                &attested_at("alice", digest.clone(), approve, PRESENTED_AT - 1),
+                &Eligibility::current(),
+            )
+            .expect_err("a decision observed before the first presentation");
+        assert_eq!(
+            refusal(&refused).as_str(),
+            "decided_before_presentation",
+            "approve {approve}"
+        );
+        assert_eq!(
+            store.stored(&recorded),
+            presented,
+            "the refusal changes nothing"
+        );
+    }
+
+    // The decision event carries the presentation, shown after the event.
+    let carried = hold("subject:carried");
+    let held = store.stored(&carried);
+    let decision = attested_at("alice", digest, true, PRESENTED_AT - 1)
+        .with_presentation(presentation_at(&rendering, PRESENTED_AT));
+    let refused = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect_err("a decision observed before the presentation it carries");
+    assert_eq!(refusal(&refused).as_str(), "decided_before_presentation");
+    assert_eq!(store.stored(&carried), held, "the refusal changes nothing");
+}
+
+/// A decision observed after the first presentation commits, an approval
+/// and a rejection alike, and its evidence records when its ingress observed
+/// it. The first presentation is the earliest one: showing the decision
+/// again later does not move it, though the row keeps only the latest
+/// presentation record of each audience.
+#[test]
+fn a_decide_observed_after_the_first_presentation_commits() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    for (subject, approve, phase) in [
+        ("subject:approved", true, DecisionPhase::Approved),
+        ("subject:rejected", false, DecisionPhase::Rejected),
+    ] {
+        let decision_id = service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id;
+        service
+            .present(&decision_id, &presentation_at(&rendering, PRESENTED_AT))
+            .expect("present");
+        let shown_again = service
+            .present(
+                &decision_id,
+                &presentation_at(&rendering, PRESENTED_AT + 50),
+            )
+            .expect("present again");
+        assert_eq!(
+            shown_again.presentations,
+            vec![presentation_at(&rendering, PRESENTED_AT + 50)]
+        );
+        let decided = service
+            .decide(
+                &decision_id,
+                &attested_at(
+                    "alice",
+                    rendering.subject_digest(),
+                    approve,
+                    PRESENTED_AT + 10,
+                ),
+                &Eligibility::current(),
+            )
+            .expect("a decision observed after the first presentation commits");
+        assert_eq!(decided.state.phase, phase);
+        assert_eq!(recorded_observed_at(&decided), Some(PRESENTED_AT + 10));
+    }
+}
+
+/// The boundary: a decision observed in the same millisecond as the first
+/// presentation commits, whether the presentation was recorded first or
+/// carried by the decision event.
+#[test]
+fn a_decide_observed_at_the_first_presentation_commits() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+
+    let recorded = hold("subject:recorded");
+    service
+        .present(&recorded, &presentation_at(&rendering, PRESENTED_AT))
+        .expect("present");
+    let decided = service
+        .decide(
+            &recorded,
+            &attested_at("alice", digest.clone(), true, PRESENTED_AT),
+            &Eligibility::current(),
+        )
+        .expect("a decision observed at the first presentation commits");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+    assert_eq!(recorded_observed_at(&decided), Some(PRESENTED_AT));
+
+    let carried = hold("subject:carried");
+    let decision = attested_at("alice", digest, true, PRESENTED_AT)
+        .with_presentation(presentation_at(&rendering, PRESENTED_AT));
+    let decided = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect("a decision observed when the presentation it carries was shown commits");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+    assert_eq!(
+        decided.presentations,
+        vec![presentation_at(&rendering, PRESENTED_AT)]
+    );
+    assert_eq!(recorded_observed_at(&decided), Some(PRESENTED_AT));
+}
+
+/// With no presentation, recorded or carried, a decision keeps its
+/// `presentation_incomplete` refusal whenever it was observed: there is no
+/// first presentation to order it by. A carried presentation that does not
+/// count (an incomplete one, or one shown to another audience) is none.
+#[test]
+fn a_decide_with_no_presentation_keeps_the_presentation_incomplete_refusal() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+    let mut incomplete = presentation_at(&rendering, PRESENTED_AT);
+    incomplete.parts_shown.clear();
+    let to_another_audience = PresentationRecord::complete(
+        PresentationAudience::Reviewer {
+            reviewer: requester(),
+        },
+        &rendering,
+        None,
+        reference("chat"),
+        reference("message-1"),
+        PRESENTED_AT,
+    );
+    for observed_at_ms in [0, PRESENTED_AT, DEADLINE - 1] {
+        for carried in [None, Some(&incomplete), Some(&to_another_audience)] {
+            let decision = attested_at("alice", rendering.subject_digest(), true, observed_at_ms);
+            let decision = match carried {
+                Some(presentation) => decision.with_presentation(presentation.clone()),
+                None => decision,
+            };
+            let refused = service
+                .decide(&decision_id, &decision, &Eligibility::current())
+                .expect_err("no presentation reached the approver");
+            assert_eq!(
+                refusal(&refused),
+                DecisionRefusal::PresentationIncomplete,
+                "observed at {observed_at_ms}, carried {carried:?}"
+            );
+            assert_eq!(
+                store.stored(&decision_id),
+                held,
+                "the refusal changes nothing"
+            );
+        }
+    }
+}
+
+/// A presentation time of 0 is no reading: a presentation recorded at 0 is
+/// refused `presentation_incomplete` and records nothing, and a decision
+/// carrying a presentation at 0 is refused the same way, even after a
+/// presentation was recorded.
+#[test]
+fn a_presentation_time_of_zero_is_no_presentation() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+    let refused = service
+        .present(&decision_id, &presentation_at(&rendering, 0))
+        .expect_err("a presentation at 0 is no reading");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let carrying = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+        .with_presentation(presentation_at(&rendering, 0));
+    let refused = service
+        .decide(&decision_id, &carrying, &Eligibility::current())
+        .expect_err("a decision carrying a presentation at 0");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+
+    let presented = service
+        .present(&decision_id, &presentation_at(&rendering, PRESENTED_AT))
+        .expect("present");
+    let refused = service
+        .decide(&decision_id, &carrying, &Eligibility::current())
+        .expect_err("a recorded presentation does not excuse the untimed one");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(
+        store.stored(&decision_id),
+        presented,
+        "the refusal changes nothing"
+    );
+}
+
 #[test]
 fn an_approved_decision_executes_once_across_a_restart() {
     let store = Arc::new(CountingStore::default());
@@ -669,7 +957,10 @@ fn a_second_owner_conflict_reloads_once_then_reports_conflict() {
     let presented = service
         .present(&decision_id, &presentation(&rendering))
         .expect("one conflict reloads the row and applies the input again");
-    assert!(presented.state.presented_to_approver);
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT)
+    );
     assert_eq!(
         store.calls(),
         vec!["get", "replace_if_revision", "get", "replace_if_revision"]
@@ -1407,7 +1698,11 @@ fn a_review_escalates_to_the_human_and_refuses_another_reviewer() {
         .decide(&decision_id, &decision, &Eligibility::current())
         .expect("the human approves with the presentation it carried");
     assert_eq!(decided.state.phase, DecisionPhase::Approved);
-    assert!(decided.state.presented_to_approver);
+    assert_eq!(
+        decided.state.first_presented_to_approver_at_ms,
+        Some(HELD_AT),
+        "the carried presentation is recorded with the time it was shown"
+    );
     assert_eq!(decided.presentations.len(), 2);
 }
 

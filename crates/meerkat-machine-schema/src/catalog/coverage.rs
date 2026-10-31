@@ -1742,6 +1742,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "PresentRefusedSubjectChanged",
                         "PresentRefusedIncomplete",
                         "PresentToApprover",
+                        "PresentRefusedUntimed",
                         "PresentRefusedWrongApproverAudience",
                         "PresentToReviewer",
                         "PresentRefusedWrongReviewerAudience",
@@ -1758,6 +1759,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "DecideRefusedNotEligible",
                         "DecideRefusedSelfApproval",
                         "DecideRefusedPresentationIncomplete",
+                        "DecideRefusedDecidedBeforePresentation",
                         "DecideApproved",
                         "DecideRejected",
                         "DecideRefusedNotOpenApproved",
@@ -1884,6 +1886,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "held_records_are_named",
                         "review_stage_names_another_reviewer",
                         "reviewer_presentation_needs_a_reviewer",
+                        "first_presentation_is_a_reading",
                         "open_has_no_outcome",
                         "approved_has_not_ended",
                         "evidence_and_decision_time_agree",
@@ -1935,7 +1938,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "durable_decision_human_decision",
-                    "durable_decision_machine.rs::each_decide_conjunct_alone_refuses and the_first_valid_decision_wins_and_end_phases_latch refuse a human decision for each missing conjunct alone (evidence, digest, approver, eligibility, the requester as decider, presentation, stage), record a complete presentation, and let the first valid decision win",
+                    "durable_decision_machine.rs::each_decide_conjunct_alone_refuses, the_first_valid_decision_wins_and_end_phases_latch, a_human_decision_is_ordered_after_its_first_presentation and a_presentation_time_of_zero_is_no_presentation refuse a human decision for each missing conjunct alone (evidence, digest, approver, eligibility, the requester as decider, presentation, presentation order, stage), record a complete presentation with the earliest time it reached the approver, refuse a presentation at 0 recorded or carried, refuse a decision observed before that first presentation and accept one in the same millisecond, and let the first valid decision win",
                     CoverageClaims::none()
                         .transitions(&[
                             "DecideRefusedReviewStage",
@@ -1944,11 +1947,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DecideRefusedNotEligible",
                             "DecideRefusedSelfApproval",
                             "DecideRefusedPresentationIncomplete",
+                            "DecideRefusedDecidedBeforePresentation",
                             "DecideApproved",
                             "DecideRejected",
                             "PresentRefusedSubjectChanged",
                             "PresentRefusedIncomplete",
                             "PresentToApprover",
+                            "PresentRefusedUntimed",
                             "PresentRefusedWrongApproverAudience",
                         ])
                         .effects(&[
@@ -1958,6 +1963,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "Refused",
                         ])
                         .invariants(&[
+                            "first_presentation_is_a_reading",
                             "open_has_no_outcome",
                             "evidence_and_decision_time_agree",
                             "decided_decisions_are_attested",
@@ -2171,6 +2177,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "held_records_are_named",
                             "review_stage_names_another_reviewer",
                             "reviewer_presentation_needs_a_reviewer",
+                            "first_presentation_is_a_reading",
                             "open_has_no_outcome",
                             "approved_has_not_ended",
                             "evidence_and_decision_time_agree",

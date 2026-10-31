@@ -42,6 +42,22 @@
 //! after the deadline, records the expiry. No permit is authorized at or
 //! after the deadline, so nothing new runs after it.
 //!
+//! # Presentation order
+//!
+//! A human decision carries the time its trusted ingress observed the
+//! decision event (`observed_at_ms`), and the machine records when a
+//! complete presentation first reached the approver: the earliest
+//! presentation time, from a recorded presentation (`presented_at_ms`) or
+//! the one a decision event carried. A human decision observed before that
+//! first presentation is refused (`DecidedBeforePresentation`); one observed
+//! in the same millisecond is accepted. With no presentation at all, the
+//! decision stays `PresentationIncomplete`. A presentation time of 0 is no
+//! reading: a presentation to the approver at 0, recorded or carried by a
+//! decision, is refused `PresentationIncomplete`, so it never becomes the
+//! first presentation. The order is this machine's fact: neither the owner
+//! service nor a host compares the times again. It is separate from the
+//! deadline, which the owner's clock (`now_ms`) decides.
+//!
 //! # Latching
 //!
 //! `Rejected`, `Expired`, `Withdrawn`, `Executed` and `ExecutionRefused` are
@@ -145,7 +161,8 @@ pub mod types {
         Expired,
         /// The presented digest is not the held subject digest.
         SubjectChanged,
-        /// The presentation did not cover the whole held subject.
+        /// The presentation did not cover the whole held subject, none reached
+        /// the deciding party, or it was shown at 0 (no reading of when).
         PresentationIncomplete,
         /// The presentation was shown to a party that does not decide now.
         WrongAudience,
@@ -175,6 +192,9 @@ pub mod types {
         SettlementOwed,
         /// No notice is owed, or this receipt contradicts the settled one.
         NotOwed,
+        /// The human decision was observed before the decision's first
+        /// presentation to the approver.
+        DecidedBeforePresentation,
     }
 }
 
@@ -214,9 +234,13 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     // Who decides now. A review escalation hands the
                     // decision to the human stage.
                     stage: Enum<DurableDecisionStage>,
+                    // When a complete presentation of the held subject first
+                    // reached the approver: the earliest presentation time,
+                    // recorded or carried by a decision event. A human
+                    // decision observed before it is refused.
+                    first_presented_to_approver_at_ms: Option<u64>,
                     // Whether a complete presentation of the held subject
-                    // reached the approver and the reviewer.
-                    presented_to_approver: bool,
+                    // reached the reviewer.
                     presented_to_reviewer: bool,
                     // Digest of the attested evidence of the decision.
                     evidence_digest: Option<String>,
@@ -243,7 +267,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     approver_id = "",
                     reviewer = None,
                     stage = DurableDecisionStage::Human,
-                    presented_to_approver = false,
+                    first_presented_to_approver_at_ms = None,
                     presented_to_reviewer = false,
                     evidence_digest = None,
                     decided_at_ms = None,
@@ -291,14 +315,20 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         notice_routable: bool,
                     },
                     // A presentation of `digest`, complete or not, was shown
-                    // to `audience`.
+                    // to `audience` at `presented_at_ms`, the presentation
+                    // record's own time.
                     Present {
                         audience: DecisionParty,
                         digest: DecisionDigest,
                         complete: bool,
+                        presented_at_ms: u64,
                         now_ms: u64,
                     },
-                    // An authenticated human decides for `approver_id`.
+                    // An authenticated human decides for `approver_id`. The
+                    // decision event's trusted ingress observed it at
+                    // `observed_at_ms`; it may carry the complete
+                    // presentation to the approver it was shown at
+                    // `carried_presentation_at_ms`.
                     Decide {
                         approve: bool,
                         approver_id: DecisionParty,
@@ -306,7 +336,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest: DecisionDigest,
                         evidence_digest: Option<String>,
                         eligible: bool,
-                        carries_presentation: bool,
+                        carried_presentation_at_ms: Option<u64>,
+                        observed_at_ms: u64,
                         now_ms: u64,
                     },
                     // The reviewer's attributed verdict.
@@ -379,6 +410,20 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     }
                 }
 
+                // The first presentation time once another presentation, if
+                // any, was shown at `presented`: the earlier of the two, so
+                // the first presentation is the earliest one in whatever
+                // order the presentations arrive.
+                helper earliest_presentation(first: Option<u64>, presented: Option<u64>) -> Option<u64> {
+                    if presented != None
+                        && (first == None || presented.get("value") < first.get("value"))
+                    {
+                        presented
+                    } else {
+                        first
+                    }
+                }
+
                 // An unheld record carries no decision facts at all.
                 invariant unheld_is_empty {
                     self.lifecycle_phase != Phase::Unheld
@@ -388,7 +433,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                             && self.deadline_at_ms == 0
                             && self.reviewer == None
                             && self.stage == DurableDecisionStage::Human
-                            && !self.presented_to_approver
+                            && self.first_presented_to_approver_at_ms == None
                             && !self.presented_to_reviewer
                             && self.evidence_digest == None
                             && self.decided_at_ms == None
@@ -422,6 +467,12 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // Only a named reviewer is ever presented to as one.
                 invariant reviewer_presentation_needs_a_reviewer {
                     !self.presented_to_reviewer || self.reviewer != None
+                }
+
+                // The approver's first presentation time is a reading: a
+                // time of 0 is never recorded.
+                invariant first_presentation_is_a_reading {
+                    self.first_presented_to_approver_at_ms != Some(0)
                 }
 
                 // An open decision has no outcome, no permit and owes no
@@ -753,7 +804,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // ----------------------------------------------------------
 
                 transition PresentAtDeadline {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "deadline_reached" { self.deadline_at_ms <= now_ms }
                     update {
@@ -770,7 +821,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedSubjectChanged {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_differs" { digest != self.subject_digest }
@@ -783,7 +834,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedIncomplete {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -797,22 +848,45 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentToApprover {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
                     guard "complete" { complete }
                     guard "human_stage" { self.stage == DurableDecisionStage::Human }
                     guard "approver_audience" { audience == self.approver_id }
+                    guard "timed" { presented_at_ms != 0 }
                     update {
-                        self.presented_to_approver = true;
+                        self.first_presented_to_approver_at_ms = earliest_presentation(
+                            self.first_presented_to_approver_at_ms,
+                            Some(presented_at_ms)
+                        );
                     }
                     to Open
                     emit Presented { decision_id: self.decision_id, audience: audience }
                 }
 
+                // A presentation to the approver at 0 is no reading of when
+                // it was shown: it never becomes the first presentation.
+                transition PresentRefusedUntimed {
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    guard "open" { self.lifecycle_phase == Phase::Open }
+                    guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "subject_matches" { digest == self.subject_digest }
+                    guard "complete" { complete }
+                    guard "human_stage" { self.stage == DurableDecisionStage::Human }
+                    guard "approver_audience" { audience == self.approver_id }
+                    guard "untimed" { presented_at_ms == 0 }
+                    update {}
+                    to Open
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::PresentationIncomplete
+                    }
+                }
+
                 transition PresentRefusedWrongApproverAudience {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -828,7 +902,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentToReviewer {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -843,7 +917,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedWrongReviewerAudience {
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -860,7 +934,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
 
                 transition PresentRefusedNotOpen {
                     per_phase [Approved, Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
-                    on input Present { audience, digest, complete, now_ms }
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
                     update {}
                     to Approved
                     emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOpen }
@@ -878,7 +952,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -904,7 +979,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -926,7 +1002,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -949,7 +1026,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -973,7 +1051,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -1000,7 +1079,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -1027,7 +1107,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -1038,13 +1119,65 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "presentation_not_carried" { !carries_presentation }
-                    guard "not_presented_to_approver" { !self.presented_to_approver }
+                    // No presentation reached the approver, recorded or
+                    // carried; or the decision event carries one at 0, which
+                    // is no reading of when it was shown.
+                    guard "no_timed_presentation" {
+                        (
+                            carried_presentation_at_ms == None
+                            && self.first_presented_to_approver_at_ms == None
+                        )
+                        || carried_presentation_at_ms == Some(0)
+                    }
                     update {}
                     to Open
                     emit Refused {
                         decision_id: self.decision_id,
                         reason: DurableDecisionRefusal::PresentationIncomplete
+                    }
+                }
+
+                // The decision was observed before the approver's first
+                // presentation: before the recorded one, and before the one
+                // the decision event carries, whichever exist.
+                transition DecideRefusedDecidedBeforePresentation {
+                    on input Decide {
+                        approve,
+                        approver_id,
+                        decider,
+                        digest,
+                        evidence_digest,
+                        eligible,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
+                        now_ms
+                    }
+                    guard "open" { self.lifecycle_phase == Phase::Open }
+                    guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "human_stage" { self.stage == DurableDecisionStage::Human }
+                    guard "evidence_present" { evidence_digest != None }
+                    guard "subject_matches" { digest == self.subject_digest }
+                    guard "sealed_approver" { approver_id == self.approver_id }
+                    guard "eligible" { eligible }
+                    guard "decider_is_not_requester" { decider != self.requester }
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    guard "presented_or_carried" {
+                        carried_presentation_at_ms != None
+                        || self.first_presented_to_approver_at_ms != None
+                    }
+                    guard "observed_before_the_recorded_presentation" {
+                        self.first_presented_to_approver_at_ms == None
+                        || observed_at_ms < self.first_presented_to_approver_at_ms.get("value")
+                    }
+                    guard "observed_before_the_carried_presentation" {
+                        carried_presentation_at_ms == None
+                        || observed_at_ms < carried_presentation_at_ms.get("value")
+                    }
+                    update {}
+                    to Open
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::DecidedBeforePresentation
                     }
                 }
 
@@ -1056,7 +1189,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -1067,16 +1201,28 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "presented_or_carried" {
-                        carries_presentation || self.presented_to_approver
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    // A presentation, recorded or carried, at or before the
+                    // observed decision: it was observed at or after its
+                    // first presentation, the same millisecond included.
+                    guard "observed_at_or_after_a_presentation" {
+                        (
+                            self.first_presented_to_approver_at_ms != None
+                            && self.first_presented_to_approver_at_ms.get("value") <= observed_at_ms
+                        )
+                        || (
+                            carried_presentation_at_ms != None
+                            && carried_presentation_at_ms.get("value") <= observed_at_ms
+                        )
                     }
                     guard "approves" { approve }
                     update {
                         self.evidence_digest = evidence_digest;
                         self.decided_at_ms = Some(now_ms);
-                        if carries_presentation {
-                            self.presented_to_approver = true;
-                        }
+                        self.first_presented_to_approver_at_ms = earliest_presentation(
+                            self.first_presented_to_approver_at_ms,
+                            carried_presentation_at_ms
+                        );
                     }
                     to Approved
                     emit Approved { decision_id: self.decision_id, decided_at_ms: now_ms }
@@ -1090,7 +1236,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     guard "open" { self.lifecycle_phase == Phase::Open }
@@ -1101,17 +1248,26 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "presented_or_carried" {
-                        carries_presentation || self.presented_to_approver
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    guard "observed_at_or_after_a_presentation" {
+                        (
+                            self.first_presented_to_approver_at_ms != None
+                            && self.first_presented_to_approver_at_ms.get("value") <= observed_at_ms
+                        )
+                        || (
+                            carried_presentation_at_ms != None
+                            && carried_presentation_at_ms.get("value") <= observed_at_ms
+                        )
                     }
                     guard "rejects" { !approve }
                     update {
                         self.evidence_digest = evidence_digest;
                         self.decided_at_ms = Some(now_ms);
                         self.ended_at_ms = Some(now_ms);
-                        if carries_presentation {
-                            self.presented_to_approver = true;
-                        }
+                        self.first_presented_to_approver_at_ms = earliest_presentation(
+                            self.first_presented_to_approver_at_ms,
+                            carried_presentation_at_ms
+                        );
                         self.notice = owed_if_due(self.notice);
                     }
                     to Rejected
@@ -1127,7 +1283,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         digest,
                         evidence_digest,
                         eligible,
-                        carries_presentation,
+                        carried_presentation_at_ms,
+                        observed_at_ms,
                         now_ms
                     }
                     update {}

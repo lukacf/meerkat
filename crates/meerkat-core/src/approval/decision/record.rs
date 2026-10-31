@@ -122,7 +122,10 @@ pub struct DecisionMachineState {
     #[serde(default)]
     pub reviewer: Option<String>,
     pub stage: DecisionStage,
-    pub presented_to_approver: bool,
+    /// When a complete presentation first reached the approver (the
+    /// earliest, recorded or carried), in UNIX milliseconds.
+    #[serde(default)]
+    pub first_presented_to_approver_at_ms: Option<u64>,
     pub presented_to_reviewer: bool,
     #[serde(default)]
     pub evidence_digest: Option<String>,

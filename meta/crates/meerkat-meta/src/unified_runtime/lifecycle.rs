@@ -671,13 +671,16 @@ impl UnifiedRuntime {
     /// Core's execution custody of the runtime store among it
     /// (`MobHandle::actor_task_watch`). A teardown that completed, or found
     /// the actor already ended, waits within the same budget for the actor's
-    /// task to return: once shutdown returns, nothing of the mob holds that
-    /// custody, so the runtime's own drop releases it and a successor that
-    /// composes on the same state directory in this process is not refused
-    /// as in use.
+    /// task to return: once shutdown returns, the actor holds nothing of the
+    /// mob, so after a teardown that settled every member the runtime's own
+    /// drop releases that custody and a successor that composes on the same
+    /// state directory in this process is not refused as in use. A member
+    /// unregister the teardown reports pending, and an actor still exiting at
+    /// the deadline, keep the custody until they end.
     async fn shutdown_mob_actor(&self, budget: Duration) -> MobTerminalShutdownOutcome {
         let deadline = std::time::Instant::now() + budget;
-        // Taken before the Shutdown, so an actor that already ended is seen.
+        // The watch holds no store handle and reports the task's end
+        // whenever it is taken.
         let mut actor_task = self.mob_handle().actor_task_watch();
         let outcome = match self
             .mob_handle()
@@ -737,12 +740,11 @@ impl UnifiedRuntime {
         {
             Ok(meerkat_mob::MobActorTaskWait::Returned) => {}
             Ok(meerkat_mob::MobActorTaskWait::Lost) => tracing::warn!(
-                "the mob actor's task ended without returning after its terminal Shutdown; \
-                 what it held is not attested"
+                "the mob actor's task ended without returning; what it held is not attested"
             ),
             Ok(_) | Err(_) => tracing::warn!(
                 "the mob actor was still exiting when its terminal teardown budget ran out; \
-                 the runtime store's execution custody is released once it has exited"
+                 it keeps the runtime store's execution custody until it has exited"
             ),
         }
     }

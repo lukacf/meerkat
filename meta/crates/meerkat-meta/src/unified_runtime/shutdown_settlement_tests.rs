@@ -284,8 +284,11 @@ async fn a_root_that_spends_its_whole_budget_releases_an_empty_child_root() {
 }
 
 /// The persistent composition of mob `mob_id` over `dir`, its child mobs
-/// process-bound: a durable child root stays owned for the rest of the
-/// process once a child actor may run, which would refuse a successor here.
+/// process-bound. The held-exit row depends on it: with a claimed durable
+/// child root, the child stand-down closes the root mob's admission with a
+/// command its actor answers only once it has dropped itself, and waits for
+/// that answer or the root's task end, so even a shutdown that does not wait
+/// for the actor would not return while the actor's exit is held.
 async fn process_bound_spec(
     dir: &Path,
     mob_id: &str,

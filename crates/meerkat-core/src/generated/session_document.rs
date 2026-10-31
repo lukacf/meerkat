@@ -312,6 +312,71 @@ pub enum SessionArchiveRuntimeObservation {
     QuiescentTerminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionTargetOwner {
+    #[default]
+    Unowned,
+    Session,
+    Mob,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionEffect {
+    #[default]
+    Absent,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionRunStart {
+    FreshRun,
+    ResumeRun,
+    #[default]
+    NoRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionLowering {
+    MidConversation,
+    LeadingPrefixOnly,
+    #[default]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionWriteOutcome {
+    Recorded,
+    #[default]
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionWriteRefusal {
+    #[default]
+    StaleRevision,
+    RevisionConflict,
+    OwnedByMob,
+    OwnedBySession,
+    SlotLimitExceeded,
+    UnknownSlot,
+    OwnedByOtherMob,
+    ActiveSetBudgetExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionDeferReason {
+    #[default]
+    LeadingPrefixOnly,
+    LoweringUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InstructionFoldSource {
+    #[default]
+    Effective,
+    Target,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentInput {
     MarkSessionInitialTurnPending {
@@ -650,6 +715,66 @@ pub enum SessionDocumentInput {
         durable_document_present: bool,
         runtime_observation: SessionArchiveRuntimeObservation,
     },
+    RecoverSessionInstructionState {
+        session_id: SessionDocumentKey,
+        owner: InstructionTargetOwner,
+        owner_mob: String,
+        target_generation: u64,
+        entry_sequence: u64,
+    },
+    RecoverSessionInstructionTarget {
+        session_id: SessionDocumentKey,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+    },
+    RecoverSessionInstructionEffective {
+        session_id: SessionDocumentKey,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+        generation: u64,
+        last_entry_sequence: u64,
+    },
+    RecordInstructionTarget {
+        session_id: SessionDocumentKey,
+        mob_id: String,
+        generation: u64,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+    },
+    SetSessionInstruction {
+        session_id: SessionDocumentKey,
+        slot: String,
+        revision: u64,
+        effect: InstructionEffect,
+        digest: String,
+        body_bytes: u64,
+    },
+    RebindInstructionOwner {
+        session_id: SessionDocumentKey,
+        owner: InstructionTargetOwner,
+        mob_id: String,
+    },
+    ReleaseInstructionTarget {
+        session_id: SessionDocumentKey,
+        mob_id: String,
+    },
+    ResolveRunStartInstructions {
+        session_id: SessionDocumentKey,
+        run_start: InstructionRunStart,
+        lowering: InstructionLowering,
+        transcript_is_system_prefix: bool,
+    },
+    AuthorizeInstructionFold {
+        session_id: SessionDocumentKey,
+        at_run_start: bool,
+        lowering: InstructionLowering,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,6 +985,33 @@ pub enum SessionDocumentEffect {
         write_document: bool,
         retire_runtime: bool,
     },
+    SessionInstructionStateRecovered,
+    InstructionTargetRecorded {
+        generation: u64,
+        outcome: InstructionWriteOutcome,
+    },
+    InstructionTargetRefused {
+        refusal: InstructionWriteRefusal,
+    },
+    InstructionOwnerRebound {
+        owner: InstructionTargetOwner,
+    },
+    InstructionTargetReleased {
+        was_owned: bool,
+    },
+    InstructionEntryAuthorized {
+        entry_sequence: u64,
+        generation: u64,
+    },
+    InstructionEntryNotNeeded,
+    InstructionApplicationDeferred {
+        reason: InstructionDeferReason,
+    },
+    InstructionFoldAuthorized {
+        entry_sequence: u64,
+        source: InstructionFoldSource,
+        generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,6 +1065,21 @@ pub struct SessionDocumentMachineState {
         BTreeMap<SessionDocumentKey, LiveAssistantPlaybackTerminalObservation>,
     session_live_assistant_terminal_prefix_chars: BTreeMap<SessionDocumentKey, u64>,
     session_live_assistant_terminal_prefix_digest: BTreeMap<SessionDocumentKey, String>,
+    session_instruction_owner: BTreeMap<SessionDocumentKey, InstructionTargetOwner>,
+    session_instruction_owner_mob: BTreeMap<SessionDocumentKey, String>,
+    session_instruction_target_generation: BTreeMap<SessionDocumentKey, u64>,
+    session_instruction_target_revision: BTreeMap<SessionDocumentKey, BTreeMap<String, u64>>,
+    session_instruction_target_effect:
+        BTreeMap<SessionDocumentKey, BTreeMap<String, InstructionEffect>>,
+    session_instruction_target_digest: BTreeMap<SessionDocumentKey, BTreeMap<String, String>>,
+    session_instruction_target_bytes: BTreeMap<SessionDocumentKey, BTreeMap<String, u64>>,
+    session_instruction_effective_revision: BTreeMap<SessionDocumentKey, BTreeMap<String, u64>>,
+    session_instruction_effective_effect:
+        BTreeMap<SessionDocumentKey, BTreeMap<String, InstructionEffect>>,
+    session_instruction_effective_digest: BTreeMap<SessionDocumentKey, BTreeMap<String, String>>,
+    session_instruction_effective_bytes: BTreeMap<SessionDocumentKey, BTreeMap<String, u64>>,
+    session_instruction_effective_generation: BTreeMap<SessionDocumentKey, u64>,
+    session_instruction_entry_sequence: BTreeMap<SessionDocumentKey, u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1034,6 +1201,36 @@ enum SessionDocumentTransition {
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,
+    RecoverSessionInstructionState,
+    RecoverSessionInstructionTarget,
+    RecoverSessionInstructionEffective,
+    RecordInstructionTargetAdvance,
+    RecordInstructionTargetActiveBudgetExceeded,
+    RecordInstructionTargetSlotLimitExceeded,
+    RecordInstructionTargetAlreadyRecorded,
+    RecordInstructionTargetOwnedBySession,
+    RecordInstructionTargetOwnedByOtherMob,
+    SetSessionInstructionNew,
+    SetSessionInstructionAdvance,
+    SetSessionInstructionActiveBudgetExceeded,
+    SetSessionInstructionDuplicate,
+    SetSessionInstructionConflict,
+    SetSessionInstructionStale,
+    SetSessionInstructionOwnedByMob,
+    SetSessionInstructionSlotLimitExceeded,
+    SetSessionInstructionUnknownSlot,
+    RebindInstructionOwner,
+    RebindInstructionOwnerUnowned,
+    ReleaseInstructionTarget,
+    ReleaseInstructionTargetAlreadyUnowned,
+    ReleaseInstructionTargetOwnedByOtherMob,
+    ReleaseInstructionTargetOwnedBySession,
+    ResolveRunStartInstructionsApply,
+    ResolveRunStartInstructionsNoChange,
+    ResolveRunStartInstructionsDeferredLeadingPrefix,
+    ResolveRunStartInstructionsDeferredUnavailable,
+    AuthorizeInstructionFoldAtRunStart,
+    AuthorizeInstructionFoldEffective,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1062,6 +1259,19 @@ impl SessionDocumentMachineAuthority {
         state.session_live_assistant_terminal_observation = BTreeMap::new();
         state.session_live_assistant_terminal_prefix_chars = BTreeMap::new();
         state.session_live_assistant_terminal_prefix_digest = BTreeMap::new();
+        state.session_instruction_owner = BTreeMap::new();
+        state.session_instruction_owner_mob = BTreeMap::new();
+        state.session_instruction_target_generation = BTreeMap::new();
+        state.session_instruction_target_revision = BTreeMap::new();
+        state.session_instruction_target_effect = BTreeMap::new();
+        state.session_instruction_target_digest = BTreeMap::new();
+        state.session_instruction_target_bytes = BTreeMap::new();
+        state.session_instruction_effective_revision = BTreeMap::new();
+        state.session_instruction_effective_effect = BTreeMap::new();
+        state.session_instruction_effective_digest = BTreeMap::new();
+        state.session_instruction_effective_bytes = BTreeMap::new();
+        state.session_instruction_effective_generation = BTreeMap::new();
+        state.session_instruction_entry_sequence = BTreeMap::new();
         Self { state }
     }
 
@@ -1427,6 +1637,306 @@ impl SessionDocumentMachineAuthority {
             .cloned()
             .ok_or(SessionDocumentError {
                 op: "session_live_assistant_terminal_prefix_digest",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_owner_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<InstructionTargetOwner> {
+        self.state.session_instruction_owner.get(key).copied()
+    }
+
+    fn session_instruction_owner_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<InstructionTargetOwner, SessionDocumentError> {
+        self.state
+            .session_instruction_owner
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_owner",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_owner_mob_for(&self, key: &SessionDocumentKey) -> Option<String> {
+        self.state.session_instruction_owner_mob.get(key).cloned()
+    }
+
+    fn session_instruction_owner_mob_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<String, SessionDocumentError> {
+        self.state
+            .session_instruction_owner_mob
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_owner_mob",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_target_generation_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<u64> {
+        self.state
+            .session_instruction_target_generation
+            .get(key)
+            .copied()
+    }
+
+    fn session_instruction_target_generation_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_instruction_target_generation
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_target_generation",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_target_revision_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, u64>> {
+        self.state
+            .session_instruction_target_revision
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_target_revision_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, u64>, SessionDocumentError> {
+        self.state
+            .session_instruction_target_revision
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_target_revision",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_target_effect_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, InstructionEffect>> {
+        self.state
+            .session_instruction_target_effect
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_target_effect_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, InstructionEffect>, SessionDocumentError> {
+        self.state
+            .session_instruction_target_effect
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_target_effect",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_target_digest_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, String>> {
+        self.state
+            .session_instruction_target_digest
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_target_digest_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, String>, SessionDocumentError> {
+        self.state
+            .session_instruction_target_digest
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_target_digest",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_target_bytes_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, u64>> {
+        self.state
+            .session_instruction_target_bytes
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_target_bytes_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, u64>, SessionDocumentError> {
+        self.state
+            .session_instruction_target_bytes
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_target_bytes",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_effective_revision_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, u64>> {
+        self.state
+            .session_instruction_effective_revision
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_effective_revision_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, u64>, SessionDocumentError> {
+        self.state
+            .session_instruction_effective_revision
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_effective_revision",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_effective_effect_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, InstructionEffect>> {
+        self.state
+            .session_instruction_effective_effect
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_effective_effect_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, InstructionEffect>, SessionDocumentError> {
+        self.state
+            .session_instruction_effective_effect
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_effective_effect",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_effective_digest_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, String>> {
+        self.state
+            .session_instruction_effective_digest
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_effective_digest_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, String>, SessionDocumentError> {
+        self.state
+            .session_instruction_effective_digest
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_effective_digest",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_effective_bytes_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<BTreeMap<String, u64>> {
+        self.state
+            .session_instruction_effective_bytes
+            .get(key)
+            .cloned()
+    }
+
+    fn session_instruction_effective_bytes_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<BTreeMap<String, u64>, SessionDocumentError> {
+        self.state
+            .session_instruction_effective_bytes
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_effective_bytes",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_effective_generation_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<u64> {
+        self.state
+            .session_instruction_effective_generation
+            .get(key)
+            .copied()
+    }
+
+    fn session_instruction_effective_generation_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_instruction_effective_generation
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_effective_generation",
+            })
+    }
+
+    #[must_use]
+    pub fn session_instruction_entry_sequence_for(&self, key: &SessionDocumentKey) -> Option<u64> {
+        self.state
+            .session_instruction_entry_sequence
+            .get(key)
+            .copied()
+    }
+
+    fn session_instruction_entry_sequence_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_instruction_entry_sequence
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_instruction_entry_sequence",
             })
     }
 
@@ -5642,6 +6152,1691 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::RecoverSessionInstructionState {
+                session_id,
+                owner,
+                owner_mob,
+                target_generation,
+                entry_sequence,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((owner != InstructionTargetOwner::Unowned) || (target_generation == 0))
+                        && (((owner == InstructionTargetOwner::Mob)
+                            && (owner_mob.clone() != "".to_string()))
+                            || ((owner != InstructionTargetOwner::Mob)
+                                && (owner_mob.clone() == "".to_string()))))
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionInstructionState);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverSessionInstructionState")?;
+                match transition {
+                    SessionDocumentTransition::RecoverSessionInstructionState => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), owner);
+                        self.state
+                            .session_instruction_owner_mob
+                            .insert(session_id.clone(), owner_mob.clone());
+                        self.state
+                            .session_instruction_target_generation
+                            .insert(session_id.clone(), target_generation);
+                        self.state
+                            .session_instruction_target_revision
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_effect
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_digest
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_bytes
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_effective_revision
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_effective_effect
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_effective_digest
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_effective_bytes
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_effective_generation
+                            .insert(session_id.clone(), 0);
+                        self.state
+                            .session_instruction_entry_sequence
+                            .insert(session_id.clone(), entry_sequence);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionInstructionStateRecovered,
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverSessionInstructionState_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecoverSessionInstructionTarget {
+                session_id,
+                revision,
+                effect,
+                digest,
+                bytes,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Unowned)
+                            || (instruction_slot_set_empty(revision.clone())))
+                            && (instruction_slot_maps_consistent(
+                                revision.clone(),
+                                effect.clone(),
+                                digest.clone(),
+                                bytes.clone(),
+                            ))
+                            && (instruction_slot_count_within_limit(revision.clone()))
+                            && (1048576
+                                >= session_document_instruction_active_bytes(
+                                    effect.clone(),
+                                    bytes.clone(),
+                                ))))
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionInstructionTarget);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverSessionInstructionTarget")?;
+                match transition {
+                    SessionDocumentTransition::RecoverSessionInstructionTarget => {
+                        self.state
+                            .session_instruction_target_revision
+                            .insert(session_id.clone(), revision.clone());
+                        self.state
+                            .session_instruction_target_effect
+                            .insert(session_id.clone(), effect.clone());
+                        self.state
+                            .session_instruction_target_digest
+                            .insert(session_id.clone(), digest.clone());
+                        self.state
+                            .session_instruction_target_bytes
+                            .insert(session_id.clone(), bytes.clone());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionInstructionStateRecovered,
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverSessionInstructionTarget_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecoverSessionInstructionEffective {
+                session_id,
+                revision,
+                effect,
+                digest,
+                bytes,
+                generation,
+                last_entry_sequence,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(self
+                        .state
+                        .session_instruction_entry_sequence
+                        .contains_key(&session_id)))
+                        || ((last_entry_sequence >= 1)
+                            || (self
+                                .state
+                                .session_instruction_entry_sequence
+                                .contains_key(&session_id))))
+                        && ((self
+                            .state
+                            .session_instruction_entry_sequence
+                            .contains_key(&session_id))
+                            && ((last_entry_sequence >= 1)
+                                || ((self
+                                    .session_instruction_entry_sequence_value(&session_id)?)
+                                    >= 1)
+                                || (effect.keys().all(|slot| {
+                                    effect.get(&slot.clone()).cloned().unwrap_or_default()
+                                        != InstructionEffect::Active
+                                })))
+                            && (instruction_slot_maps_consistent(
+                                revision.clone(),
+                                effect.clone(),
+                                digest.clone(),
+                                bytes.clone(),
+                            ))
+                            && (effect.keys().all(|slot| {
+                                effect.get(&slot.clone()).cloned().unwrap_or_default()
+                                    == InstructionEffect::Active
+                            }))
+                            && (1048576
+                                >= session_document_instruction_active_bytes(
+                                    effect.clone(),
+                                    bytes.clone(),
+                                ))))
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionInstructionEffective);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverSessionInstructionEffective")?;
+                match transition {
+                    SessionDocumentTransition::RecoverSessionInstructionEffective => {
+                        self.state
+                            .session_instruction_effective_revision
+                            .insert(session_id.clone(), revision.clone());
+                        self.state
+                            .session_instruction_effective_effect
+                            .insert(session_id.clone(), effect.clone());
+                        self.state
+                            .session_instruction_effective_digest
+                            .insert(session_id.clone(), digest.clone());
+                        self.state
+                            .session_instruction_effective_bytes
+                            .insert(session_id.clone(), bytes.clone());
+                        self.state
+                            .session_instruction_effective_generation
+                            .insert(session_id.clone(), generation);
+                        self.state.session_instruction_entry_sequence.insert(
+                            session_id.clone(),
+                            if last_entry_sequence
+                                > self.session_instruction_entry_sequence_value(&session_id)?
+                            {
+                                last_entry_sequence
+                            } else {
+                                self.session_instruction_entry_sequence_value(&session_id)?
+                            },
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionInstructionStateRecovered,
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverSessionInstructionEffective_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(mob_id.clone() != "".to_string()))
+                        || (self
+                            .state
+                            .session_instruction_target_generation
+                            .contains_key(&session_id)))
+                        && ((mob_id.clone() != "".to_string())
+                            && (generation
+                                > (self
+                                    .session_instruction_target_generation_value(&session_id)?))
+                            && (instruction_slot_maps_consistent(
+                                revision.clone(),
+                                effect.clone(),
+                                digest.clone(),
+                                bytes.clone(),
+                            ))
+                            && (instruction_slot_count_within_limit(revision.clone()))))
+                    && (1048576
+                        >= session_document_instruction_active_bytes(effect.clone(), bytes.clone()))
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Unowned)
+                            || ((self
+                                .state
+                                .session_instruction_owner
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_owner_value(&session_id)?)
+                                    == InstructionTargetOwner::Mob))
+                                    || (self
+                                        .state
+                                        .session_instruction_owner_mob
+                                        .contains_key(&session_id))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Unowned)
+                            || (((self.session_instruction_owner_value(&session_id)?)
+                                == InstructionTargetOwner::Mob)
+                                && ((self.session_instruction_owner_mob_value(&session_id)?)
+                                    == mob_id.clone()))))
+                {
+                    matches.push(SessionDocumentTransition::RecordInstructionTargetAdvance);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(mob_id.clone() != "".to_string()))
+                        || ((self
+                            .state
+                            .session_instruction_target_generation
+                            .contains_key(&session_id))
+                            && ((!(generation
+                                > (self.session_instruction_target_generation_value(
+                                    &session_id,
+                                )?)))
+                                || ((!(instruction_slot_maps_consistent(
+                                    revision.clone(),
+                                    effect.clone(),
+                                    digest.clone(),
+                                    bytes.clone(),
+                                ))) || ((!(instruction_slot_count_within_limit(
+                                    revision.clone(),
+                                ))) || ((!(session_document_instruction_active_bytes(
+                                    effect.clone(),
+                                    bytes.clone(),
+                                )
+                                    > 1048576))
+                                    || ((self
+                                        .state
+                                        .session_instruction_owner
+                                        .contains_key(&session_id))
+                                        && (((self.session_instruction_owner_value(
+                                            &session_id,
+                                        )?) == InstructionTargetOwner::Unowned)
+                                            || ((self
+                                                .state
+                                                .session_instruction_owner
+                                                .contains_key(&session_id))
+                                                && ((!((self
+                                                    .session_instruction_owner_value(
+                                                        &session_id,
+                                                    )?)
+                                                    == InstructionTargetOwner::Mob))
+                                                    || (self
+                                                        .state
+                                                        .session_instruction_owner_mob
+                                                        .contains_key(&session_id))))))))))))
+                        && ((mob_id.clone() != "".to_string())
+                            && (generation
+                                > (self
+                                    .session_instruction_target_generation_value(&session_id)?))
+                            && (instruction_slot_maps_consistent(
+                                revision.clone(),
+                                effect.clone(),
+                                digest.clone(),
+                                bytes.clone(),
+                            ))
+                            && (instruction_slot_count_within_limit(revision.clone()))
+                            && (session_document_instruction_active_bytes(
+                                effect.clone(),
+                                bytes.clone(),
+                            ) > 1048576)
+                            && (((self.session_instruction_owner_value(&session_id)?)
+                                == InstructionTargetOwner::Unowned)
+                                || (((self.session_instruction_owner_value(&session_id)?)
+                                    == InstructionTargetOwner::Mob)
+                                    && ((self
+                                        .session_instruction_owner_mob_value(&session_id)?)
+                                        == mob_id.clone())))))
+                {
+                    matches.push(
+                        SessionDocumentTransition::RecordInstructionTargetActiveBudgetExceeded,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(mob_id.clone() != "".to_string()))
+                        || ((self
+                            .state
+                            .session_instruction_target_generation
+                            .contains_key(&session_id))
+                            && ((!(generation
+                                > (self.session_instruction_target_generation_value(
+                                    &session_id,
+                                )?)))
+                                || ((!(instruction_slot_maps_consistent(
+                                    revision.clone(),
+                                    effect.clone(),
+                                    digest.clone(),
+                                    bytes.clone(),
+                                ))) || ((!(instruction_slot_count_within_limit(
+                                    revision.clone(),
+                                ) == false))
+                                    || ((self
+                                        .state
+                                        .session_instruction_owner
+                                        .contains_key(&session_id))
+                                        && (((self.session_instruction_owner_value(
+                                            &session_id,
+                                        )?) == InstructionTargetOwner::Unowned)
+                                            || ((self
+                                                .state
+                                                .session_instruction_owner
+                                                .contains_key(&session_id))
+                                                && ((!((self
+                                                    .session_instruction_owner_value(
+                                                        &session_id,
+                                                    )?)
+                                                    == InstructionTargetOwner::Mob))
+                                                    || (self
+                                                        .state
+                                                        .session_instruction_owner_mob
+                                                        .contains_key(&session_id)))))))))))
+                        && ((mob_id.clone() != "".to_string())
+                            && (generation
+                                > (self
+                                    .session_instruction_target_generation_value(&session_id)?))
+                            && (instruction_slot_maps_consistent(
+                                revision.clone(),
+                                effect.clone(),
+                                digest.clone(),
+                                bytes.clone(),
+                            ))
+                            && (instruction_slot_count_within_limit(revision.clone()) == false)
+                            && (((self.session_instruction_owner_value(&session_id)?)
+                                == InstructionTargetOwner::Unowned)
+                                || (((self.session_instruction_owner_value(&session_id)?)
+                                    == InstructionTargetOwner::Mob)
+                                    && ((self
+                                        .session_instruction_owner_mob_value(&session_id)?)
+                                        == mob_id.clone())))))
+                {
+                    matches
+                        .push(SessionDocumentTransition::RecordInstructionTargetSlotLimitExceeded);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_owner_mob
+                                .contains_key(&session_id))
+                                && ((!((self
+                                    .session_instruction_owner_mob_value(&session_id)?)
+                                    == mob_id.clone()))
+                                    || (self
+                                        .state
+                                        .session_instruction_target_generation
+                                        .contains_key(&session_id))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_owner_mob_value(&session_id)?)
+                                == mob_id.clone())
+                            && (generation
+                                <= (self
+                                    .session_instruction_target_generation_value(&session_id)?))))
+                {
+                    matches.push(SessionDocumentTransition::RecordInstructionTargetAlreadyRecorded);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Session))
+                {
+                    matches.push(SessionDocumentTransition::RecordInstructionTargetOwnedBySession);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob))
+                            || (self
+                                .state
+                                .session_instruction_owner_mob
+                                .contains_key(&session_id))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_owner_mob_value(&session_id)?)
+                                != mob_id.clone())))
+                {
+                    matches.push(SessionDocumentTransition::RecordInstructionTargetOwnedByOtherMob);
+                }
+                let transition = Self::single_transition(matches, "RecordInstructionTarget")?;
+                match transition {
+                    SessionDocumentTransition::RecordInstructionTargetAdvance => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), InstructionTargetOwner::Mob);
+                        self.state
+                            .session_instruction_owner_mob
+                            .insert(session_id.clone(), mob_id.clone());
+                        self.state
+                            .session_instruction_target_generation
+                            .insert(session_id.clone(), generation);
+                        self.state
+                            .session_instruction_target_revision
+                            .insert(session_id.clone(), revision.clone());
+                        self.state
+                            .session_instruction_target_effect
+                            .insert(session_id.clone(), effect.clone());
+                        self.state
+                            .session_instruction_target_digest
+                            .insert(session_id.clone(), digest.clone());
+                        self.state
+                            .session_instruction_target_bytes
+                            .insert(session_id.clone(), bytes.clone());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRecorded {
+                            generation: generation,
+                            outcome: InstructionWriteOutcome::Recorded,
+                        }])
+                    }
+                    SessionDocumentTransition::RecordInstructionTargetActiveBudgetExceeded => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::ActiveSetBudgetExceeded,
+                        }])
+                    }
+                    SessionDocumentTransition::RecordInstructionTargetSlotLimitExceeded => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::SlotLimitExceeded,
+                        }])
+                    }
+                    SessionDocumentTransition::RecordInstructionTargetAlreadyRecorded => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRecorded {
+                            generation: self
+                                .session_instruction_target_generation_value(&session_id)?,
+                            outcome: InstructionWriteOutcome::Duplicate,
+                        }])
+                    }
+                    SessionDocumentTransition::RecordInstructionTargetOwnedBySession => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::OwnedBySession,
+                        }])
+                    }
+                    SessionDocumentTransition::RecordInstructionTargetOwnedByOtherMob => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::OwnedByOtherMob,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecordInstructionTarget_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::SetSessionInstruction {
+                session_id,
+                slot,
+                revision,
+                effect,
+                digest,
+                body_bytes,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_target_revision_value(
+                                    &session_id,
+                                )?)
+                                .contains_key(&slot.clone())
+                                    == false))
+                                    || ((!(effect == InstructionEffect::Active))
+                                        || ((!(digest.clone() != "".to_string()))
+                                            || ((!(revision >= 1))
+                                                || (self
+                                                    .state
+                                                    .session_instruction_target_revision
+                                                    .contains_key(&session_id)))))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone())
+                                == false)
+                            && (effect == InstructionEffect::Active)
+                            && (digest.clone() != "".to_string())
+                            && (revision >= 1)
+                            && (64
+                                > ((self.session_instruction_target_revision_value(&session_id)?)
+                                    .len() as u64))))
+                    && (((self
+                        .state
+                        .session_instruction_target_effect
+                        .contains_key(&session_id))
+                        && (self
+                            .state
+                            .session_instruction_target_bytes
+                            .contains_key(&session_id)))
+                        && (1048576
+                            >= session_document_instruction_active_bytes(
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_effect_value(&session_id)?,
+                                    slot.clone(),
+                                    effect,
+                                ),
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_bytes_value(&session_id)?,
+                                    slot.clone(),
+                                    body_bytes,
+                                ),
+                            )))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionNew);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || (self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone()))
+                            && (((effect == InstructionEffect::Active)
+                                && (digest.clone() != "".to_string()))
+                                || ((effect == InstructionEffect::Absent)
+                                    && (digest.clone() == "".to_string())
+                                    && (body_bytes == 0)))))
+                    && (((self
+                        .state
+                        .session_instruction_target_effect
+                        .contains_key(&session_id))
+                        && (self
+                            .state
+                            .session_instruction_target_bytes
+                            .contains_key(&session_id)))
+                        && (1048576
+                            >= session_document_instruction_active_bytes(
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_effect_value(&session_id)?,
+                                    slot.clone(),
+                                    effect,
+                                ),
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_bytes_value(&session_id)?,
+                                    slot.clone(),
+                                    body_bytes,
+                                ),
+                            )))
+                    && ((self
+                        .state
+                        .session_instruction_target_revision
+                        .contains_key(&session_id))
+                        && (revision
+                            > (self.session_instruction_target_revision_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default()))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionAdvance);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((!(effect == InstructionEffect::Active))
+                                || ((!(digest.clone() != "".to_string()))
+                                    || ((((self
+                                        .state
+                                        .session_instruction_target_revision
+                                        .contains_key(&session_id))
+                                        && ((!((self
+                                            .session_instruction_target_revision_value(
+                                                &session_id,
+                                            )?)
+                                        .contains_key(&slot.clone())
+                                            == false))
+                                            || ((!(revision >= 1))
+                                                || (self
+                                                    .state
+                                                    .session_instruction_target_revision
+                                                    .contains_key(&session_id)))))
+                                        && ((((self
+                                            .session_instruction_target_revision_value(
+                                                &session_id,
+                                            )?)
+                                        .contains_key(&slot.clone())
+                                            == false)
+                                            && (revision >= 1)
+                                            && (64
+                                                > ((self
+                                                    .session_instruction_target_revision_value(
+                                                        &session_id,
+                                                    )?)
+                                                .len()
+                                                    as u64)))
+                                            || ((self
+                                                .state
+                                                .session_instruction_target_revision
+                                                .contains_key(&session_id))
+                                                && ((!((self
+                                                    .session_instruction_target_revision_value(
+                                                        &session_id,
+                                                    )?)
+                                                .contains_key(&slot.clone())))
+                                                    || (self
+                                                        .state
+                                                        .session_instruction_target_revision
+                                                        .contains_key(&session_id))))))
+                                        && ((!((((self
+                                            .session_instruction_target_revision_value(
+                                                &session_id,
+                                            )?)
+                                        .contains_key(&slot.clone())
+                                            == false)
+                                            && (revision >= 1)
+                                            && (64
+                                                > ((self
+                                                    .session_instruction_target_revision_value(
+                                                        &session_id,
+                                                    )?)
+                                                .len()
+                                                    as u64)))
+                                            || (((self
+                                                .session_instruction_target_revision_value(
+                                                    &session_id,
+                                                )?)
+                                            .contains_key(&slot.clone()))
+                                                && (revision
+                                                    > (self
+                                                        .session_instruction_target_revision_value(
+                                                            &session_id,
+                                                        )?)
+                                                    .get(&slot.clone())
+                                                    .cloned()
+                                                    .unwrap_or_default()))))
+                                            || ((self
+                                                .state
+                                                .session_instruction_target_effect
+                                                .contains_key(&session_id))
+                                                && (self
+                                                    .state
+                                                    .session_instruction_target_bytes
+                                                    .contains_key(&session_id)))))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && (effect == InstructionEffect::Active)
+                            && (digest.clone() != "".to_string())
+                            && ((((self
+                                .session_instruction_target_revision_value(&session_id)?)
+                            .contains_key(&slot.clone())
+                                == false)
+                                && (revision >= 1)
+                                && (64
+                                    > ((self
+                                        .session_instruction_target_revision_value(&session_id)?)
+                                    .len() as u64)))
+                                || (((self
+                                    .session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone()))
+                                    && (revision
+                                        > (self.session_instruction_target_revision_value(
+                                            &session_id,
+                                        )?)
+                                        .get(&slot.clone())
+                                        .cloned()
+                                        .unwrap_or_default())))
+                            && (session_document_instruction_active_bytes(
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_effect_value(&session_id)?,
+                                    slot.clone(),
+                                    effect,
+                                ),
+                                session_document_instruction_slot_after_set(
+                                    self.session_instruction_target_bytes_value(&session_id)?,
+                                    slot.clone(),
+                                    body_bytes,
+                                ),
+                            ) > 1048576)))
+                {
+                    matches
+                        .push(SessionDocumentTransition::SetSessionInstructionActiveBudgetExceeded);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_target_revision_value(
+                                    &session_id,
+                                )?)
+                                .contains_key(&slot.clone())))
+                                    || ((self
+                                        .state
+                                        .session_instruction_target_revision
+                                        .contains_key(&session_id))
+                                        && ((!(revision
+                                            == (self
+                                                .session_instruction_target_revision_value(
+                                                    &session_id,
+                                                )?)
+                                            .get(&slot.clone())
+                                            .cloned()
+                                            .unwrap_or_default()))
+                                            || ((self
+                                                .state
+                                                .session_instruction_target_effect
+                                                .contains_key(&session_id))
+                                                && ((!((self
+                                                    .session_instruction_target_effect_value(
+                                                        &session_id,
+                                                    )?)
+                                                .get(&slot.clone())
+                                                .cloned()
+                                                .unwrap_or_default()
+                                                    == effect))
+                                                    || (self
+                                                        .state
+                                                        .session_instruction_target_digest
+                                                        .contains_key(&session_id))))))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone()))
+                            && (revision
+                                == (self
+                                    .session_instruction_target_revision_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default())
+                            && ((self.session_instruction_target_effect_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default()
+                                == effect)
+                            && ((self.session_instruction_target_digest_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default()
+                                == digest.clone())))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionDuplicate);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_target_revision_value(
+                                    &session_id,
+                                )?)
+                                .contains_key(&slot.clone())))
+                                    || ((self
+                                        .state
+                                        .session_instruction_target_revision
+                                        .contains_key(&session_id))
+                                        && ((!(revision
+                                            == (self
+                                                .session_instruction_target_revision_value(
+                                                    &session_id,
+                                                )?)
+                                            .get(&slot.clone())
+                                            .cloned()
+                                            .unwrap_or_default()))
+                                            || ((self
+                                                .state
+                                                .session_instruction_target_effect
+                                                .contains_key(&session_id))
+                                                && (((self
+                                                    .session_instruction_target_effect_value(
+                                                        &session_id,
+                                                    )?)
+                                                .get(&slot.clone())
+                                                .cloned()
+                                                .unwrap_or_default()
+                                                    != effect)
+                                                    || (self
+                                                        .state
+                                                        .session_instruction_target_digest
+                                                        .contains_key(&session_id))))))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone()))
+                            && (revision
+                                == (self
+                                    .session_instruction_target_revision_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default())
+                            && (((self.session_instruction_target_effect_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default()
+                                != effect)
+                                || ((self
+                                    .session_instruction_target_digest_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default()
+                                    != digest.clone()))))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionConflict);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_target_revision_value(
+                                    &session_id,
+                                )?)
+                                .contains_key(&slot.clone())))
+                                    || (self
+                                        .state
+                                        .session_instruction_target_revision
+                                        .contains_key(&session_id))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone()))
+                            && (revision
+                                < (self
+                                    .session_instruction_target_revision_value(&session_id)?)
+                                .get(&slot.clone())
+                                .cloned()
+                                .unwrap_or_default())))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionStale);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionOwnedByMob);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || ((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && ((!((self.session_instruction_target_revision_value(
+                                    &session_id,
+                                )?)
+                                .contains_key(&slot.clone())
+                                    == false))
+                                    || ((!(effect == InstructionEffect::Active))
+                                        || (self
+                                            .state
+                                            .session_instruction_target_revision
+                                            .contains_key(&session_id)))))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone())
+                                == false)
+                            && (effect == InstructionEffect::Active)
+                            && (((self.session_instruction_target_revision_value(&session_id)?)
+                                .len() as u64)
+                                >= 64)))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionSlotLimitExceeded);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob))
+                            || (self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            != InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_target_revision_value(&session_id)?)
+                                .contains_key(&slot.clone())
+                                == false)
+                            && (effect == InstructionEffect::Absent)))
+                {
+                    matches.push(SessionDocumentTransition::SetSessionInstructionUnknownSlot);
+                }
+                let transition = Self::single_transition(matches, "SetSessionInstruction")?;
+                match transition {
+                    SessionDocumentTransition::SetSessionInstructionNew => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), InstructionTargetOwner::Session);
+                        self.state.session_instruction_target_generation.insert(
+                            session_id.clone(),
+                            self.session_instruction_target_generation_value(&session_id)? + 1,
+                        );
+                        self.state.session_instruction_target_revision.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_revision_value(&session_id)?,
+                                slot.clone(),
+                                revision,
+                            ),
+                        );
+                        self.state.session_instruction_target_effect.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                slot.clone(),
+                                effect,
+                            ),
+                        );
+                        self.state.session_instruction_target_digest.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_digest_value(&session_id)?,
+                                slot.clone(),
+                                digest.clone(),
+                            ),
+                        );
+                        self.state.session_instruction_target_bytes.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_bytes_value(&session_id)?,
+                                slot.clone(),
+                                body_bytes,
+                            ),
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRecorded {
+                            generation: self
+                                .session_instruction_target_generation_value(&session_id)?,
+                            outcome: InstructionWriteOutcome::Recorded,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionAdvance => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), InstructionTargetOwner::Session);
+                        self.state.session_instruction_target_generation.insert(
+                            session_id.clone(),
+                            self.session_instruction_target_generation_value(&session_id)? + 1,
+                        );
+                        self.state.session_instruction_target_revision.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_revision_value(&session_id)?,
+                                slot.clone(),
+                                revision,
+                            ),
+                        );
+                        self.state.session_instruction_target_effect.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                slot.clone(),
+                                effect,
+                            ),
+                        );
+                        self.state.session_instruction_target_digest.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_digest_value(&session_id)?,
+                                slot.clone(),
+                                digest.clone(),
+                            ),
+                        );
+                        self.state.session_instruction_target_bytes.insert(
+                            session_id.clone(),
+                            session_document_instruction_slot_after_set(
+                                self.session_instruction_target_bytes_value(&session_id)?,
+                                slot.clone(),
+                                body_bytes,
+                            ),
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRecorded {
+                            generation: self
+                                .session_instruction_target_generation_value(&session_id)?,
+                            outcome: InstructionWriteOutcome::Recorded,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionActiveBudgetExceeded => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::ActiveSetBudgetExceeded,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionDuplicate => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRecorded {
+                            generation: self
+                                .session_instruction_target_generation_value(&session_id)?,
+                            outcome: InstructionWriteOutcome::Duplicate,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionConflict => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::RevisionConflict,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionStale => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::StaleRevision,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionOwnedByMob => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::OwnedByMob,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionSlotLimitExceeded => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::SlotLimitExceeded,
+                        }])
+                    }
+                    SessionDocumentTransition::SetSessionInstructionUnknownSlot => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::UnknownSlot,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "SetSessionInstruction_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RebindInstructionOwner {
+                session_id,
+                owner,
+                mob_id,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(owner == InstructionTargetOwner::Mob))
+                        || ((!(mob_id.clone() != "".to_string()))
+                            || (self
+                                .state
+                                .session_instruction_effective_revision
+                                .contains_key(&session_id))))
+                        && ((owner == InstructionTargetOwner::Mob)
+                            && (mob_id.clone() != "".to_string())
+                            && (((self.session_instruction_effective_revision_value(&session_id)?)
+                                .len() as u64)
+                                <= 64)))
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Session))
+                {
+                    matches.push(SessionDocumentTransition::RebindInstructionOwner);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((owner == InstructionTargetOwner::Session)
+                        && (mob_id.clone() == "".to_string()))
+                        || ((owner == InstructionTargetOwner::Mob)
+                            && (mob_id.clone() != "".to_string())))
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Unowned))
+                {
+                    matches.push(SessionDocumentTransition::RebindInstructionOwnerUnowned);
+                }
+                let transition = Self::single_transition(matches, "RebindInstructionOwner")?;
+                match transition {
+                    SessionDocumentTransition::RebindInstructionOwner => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), owner);
+                        self.state
+                            .session_instruction_owner_mob
+                            .insert(session_id.clone(), mob_id.clone());
+                        self.state
+                            .session_instruction_target_generation
+                            .insert(session_id.clone(), 0);
+                        self.state.session_instruction_target_revision.insert(
+                            session_id.clone(),
+                            self.session_instruction_effective_revision_value(&session_id)?,
+                        );
+                        self.state.session_instruction_target_effect.insert(
+                            session_id.clone(),
+                            self.session_instruction_effective_effect_value(&session_id)?,
+                        );
+                        self.state.session_instruction_target_digest.insert(
+                            session_id.clone(),
+                            self.session_instruction_effective_digest_value(&session_id)?,
+                        );
+                        self.state.session_instruction_target_bytes.insert(
+                            session_id.clone(),
+                            self.session_instruction_effective_bytes_value(&session_id)?,
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionOwnerRebound {
+                            owner: owner,
+                        }])
+                    }
+                    SessionDocumentTransition::RebindInstructionOwnerUnowned => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), owner);
+                        self.state
+                            .session_instruction_owner_mob
+                            .insert(session_id.clone(), mob_id.clone());
+                        self.state
+                            .session_instruction_target_generation
+                            .insert(session_id.clone(), 0);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionOwnerRebound {
+                            owner: owner,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RebindInstructionOwner_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ReleaseInstructionTarget { session_id, mob_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob))
+                            || (self
+                                .state
+                                .session_instruction_owner_mob
+                                .contains_key(&session_id))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_owner_mob_value(&session_id)?)
+                                == mob_id.clone())))
+                {
+                    matches.push(SessionDocumentTransition::ReleaseInstructionTarget);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Unowned))
+                {
+                    matches.push(SessionDocumentTransition::ReleaseInstructionTargetAlreadyUnowned);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((!((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob))
+                            || (self
+                                .state
+                                .session_instruction_owner_mob
+                                .contains_key(&session_id))))
+                        && (((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Mob)
+                            && ((self.session_instruction_owner_mob_value(&session_id)?)
+                                != mob_id.clone())))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ReleaseInstructionTargetOwnedByOtherMob);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_owner
+                        .contains_key(&session_id))
+                        && ((self.session_instruction_owner_value(&session_id)?)
+                            == InstructionTargetOwner::Session))
+                {
+                    matches.push(SessionDocumentTransition::ReleaseInstructionTargetOwnedBySession);
+                }
+                let transition = Self::single_transition(matches, "ReleaseInstructionTarget")?;
+                match transition {
+                    SessionDocumentTransition::ReleaseInstructionTarget => {
+                        self.state
+                            .session_instruction_owner
+                            .insert(session_id.clone(), InstructionTargetOwner::Unowned);
+                        self.state
+                            .session_instruction_owner_mob
+                            .insert(session_id.clone(), "".to_string());
+                        self.state
+                            .session_instruction_target_generation
+                            .insert(session_id.clone(), 0);
+                        self.state
+                            .session_instruction_target_revision
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_effect
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_digest
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state
+                            .session_instruction_target_bytes
+                            .insert(session_id.clone(), BTreeMap::new());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetReleased {
+                            was_owned: true,
+                        }])
+                    }
+                    SessionDocumentTransition::ReleaseInstructionTargetAlreadyUnowned => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetReleased {
+                            was_owned: false,
+                        }])
+                    }
+                    SessionDocumentTransition::ReleaseInstructionTargetOwnedByOtherMob => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::OwnedByOtherMob,
+                        }])
+                    }
+                    SessionDocumentTransition::ReleaseInstructionTargetOwnedBySession => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionTargetRefused {
+                            refusal: InstructionWriteRefusal::OwnedBySession,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ReleaseInstructionTarget_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveRunStartInstructions {
+                session_id,
+                run_start,
+                lowering,
+                transcript_is_system_prefix,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((((((self
+                        .state
+                        .session_instruction_target_revision
+                        .contains_key(&session_id))
+                        && (self
+                            .state
+                            .session_instruction_target_effect
+                            .contains_key(&session_id)))
+                        && (self
+                            .state
+                            .session_instruction_target_digest
+                            .contains_key(&session_id)))
+                        && (self
+                            .state
+                            .session_instruction_effective_revision
+                            .contains_key(&session_id)))
+                        && (self
+                            .state
+                            .session_instruction_effective_effect
+                            .contains_key(&session_id)))
+                        && (self
+                            .state
+                            .session_instruction_effective_digest
+                            .contains_key(&session_id)))
+                        && (instruction_change_pending(
+                            self.session_instruction_target_revision_value(&session_id)?,
+                            self.session_instruction_target_effect_value(&session_id)?,
+                            self.session_instruction_target_digest_value(&session_id)?,
+                            self.session_instruction_effective_revision_value(&session_id)?,
+                            self.session_instruction_effective_effect_value(&session_id)?,
+                            self.session_instruction_effective_digest_value(&session_id)?,
+                        )))
+                    && (run_start == InstructionRunStart::FreshRun)
+                    && (instruction_entry_lowers(lowering, transcript_is_system_prefix))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRunStartInstructionsApply);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((run_start != InstructionRunStart::FreshRun)
+                        || ((((((self
+                            .state
+                            .session_instruction_target_revision
+                            .contains_key(&session_id))
+                            && (self
+                                .state
+                                .session_instruction_target_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_target_digest
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_revision
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_digest
+                                .contains_key(&session_id))))
+                        && ((run_start != InstructionRunStart::FreshRun)
+                            || (instruction_change_pending(
+                                self.session_instruction_target_revision_value(&session_id)?,
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_digest_value(&session_id)?,
+                                self.session_instruction_effective_revision_value(&session_id)?,
+                                self.session_instruction_effective_effect_value(&session_id)?,
+                                self.session_instruction_effective_digest_value(&session_id)?,
+                            ) == false)))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRunStartInstructionsNoChange);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(run_start == InstructionRunStart::FreshRun))
+                        || ((((((self
+                            .state
+                            .session_instruction_target_revision
+                            .contains_key(&session_id))
+                            && (self
+                                .state
+                                .session_instruction_target_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_target_digest
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_revision
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_digest
+                                .contains_key(&session_id))))
+                        && ((run_start == InstructionRunStart::FreshRun)
+                            && (instruction_change_pending(
+                                self.session_instruction_target_revision_value(&session_id)?,
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_digest_value(&session_id)?,
+                                self.session_instruction_effective_revision_value(&session_id)?,
+                                self.session_instruction_effective_effect_value(&session_id)?,
+                                self.session_instruction_effective_digest_value(&session_id)?,
+                            ))
+                            && (lowering == InstructionLowering::LeadingPrefixOnly)
+                            && (transcript_is_system_prefix == false)))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRunStartInstructionsDeferredLeadingPrefix,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((!(run_start == InstructionRunStart::FreshRun))
+                        || ((((((self
+                            .state
+                            .session_instruction_target_revision
+                            .contains_key(&session_id))
+                            && (self
+                                .state
+                                .session_instruction_target_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_target_digest
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_revision
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_effect
+                                .contains_key(&session_id)))
+                            && (self
+                                .state
+                                .session_instruction_effective_digest
+                                .contains_key(&session_id))))
+                        && ((run_start == InstructionRunStart::FreshRun)
+                            && (instruction_change_pending(
+                                self.session_instruction_target_revision_value(&session_id)?,
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_digest_value(&session_id)?,
+                                self.session_instruction_effective_revision_value(&session_id)?,
+                                self.session_instruction_effective_effect_value(&session_id)?,
+                                self.session_instruction_effective_digest_value(&session_id)?,
+                            ))
+                            && (lowering == InstructionLowering::Unavailable)))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRunStartInstructionsDeferredUnavailable,
+                    );
+                }
+                let transition = Self::single_transition(matches, "ResolveRunStartInstructions")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRunStartInstructionsApply => {
+                        self.state.session_instruction_effective_revision.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_revision_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_effect.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_effect_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_digest.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_digest_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_bytes.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_bytes_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_generation.insert(
+                            session_id.clone(),
+                            self.session_instruction_target_generation_value(&session_id)?,
+                        );
+                        self.state.session_instruction_entry_sequence.insert(
+                            session_id.clone(),
+                            self.session_instruction_entry_sequence_value(&session_id)? + 1,
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionEntryAuthorized {
+                            entry_sequence: self
+                                .session_instruction_entry_sequence_value(&session_id)?,
+                            generation: self
+                                .session_instruction_target_generation_value(&session_id)?,
+                        }])
+                    }
+                    SessionDocumentTransition::ResolveRunStartInstructionsNoChange => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionEntryNotNeeded])
+                    }
+                    SessionDocumentTransition::ResolveRunStartInstructionsDeferredLeadingPrefix => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::InstructionApplicationDeferred {
+                                reason: InstructionDeferReason::LeadingPrefixOnly,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRunStartInstructionsDeferredUnavailable => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::InstructionApplicationDeferred {
+                                reason: InstructionDeferReason::LoweringUnavailable,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRunStartInstructions_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::AuthorizeInstructionFold {
+                session_id,
+                at_run_start,
+                lowering,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self
+                        .state
+                        .session_instruction_entry_sequence
+                        .contains_key(&session_id))
+                    && (at_run_start == true)
+                    && (lowering != InstructionLowering::Unavailable)
+                {
+                    matches.push(SessionDocumentTransition::AuthorizeInstructionFoldAtRunStart);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((self
+                        .state
+                        .session_instruction_entry_sequence
+                        .contains_key(&session_id))
+                        && ((at_run_start == false)
+                            || (lowering == InstructionLowering::Unavailable)))
+                {
+                    matches.push(SessionDocumentTransition::AuthorizeInstructionFoldEffective);
+                }
+                let transition = Self::single_transition(matches, "AuthorizeInstructionFold")?;
+                match transition {
+                    SessionDocumentTransition::AuthorizeInstructionFoldAtRunStart => {
+                        self.state.session_instruction_effective_revision.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_revision_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_effect.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_effect_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_digest.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_digest_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_bytes.insert(
+                            session_id.clone(),
+                            session_document_instruction_active_slots(
+                                self.session_instruction_target_effect_value(&session_id)?,
+                                self.session_instruction_target_bytes_value(&session_id)?,
+                            ),
+                        );
+                        self.state.session_instruction_effective_generation.insert(
+                            session_id.clone(),
+                            self.session_instruction_target_generation_value(&session_id)?,
+                        );
+                        self.state.session_instruction_entry_sequence.insert(
+                            session_id.clone(),
+                            self.session_instruction_entry_sequence_value(&session_id)? + 1,
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionFoldAuthorized {
+                            entry_sequence: self
+                                .session_instruction_entry_sequence_value(&session_id)?,
+                            source: InstructionFoldSource::Target,
+                            generation: self
+                                .session_instruction_effective_generation_value(&session_id)?,
+                        }])
+                    }
+                    SessionDocumentTransition::AuthorizeInstructionFoldEffective => {
+                        self.state.session_instruction_entry_sequence.insert(
+                            session_id.clone(),
+                            self.session_instruction_entry_sequence_value(&session_id)? + 1,
+                        );
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::InstructionFoldAuthorized {
+                            entry_sequence: self
+                                .session_instruction_entry_sequence_value(&session_id)?,
+                            source: InstructionFoldSource::Effective,
+                            generation: self
+                                .session_instruction_effective_generation_value(&session_id)?,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "AuthorizeInstructionFold_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -6473,6 +8668,150 @@ impl SessionDocumentMachineAuthority {
             runtime_observation,
         })
     }
+
+    pub fn recover_session_instruction_state(
+        &mut self,
+        session_id: SessionDocumentKey,
+        owner: InstructionTargetOwner,
+        owner_mob: String,
+        target_generation: u64,
+        entry_sequence: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverSessionInstructionState {
+            session_id,
+            owner,
+            owner_mob,
+            target_generation,
+            entry_sequence,
+        })
+    }
+
+    pub fn recover_session_instruction_target(
+        &mut self,
+        session_id: SessionDocumentKey,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverSessionInstructionTarget {
+            session_id,
+            revision,
+            effect,
+            digest,
+            bytes,
+        })
+    }
+
+    pub fn recover_session_instruction_effective(
+        &mut self,
+        session_id: SessionDocumentKey,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+        generation: u64,
+        last_entry_sequence: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverSessionInstructionEffective {
+            session_id,
+            revision,
+            effect,
+            digest,
+            bytes,
+            generation,
+            last_entry_sequence,
+        })
+    }
+
+    pub fn record_instruction_target(
+        &mut self,
+        session_id: SessionDocumentKey,
+        mob_id: String,
+        generation: u64,
+        revision: BTreeMap<String, u64>,
+        effect: BTreeMap<String, InstructionEffect>,
+        digest: BTreeMap<String, String>,
+        bytes: BTreeMap<String, u64>,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecordInstructionTarget {
+            session_id,
+            mob_id,
+            generation,
+            revision,
+            effect,
+            digest,
+            bytes,
+        })
+    }
+
+    pub fn set_session_instruction(
+        &mut self,
+        session_id: SessionDocumentKey,
+        slot: String,
+        revision: u64,
+        effect: InstructionEffect,
+        digest: String,
+        body_bytes: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::SetSessionInstruction {
+            session_id,
+            slot,
+            revision,
+            effect,
+            digest,
+            body_bytes,
+        })
+    }
+
+    pub fn rebind_instruction_owner(
+        &mut self,
+        session_id: SessionDocumentKey,
+        owner: InstructionTargetOwner,
+        mob_id: String,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RebindInstructionOwner {
+            session_id,
+            owner,
+            mob_id,
+        })
+    }
+
+    pub fn release_instruction_target(
+        &mut self,
+        session_id: SessionDocumentKey,
+        mob_id: String,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ReleaseInstructionTarget { session_id, mob_id })
+    }
+
+    pub fn resolve_run_start_instructions(
+        &mut self,
+        session_id: SessionDocumentKey,
+        run_start: InstructionRunStart,
+        lowering: InstructionLowering,
+        transcript_is_system_prefix: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRunStartInstructions {
+            session_id,
+            run_start,
+            lowering,
+            transcript_is_system_prefix,
+        })
+    }
+
+    pub fn authorize_instruction_fold(
+        &mut self,
+        session_id: SessionDocumentKey,
+        at_run_start: bool,
+        lowering: InstructionLowering,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::AuthorizeInstructionFold {
+            session_id,
+            at_run_start,
+            lowering,
+        })
+    }
 }
 
 fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
@@ -6577,6 +8916,159 @@ fn archive_should_retire_runtime(
         && (runtime_observation != SessionArchiveRuntimeObservation::QuiescentTerminal)
         && ((durable_document_present)
             || (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired))
+}
+
+fn instruction_slot_maps_consistent(
+    revision: BTreeMap<String, u64>,
+    effect: BTreeMap<String, InstructionEffect>,
+    digest: BTreeMap<String, String>,
+    bytes: BTreeMap<String, u64>,
+) -> bool {
+    ((revision
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>())
+        == (effect
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()))
+        && ((revision
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>())
+            == (digest
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()))
+        && ((revision
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>())
+            == (bytes
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()))
+        && (revision.keys().all(|slot| {
+            (revision.get(&slot.clone()).cloned().unwrap_or_default() >= 1)
+                && (((effect.get(&slot.clone()).cloned().unwrap_or_default()
+                    == InstructionEffect::Active)
+                    && (digest.get(&slot.clone()).cloned().unwrap_or_default() != "".to_string()))
+                    || ((effect.get(&slot.clone()).cloned().unwrap_or_default()
+                        == InstructionEffect::Absent)
+                        && (digest.get(&slot.clone()).cloned().unwrap_or_default()
+                            == "".to_string())
+                        && (bytes.get(&slot.clone()).cloned().unwrap_or_default() == 0)))
+        }))
+}
+
+fn instruction_slot_count_within_limit(revision: BTreeMap<String, u64>) -> bool {
+    (revision.len() as u64) <= 64
+}
+
+fn instruction_slot_set_empty(revision: BTreeMap<String, u64>) -> bool {
+    (revision.len() as u64) == 0
+}
+
+fn instruction_change_pending(
+    target_revision: BTreeMap<String, u64>,
+    target_effect: BTreeMap<String, InstructionEffect>,
+    target_digest: BTreeMap<String, String>,
+    effective_revision: BTreeMap<String, u64>,
+    effective_effect: BTreeMap<String, InstructionEffect>,
+    effective_digest: BTreeMap<String, String>,
+) -> bool {
+    (target_revision.keys().any(|slot| {
+        ((target_effect
+            .get(&slot.clone())
+            .cloned()
+            .unwrap_or_default()
+            == InstructionEffect::Active)
+            && ((effective_effect.contains_key(&slot.clone()) == false)
+                || (effective_effect
+                    .get(&slot.clone())
+                    .cloned()
+                    .unwrap_or_default()
+                    != InstructionEffect::Active)
+                || (effective_revision
+                    .get(&slot.clone())
+                    .cloned()
+                    .unwrap_or_default()
+                    != target_revision
+                        .get(&slot.clone())
+                        .cloned()
+                        .unwrap_or_default())
+                || (effective_digest
+                    .get(&slot.clone())
+                    .cloned()
+                    .unwrap_or_default()
+                    != target_digest
+                        .get(&slot.clone())
+                        .cloned()
+                        .unwrap_or_default())))
+            || ((target_effect
+                .get(&slot.clone())
+                .cloned()
+                .unwrap_or_default()
+                == InstructionEffect::Absent)
+                && (effective_effect.contains_key(&slot.clone()))
+                && (effective_effect
+                    .get(&slot.clone())
+                    .cloned()
+                    .unwrap_or_default()
+                    == InstructionEffect::Active))
+    })) || (effective_effect.keys().any(|slot| {
+        (effective_effect
+            .get(&slot.clone())
+            .cloned()
+            .unwrap_or_default()
+            == InstructionEffect::Active)
+            && (target_revision.contains_key(&slot.clone()) == false)
+    }))
+}
+
+fn instruction_entry_lowers(
+    lowering: InstructionLowering,
+    transcript_is_system_prefix: bool,
+) -> bool {
+    (lowering == InstructionLowering::MidConversation)
+        || ((lowering == InstructionLowering::LeadingPrefixOnly) && (transcript_is_system_prefix))
+}
+
+/// One session's slot map with one slot set to `value`.
+fn session_document_instruction_slot_after_set<V>(
+    mut current: BTreeMap<String, V>,
+    slot: String,
+    value: V,
+) -> BTreeMap<String, V> {
+    current.insert(slot, value);
+    current
+}
+
+/// The body bytes of one slot set's Active slots; a slot the bytes map
+/// does not name counts nothing.
+fn session_document_instruction_active_bytes(
+    effect: BTreeMap<String, InstructionEffect>,
+    bytes: BTreeMap<String, u64>,
+) -> u64 {
+    effect
+        .iter()
+        .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)
+        .fold(0_u64, |total, (slot, _)| {
+            total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
+        })
+}
+
+/// The entries of one slot set's map whose slot is Active in `effect`:
+/// what an application puts in effect. A slot `effect` holds Absent, or
+/// does not name, is left out.
+fn session_document_instruction_active_slots<V>(
+    effect: BTreeMap<String, InstructionEffect>,
+    values: BTreeMap<String, V>,
+) -> BTreeMap<String, V> {
+    values
+        .into_iter()
+        .filter(|(slot, _)| effect.get(slot) == Some(&InstructionEffect::Active))
+        .collect()
 }
 
 impl Default for SessionDocumentMachineAuthority {

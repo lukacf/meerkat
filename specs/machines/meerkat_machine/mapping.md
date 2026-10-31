@@ -461,6 +461,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetModelRoutingBaselineRetired`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

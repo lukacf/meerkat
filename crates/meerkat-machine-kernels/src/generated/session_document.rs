@@ -263,6 +263,442 @@ impl std::fmt::Display for DurableTailStopReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum InstructionDeferReason {
+    #[default]
+    #[serde(rename = "LeadingPrefixOnly")]
+    LeadingPrefixOnly,
+    #[serde(rename = "LoweringUnavailable")]
+    LoweringUnavailable,
+}
+impl InstructionDeferReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LeadingPrefixOnly => "LeadingPrefixOnly",
+            Self::LoweringUnavailable => "LoweringUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionDeferReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "LeadingPrefixOnly" => Ok(Self::LeadingPrefixOnly),
+            "LoweringUnavailable" => Ok(Self::LoweringUnavailable),
+            other => Err(format!("invalid InstructionDeferReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionDeferReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionDeferReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionEffect {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Active")]
+    Active,
+}
+impl InstructionEffect {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Active => "Active",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionEffect {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Active" => Ok(Self::Active),
+            other => Err(format!("invalid InstructionEffect value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionEffect {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionFoldSource {
+    #[default]
+    #[serde(rename = "Effective")]
+    Effective,
+    #[serde(rename = "Target")]
+    Target,
+}
+impl InstructionFoldSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Effective => "Effective",
+            Self::Target => "Target",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionFoldSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Effective" => Ok(Self::Effective),
+            "Target" => Ok(Self::Target),
+            other => Err(format!("invalid InstructionFoldSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionFoldSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionFoldSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionLowering {
+    #[default]
+    #[serde(rename = "MidConversation")]
+    MidConversation,
+    #[serde(rename = "LeadingPrefixOnly")]
+    LeadingPrefixOnly,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+}
+impl InstructionLowering {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MidConversation => "MidConversation",
+            Self::LeadingPrefixOnly => "LeadingPrefixOnly",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionLowering {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MidConversation" => Ok(Self::MidConversation),
+            "LeadingPrefixOnly" => Ok(Self::LeadingPrefixOnly),
+            "Unavailable" => Ok(Self::Unavailable),
+            other => Err(format!("invalid InstructionLowering value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionLowering {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionLowering {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionRunStart {
+    #[default]
+    #[serde(rename = "FreshRun")]
+    FreshRun,
+    #[serde(rename = "ResumeRun")]
+    ResumeRun,
+    #[serde(rename = "NoRun")]
+    NoRun,
+}
+impl InstructionRunStart {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FreshRun => "FreshRun",
+            Self::ResumeRun => "ResumeRun",
+            Self::NoRun => "NoRun",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionRunStart {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FreshRun" => Ok(Self::FreshRun),
+            "ResumeRun" => Ok(Self::ResumeRun),
+            "NoRun" => Ok(Self::NoRun),
+            other => Err(format!("invalid InstructionRunStart value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionRunStart {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionRunStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionTargetOwner {
+    #[default]
+    #[serde(rename = "Unowned")]
+    Unowned,
+    #[serde(rename = "Session")]
+    Session,
+    #[serde(rename = "Mob")]
+    Mob,
+}
+impl InstructionTargetOwner {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unowned => "Unowned",
+            Self::Session => "Session",
+            Self::Mob => "Mob",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionTargetOwner {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unowned" => Ok(Self::Unowned),
+            "Session" => Ok(Self::Session),
+            "Mob" => Ok(Self::Mob),
+            other => Err(format!("invalid InstructionTargetOwner value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionTargetOwner {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionTargetOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionWriteOutcome {
+    #[default]
+    #[serde(rename = "Recorded")]
+    Recorded,
+    #[serde(rename = "Duplicate")]
+    Duplicate,
+}
+impl InstructionWriteOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Recorded => "Recorded",
+            Self::Duplicate => "Duplicate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionWriteOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Recorded" => Ok(Self::Recorded),
+            "Duplicate" => Ok(Self::Duplicate),
+            other => Err(format!("invalid InstructionWriteOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionWriteOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionWriteOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionWriteRefusal {
+    #[default]
+    #[serde(rename = "StaleRevision")]
+    StaleRevision,
+    #[serde(rename = "RevisionConflict")]
+    RevisionConflict,
+    #[serde(rename = "OwnedByMob")]
+    OwnedByMob,
+    #[serde(rename = "OwnedBySession")]
+    OwnedBySession,
+    #[serde(rename = "SlotLimitExceeded")]
+    SlotLimitExceeded,
+    #[serde(rename = "UnknownSlot")]
+    UnknownSlot,
+    #[serde(rename = "OwnedByOtherMob")]
+    OwnedByOtherMob,
+    #[serde(rename = "ActiveSetBudgetExceeded")]
+    ActiveSetBudgetExceeded,
+}
+impl InstructionWriteRefusal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StaleRevision => "StaleRevision",
+            Self::RevisionConflict => "RevisionConflict",
+            Self::OwnedByMob => "OwnedByMob",
+            Self::OwnedBySession => "OwnedBySession",
+            Self::SlotLimitExceeded => "SlotLimitExceeded",
+            Self::UnknownSlot => "UnknownSlot",
+            Self::OwnedByOtherMob => "OwnedByOtherMob",
+            Self::ActiveSetBudgetExceeded => "ActiveSetBudgetExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionWriteRefusal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StaleRevision" => Ok(Self::StaleRevision),
+            "RevisionConflict" => Ok(Self::RevisionConflict),
+            "OwnedByMob" => Ok(Self::OwnedByMob),
+            "OwnedBySession" => Ok(Self::OwnedBySession),
+            "SlotLimitExceeded" => Ok(Self::SlotLimitExceeded),
+            "UnknownSlot" => Ok(Self::UnknownSlot),
+            "OwnedByOtherMob" => Ok(Self::OwnedByOtherMob),
+            "ActiveSetBudgetExceeded" => Ok(Self::ActiveSetBudgetExceeded),
+            other => Err(format!("invalid InstructionWriteRefusal value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionWriteRefusal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionWriteRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveAssistantPlaybackTerminalDisposition {
     #[default]
     #[serde(rename = "Unmeasured")]
@@ -2054,6 +2490,31 @@ pub struct State {
     pub session_live_assistant_terminal_prefix_chars: std::collections::BTreeMap<SessionId, u64>,
     pub session_live_assistant_terminal_prefix_digest:
         std::collections::BTreeMap<SessionId, String>,
+    pub session_instruction_owner: std::collections::BTreeMap<SessionId, InstructionTargetOwner>,
+    pub session_instruction_owner_mob: std::collections::BTreeMap<SessionId, String>,
+    pub session_instruction_target_generation: std::collections::BTreeMap<SessionId, u64>,
+    pub session_instruction_target_revision:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_instruction_target_effect: std::collections::BTreeMap<
+        SessionId,
+        std::collections::BTreeMap<String, InstructionEffect>,
+    >,
+    pub session_instruction_target_digest:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, String>>,
+    pub session_instruction_target_bytes:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_instruction_effective_revision:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_instruction_effective_effect: std::collections::BTreeMap<
+        SessionId,
+        std::collections::BTreeMap<String, InstructionEffect>,
+    >,
+    pub session_instruction_effective_digest:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, String>>,
+    pub session_instruction_effective_bytes:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_instruction_effective_generation: std::collections::BTreeMap<SessionId, u64>,
+    pub session_instruction_entry_sequence: std::collections::BTreeMap<SessionId, u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -2451,6 +2912,75 @@ pub mod inputs {
         pub durable_document_present: bool,
         pub runtime_observation: SessionArchiveRuntimeObservation,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionInstructionState {
+        pub session_id: SessionId,
+        pub owner: InstructionTargetOwner,
+        pub owner_mob: String,
+        pub target_generation: u64,
+        pub entry_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionInstructionTarget {
+        pub session_id: SessionId,
+        pub revision: std::collections::BTreeMap<String, u64>,
+        pub effect: std::collections::BTreeMap<String, InstructionEffect>,
+        pub digest: std::collections::BTreeMap<String, String>,
+        pub bytes: std::collections::BTreeMap<String, u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionInstructionEffective {
+        pub session_id: SessionId,
+        pub revision: std::collections::BTreeMap<String, u64>,
+        pub effect: std::collections::BTreeMap<String, InstructionEffect>,
+        pub digest: std::collections::BTreeMap<String, String>,
+        pub bytes: std::collections::BTreeMap<String, u64>,
+        pub generation: u64,
+        pub last_entry_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordInstructionTarget {
+        pub session_id: SessionId,
+        pub mob_id: String,
+        pub generation: u64,
+        pub revision: std::collections::BTreeMap<String, u64>,
+        pub effect: std::collections::BTreeMap<String, InstructionEffect>,
+        pub digest: std::collections::BTreeMap<String, String>,
+        pub bytes: std::collections::BTreeMap<String, u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetSessionInstruction {
+        pub session_id: SessionId,
+        pub slot: String,
+        pub revision: u64,
+        pub effect: InstructionEffect,
+        pub digest: String,
+        pub body_bytes: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RebindInstructionOwner {
+        pub session_id: SessionId,
+        pub owner: InstructionTargetOwner,
+        pub mob_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseInstructionTarget {
+        pub session_id: SessionId,
+        pub mob_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRunStartInstructions {
+        pub session_id: SessionId,
+        pub run_start: InstructionRunStart,
+        pub lowering: InstructionLowering,
+        pub transcript_is_system_prefix: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeInstructionFold {
+        pub session_id: SessionId,
+        pub at_run_start: bool,
+        pub lowering: InstructionLowering,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2506,6 +3036,15 @@ pub enum Input {
     RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
     ReviveArchivedSessionDocument(inputs::ReviveArchivedSessionDocument),
     ArchiveSessionDocument(inputs::ArchiveSessionDocument),
+    RecoverSessionInstructionState(inputs::RecoverSessionInstructionState),
+    RecoverSessionInstructionTarget(inputs::RecoverSessionInstructionTarget),
+    RecoverSessionInstructionEffective(inputs::RecoverSessionInstructionEffective),
+    RecordInstructionTarget(inputs::RecordInstructionTarget),
+    SetSessionInstruction(inputs::SetSessionInstruction),
+    RebindInstructionOwner(inputs::RebindInstructionOwner),
+    ReleaseInstructionTarget(inputs::ReleaseInstructionTarget),
+    ResolveRunStartInstructions(inputs::ResolveRunStartInstructions),
+    AuthorizeInstructionFold(inputs::AuthorizeInstructionFold),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -2611,6 +3150,17 @@ impl Input {
             Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
             Self::ReviveArchivedSessionDocument(_) => InputKind::ReviveArchivedSessionDocument,
             Self::ArchiveSessionDocument(_) => InputKind::ArchiveSessionDocument,
+            Self::RecoverSessionInstructionState(_) => InputKind::RecoverSessionInstructionState,
+            Self::RecoverSessionInstructionTarget(_) => InputKind::RecoverSessionInstructionTarget,
+            Self::RecoverSessionInstructionEffective(_) => {
+                InputKind::RecoverSessionInstructionEffective
+            }
+            Self::RecordInstructionTarget(_) => InputKind::RecordInstructionTarget,
+            Self::SetSessionInstruction(_) => InputKind::SetSessionInstruction,
+            Self::RebindInstructionOwner(_) => InputKind::RebindInstructionOwner,
+            Self::ReleaseInstructionTarget(_) => InputKind::ReleaseInstructionTarget,
+            Self::ResolveRunStartInstructions(_) => InputKind::ResolveRunStartInstructions,
+            Self::AuthorizeInstructionFold(_) => InputKind::AuthorizeInstructionFold,
         }
     }
 }
@@ -2667,6 +3217,15 @@ pub enum InputKind {
     RecoverSessionLifecycleTerminal,
     ReviveArchivedSessionDocument,
     ArchiveSessionDocument,
+    RecoverSessionInstructionState,
+    RecoverSessionInstructionTarget,
+    RecoverSessionInstructionEffective,
+    RecordInstructionTarget,
+    SetSessionInstruction,
+    RebindInstructionOwner,
+    ReleaseInstructionTarget,
+    ResolveRunStartInstructions,
+    AuthorizeInstructionFold,
 }
 
 pub mod effects {
@@ -2921,6 +3480,42 @@ pub mod effects {
         pub write_document: bool,
         pub retire_runtime: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionInstructionStateRecovered {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionTargetRecorded {
+        pub generation: u64,
+        pub outcome: InstructionWriteOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionTargetRefused {
+        pub refusal: InstructionWriteRefusal,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionOwnerRebound {
+        pub owner: InstructionTargetOwner,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionTargetReleased {
+        pub was_owned: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionEntryAuthorized {
+        pub entry_sequence: u64,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionEntryNotNeeded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionApplicationDeferred {
+        pub reason: InstructionDeferReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InstructionFoldAuthorized {
+        pub entry_sequence: u64,
+        pub source: InstructionFoldSource,
+        pub generation: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2972,6 +3567,15 @@ pub enum Effect {
     SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
     SessionRevivalResolved(effects::SessionRevivalResolved),
     SessionArchiveResolved(effects::SessionArchiveResolved),
+    SessionInstructionStateRecovered(effects::SessionInstructionStateRecovered),
+    InstructionTargetRecorded(effects::InstructionTargetRecorded),
+    InstructionTargetRefused(effects::InstructionTargetRefused),
+    InstructionOwnerRebound(effects::InstructionOwnerRebound),
+    InstructionTargetReleased(effects::InstructionTargetReleased),
+    InstructionEntryAuthorized(effects::InstructionEntryAuthorized),
+    InstructionEntryNotNeeded(effects::InstructionEntryNotNeeded),
+    InstructionApplicationDeferred(effects::InstructionApplicationDeferred),
+    InstructionFoldAuthorized(effects::InstructionFoldAuthorized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -3018,6 +3622,15 @@ pub enum EffectKind {
     SessionLifecycleTerminalRecovered,
     SessionRevivalResolved,
     SessionArchiveResolved,
+    SessionInstructionStateRecovered,
+    InstructionTargetRecorded,
+    InstructionTargetRefused,
+    InstructionOwnerRebound,
+    InstructionTargetReleased,
+    InstructionEntryAuthorized,
+    InstructionEntryNotNeeded,
+    InstructionApplicationDeferred,
+    InstructionFoldAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -3139,6 +3752,36 @@ pub enum TransitionId {
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,
+    RecoverSessionInstructionState,
+    RecoverSessionInstructionTarget,
+    RecoverSessionInstructionEffective,
+    RecordInstructionTargetAdvance,
+    RecordInstructionTargetActiveBudgetExceeded,
+    RecordInstructionTargetSlotLimitExceeded,
+    RecordInstructionTargetAlreadyRecorded,
+    RecordInstructionTargetOwnedBySession,
+    RecordInstructionTargetOwnedByOtherMob,
+    SetSessionInstructionNew,
+    SetSessionInstructionAdvance,
+    SetSessionInstructionActiveBudgetExceeded,
+    SetSessionInstructionDuplicate,
+    SetSessionInstructionConflict,
+    SetSessionInstructionStale,
+    SetSessionInstructionOwnedByMob,
+    SetSessionInstructionSlotLimitExceeded,
+    SetSessionInstructionUnknownSlot,
+    RebindInstructionOwner,
+    RebindInstructionOwnerUnowned,
+    ReleaseInstructionTarget,
+    ReleaseInstructionTargetAlreadyUnowned,
+    ReleaseInstructionTargetOwnedByOtherMob,
+    ReleaseInstructionTargetOwnedBySession,
+    ResolveRunStartInstructionsApply,
+    ResolveRunStartInstructionsNoChange,
+    ResolveRunStartInstructionsDeferredLeadingPrefix,
+    ResolveRunStartInstructionsDeferredUnavailable,
+    AuthorizeInstructionFoldAtRunStart,
+    AuthorizeInstructionFoldEffective,
     ClassifyDurableTailContinuable,
 }
 #[allow(non_camel_case_types)]
@@ -3228,5 +3871,18 @@ pub fn initial_state() -> State {
         session_live_assistant_terminal_observation: Default::default(),
         session_live_assistant_terminal_prefix_chars: Default::default(),
         session_live_assistant_terminal_prefix_digest: Default::default(),
+        session_instruction_owner: Default::default(),
+        session_instruction_owner_mob: Default::default(),
+        session_instruction_target_generation: Default::default(),
+        session_instruction_target_revision: Default::default(),
+        session_instruction_target_effect: Default::default(),
+        session_instruction_target_digest: Default::default(),
+        session_instruction_target_bytes: Default::default(),
+        session_instruction_effective_revision: Default::default(),
+        session_instruction_effective_effect: Default::default(),
+        session_instruction_effective_digest: Default::default(),
+        session_instruction_effective_bytes: Default::default(),
+        session_instruction_effective_generation: Default::default(),
+        session_instruction_entry_sequence: Default::default(),
     }
 }

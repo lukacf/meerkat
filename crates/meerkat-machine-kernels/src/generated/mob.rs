@@ -635,6 +635,58 @@ impl std::fmt::Display for AgentRuntimeId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ArchivedSessionForgetReason {
+    #[default]
+    #[serde(rename = "SessionAbsent")]
+    SessionAbsent,
+    #[serde(rename = "FreshLifeRequested")]
+    FreshLifeRequested,
+}
+impl ArchivedSessionForgetReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SessionAbsent => "SessionAbsent",
+            Self::FreshLifeRequested => "FreshLifeRequested",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ArchivedSessionForgetReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SessionAbsent" => Ok(Self::SessionAbsent),
+            "FreshLifeRequested" => Ok(Self::FreshLifeRequested),
+            other => Err(format!(
+                "invalid ArchivedSessionForgetReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ArchivedSessionForgetReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ArchivedSessionForgetReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AutonomousShutdownMemberActionKind {
     #[default]
     #[serde(rename = "Interrupt")]
@@ -1043,6 +1095,114 @@ impl std::fmt::Display for CoordinationResourceRef {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DeclaredApplyOpenVerdict {
+    #[default]
+    #[serde(rename = "Opened")]
+    Opened,
+    #[serde(rename = "Busy")]
+    Busy,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl DeclaredApplyOpenVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Opened => "Opened",
+            Self::Busy => "Busy",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeclaredApplyOpenVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Opened" => Ok(Self::Opened),
+            "Busy" => Ok(Self::Busy),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid DeclaredApplyOpenVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeclaredApplyOpenVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeclaredApplyOpenVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeclaredRosterSealVerdict {
+    #[default]
+    #[serde(rename = "Sealed")]
+    Sealed,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl DeclaredRosterSealVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sealed => "Sealed",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeclaredRosterSealVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Sealed" => Ok(Self::Sealed),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid DeclaredRosterSealVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeclaredRosterSealVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeclaredRosterSealVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DependencyMode {
     #[default]
     #[serde(rename = "All")]
@@ -1075,6 +1235,60 @@ impl std::convert::TryFrom<String> for DependencyMode {
     }
 }
 impl std::fmt::Display for DependencyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum EntryPlacementKind {
+    #[default]
+    #[serde(rename = "Local")]
+    Local,
+    #[serde(rename = "Placed")]
+    Placed,
+    #[serde(rename = "External")]
+    External,
+}
+impl EntryPlacementKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Placed => "Placed",
+            Self::External => "External",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for EntryPlacementKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Local" => Ok(Self::Local),
+            "Placed" => Ok(Self::Placed),
+            "External" => Ok(Self::External),
+            other => Err(format!("invalid EntryPlacementKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for EntryPlacementKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for EntryPlacementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1209,6 +1423,60 @@ impl From<u64> for FenceToken {
 impl std::fmt::Display for FenceToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FirstBootRequestKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Resume")]
+    Resume,
+    #[serde(rename = "Fresh")]
+    Fresh,
+}
+impl FirstBootRequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Resume => "Resume",
+            Self::Fresh => "Fresh",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FirstBootRequestKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Resume" => Ok(Self::Resume),
+            "Fresh" => Ok(Self::Fresh),
+            other => Err(format!("invalid FirstBootRequestKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FirstBootRequestKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FirstBootRequestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -1964,6 +2232,60 @@ pub type HostId = meerkat_machine_schema::catalog::dsl::mob_machine::HostId;
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum HostPreparationCause {
+    #[default]
+    #[serde(rename = "FirstBootRow")]
+    FirstBootRow,
+    #[serde(rename = "RoleMigrationUndeclared")]
+    RoleMigrationUndeclared,
+    #[serde(rename = "BuildPreparationRetry")]
+    BuildPreparationRetry,
+}
+impl HostPreparationCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FirstBootRow => "FirstBootRow",
+            Self::RoleMigrationUndeclared => "RoleMigrationUndeclared",
+            Self::BuildPreparationRetry => "BuildPreparationRetry",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for HostPreparationCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FirstBootRow" => Ok(Self::FirstBootRow),
+            "RoleMigrationUndeclared" => Ok(Self::RoleMigrationUndeclared),
+            "BuildPreparationRetry" => Ok(Self::BuildPreparationRetry),
+            other => Err(format!("invalid HostPreparationCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for HostPreparationCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for HostPreparationCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityAuthorityCondition {
     #[default]
     #[serde(rename = "Unavailable")]
@@ -2060,6 +2382,100 @@ impl std::convert::TryFrom<String> for IdentityEntryOrigin {
     }
 }
 impl std::fmt::Display for IdentityEntryOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityEntryVerdict {
+    #[default]
+    #[serde(rename = "Kept")]
+    Kept,
+    #[serde(rename = "SeatOwed")]
+    SeatOwed,
+    #[serde(rename = "HostedOnFirstUse")]
+    HostedOnFirstUse,
+    #[serde(rename = "AwaitHeldCreation")]
+    AwaitHeldCreation,
+    #[serde(rename = "RuntimeModeRestamp")]
+    RuntimeModeRestamp,
+    #[serde(rename = "RoleMigrate")]
+    RoleMigrate,
+    #[serde(rename = "RoleRotate")]
+    RoleRotate,
+    #[serde(rename = "RoleMigrationHeld")]
+    RoleMigrationHeld,
+    #[serde(rename = "LifecycleInFlight")]
+    LifecycleInFlight,
+    #[serde(rename = "RefusedNameHeldByWorker")]
+    RefusedNameHeldByWorker,
+    #[serde(rename = "RefusedHostAdopted")]
+    RefusedHostAdopted,
+    #[serde(rename = "RefusedNonAuthoritative")]
+    RefusedNonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityEntryVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Kept => "Kept",
+            Self::SeatOwed => "SeatOwed",
+            Self::HostedOnFirstUse => "HostedOnFirstUse",
+            Self::AwaitHeldCreation => "AwaitHeldCreation",
+            Self::RuntimeModeRestamp => "RuntimeModeRestamp",
+            Self::RoleMigrate => "RoleMigrate",
+            Self::RoleRotate => "RoleRotate",
+            Self::RoleMigrationHeld => "RoleMigrationHeld",
+            Self::LifecycleInFlight => "LifecycleInFlight",
+            Self::RefusedNameHeldByWorker => "RefusedNameHeldByWorker",
+            Self::RefusedHostAdopted => "RefusedHostAdopted",
+            Self::RefusedNonAuthoritative => "RefusedNonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityEntryVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Kept" => Ok(Self::Kept),
+            "SeatOwed" => Ok(Self::SeatOwed),
+            "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
+            "AwaitHeldCreation" => Ok(Self::AwaitHeldCreation),
+            "RuntimeModeRestamp" => Ok(Self::RuntimeModeRestamp),
+            "RoleMigrate" => Ok(Self::RoleMigrate),
+            "RoleRotate" => Ok(Self::RoleRotate),
+            "RoleMigrationHeld" => Ok(Self::RoleMigrationHeld),
+            "LifecycleInFlight" => Ok(Self::LifecycleInFlight),
+            "RefusedNameHeldByWorker" => Ok(Self::RefusedNameHeldByWorker),
+            "RefusedHostAdopted" => Ok(Self::RefusedHostAdopted),
+            "RefusedNonAuthoritative" => Ok(Self::RefusedNonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityEntryVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityEntryVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityEntryVerdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7700,6 +8116,60 @@ impl std::fmt::Display for TurnTimeoutDisposition {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UnseatedEntryCause {
+    #[default]
+    #[serde(rename = "SeatOwed")]
+    SeatOwed,
+    #[serde(rename = "HostedOnFirstUse")]
+    HostedOnFirstUse,
+    #[serde(rename = "HeldCreation")]
+    HeldCreation,
+}
+impl UnseatedEntryCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SeatOwed => "SeatOwed",
+            Self::HostedOnFirstUse => "HostedOnFirstUse",
+            Self::HeldCreation => "HeldCreation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for UnseatedEntryCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SeatOwed" => Ok(Self::SeatOwed),
+            "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
+            "HeldCreation" => Ok(Self::HeldCreation),
+            other => Err(format!("invalid UnseatedEntryCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for UnseatedEntryCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for UnseatedEntryCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -8326,7 +8796,8 @@ pub struct State {
         std::collections::BTreeMap<AgentIdentity, MemberBootObligationCause>,
     pub member_restore_policy: MemberRestorePolicyKind,
     pub composition_authority: CompositionAuthorityKind,
-    pub member_host_preparation_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub member_host_preparation_causes:
+        std::collections::BTreeMap<AgentIdentity, HostPreparationCause>,
     pub boot_plan_sealed: bool,
     pub member_rotation_session_ids: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub member_rotation_peer_endpoints:
@@ -8340,6 +8811,10 @@ pub struct State {
     pub identity_entry_origins: std::collections::BTreeMap<AgentIdentity, IdentityEntryOrigin>,
     pub spawn_exec_entry_custody: std::collections::BTreeSet<AgentIdentity>,
     pub member_rotation_targets: std::collections::BTreeMap<AgentIdentity, RotationTarget>,
+    pub identity_entry_unseated: std::collections::BTreeMap<AgentIdentity, UnseatedEntryCause>,
+    pub identity_entry_retiring: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_archived_sessions: std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub declared_apply_open: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -9817,6 +10292,35 @@ pub mod inputs {
     pub struct ResolveAgentLaneMemberAdmission {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclareIdentityEntry {
+        pub agent_identity: AgentIdentity,
+        pub profile_name: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub placement: EntryPlacementKind,
+        pub held_creation: bool,
+        pub declared_migration_from: Option<String>,
+        pub intent_managed: bool,
+        pub session_memory_only: bool,
+        pub resume_session_role: Option<String>,
+        pub first_boot: FirstBootRequestKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SealDeclaredRoster {
+        pub desired: std::collections::BTreeSet<AgentIdentity>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ForgetArchivedSession {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub reason: ArchivedSessionForgetReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpenDeclaredApply {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseDeclaredApply {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitReset {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10059,6 +10563,12 @@ pub enum Input {
     ClassifyMemberRelease(inputs::ClassifyMemberRelease),
     AdoptLegacyIdentityEntry(inputs::AdoptLegacyIdentityEntry),
     ResolveAgentLaneMemberAdmission(inputs::ResolveAgentLaneMemberAdmission),
+    DeclareIdentityEntry(inputs::DeclareIdentityEntry),
+    SealDeclaredRoster(inputs::SealDeclaredRoster),
+    ForgetArchivedSession(inputs::ForgetArchivedSession),
+    OpenDeclaredApply(inputs::OpenDeclaredApply),
+    CloseDeclaredApply(inputs::CloseDeclaredApply),
+    AdmitReset(inputs::AdmitReset),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -10377,6 +10887,12 @@ impl Input {
             Self::ClassifyMemberRelease(_) => InputKind::ClassifyMemberRelease,
             Self::AdoptLegacyIdentityEntry(_) => InputKind::AdoptLegacyIdentityEntry,
             Self::ResolveAgentLaneMemberAdmission(_) => InputKind::ResolveAgentLaneMemberAdmission,
+            Self::DeclareIdentityEntry(_) => InputKind::DeclareIdentityEntry,
+            Self::SealDeclaredRoster(_) => InputKind::SealDeclaredRoster,
+            Self::ForgetArchivedSession(_) => InputKind::ForgetArchivedSession,
+            Self::OpenDeclaredApply(_) => InputKind::OpenDeclaredApply,
+            Self::CloseDeclaredApply(_) => InputKind::CloseDeclaredApply,
+            Self::AdmitReset(_) => InputKind::AdmitReset,
         }
     }
 }
@@ -10612,6 +11128,12 @@ pub enum InputKind {
     ClassifyMemberRelease,
     AdoptLegacyIdentityEntry,
     ResolveAgentLaneMemberAdmission,
+    DeclareIdentityEntry,
+    SealDeclaredRoster,
+    ForgetArchivedSession,
+    OpenDeclaredApply,
+    CloseDeclaredApply,
+    AdmitReset,
 }
 
 pub mod signals {
@@ -10780,6 +11302,8 @@ pub mod signals {
         pub generation: Generation,
         pub preserve_machine_topology: bool,
         pub preservation_started: bool,
+        pub session_archived: bool,
+        pub hosted_incarnation: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConvergeRecoveredRosterTopology {
@@ -11110,6 +11634,11 @@ pub mod signals {
         pub session_id: SessionId,
         pub peer_endpoint: Option<MemberPeerEndpoint>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityEntryRetiring {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11205,6 +11734,7 @@ pub enum Signal {
     ExemptMemberFromDefinitionWiring(signals::ExemptMemberFromDefinitionWiring),
     RecoverIdentityEntry(signals::RecoverIdentityEntry),
     RecoverMemberRotationIntent(signals::RecoverMemberRotationIntent),
+    RecoverIdentityEntryRetiring(signals::RecoverIdentityEntryRetiring),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -11334,6 +11864,7 @@ impl Signal {
             }
             Self::RecoverIdentityEntry(_) => SignalKind::RecoverIdentityEntry,
             Self::RecoverMemberRotationIntent(_) => SignalKind::RecoverMemberRotationIntent,
+            Self::RecoverIdentityEntryRetiring(_) => SignalKind::RecoverIdentityEntryRetiring,
         }
     }
 }
@@ -11428,6 +11959,7 @@ pub enum SignalKind {
     ExemptMemberFromDefinitionWiring,
     RecoverIdentityEntry,
     RecoverMemberRotationIntent,
+    RecoverIdentityEntryRetiring,
 }
 
 pub mod effects {
@@ -12395,6 +12927,31 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub reason: RespawnRefusalReason,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEntryDeclared {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityEntryVerdict,
+        pub archived_session: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclaredRosterSealed {
+        pub verdict: DeclaredRosterSealVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ArchivedSessionForgotten {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub reason: ArchivedSessionForgetReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExplicitResumeMemberHeld {
+        pub agent_identity: AgentIdentity,
+        pub cause: HostPreparationCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclaredApplyOpenResolved {
+        pub verdict: DeclaredApplyOpenVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12574,6 +13131,11 @@ pub enum Effect {
     LegacyIdentityEntryAdoptionResolved(effects::LegacyIdentityEntryAdoptionResolved),
     AgentLaneMemberAdmissionResolved(effects::AgentLaneMemberAdmissionResolved),
     RespawnRefused(effects::RespawnRefused),
+    IdentityEntryDeclared(effects::IdentityEntryDeclared),
+    DeclaredRosterSealed(effects::DeclaredRosterSealed),
+    ArchivedSessionForgotten(effects::ArchivedSessionForgotten),
+    ExplicitResumeMemberHeld(effects::ExplicitResumeMemberHeld),
+    DeclaredApplyOpenResolved(effects::DeclaredApplyOpenResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -12748,6 +13310,11 @@ pub enum EffectKind {
     LegacyIdentityEntryAdoptionResolved,
     AgentLaneMemberAdmissionResolved,
     RespawnRefused,
+    IdentityEntryDeclared,
+    DeclaredRosterSealed,
+    ArchivedSessionForgotten,
+    ExplicitResumeMemberHeld,
+    DeclaredApplyOpenResolved,
 }
 
 pub mod command_capabilities {
@@ -14500,6 +15067,43 @@ pub enum TransitionId {
     RespawnIdentityEntryRefusedRunning,
     RespawnIdentityEntryRefusedStopped,
     RespawnIdentityEntryRefusedCompleted,
+    DeclareIdentityEntryKept,
+    DeclareIdentityEntrySeatOwed,
+    DeclareIdentityEntryHostedOnFirstUse,
+    DeclareIdentityEntryAwaitHeldCreation,
+    DeclareIdentityEntryRuntimeModeRestamp,
+    DeclareIdentityEntryRoleMigrate,
+    DeclareIdentityEntryRoleRotate,
+    DeclareIdentityEntryRoleMigrationHeld,
+    DeclareIdentityEntryLifecycleInFlight,
+    DeclareIdentityEntryRefusedNameHeldByWorker,
+    DeclareIdentityEntryRefusedHostAdopted,
+    DeclareIdentityEntryRefusedNonAuthoritative,
+    DeclareIdentityEntryMobNotRunningStopped,
+    DeclareIdentityEntryMobNotRunningCompleted,
+    DeclareIdentityEntryMobNotRunningDestroyed,
+    SealDeclaredRosterSealed,
+    SealDeclaredRosterNonAuthoritative,
+    SealDeclaredRosterMobNotRunningStopped,
+    SealDeclaredRosterMobNotRunningCompleted,
+    SealDeclaredRosterMobNotRunningDestroyed,
+    RecoverIdentityEntryRetiringMarkedRunning,
+    ForgetArchivedSession,
+    AuthorizeExplicitResumeMemberHeldRunning,
+    RecoverIdentityEntryRetiringStaleRunning,
+    OpenDeclaredApplyOpened,
+    OpenDeclaredApplyBusy,
+    OpenDeclaredApplyMobNotRunningStopped,
+    OpenDeclaredApplyMobNotRunningCompleted,
+    OpenDeclaredApplyMobNotRunningDestroyed,
+    CloseDeclaredApplyRunning,
+    CloseDeclaredApplyStopped,
+    CloseDeclaredApplyCompleted,
+    CloseDeclaredApplyDestroyed,
+    AdmitResetRunning,
+    AdmitResetStopped,
+    AdmitResetCompleted,
+    AuthorizeExplicitResumeMemberHeldStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14864,7 +15468,7 @@ pub fn initial_state() -> State {
         member_boot_obligation_owed: Default::default(),
         member_restore_policy: MemberRestorePolicyKind::OnDemand,
         composition_authority: CompositionAuthorityKind::Authoritative,
-        member_host_preparation_pending: Default::default(),
+        member_host_preparation_causes: Default::default(),
         boot_plan_sealed: false,
         member_rotation_session_ids: Default::default(),
         member_rotation_peer_endpoints: Default::default(),
@@ -14877,5 +15481,9 @@ pub fn initial_state() -> State {
         identity_entry_origins: Default::default(),
         spawn_exec_entry_custody: Default::default(),
         member_rotation_targets: Default::default(),
+        identity_entry_unseated: Default::default(),
+        identity_entry_retiring: Default::default(),
+        identity_entry_archived_sessions: Default::default(),
+        declared_apply_open: false,
     }
 }

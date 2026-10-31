@@ -10180,12 +10180,15 @@ pub enum RunStartHoldReason {
     MobStop,
     #[serde(rename = "ToolsNotPublished")]
     ToolsNotPublished,
+    #[serde(rename = "HostPreparation")]
+    HostPreparation,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
+            Self::HostPreparation => "HostPreparation",
         }
     }
 }
@@ -10195,6 +10198,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
         match value {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
+            "HostPreparation" => Ok(Self::HostPreparation),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -16783,6 +16787,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestUntilChangedSwitchTurn {
@@ -16794,6 +16799,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteUntilChangedSwitchTurnReconfigure {
@@ -23490,6 +23496,12 @@ pub enum TransitionId {
     SetModelRoutingBaselineAttached,
     SetModelRoutingBaselineRunning,
     SetModelRoutingBaselineRetired,
+    RequestFiniteSwitchTurnTranscriptUnsupportedIdle,
+    RequestFiniteSwitchTurnTranscriptUnsupportedAttached,
+    RequestFiniteSwitchTurnTranscriptUnsupportedRunning,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
     RequestFiniteSwitchTurnApprovalUnavailableIdle,
     RequestFiniteSwitchTurnApprovalUnavailableAttached,
     RequestFiniteSwitchTurnApprovalUnavailableRunning,

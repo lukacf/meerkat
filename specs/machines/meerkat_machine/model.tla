@@ -1757,7 +1757,7 @@ RegisterSessionIdle(arg_session_id, runtime_epoch_id, initial_run_start_holds) =
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_f06c2b07c76ffa48
 
 
@@ -1782,7 +1782,7 @@ RegisterSessionAttached(arg_session_id, runtime_epoch_id, initial_run_start_hold
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_f06c2b07c76ffa48
 
 
@@ -1807,7 +1807,7 @@ RegisterSessionRunning(arg_session_id, runtime_epoch_id, initial_run_start_holds
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_f06c2b07c76ffa48
 
 
@@ -1832,7 +1832,7 @@ RegisterSessionRetired(arg_session_id, runtime_epoch_id, initial_run_start_holds
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_f06c2b07c76ffa48
 
 
@@ -1843,7 +1843,7 @@ RegisterSessionIdempotentIdle(arg_session_id, runtime_epoch_id, initial_run_star
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_29e677f66e232b19
 
 
@@ -1854,7 +1854,7 @@ RegisterSessionIdempotentAttached(arg_session_id, runtime_epoch_id, initial_run_
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_29e677f66e232b19
 
 
@@ -1865,7 +1865,7 @@ RegisterSessionIdempotentRunning(arg_session_id, runtime_epoch_id, initial_run_s
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_29e677f66e232b19
 
 
@@ -1876,7 +1876,7 @@ RegisterSessionIdempotentRetired(arg_session_id, runtime_epoch_id, initial_run_s
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_29e677f66e232b19
 
 
@@ -1972,7 +1972,7 @@ RegisterSessionResumesStopped(arg_session_id, runtime_epoch_id, initial_run_star
     /\ active_runtime_epoch_id' = runtime_epoch_id
     /\ runtime_stop_deferred' = FALSE
     /\ registration_phase' = "Queuing"
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ live_media_health_requested_output_by_channel' = [x \in {} |-> None]
     /\ live_media_health_judged_channels' = {}
     /\ live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -2006,7 +2006,7 @@ RegisterSessionNewBindingFromStopped(arg_session_id, runtime_epoch_id, initial_r
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ live_media_health_requested_output_by_channel' = [x \in {} |-> None]
     /\ live_media_health_judged_channels' = {}
     /\ live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -3337,8 +3337,69 @@ SetModelRoutingBaselineRetired(baseline_model, realtime_capable) ==
     /\ UnchangedFrame_3c26bcb9228a7070
 
 
-RequestFiniteSwitchTurnApprovalUnavailableIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnTranscriptUnsupportedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestFiniteSwitchTurnTranscriptUnsupportedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Attached"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestFiniteSwitchTurnTranscriptUnsupportedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Running"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Idle"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Attached"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Running"
+    /\ ~(target_carries_transcript)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ model_routing_switch_terminal' = MapSet(model_routing_switch_terminal, request_id, "Denied")
+    /\ model_routing_switch_denials' = MapSet(model_routing_switch_denials, request_id, "CapabilityPolicy")
+    /\ UnchangedFrame_ad97b6eebc5b193c
+
+
+RequestFiniteSwitchTurnApprovalUnavailableIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
+    /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Idle"
@@ -3348,8 +3409,9 @@ RequestFiniteSwitchTurnApprovalUnavailableIdle(request_id, target_model, turns, 
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnApprovalUnavailableAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnApprovalUnavailableAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Attached"
@@ -3359,8 +3421,9 @@ RequestFiniteSwitchTurnApprovalUnavailableAttached(request_id, target_model, tur
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnApprovalUnavailableRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnApprovalUnavailableRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Running"
@@ -3370,8 +3433,9 @@ RequestFiniteSwitchTurnApprovalUnavailableRunning(request_id, target_model, turn
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnApprovalDeniedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnApprovalDeniedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Idle"
@@ -3384,8 +3448,9 @@ RequestFiniteSwitchTurnApprovalDeniedIdle(request_id, target_model, turns, targe
     /\ UnchangedFrame_cfebdeb807a2b794
 
 
-RequestFiniteSwitchTurnApprovalDeniedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnApprovalDeniedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Attached"
@@ -3398,8 +3463,9 @@ RequestFiniteSwitchTurnApprovalDeniedAttached(request_id, target_model, turns, t
     /\ UnchangedFrame_cfebdeb807a2b794
 
 
-RequestFiniteSwitchTurnApprovalDeniedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnApprovalDeniedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Running"
@@ -3412,8 +3478,9 @@ RequestFiniteSwitchTurnApprovalDeniedRunning(request_id, target_model, turns, ta
     /\ UnchangedFrame_cfebdeb807a2b794
 
 
-RequestFiniteSwitchTurnScopedConflictIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnScopedConflictIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (IF (model_routing_turn_override_id # None) THEN TRUE ELSE (IF (model_routing_operation_override_id # None) THEN TRUE ELSE (model_routing_pending_switch_request_id # None)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
@@ -3422,8 +3489,9 @@ RequestFiniteSwitchTurnScopedConflictIdle(request_id, target_model, turns, targe
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnScopedConflictAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnScopedConflictAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (IF (model_routing_turn_override_id # None) THEN TRUE ELSE (IF (model_routing_operation_override_id # None) THEN TRUE ELSE (model_routing_pending_switch_request_id # None)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
@@ -3432,8 +3500,9 @@ RequestFiniteSwitchTurnScopedConflictAttached(request_id, target_model, turns, t
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnScopedConflictRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnScopedConflictRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (IF (model_routing_turn_override_id # None) THEN TRUE ELSE (IF (model_routing_operation_override_id # None) THEN TRUE ELSE (model_routing_pending_switch_request_id # None)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -3442,8 +3511,9 @@ RequestFiniteSwitchTurnScopedConflictRunning(request_id, target_model, turns, ta
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestFiniteSwitchTurnAcceptedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnAcceptedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (turns > 0)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
@@ -3460,8 +3530,9 @@ RequestFiniteSwitchTurnAcceptedIdle(request_id, target_model, turns, target_real
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestFiniteSwitchTurnAcceptedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnAcceptedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (turns > 0)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
@@ -3478,8 +3549,9 @@ RequestFiniteSwitchTurnAcceptedAttached(request_id, target_model, turns, target_
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestFiniteSwitchTurnAcceptedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestFiniteSwitchTurnAcceptedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (turns > 0)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
@@ -3496,8 +3568,9 @@ RequestFiniteSwitchTurnAcceptedRunning(request_id, target_model, turns, target_r
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestUntilChangedSwitchTurnAcceptedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnAcceptedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
     /\ phase' = "Idle"
@@ -3512,8 +3585,9 @@ RequestUntilChangedSwitchTurnAcceptedIdle(request_id, target_model, target_realt
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestUntilChangedSwitchTurnAcceptedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnAcceptedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
     /\ phase' = "Attached"
@@ -3528,8 +3602,9 @@ RequestUntilChangedSwitchTurnAcceptedAttached(request_id, target_model, target_r
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestUntilChangedSwitchTurnAcceptedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnAcceptedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (IF ~(requires_approval) THEN TRUE ELSE (approval_available /\ ~(approval_denied)))
     /\ phase' = "Running"
@@ -3544,8 +3619,9 @@ RequestUntilChangedSwitchTurnAcceptedRunning(request_id, target_model, target_re
     /\ UnchangedFrame_ab3ea3689763802d
 
 
-RequestUntilChangedSwitchTurnApprovalUnavailableIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalUnavailableIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Idle"
@@ -3555,8 +3631,9 @@ RequestUntilChangedSwitchTurnApprovalUnavailableIdle(request_id, target_model, t
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestUntilChangedSwitchTurnApprovalUnavailableAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalUnavailableAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Attached"
@@ -3566,8 +3643,9 @@ RequestUntilChangedSwitchTurnApprovalUnavailableAttached(request_id, target_mode
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestUntilChangedSwitchTurnApprovalUnavailableRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalUnavailableRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (model_routing_baseline_model # None)
     /\ (requires_approval /\ ~(approval_available))
     /\ phase' = "Running"
@@ -3577,8 +3655,9 @@ RequestUntilChangedSwitchTurnApprovalUnavailableRunning(request_id, target_model
     /\ UnchangedFrame_ad97b6eebc5b193c
 
 
-RequestUntilChangedSwitchTurnApprovalDeniedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalDeniedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Idle"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Idle"
@@ -3591,8 +3670,9 @@ RequestUntilChangedSwitchTurnApprovalDeniedIdle(request_id, target_model, target
     /\ UnchangedFrame_cfebdeb807a2b794
 
 
-RequestUntilChangedSwitchTurnApprovalDeniedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalDeniedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Attached"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Attached"
@@ -3605,8 +3685,9 @@ RequestUntilChangedSwitchTurnApprovalDeniedAttached(request_id, target_model, ta
     /\ UnchangedFrame_cfebdeb807a2b794
 
 
-RequestUntilChangedSwitchTurnApprovalDeniedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed) ==
+RequestUntilChangedSwitchTurnApprovalDeniedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript) ==
     /\ phase = "Running"
+    /\ target_carries_transcript
     /\ (requires_approval /\ approval_available /\ approval_denied)
     /\ (approval_reason # None)
     /\ phase' = "Running"
@@ -38373,27 +38454,33 @@ Next ==
     \/ (phase = "Attached") /\ \E baseline_model \in StringValues : \E realtime_capable \in BOOLEAN : SetModelRoutingBaselineAttached(baseline_model, realtime_capable)
     \/ (phase = "Running") /\ \E baseline_model \in StringValues : \E realtime_capable \in BOOLEAN : SetModelRoutingBaselineRunning(baseline_model, realtime_capable)
     \/ (phase = "Retired") /\ \E baseline_model \in StringValues : \E realtime_capable \in BOOLEAN : SetModelRoutingBaselineRetired(baseline_model, realtime_capable)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableIdle(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableAttached(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableRunning(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedIdle(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedAttached(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedRunning(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableIdle(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableAttached(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableRunning(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedIdle(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedAttached(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
-    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedRunning(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnTranscriptUnsupportedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnTranscriptUnsupportedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnTranscriptUnsupportedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, FALSE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableIdle(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableAttached(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalUnavailableRunning(request_id, target_model, turns, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedIdle(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedAttached(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnApprovalDeniedRunning(request_id, target_model, turns, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnScopedConflictRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedIdle(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedAttached(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E turns \in 0..2 : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestFiniteSwitchTurnAcceptedRunning(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedIdle(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedAttached(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E requires_approval \in BOOLEAN : \E approval_available \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnAcceptedRunning(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableIdle(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableAttached(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_denied \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalUnavailableRunning(request_id, target_model, target_realtime_capable, TRUE, FALSE, approval_denied, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Idle") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedIdle(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Attached") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedAttached(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
+    \/ (phase = "Running") /\ \E request_id \in StringValues : \E target_model \in StringValues : \E target_realtime_capable \in BOOLEAN : \E approval_reason \in OptionRoutingSwitchApprovalReasonValues : \E realtime_detach_allowed \in BOOLEAN : RequestUntilChangedSwitchTurnApprovalDeniedRunning(request_id, target_model, target_realtime_capable, TRUE, TRUE, TRUE, approval_reason, realtime_detach_allowed, TRUE)
     \/ (phase = "Idle") /\ \E request_id \in StringValues : CompleteUntilChangedSwitchTurnReconfigureIdle(request_id)
     \/ (phase = "Attached") /\ \E request_id \in StringValues : CompleteUntilChangedSwitchTurnReconfigureAttached(request_id)
     \/ (phase = "Running") /\ \E request_id \in StringValues : CompleteUntilChangedSwitchTurnReconfigureRunning(request_id)

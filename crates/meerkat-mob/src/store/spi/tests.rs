@@ -971,11 +971,12 @@ async fn the_identity_write_fence_declares_the_hosts_longest_commit() {
 /// Every field the stored event codec keeps beyond the public event
 /// contract survives a reopen of the host store's mob storage: a member's
 /// bridge ref, placed spawn, identity intent digest, peer endpoint, direct
-/// fence and the rotation that seated it; a recovered binding's session and
-/// endpoint; a retirement's endpoint, topology mark and the rotation it
-/// carries out; a retired incarnation's session, cause, entry and rotation;
-/// an abandoned respawn's runtime and fence. A restarted mob rebuilds its
-/// roster and topology from them, and the journal read its facts.
+/// fence, the rotation that seated it and the session the read names for
+/// it; a recovered binding's session and endpoint; a retirement's endpoint,
+/// topology mark and the rotation it carries out; a retired incarnation's
+/// session, cause, entry and rotation; an abandoned respawn's runtime and
+/// fence. A restarted mob rebuilds its roster and topology from them, and
+/// the journal read its facts.
 ///
 /// RED (before the codec stores the journal read's facts): the reopen loses
 /// the seat's rotation and the retirement's facts.
@@ -1029,6 +1030,7 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
     spawned.seat_rotation = Some(crate::runtime::SeatRotation::fresh_life_after(
         Generation::new(7),
     ));
+    spawned.seat_session = Some(SessionId::new());
     let kinds = vec![
         MobEventKind::MemberSpawned(spawned),
         MobEventKind::MemberSessionBindingRecovered(

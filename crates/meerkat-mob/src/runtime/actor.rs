@@ -41206,7 +41206,12 @@ impl MobActor {
             .with_bridge_member_ref(Some(Self::sanitized_member_ref(&member_ref)))
             .with_placed_spawn_id(Some(remote.placed_spawn_id.clone()))
             .with_member_peer_endpoint(Some(member_peer_endpoint.clone()))
-            .with_direct_member_fence(ctx.direct_member_fence.clone());
+            .with_direct_member_fence(ctx.direct_member_fence.clone())
+            // The session the membership step's journal effect named (the
+            // ACK's, checked against the effect above): the placed row's
+            // member ref is the host peer's and carries none, so the row
+            // records it for the journal read.
+            .with_seat_session(Some(remote.ack.session_id.clone()));
             spawned.creation = creation.clone();
             spawned.runtime_mode = runtime_mode;
             spawned.labels = labels.clone();

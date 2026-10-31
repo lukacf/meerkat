@@ -233,10 +233,10 @@ impl<'de> Deserialize<'de> for MemberRef {
 // them. A stored `MemberRetired` may also carry the internal facts of the
 // member lifecycle journal read (`retired_session`, `retired_cause`,
 // `retired_entry`, `retired_rotation`), and a stored `MemberSpawned` the
-// internal `seat_rotation`; the replay reads none of them, and a reader that
-// predates them ignores them. A cause, a rotation or a seat rotation this
-// build cannot read decodes as none, and an entry origin it does not know
-// keeps its token.
+// internal `seat_rotation` and `seat_session`; the replay reads none of
+// them, and a reader that predates them ignores them. A cause, a rotation or
+// a seat rotation this build cannot read decodes as none, and an entry
+// origin it does not know keeps its token.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2217,6 +2217,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
     {
         kind.insert("seat_rotation".to_string(), seat_rotation.to_stored()?);
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(seat_session) = member_spawned.seat_session()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "seat_session".to_string(),
+            serde_json::to_value(seat_session)?,
+        );
+    }
     if let Some(facts) = event.kind.retired_facts()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -2540,6 +2549,20 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(crate::runtime::SeatRotation::from_stored)
         .transpose()?
         .flatten();
+    // The session a MemberSpawned row's seat effect named when its member
+    // ref carries none (a placed member's), for the journal read only: a
+    // form this build cannot read reads as absent.
+    let spawned_seat_session = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_session")
+            } else {
+                None
+            }
+        })
+        .and_then(|session| serde_json::from_value::<SessionId>(session).ok());
     let retired_facts = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2649,6 +2672,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.seat_rotation = Some(seat_rotation);
+    }
+    if let Some(seat_session) = spawned_seat_session
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.seat_session = Some(seat_session);
     }
     if let Some(facts) = retired_facts
         && let Some(stored) = event.kind.retired_facts_mut()

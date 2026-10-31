@@ -1061,11 +1061,14 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             role: spawned.role.clone(),
             identity_entry: spawned.identity_entry(),
             history_unavailable: spawned.history_unavailable().cloned(),
-            // The session the seat's journal effect named, which its row
-            // records as the member's binding.
+            // The session the seat's journal effect named: the member binding
+            // its row records, or, when the row's member ref carries none (a
+            // placed member's: the host peer's ref), the session the row
+            // records for the read.
             session_id: spawned
                 .bridge_member_ref()
                 .and_then(MemberRef::bridge_session_id)
+                .or_else(|| spawned.seat_session())
                 .cloned(),
             rotation: spawned.seat_rotation().cloned(),
         }),

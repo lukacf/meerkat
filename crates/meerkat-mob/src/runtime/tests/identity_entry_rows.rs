@@ -1304,8 +1304,8 @@ fn the_legacy_label_scans_see_a_planted_second_reader() {
 /// written, with the internal fields of identity entries absent (its decoder
 /// ignores the keys it does not know): the `identity_entry` fields, a seat's
 /// `history_unavailable` notice and a retirement start's `cause`, and the
-/// facts of the member lifecycle journal read (a seat's `seat_rotation`, a
-/// retirement's `retired_*` facts).
+/// facts of the member lifecycle journal read (a seat's `seat_rotation` and
+/// `seat_session`, a retirement's `retired_*` facts).
 pub(super) async fn predating_reader_journal(
     events: &Arc<dyn MobEventStore>,
     through: Option<u64>,
@@ -1328,6 +1328,7 @@ pub(super) async fn predating_reader_journal(
             spawned.identity_entry = None;
             spawned.history_unavailable = None;
             spawned.seat_rotation = None;
+            spawned.seat_session = None;
         }
         if let Some(facts) = event.kind.retired_facts_mut() {
             *facts = crate::event::MemberRetiredFacts::default();

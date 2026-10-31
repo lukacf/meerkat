@@ -3568,7 +3568,10 @@ fn repaired_placed_spawn_event(
         bootstrap_token: None,
         session_id: None,
     }))
-    .with_placed_spawn_id(Some(record.spawn_id.clone()));
+    .with_placed_spawn_id(Some(record.spawn_id.clone()))
+    // The session the committed membership step named (the host's ACK, as
+    // the carrier records it), for the journal read: the ref carries none.
+    .with_seat_session(Some(committed.member_session_id.clone()));
     spawned.runtime_mode = domain_runtime_mode_from_portable(record.spec.profile.runtime_mode);
     spawned.labels = record.spec.overlay.labels.clone().unwrap_or_default();
     spawned.effective_profile_override = record.rehydrated_effective_profile_override()?;

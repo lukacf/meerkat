@@ -283,13 +283,14 @@ pub use meerkat_core::{
     CompactionCurator, CompactionCuratorError, CompactionWindow, CuratedCompactionSummary,
 };
 pub use meerkat_core::{
-    RetainedTranscriptRevisionRows, SessionTranscriptRestoreRevisionRequest,
-    SessionTranscriptRevisionList, SessionTranscriptRevisionListEntry,
-    SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
-    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
-    SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
-    TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
-    TranscriptRewriteSemantic,
+    RetainedTranscriptRevisionRows, SYSTEM_ROW_PRUNE_REASON_KIND,
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
+    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    SessionTranscriptRewriteResult, SystemRowPruneCommit, SystemRowPruneRefusal,
+    SystemRowPruneRequest, SystemRowPruneResult, SystemRowRef, TranscriptEditRunningBehavior,
+    TranscriptRewriteCommit, TranscriptRewriteReason, TranscriptRewriteRecord,
+    TranscriptRewriteSelection, TranscriptRewriteSemantic,
 };
 
 // Re-export client types

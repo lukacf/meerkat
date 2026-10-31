@@ -182,6 +182,26 @@ async fn boot_in_mode(
     Arc<dyn SessionBridge>,
     BTreeMap<AgentIdentity, RestoreOutcome>,
 ) {
+    boot_with_bridge(state_path, definition, roster, topology, mode, |bridge| {
+        Arc::new(bridge) as Arc<dyn SessionBridge>
+    })
+    .await
+}
+
+/// [`boot_in_mode`] with the identity runtime's session bridge made from the
+/// mob's own by `bridge_of`.
+async fn boot_with_bridge(
+    state_path: &std::path::Path,
+    definition: MobDefinition,
+    roster: &[DurableAgentSpec],
+    topology: Option<Arc<dyn TopologyProvider>>,
+    mode: IdentityBootstrapMode,
+    bridge_of: impl FnOnce(MobSessionBridge) -> Arc<dyn SessionBridge>,
+) -> (
+    meerkat_meta::UnifiedRuntime,
+    Arc<dyn SessionBridge>,
+    BTreeMap<AgentIdentity, RestoreOutcome>,
+) {
     std::fs::create_dir_all(state_path).expect("state root");
     let (storage, provenance) = persistent_mob_storage(state_path.join("mob.sqlite3"))
         .expect("open persistent mob storage");
@@ -217,7 +237,7 @@ async fn boot_in_mode(
     )
     .await
     .expect("bootstrap the UnifiedRuntime");
-    let bridge: Arc<dyn SessionBridge> = Arc::new(MobSessionBridge::with_session_service(
+    let bridge: Arc<dyn SessionBridge> = bridge_of(MobSessionBridge::with_session_service(
         unified.mob_handle(),
         unified
             .mob_runtime()
@@ -453,6 +473,142 @@ async fn a_reset_identity_keeps_its_managed_edges_with_no_roster_refresh() {
         roster_identity_edges(&unified).await,
         BTreeSet::from([pair(&lead, &member)]),
         "the reset wires the identity's managed edge again, with no roster refresh"
+    );
+    unified.shutdown().await;
+}
+
+/// A respawn retires the identity's member, and Core's retirement ends every
+/// edge of the member it retires, as a reset's rotation does. The respawn
+/// wires the identity's managed edges again itself: right after it, with no
+/// roster refresh, Core's roster holds the edge for the respawned member.
+/// The member is built before the respawn, so the respawn revives it on its
+/// archived session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawned_identity_keeps_its_managed_edges_with_no_roster_refresh() {
+    let mob_id = next_mob_id("edge-respawn");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state_path = temp.path().join("state");
+    let lead = id("identity:lead-1");
+    let member = id("identity:member-1");
+    let roster = vec![spec("identity:lead-1"), spec("identity:member-1")];
+    let topology = Arc::new(TeamTopology {
+        edges: Mutex::new(vec![
+            ManagedPeerEdge::new(lead.clone(), member.clone()).unwrap(),
+        ]),
+    });
+    let (unified, _bridge, _outcomes) = boot_in_mode(
+        &state_path,
+        definition(&mob_id),
+        &roster,
+        Some(topology as Arc<dyn TopologyProvider>),
+        IdentityBootstrapMode::EagerMaterialize,
+    )
+    .await;
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the boot wires the declared edge"
+    );
+
+    let identity_runtime = unified.identity_runtime().expect("identity runtime");
+    identity_runtime
+        .materialize(&member)
+        .await
+        .expect("build the member");
+    let before = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    identity_runtime
+        .respawn(&member)
+        .await
+        .expect("respawn the member");
+    let after = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    assert_ne!(
+        before, after,
+        "the respawn moved the member to a new generation"
+    );
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the respawn wires the identity's managed edge again, with no roster refresh"
+    );
+    unified.shutdown().await;
+}
+
+/// `meta/reload_member` through a bridge without Core's registration reload
+/// (a host bridge that does not implement it) falls back to retiring the
+/// member and waking it onto the same session, and Core's retirement ends
+/// every edge of the member it retires. The reload wires the identity's
+/// managed edges again itself, as a respawn does: right after it, with no
+/// roster refresh, Core's roster holds the edge for the reloaded member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reloaded_identity_keeps_its_managed_edges_with_no_roster_refresh() {
+    let mob_id = next_mob_id("edge-reload");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state_path = temp.path().join("state");
+    let lead = id("identity:lead-1");
+    let member = id("identity:member-1");
+    let roster = vec![spec("identity:lead-1"), spec("identity:member-1")];
+    let topology = Arc::new(TeamTopology {
+        edges: Mutex::new(vec![
+            ManagedPeerEdge::new(lead.clone(), member.clone()).unwrap(),
+        ]),
+    });
+    let (unified, _bridge, _outcomes) = boot_with_bridge(
+        &state_path,
+        definition(&mob_id),
+        &roster,
+        Some(topology as Arc<dyn TopologyProvider>),
+        IdentityBootstrapMode::EagerMaterialize,
+        |bridge| {
+            Arc::new(no_registration_reload::NoRegistrationReloadBridge { inner: bridge })
+                as Arc<dyn SessionBridge>
+        },
+    )
+    .await;
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the boot wires the declared edge"
+    );
+
+    let identity_runtime = unified.identity_runtime().expect("identity runtime");
+    identity_runtime
+        .materialize(&member)
+        .await
+        .expect("build the member");
+    let before = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    let outcome = identity_runtime
+        .reload_member(&member)
+        .await
+        .expect("reload the member");
+    assert!(
+        outcome.reloaded,
+        "the fallback retires the member and wakes it: {outcome:?}"
+    );
+    let after = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    assert_ne!(
+        before, after,
+        "the fallback's retire and wake moved the member to a new generation"
+    );
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the reload wires the identity's managed edge again, with no roster refresh"
     );
     unified.shutdown().await;
 }
@@ -917,4 +1073,578 @@ async fn a_managed_edge_between_unmaterialized_identities_is_unwired_once_droppe
         "Core's roster holds only the kept edge"
     );
     unified.shutdown().await;
+}
+
+mod no_registration_reload {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use meerkat_core::types::HandlingMode;
+    use meerkat_meta::actor_loop_health::ActorLoopHealth;
+    use meerkat_meta::identity_first::bridge::{DormantSeatRequest, DormantSeatResult};
+    use meerkat_meta::identity_first::*;
+    use meerkat_mob::ids::AgentIdentity as MobAgentIdentity;
+
+    /// The real mob session bridge without Core's registration reload, as a
+    /// host bridge that does not implement it answers: `meta/reload_member`
+    /// falls back to retiring the member and waking it onto the same
+    /// session. Every other method forwards to the real bridge, as the
+    /// crate's own exported bridge forwards them.
+    pub struct NoRegistrationReloadBridge {
+        pub inner: MobSessionBridge,
+    }
+
+    #[async_trait]
+    impl SessionBridge for NoRegistrationReloadBridge {
+        async fn raw_member_alias_exists(&self, alias: &str) -> Result<bool, BridgeError> {
+            self.inner.raw_member_alias_exists(alias).await
+        }
+
+        async fn raw_member_aliases(
+            &self,
+            aliases: &BTreeSet<String>,
+        ) -> Result<BTreeSet<String>, BridgeError> {
+            self.inner.raw_member_aliases(aliases).await
+        }
+
+        fn observe_actor_loop_health(&self, health: Arc<ActorLoopHealth>) {
+            self.inner.observe_actor_loop_health(health);
+        }
+
+        async fn reload_member_registration(
+            &self,
+            _runtime_id: &AgentRuntimeId,
+        ) -> Result<Option<BridgeMemberReload>, BridgeError> {
+            Ok(None)
+        }
+
+        async fn release_member_run_starts_for_published_tools(
+            &self,
+            member_id: &MobAgentIdentity,
+        ) -> Result<(), BridgeError> {
+            self.inner
+                .release_member_run_starts_for_published_tools(member_id)
+                .await
+        }
+
+        async fn member_durability(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Option<MemberDurability> {
+            self.inner.member_durability(session_id).await
+        }
+
+        async fn member_registration(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Option<meerkat_runtime::RuntimeSessionRegistrationWitness> {
+            self.inner.member_registration(session_id).await
+        }
+
+        async fn create_session(
+            &self,
+            identity: &AgentIdentity,
+            spec: &DurableAgentSpec,
+            draft: &AgentBuildDraft,
+        ) -> Result<MemberRuntimeBinding, BridgeError> {
+            self.inner.create_session(identity, spec, draft).await
+        }
+
+        async fn create_session_held(
+            &self,
+            identity: &AgentIdentity,
+            spec: &DurableAgentSpec,
+            draft: &AgentBuildDraft,
+            pass: &HeldCreatePass,
+        ) -> Result<MemberRuntimeBinding, BridgeError> {
+            self.inner
+                .create_session_held(identity, spec, draft, pass)
+                .await
+        }
+
+        async fn seat_dormant_members(
+            &self,
+            requests: Vec<DormantSeatRequest>,
+        ) -> Result<Vec<(AgentIdentity, DormantSeatResult)>, BridgeError> {
+            self.inner.seat_dormant_members(requests).await
+        }
+
+        async fn rotate_member(
+            &self,
+            identity: &AgentIdentity,
+            spec: &DurableAgentSpec,
+            draft: &AgentBuildDraft,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner.rotate_member(identity, spec, draft).await
+        }
+
+        async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
+            self.inner.release_member(identity).await
+        }
+
+        async fn capture_queued_member_inputs(
+            &self,
+            identity: &AgentIdentity,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<QueuedMemberInputs, BridgeError> {
+            self.inner
+                .capture_queued_member_inputs(identity, session_id)
+                .await
+        }
+
+        async fn readmit_queued_member_inputs(
+            &self,
+            identity: &AgentIdentity,
+            session_id: &meerkat_core::types::SessionId,
+            inputs: QueuedMemberInputs,
+        ) {
+            self.inner
+                .readmit_queued_member_inputs(identity, session_id, inputs)
+                .await;
+        }
+
+        async fn resume_session(
+            &self,
+            identity: &AgentIdentity,
+            spec: &DurableAgentSpec,
+            draft: &AgentBuildDraft,
+            session_id: &meerkat_core::types::SessionId,
+            resume_from_role: Option<&meerkat_mob::ProfileName>,
+        ) -> Result<ResumeSessionOutcome, BridgeError> {
+            self.inner
+                .resume_session(identity, spec, draft, session_id, resume_from_role)
+                .await
+        }
+
+        fn declared_role_migration(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Option<meerkat_mob::ProfileName> {
+            self.inner.declared_role_migration(identity)
+        }
+
+        async fn live_member(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
+            self.inner.live_member(identity).await
+        }
+
+        async fn live_member_scope(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<Option<meerkat_mob::MemberDeliveryScope>, BridgeError> {
+            self.inner.live_member_scope(identity).await
+        }
+
+        async fn ensure_member_live(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
+            self.inner.ensure_member_live(identity).await
+        }
+
+        async fn identity_convergence_status(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<
+            meerkat_mob::identity::IdentityStoredObservation<
+                meerkat_mob::identity::IdentityConvergenceStatus,
+            >,
+            BridgeError,
+        > {
+            self.inner.identity_convergence_status(identity).await
+        }
+
+        async fn identity_intent_present(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<Option<bool>, BridgeError> {
+            self.inner.identity_intent_present(identity).await
+        }
+
+        async fn member_binding_history(
+            &self,
+        ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
+            self.inner.member_binding_history().await
+        }
+
+        async fn last_member_binding(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<Option<meerkat_mob::MemberBinding>, BridgeError> {
+            self.inner.last_member_binding(identity).await
+        }
+
+        async fn identity_management(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
+            self.inner.identity_management(identity).await
+        }
+
+        async fn durable_identity_members(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MemberBinding>, BridgeError> {
+            self.inner.durable_identity_members().await
+        }
+
+        async fn identity_labelled_members(
+            &self,
+        ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
+            self.inner.identity_labelled_members().await
+        }
+
+        async fn broken_members(
+            &self,
+        ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
+            self.inner.broken_members().await
+        }
+
+        async fn durable_session_held(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<bool, BridgeError> {
+            self.inner.durable_session_held(session_id).await
+        }
+
+        async fn session_outlives_member(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<bool, BridgeError> {
+            self.inner.session_outlives_member(session_id).await
+        }
+
+        async fn deliver_admitted(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            delivery: BridgeDelivery,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner.deliver_admitted(runtime_id, delivery).await
+        }
+
+        async fn deliver_host_human_input(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            expected_session: &meerkat_core::SessionId,
+            delivery: BridgeDelivery,
+        ) -> Result<meerkat_core::SessionId, BridgeError> {
+            self.inner
+                .deliver_host_human_input(runtime_id, expected_session, delivery)
+                .await
+        }
+
+        async fn capture_member_delivery_scope(
+            &self,
+            runtime_id: &AgentRuntimeId,
+        ) -> Result<meerkat_mob::MemberDeliveryScope, ScopedDeliveryError> {
+            self.inner.capture_member_delivery_scope(runtime_id).await
+        }
+
+        async fn submit_at_scope(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            scope: &meerkat_mob::MemberDeliveryScope,
+            content: &meerkat_core::ContentInput,
+            handling_mode: HandlingMode,
+            delivery_identity: &meerkat_mob::MobDeliveryIdentity,
+        ) -> Result<meerkat_mob::WorkDeliveryReceipt, ScopedDeliveryError> {
+            self.inner
+                .submit_at_scope(runtime_id, scope, content, handling_mode, delivery_identity)
+                .await
+        }
+
+        async fn recover_at_scope(
+            &self,
+            scope: &meerkat_mob::MemberDeliveryScope,
+            delivery_identity: &meerkat_mob::MobDeliveryIdentity,
+            deadline: std::time::Instant,
+        ) -> Result<meerkat_mob::ScopedWorkRecovery, ScopedDeliveryError> {
+            self.inner
+                .recover_at_scope(scope, delivery_identity, deadline)
+                .await
+        }
+
+        async fn retire_at_scope(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            scope: &meerkat_mob::MemberDeliveryScope,
+        ) -> Result<(), ScopedRetireError> {
+            self.inner.retire_at_scope(runtime_id, scope).await
+        }
+
+        async fn deliver(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner.deliver(runtime_id, content).await
+        }
+
+        async fn deliver_with_mode(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+            handling_mode: HandlingMode,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner
+                .deliver_with_mode(runtime_id, content, handling_mode)
+                .await
+        }
+
+        async fn deliver_with_mode_and_context(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+            injected_context: &[meerkat_core::ContentInput],
+            handling_mode: HandlingMode,
+            interaction_id: Option<&str>,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner
+                .deliver_with_mode_and_context(
+                    runtime_id,
+                    content,
+                    injected_context,
+                    handling_mode,
+                    interaction_id,
+                )
+                .await
+        }
+
+        async fn deliver_awaiting_commit_with_mode_context_and_system_prompt(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+            system_prompt: Option<&str>,
+            injected_context: &[meerkat_core::ContentInput],
+            handling_mode: HandlingMode,
+            interaction_id: Option<&str>,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner
+                .deliver_awaiting_commit_with_mode_context_and_system_prompt(
+                    runtime_id,
+                    content,
+                    system_prompt,
+                    injected_context,
+                    handling_mode,
+                    interaction_id,
+                )
+                .await
+        }
+
+        async fn begin_awaiting_commit(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+            system_prompt: Option<&str>,
+            injected_context: &[meerkat_core::ContentInput],
+            handling_mode: HandlingMode,
+            interaction_id: Option<&str>,
+        ) -> Result<BridgeTurnReceipt, BridgeAdmissionError> {
+            self.inner
+                .begin_awaiting_commit(
+                    runtime_id,
+                    content,
+                    system_prompt,
+                    injected_context,
+                    handling_mode,
+                    interaction_id,
+                )
+                .await
+        }
+
+        fn tracks_turn_output(&self) -> bool {
+            self.inner.tracks_turn_output()
+        }
+
+        async fn begin_delivery_with_output(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            delivery: BridgeDelivery,
+        ) -> Result<BridgeTurnReceipt, BridgeAdmissionError> {
+            self.inner
+                .begin_delivery_with_output(runtime_id, delivery)
+                .await
+        }
+
+        async fn begin_governed_delivery(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+            input: meerkat_runtime::Input,
+            custody: GovernedDeliveryCustody,
+        ) -> Result<GovernedDelivery, BridgeAdmissionError> {
+            self.inner
+                .begin_governed_delivery(runtime_id, session_id, input, custody)
+                .await
+        }
+
+        async fn begin_internal_governed_delivery(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+            input: meerkat_runtime::Input,
+            custody: GovernedDeliveryCustody,
+        ) -> Result<GovernedDelivery, BridgeAdmissionError> {
+            self.inner
+                .begin_internal_governed_delivery(runtime_id, session_id, input, custody)
+                .await
+        }
+
+        async fn wake_for_governed_input(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<(), BridgeAdmissionError> {
+            self.inner.wake_for_governed_input(identity).await
+        }
+
+        async fn governed_controller(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<meerkat_core::ControllerModelClient, BridgeAdmissionError> {
+            self.inner.governed_controller(runtime_id, session_id).await
+        }
+
+        async fn attach_live_mcp_server(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            attachment: meerkat_core::mcp_attachment::LiveMcpAttachment,
+        ) -> Result<
+            meerkat_core::mcp_attachment::LiveMcpAttachmentReceipt,
+            meerkat_core::mcp_attachment::LiveMcpAttachError,
+        > {
+            self.inner
+                .attach_live_mcp_server(session_id, attachment)
+                .await
+        }
+
+        async fn deliver_with_mode_context_and_system_prompt(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            content: &meerkat_core::ContentInput,
+            system_prompt: Option<&str>,
+            injected_context: &[meerkat_core::ContentInput],
+            handling_mode: HandlingMode,
+            interaction_id: Option<&str>,
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+            self.inner
+                .deliver_with_mode_context_and_system_prompt(
+                    runtime_id,
+                    content,
+                    system_prompt,
+                    injected_context,
+                    handling_mode,
+                    interaction_id,
+                )
+                .await
+        }
+
+        async fn checkpoint_session(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<SessionSnapshot, BridgeError> {
+            self.inner.checkpoint_session(runtime_id, session_id).await
+        }
+
+        async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
+            self.inner.retire_member(runtime_id).await
+        }
+
+        async fn retire_reset_superseded_member(
+            &self,
+            runtime_id: &AgentRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<(), BridgeError> {
+            self.inner
+                .retire_reset_superseded_member(runtime_id, session_id)
+                .await
+        }
+
+        async fn wire_peer(
+            &self,
+            a: &AgentRuntimeId,
+            b: &AgentRuntimeId,
+        ) -> Result<(), BridgeError> {
+            self.inner.wire_peer(a, b).await
+        }
+
+        async fn wire_peers_batch(
+            &self,
+            edges: &[(AgentRuntimeId, AgentRuntimeId)],
+        ) -> Result<(), BridgeError> {
+            self.inner.wire_peers_batch(edges).await
+        }
+
+        async fn current_member_wires(
+            &self,
+        ) -> Result<Vec<(AgentRuntimeId, AgentRuntimeId)>, BridgeError> {
+            self.inner.current_member_wires().await
+        }
+
+        async fn current_member_wires_any_half(
+            &self,
+        ) -> Result<Vec<(AgentRuntimeId, AgentRuntimeId)>, BridgeError> {
+            self.inner.current_member_wires_any_half().await
+        }
+
+        async fn unwire_peer(
+            &self,
+            a: &AgentRuntimeId,
+            b: &AgentRuntimeId,
+        ) -> Result<(), BridgeError> {
+            self.inner.unwire_peer(a, b).await
+        }
+
+        async fn inspect_member(
+            &self,
+            runtime_id: &AgentRuntimeId,
+        ) -> Result<MemberInspection, BridgeError> {
+            self.inner.inspect_member(runtime_id).await
+        }
+
+        async fn register_session_runtime_state(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            identity: &AgentIdentity,
+            generation: ContinuityGeneration,
+            checkpoint_version: CheckpointVersion,
+            fencing_token: FencingToken,
+        ) -> Result<CheckpointVersion, BridgeError> {
+            self.inner
+                .register_session_runtime_state(
+                    session_id,
+                    identity,
+                    generation,
+                    checkpoint_version,
+                    fencing_token,
+                )
+                .await
+        }
+
+        async fn suspend_session_runtime_state(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<(), BridgeError> {
+            self.inner.suspend_session_runtime_state(session_id).await
+        }
+
+        async fn unregister_session_runtime_state(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<(), BridgeError> {
+            self.inner
+                .unregister_session_runtime_state(session_id)
+                .await
+        }
+
+        async fn recover_committed_boundary(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<CommittedBoundaryRepair, BridgeError> {
+            self.inner.recover_committed_boundary(session_id).await
+        }
+    }
 }

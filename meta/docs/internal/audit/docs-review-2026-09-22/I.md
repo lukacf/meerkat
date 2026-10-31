@@ -588,7 +588,7 @@ Current code marks request ingestions before the inner LLM call and marks server
             }
 ```
 
-The name-only asynchronous path still exists alongside the richer dispatch path. classify_tool_with_provenance recognizes ToolSourceKind::Mcp/source_id, while the dispatcher feed accepts Option<&ToolProvenance>. Searches also verified actual member-build attachment at mob_handle_runtime.rs:725 and slot filling at unified_runtime/builder.rs:1475 and bin/rpc_gateway.rs:12908.
+The name-only asynchronous path still exists alongside the richer dispatch path. classify_tool_with_provenance recognizes ToolSourceKind::Mcp/source_id, while the dispatcher feed accepts `Option<&ToolProvenance>`. Searches also verified actual member-build attachment at mob_handle_runtime.rs:725 and slot filling at unified_runtime/builder.rs:1475 and bin/rpc_gateway.rs:12908.
 
 **`https://github.com/lukacf/meerkat/blob/bdb53a24f7a1ac048fe91a328f82e161e00a2b95/audit/docs-review-2026-09-21/A17.md:2926-2928;3107-3109`**
 

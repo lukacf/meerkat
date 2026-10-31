@@ -182,9 +182,9 @@ searches that agent's memory dir instead (attachments.ts:2204-2213). Model is al
 
 ## INJECTION
 Four distinct entry points. (1) CLAUDE.md + AutoMem/TeamMem MEMORY.md indexes: concatenated by getClaudeMds with an OVERRIDE header and per-file provenance labels, returned from
-getUserContext (context.ts:155-189), then prepended as the FIRST user message inside a <system-reminder> block via prependUserContext (utils/api.ts:449-474) — not the system
+getUserContext (context.ts:155-189), then prepended as the FIRST user message inside a `<system-reminder>` block via prependUserContext (utils/api.ts:449-474) — not the system
 prompt. (2) Memory-system behavioral instructions (how/when to save, four-type taxonomy, staleness caveats): a real system-prompt section, systemPromptSection('memory',
-loadMemoryPrompt) (constants/prompts.ts:495). (3) Relevance-prefetched topic files: relevant_memories attachments rendered as isMeta user messages wrapped in <system-reminder>,
+loadMemoryPrompt) (constants/prompts.ts:495). (3) Relevance-prefetched topic files: relevant_memories attachments rendered as isMeta user messages wrapped in `<system-reminder>`,
 each with a freshness header ("saved N days ago" / verification warning for >1-day-old, memdir/memoryAge.ts) using headers frozen at creation time for prompt-cache stability
 (messages.ts:3708-3722). (4) Session memory: never in live context; enters only at compaction as the isCompactSummary user message ("This session is being continued…" + notes +
 transcript path pointer, compact/prompt.ts:337-374). (5) Agent memory: buildMemoryPrompt output (instructions + truncated MEMORY.md content inline) appended to the subagent's
@@ -195,7 +195,7 @@ Composed by path convention. Per-session: session memory keyed by sessionId (die
 SM-compact mode). Per-project: auto memory keyed by sanitized canonical git root (worktrees share; issue #24382), project/local agent memory under cwd/.claude. Per-user-global:
 ~/.claude/CLAUDE.md, user-scoped agent memory, memoryBase override for remote mode. Per-agent-type: agent memory dirs named by sanitized agentType, isolated from each other and
 from the main thread's auto memory (main-thread extraction skips subagents: extractMemories.ts:532; session memory only on repl_main_thread: sessionMemory.ts:278). Per-team/org:
-team dir synced via server keyed by git remote, injected with <team-memory-content source="shared"> tags; requires auto memory + tengu_herring_clock. Enterprise/managed:
+team dir synced via server keyed by git remote, injected with `<team-memory-content source="shared">` tags; requires auto memory + tengu_herring_clock. Enterprise/managed:
 /etc/claude-code/CLAUDE.md + managed rules always load and are exempt from claudeMdExcludes. Layer priority is load order — "latest files are highest priority" (claudemd.ts
 header), so Local (closest to cwd) outranks Managed textually last.
 
@@ -259,7 +259,7 @@ notes
 * (operator-retained path)/claude-code/src/utils/claudemd.ts — full CLAUDE.md discovery/merge: Managed→User→Project→Local, rules dirs, @-imports, conditional path-glob rules, excludes,
 worktree dedup
 * (operator-retained path)/claude-code/src/context.ts — getUserContext/getSystemContext memoized assembly of claudeMd + gitStatus + date
-* (operator-retained path)/claude-code/src/utils/api.ts — prependUserContext: <system-reminder> first-user-message injection (l.449-474)
+* (operator-retained path)/claude-code/src/utils/api.ts — prependUserContext: `<system-reminder>` first-user-message injection (l.449-474)
 * (operator-retained path)/claude-code/src/memdir/memdir.ts — MEMORY.md index caps/truncation, buildMemoryLines/buildMemoryPrompt shared by auto+agent memory, KAIROS daily-log variant
 * (operator-retained path)/claude-code/src/memdir/paths.ts — auto-memory path resolution, canonical-git-root keying, enablement chain, security validation
 * (operator-retained path)/claude-code/src/memdir/memoryTypes.ts — four-type taxonomy, what-NOT-to-save, drift/verification prompt sections with eval provenance
@@ -363,7 +363,7 @@ under the write lock. Rollouts: never deleted by the memory system (immutable ev
 * Git as the consolidation engine: the memory folder is a git repo; 'what changed since last consolidation' (including user hand-edits, ad-hoc notes, and pruned files) is computed
 as a real git diff, handed to the agent as phase2_workspace_diff.md, and the baseline is reset only after success — one mechanism uniformly handles incremental update, user
 overrides, and forgetting (workspace.rs + consolidation.md).
-* Usage-based reinforcement loop: mandatory <oai-mem-citation> blocks in assistant output are parsed and stripped by the runtime; cited rollout ids increment
+* Usage-based reinforcement loop: mandatory `<oai-mem-citation>` blocks in assistant output are parsed and stripped by the runtime; cited rollout ids increment
 usage_count/last_usage, which drives both phase-2 selection ranking and retention pruning — memories that get used survive, unused ones decay out in 30 days.
 * Two-phase map/consolidate split with SQLite job leasing (ownership tokens, leases, retry backoff, heartbeats) makes the whole pipeline safe across concurrent Codex processes
 with zero coordination service.
@@ -404,7 +404,7 @@ use_memories)
 * (operator-retained path)/codex/codex-rs/ext/memories/templates/memories/read_path.md — read-path prompt: quick memory pass, drift/verification policy, citation protocol, ad-hoc note
 rule
 * (operator-retained path)/codex/codex-rs/ext/memories/src/tools/mod.rs — optional dedicated memories.{list,read,search,add_ad_hoc_note} tools
-* (operator-retained path)/codex/codex-rs/memories/read/src/citations.rs — <oai-mem-citation> parsing
+* (operator-retained path)/codex/codex-rs/memories/read/src/citations.rs — `<oai-mem-citation>` parsing
 * (operator-retained path)/codex/codex-rs/core/src/stream_events_utils.rs — citation strip + usage_count recording + external-context pollution marking
 * (operator-retained path)/codex/codex-rs/state/memory_migrations/0001_memories.sql — SQLite schema (stage1_outputs, jobs)
 * (operator-retained path)/codex/codex-rs/state/src/runtime/memories.rs — claim/lease/selection/prune/usage SQL (memory_mode='enabled' filter, usage-ranked phase-2 selection)
@@ -431,10 +431,10 @@ cross-session recall, and no lifecycle management — the design is deliberately
 HnswMemoryStore persists to `<realm store path>/memory/memory.sqlite3` (factory.rs:5419 joins factory store_path + "memory"; CLI passes realm_store_path, so effectively
 `<context-root>/.rkat/realms/<realm-id>/.../memory/memory.sqlite3`). Schema (hnsw.rs:26-34): two tables — memory_metadata(point_id INTEGER PRIMARY KEY, metadata_json BLOB) and
 memory_text(point_id INTEGER PRIMARY KEY, content BLOB). SQLite opened WAL + synchronous=FULL + 5s busy timeout (hnsw.rs:97-111). The HNSW vector indices are NOT persisted: one
-in-memory Hnsw<f32, DistCosine> graph per session_id, fully rebuilt from SQLite rows on every open() (hnsw.rs:317-355) — O(N) re-embed on startup. One SQLite file is shared by all
+in-memory `Hnsw<f32, DistCosine>` graph per session_id, fully rebuilt from SQLite rows on every open() (hnsw.rs:317-355) — O(N) re-embed on startup. One SQLite file is shared by all
 sessions in a realm; isolation is by metadata filtering + per-session graphs. Record data model (meerkat-core/src/memory.rs:104-124): MemoryMetadata { session_id, source:
 MemorySource::Compaction { source_range: MessageRange [start,end) of original transcript offsets }, indexed_at: SystemTime } plus raw text content; MemoryResult adds score f32
-0..1. MemorySource is a single-variant enum today (Compaction only) — provenance is typed and extensible but nothing else exists. SimpleMemoryStore is Vec<MemoryEntry> behind
+0..1. MemorySource is a single-variant enum today (Compaction only) — provenance is typed and extensible but nothing else exists. SimpleMemoryStore is `Vec<MemoryEntry>` behind
 RwLock, no persistence.
 
 ## WRITE PATH
@@ -451,7 +451,7 @@ Embedding-based ANN only — but with a placeholder embedder. Query flow (hnsw.r
 session-scoped HNSW graph (ef_search=200 default), hydrate text+metadata from SQLite per neighbor, post-filter scope.includes(metadata), score = 1.0 - distance/2 (0..1). No
 recency weighting, no score threshold, no hybrid lexical — indexed_at exists in metadata but is unused for ranking. The default embedding is BagOfWordsEmbeddingModel
 (hnsw.rs:61-95): hash-each-word-to-one-of-4096-buckets TF vector, L2-normalized; code comments explicitly say "upgrade to a proper embedding model for production". The extension
-point is the injected MemoryRankingPolicy (Arc<dyn EmbeddingModel> + HnswParams, meerkat-core/src/memory.rs:317-403) via HnswMemoryStore::open_with_policy — but the factory only
+point is the injected MemoryRankingPolicy (`Arc<dyn EmbeddingModel>` + HnswParams, meerkat-core/src/memory.rs:317-403) via HnswMemoryStore::open_with_policy — but the factory only
 ever calls open() with the default policy, so real embeddings are an unexercised seam. SimpleMemoryStore does lowercase word-overlap scoring (matching_words/query_words).
 Retrieval limit: default 5, hard cap 20 (tool.rs:21,131).
 

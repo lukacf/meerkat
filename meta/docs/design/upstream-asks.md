@@ -1318,7 +1318,7 @@ producer of that state still deadlocks upstream of it.
   currently still fails on 0.7.21 with the ORIGINAL 21b error, fast:
   "respawn_member failed: … disposal completed but ArchiveSession failed:
   … mob archive authority returned NotFound for registered runtime session
-  <id>". I.e. 0.7.21's #845 arms do not fire at all on this construction
+  `<id>`". I.e. 0.7.21's #845 arms do not fire at all on this construction
   (first-archive of a never-run session: document not yet Archived, so the
   Ready+Archived+registered arm cannot match — ask 21's original
   owned-but-snapshotless strand). 21b is NOT converged on 0.7.21; fixing
@@ -1343,7 +1343,7 @@ meerkat 0.7.22 (#847) verification with both meta acceptance repros:
   (identity-first gateway construction, mob-plane worker): **still fails**,
   fast, with the ORIGINAL error: "respawn_member failed: … disposal
   completed but ArchiveSession failed: … mob archive authority returned
-  NotFound for registered runtime session <id>".
+  NotFound for registered runtime session `<id>`".
 
 Trace delta vs the (now green) classic chain: on this construction
 `SessionBackend::retire_runtime_before_archive` logs "calling runtime
@@ -1477,7 +1477,7 @@ dispatch context and the pre-addressed `reply_to_peer` tool provide the
 structural affordance. No Meta change is required.
 
 
-Peer messages arrive framed as prose ("Peer message from <endpoint>...")
+Peer messages arrive framed as prose (`Peer message from <endpoint>...`)
 with no structural reply affordance. Models reliably answer in their own
 transcript instead of calling the comms tool back — charter/prompt
 strengthening does not hold (meta consumer field report, 2026-07-08),

@@ -535,7 +535,7 @@ A missing key is explicitly accepted; a provided one must be a non-empty string.
 pub payload: Value,
 ```
 
-The public wire type permits any JSON value and uses Option<String> for the key.
+The public wire type permits any JSON value and uses `Option<String>` for the key.
 
 **`meerkat-mobkit/tests/routing_delivery.rs:278-298`**
 
@@ -1488,7 +1488,7 @@ The sequence restarts per connection; this is not a structural ledger cursor.
                 "payload": payload,
 ```
 
-Mob-stream data wraps an agent payload with member_id and source, uses the agent event name and id mob:<seq>, and is not EventEnvelope<UnifiedEvent>. The entire assigned SSE page has no mob-stream section explaining this difference.
+Mob-stream data wraps an agent payload with member_id and source, uses the agent event name and id `mob:<seq>`, and is not `EventEnvelope<UnifiedEvent>`. The entire assigned SSE page has no mob-stream section explaining this difference.
 
 ### Independent adjudication
 
@@ -1518,9 +1518,9 @@ Each new connection initializes its own counter; source is rendered through runt
                 "payload": payload,
 ```
 
-Both member_id and source carry the attributed source, payload carries the projected agent event, and the ID is mob:<seq>.
+Both member_id and source carry the attributed source, payload carries the projected agent event, and the ID is `mob:<seq>`.
 
-**Required correction:** Add a /mob/events section with {member_id,source,payload}, an actual generation-suffixed source example, the agent event name, and mob:<connection-local sequence> IDs. State live-only/no Last-Event-ID replay and contrast it with structural ledger SSE and events/subscribe snapshots.
+**Required correction:** Add a /mob/events section with {member_id,source,payload}, an actual generation-suffixed source example, the agent event name, and `mob:<connection-local sequence>` IDs. State live-only/no Last-Event-ID replay and contrast it with structural ledger SSE and events/subscribe snapshots.
 
 ### Changes and final verification
 
@@ -2222,7 +2222,7 @@ let send_request: ConsoleSendRequest =
                 match serde_json::from_value(request.params.clone()) {
 ```
 
-HTTP RPC directly deserializes this type, returning -32602 for missing fields. REST likewise extracts Json<ConsoleSendRequest>. The same erroneous optional list appears in the RPC method entry at 333-337.
+HTTP RPC directly deserializes this type, returning -32602 for missing fields. REST likewise extracts `Json<ConsoleSendRequest>`. The same erroneous optional list appears in the RPC method entry at 333-337.
 
 ### Independent adjudication
 
@@ -2251,7 +2251,7 @@ These fields have no serde defaults; only handling_mode is optional/defaulted.
 match serde_json::from_value(request.params.clone()) {
 ```
 
-The runtime HTTP console/send arm deserializes ConsoleSendRequest directly; the REST route uses Json<ConsoleSendRequest> at 1036.
+The runtime HTTP console/send arm deserializes ConsoleSendRequest directly; the REST route uses `Json<ConsoleSendRequest>` at 1036.
 
 **`meerkat-mobkit/src/console_aggregator/mod.rs:5390-5398`**
 
@@ -2311,7 +2311,7 @@ An upload created from the contract fails for missing upload_id/part_name, and c
 let upload = params.get("upload").unwrap_or(params);
 ```
 
-The handler expects an upload object, or the same fields directly in params, containing upload_id or part_name matching exactly one file:<id> multipart part. media_type is optional and checked against the file MIME type. content_type is never read.
+The handler expects an upload object, or the same fields directly in params, containing upload_id or part_name matching exactly one `file:<id>` multipart part. media_type is optional and checked against the file MIME type. content_type is never read.
 
 **`meerkat-mobkit/src/http_console.rs:3868-3873`**
 
@@ -2359,7 +2359,7 @@ The extractor validates optional type/media_type, exactly one matching file, and
 let Some(upload_id) = name.strip_prefix("file:").filter(|id| !id.is_empty()) else {
 ```
 
-The multipart transport expects a JSON-RPC payload part and file:<id> bytes, not a params.content_type contract.
+The multipart transport expects a JSON-RPC payload part and `file:<id>` bytes, not a params.content_type contract.
 
 **`meerkat-mobkit/src/http_console.rs:16762-16777`**
 
@@ -2369,7 +2369,7 @@ assert_eq!(result["media_type"], json!("image/png"));
 
 The existing upload test sends upload.upload_id and verifies media_type plus size.
 
-**Required correction:** Fix the v0.5.0 blob/upload schema to accept params.upload (or direct params) with required upload_id or part_name, optional type constrained to image_upload and optional media_type matching the file MIME. Explain the JSON-RPC payload part and exactly one file:<id> part. Mark blob_id, media_type and size as returned fields; do not promise url/content_type. A small matching example can be shared by the terse REST/RPC upload descriptions. Retain png/jpeg/webp/gif and the 25 MiB per-file limit.
+**Required correction:** Fix the v0.5.0 blob/upload schema to accept params.upload (or direct params) with required upload_id or part_name, optional type constrained to image_upload and optional media_type matching the file MIME. Explain the JSON-RPC payload part and exactly one `file:<id>` part. Mark blob_id, media_type and size as returned fields; do not promise url/content_type. A small matching example can be shared by the terse REST/RPC upload descriptions. Retain png/jpeg/webp/gif and the 25 MiB per-file limit.
 
 ### Changes and final verification
 
@@ -3000,7 +3000,7 @@ The synopsis at 345 uses session_id?/generation? consistently.
 
 Both fields have this omission attribute. runtime.rs:9256-9262 returns None/None for no binding; rpc/mob_methods.rs:1280-1288 serializes the outcome and only adds identity/identity_first.
 
-## C-031: The WorkGraph realm is mob.<mob_id>, not the bare mob ID
+## C-031: The WorkGraph realm is `mob.<mob_id>`, not the bare mob ID
 
 **Severity:** medium. **Decision:** confirmed. **Disposition:** fixed; independently reviewed.
 
@@ -3022,7 +3022,7 @@ Hosts comparing realm IDs or inspecting persisted WorkGraph rows use the wrong k
 let realm = match meerkat_core::mob_realm_id(mob_id) {
 ```
 
-The service is scoped through Meerkat's canonical mob-realm helper; source documentation at 91-93 identifies its spelling as mob.<mob_id>. install_workgraph_tools takes the namespace grant from this actual service.
+The service is scoped through Meerkat's canonical mob-realm helper; source documentation at 91-93 identifies its spelling as `mob.<mob_id>`. install_workgraph_tools takes the namespace grant from this actual service.
 
 **`meerkat-mobkit/tests/workgraph_rpc.rs:247-254`**
 
@@ -3068,17 +3068,17 @@ json!(format!("mob.{}", runtime_mob_id(&runtime)))
 
 The RPC integration test checks the same serialized item realm.
 
-**Required correction:** Change the stock grant description to realm=Meerkat's canonical mob.<mob_id>, namespace=default. Preserve that callers cannot supply realm_id and that grants derive from the wired service.
+**Required correction:** Change the stock grant description to realm=Meerkat's canonical `mob.<mob_id>`, namespace=default. Preserve that callers cannot supply realm_id and that grants derive from the wired service.
 
 ### Changes and final verification
 
 **Changed:** `docs/api/rpc.mdx`.
 
-Corrected the stock WorkGraph realm to canonical mob.<mob_id>, retaining default namespace and wired-service grant authority.
+Corrected the stock WorkGraph realm to canonical `mob.<mob_id>`, retaining default namespace and wired-service grant authority.
 
 **Validation:** Checked workgraph_wiring.rs mob_realm_id/service grant and literal mob.wiring-realm test assertion.
 
-**Final review: pass.** The stock realm spelling is corrected to mob.<mob_id>, while the default namespace, wired-service grant authority and rejection of caller-selected realms are preserved. The fallback error path is not presented as the normal realm format.
+**Final review: pass.** The stock realm spelling is corrected to `mob.<mob_id>`, while the default namespace, wired-service grant authority and rejection of caller-selected realms are preserved. The fallback error path is not presented as the normal realm format.
 
 **`docs/api/rpc.mdx:1010-1015`**
 

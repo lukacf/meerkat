@@ -2461,7 +2461,7 @@ const MEMORY_LEDGER_STATE_FILE: &str = "memory-ledger-state.json";
 
 The stock filename actually has the .json extension affected by the distinction.
 
-**Required correction:** Replace <state_path>.tmp with a sibling path formed by replacing the final extension with .tmp (state_path.with_extension("tmp")); give memory-ledger-state.tmp for the default JSON filename, followed by rename over the original state path.
+**Required correction:** Replace `<state_path>.tmp` with a sibling path formed by replacing the final extension with .tmp (state_path.with_extension("tmp")); give memory-ledger-state.tmp for the default JSON filename, followed by rename over the original state path.
 
 ### Changes and final verification
 

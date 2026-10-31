@@ -66,6 +66,7 @@ from .errors import (
     TransportReaderFailedError,
     GatewayChildEndedError,
     GatewayStartupCleanupError,
+    GatewayTransportConflictError,
     IdentityHistoryUnavailableError,
     IdentityHostAdoptedError,
     IdentityUnresumableError,
@@ -99,6 +100,7 @@ from .live import (
     supports_live_execution_mode,
 )
 from ._sse import SseEvent, parse_sse_stream
+from ._adopted_gateway import AdoptedGatewayTransport, GatewayStartFailure
 from ._transport import (
     INIT_PROTOCOL_ACCEPTED_THEN_SETTLED,
     InitWatch,
@@ -634,6 +636,13 @@ class MetaRuntime:
     def __init__(self, config: Any, transport: PersistentTransport | None = None):
         self._config = config
         self._transport = transport
+        # A transport given here is the host's: when the configuration names
+        # a gateway, connect() starts and initializes it instead of spawning
+        # one (see ``_make_gateway_transport``).
+        self._injected_transport = transport
+        # What is known of the current start's meta/init, for the record a
+        # failed start hands an adopted gateway transport.
+        self._init_outcome = "not_sent"
         self._running = False
         # The gateway child this runtime bootstrapped, kept for observation
         # after shutdown or a failed bootstrap detaches ``_transport``.
@@ -751,11 +760,25 @@ class MetaRuntime:
         that propagates carries this runtime's cleanup as ``gateway_cleanup``.
         connect() settled any earlier stop before it bootstrapped, so this
         stop is the only one in flight.
+
+        An ``AdoptedGatewayTransport`` that took its child first records the
+        failure as its ``start_failure``, with what is known of ``meta/init``,
+        before any await: its stop then requests the host's retirement and
+        observes the child on the same runtime-owned task, whether or not the
+        caller is still waiting. A refusal before the hand-off records
+        nothing: the host keeps the child.
         """
         self._running = False
         self._rust_http_base = None
         self._rust_http_public_base = None
 
+        if isinstance(transport, AdoptedGatewayTransport) and transport._handed_over:
+            transport._record_start_failure(
+                GatewayStartFailure(
+                    error=startup_error,
+                    init_outcome=getattr(self, "_init_outcome", "not_sent"),
+                )
+            )
         stop_task = self._schedule_transport_stop(transport)
         try:
             await asyncio.shield(stop_task)
@@ -830,26 +853,68 @@ class MetaRuntime:
         return builder
 
     def _make_gateway_transport(self) -> PersistentTransport:
-        """Compose one local process transport before any public init request.
+        """Compose one gateway transport before any public init request.
+
+        The host transport configured with ``MetaBuilder.gateway_transport()``
+        (a transport, or a factory called once per connect), else the
+        transport given to the constructor, else a stock
+        ``PersistentTransport`` that spawns ``gateway_bin``. A constructor
+        transport is used when a gateway is configured, and an
+        ``AdoptedGatewayTransport`` given there is used even without one. A
+        host transport is used as it is and never replaced by a spawned
+        child, even when ``gateway_bin`` is set. It must be a
+        ``PersistentTransport``, such as an ``AdoptedGatewayTransport`` over a
+        child the host started, that was never started or stopped: one serves
+        one connect. Both a configured and a constructor transport raise
+        ``GatewayTransportConflictError``. Every refusal comes before
+        anything is handed to the transport.
 
         Application-owned subclasses may carry private local startup channels
         (``inherited_fds``, ``extra_args``, ``env``). The returned transport
         must finish its own trusted bootstrap in start(). Remote RPC and model
         parameters never select this native factory.
         """
+        configured = getattr(self._config, "gateway_transport", None)
+        injected = getattr(self, "_injected_transport", None)
+        if configured is not None and injected is not None:
+            raise GatewayTransportConflictError(
+                "a transport given to MetaRuntime() and a gateway_transport() are "
+                "two host transports for one gateway; configure one"
+            )
+        if configured is not None:
+            if isinstance(configured, PersistentTransport):
+                return _fresh_host_transport(configured)
+            return _fresh_host_transport(configured())
+        if injected is not None:
+            return _fresh_host_transport(injected)
         assert self._config.gateway_bin is not None
         return PersistentTransport(self._config.gateway_bin)
+
+    def _gateway_configured(self) -> bool:
+        """Whether connect() runs a gateway: a binary or a host transport.
+
+        An ``AdoptedGatewayTransport`` given to the constructor counts too:
+        its child is started and initialized, never left to a first request.
+        """
+        return (
+            bool(self._config.gateway_bin)
+            or getattr(self._config, "gateway_transport", None) is not None
+            or isinstance(
+                getattr(self, "_injected_transport", None), AdoptedGatewayTransport
+            )
+        )
 
     async def _bootstrap(self) -> None:
         # Resolve the builder before anything is spawned: a refusal here costs
         # nothing to clean up.
         session_builder = self._session_builder_to_register()
-        if self._config.gateway_bin:
+        if self._gateway_configured():
             transport = self._make_gateway_transport()
             self._transport = transport
             self._last_gateway_transport = transport
             self._rust_http_base = None
             self._rust_http_public_base = None
+            self._init_outcome = "not_sent"
             try:
                 # Detached host work reports asynchronously through ordinary
                 # gateway RPC after the short callback/job/start response.
@@ -879,6 +944,8 @@ class MetaRuntime:
                 transport.start()
                 self._gateway_lifetime = getattr(transport, "_lifetime", None)
                 if not transport.is_running():
+                    if isinstance(transport, AdoptedGatewayTransport):
+                        raise TransportError("the adopted gateway child did not start")
                     raise TransportError(
                         f"gateway binary failed to start: {self._config.gateway_bin}"
                     )
@@ -958,6 +1025,9 @@ class MetaRuntime:
         init_id = watch.init_id
         rid = _next_request_id("meta/init")
         request = _rpc_request(rid, "meta/init", params)
+        # From here the gateway may receive the request: until an answer says
+        # otherwise, the init's outcome is unknown.
+        self._init_outcome = "unknown"
         try:
             response = await transport.send_async(
                 request, timeout=self._config.gateway_init_timeout
@@ -973,12 +1043,14 @@ class MetaRuntime:
         if "error" in response:
             # Refused before acceptance (or by an older gateway): typed, and
             # nothing past the pre-durable gates ran.
+            self._init_outcome = "refused"
             raise _rpc_error_from_payload(
                 response["error"], request_id=rid, method="meta/init"
             )
         result = response.get("result")
         if not (isinstance(result, dict) and result.get("init_state") == "accepted"):
             # An older gateway: its single response is the final init result.
+            self._init_outcome = "ready"
             return result
         if result.get("init_id") != init_id:
             raise InitOutcomeUnknownError(
@@ -998,12 +1070,14 @@ class MetaRuntime:
             ) from exc
         outcome = settled.get("outcome")
         if outcome == "ready":
+            self._init_outcome = "ready"
             return {
                 key: value
                 for key, value in settled.items()
                 if key not in ("init_id", "outcome")
             }
         if outcome == "failed":
+            self._init_outcome = "failed"
             data = settled.get("data")
             error_data = dict(data) if isinstance(data, dict) else {}
             if data is not None and not isinstance(data, dict):
@@ -1204,8 +1278,10 @@ class MetaRuntime:
         ``MetaBuilder.http_public_base_url``), falling back to
         ``rust_http_base_url`` when none was declared. The SDK's own SSE,
         multipart and console RPC calls keep using ``rust_http_base_url``:
-        this process spawned the gateway and shares its network namespace,
-        so the same-host form is always the one that answers.
+        a gateway this process spawned shares its network namespace, so the
+        same-host form is the one that answers. For a gateway child the host
+        started (``AdoptedGatewayTransport``), the host keeps that address
+        reachable from this process.
         """
         return self._rust_http_public_base or self._rust_http_base
 
@@ -2035,6 +2111,21 @@ def _log_unobserved_stop_failure(task: asyncio.Task[Any]) -> None:
             "keeps the transport",
             exc_info=failure,
         )
+
+
+def _fresh_host_transport(transport: Any) -> PersistentTransport:
+    """Check a host gateway transport before anything is handed to it."""
+    if not isinstance(transport, PersistentTransport):
+        raise TypeError(
+            "a host gateway transport must be a PersistentTransport, such as an "
+            f"AdoptedGatewayTransport; got {type(transport).__name__}"
+        )
+    if not transport._is_fresh():
+        raise GatewayTransportConflictError(
+            "a host gateway transport serves one connect, and this one was already "
+            "started or stopped; give gateway_transport() a factory to connect again"
+        )
+    return transport
 
 
 class IdentityAgentHandle:

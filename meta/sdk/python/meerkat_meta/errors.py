@@ -207,6 +207,39 @@ class GatewayStartupCleanupError(TransportError):
         )
 
 
+class GatewayChildPendingError(TransportError):
+    """A stop of an adopted gateway child did not observe the child's exit.
+
+    Raised by ``AdoptedGatewayTransport.stop()`` (and so by
+    ``MetaRuntime.shutdown()``) when the host's ``wait_process`` reported the
+    exit still pending for the whole bounded wait, or failed other than with a
+    timeout (then it is the ``__cause__``). The host's retirement was
+    requested; the transport keeps the child's observation, and a later
+    ``stop()`` observes it again without requesting the retirement twice.
+    ``child_exit`` is the transport's record, with ``state == "pending"``. It
+    says nothing about the host's own cleanup, which the SDK never awaits.
+    """
+
+    def __init__(self, child_exit: Any):
+        self.child_exit = child_exit
+        super().__init__(
+            "the adopted gateway child's exit is still pending after the bounded "
+            "wait; the host's retirement was requested"
+        )
+
+
+class GatewayTransportConflictError(MetaError, ValueError):
+    """A host gateway transport cannot be used for this start.
+
+    Raised before anything is handed over, so the host keeps the child and
+    its pipes untouched: two host transports were configured (one given to
+    ``MetaRuntime(config, transport)`` and one through
+    ``MetaBuilder.gateway_transport()``), or the host transport was already
+    started, stopped or handed its child (an adopted gateway transport takes
+    its child once and never starts, reconnects to or replays another).
+    """
+
+
 class InitOutcomeUnknownError(MetaError):
     """The SDK stopped waiting for ``meta/init`` before it settled.
 

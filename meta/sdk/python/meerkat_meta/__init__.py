@@ -187,9 +187,18 @@ from .errors import (
     AnnouncementFrontierError,
     AnnouncementRefusedError,
     AnnouncementNotFoundError,
+    GatewayChildPendingError,
+    GatewayTransportConflictError,
 )
 # What a stop observed for a gateway process
 from ._transport import TransportTermination
+# A gateway child the host started and keeps, adopted without a spawn
+from ._adopted_gateway import (
+    AdoptedGatewayChild,
+    AdoptedGatewayTransport,
+    GatewayChildExit,
+    GatewayStartFailure,
+)
 
 # Typed return models
 from .types import (
@@ -455,6 +464,12 @@ __all__ = [
     "GatewayCleanup",
     "GatewayStartupCleanupError",
     "TransportTermination",
+    "AdoptedGatewayChild",
+    "AdoptedGatewayTransport",
+    "GatewayChildExit",
+    "GatewayStartFailure",
+    "GatewayChildPendingError",
+    "GatewayTransportConflictError",
     "RpcError",
     "MobEventsStaleError",
     "MOB_EVENTS_STALE_CURSOR_CODE",

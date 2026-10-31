@@ -10,8 +10,9 @@
 //! bootstrap, and a gateway without an identity roster never asks. A host that
 //! needs a customizer refuses `None` with `AgentCustomizerRequired`, whose text
 //! names what to configure. Each build that ran the customizer tells it
-//! `after_create` once, best-effort. Each case is a separate gateway process
-//! over real stdio, answering the SDK callbacks itself.
+//! `after_create` once, best-effort. A respawn of a built member asks the
+//! customizer once and builds the member once. Each case is a separate
+//! gateway process over real stdio, answering the SDK callbacks itself.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -67,6 +68,7 @@ const AFTER_CREATE_TEST: &str = "each_customized_build_tells_after_create_once";
 const AFTER_CREATE_FAILS_TEST: &str = "a_failing_after_create_leaves_the_build_standing";
 const SELF_SEND_TEST: &str =
     "an_after_create_that_sends_to_its_own_identity_does_not_wait_out_the_callback_window";
+const RESPAWN_BUILDS_TEST: &str = "a_respawn_of_a_built_member_customizes_and_builds_it_once";
 /// How long the send made inside an `after_create` may take to answer. The
 /// gateway waits up to 130 seconds for a callback, so a send that waits for
 /// that callback's own identity lock answers only after this.
@@ -367,8 +369,14 @@ struct Run {
     /// settled, and after it.
     bootstrap_builds: usize,
     later_builds: usize,
-    /// The sessions the SDK customizer was told of (`after_create`), in order.
-    sdk_after_create: Vec<String>,
+    /// Each SDK `customize_build` call, in order: how many operations the
+    /// driver had sent when it arrived (0 before the first, `n` while the
+    /// `n`-th is in flight) and the handler scope it was asked under.
+    customize_calls: Vec<(usize, String)>,
+    /// The sessions the SDK customizer was told of (`after_create`), in
+    /// order, each with how many operations the driver had sent when it
+    /// arrived.
+    sdk_after_create: Vec<(usize, String)>,
     /// Each operation's response, by method.
     responses: Vec<(String, Value)>,
     /// The reset's response.
@@ -421,6 +429,20 @@ impl Run {
             .unwrap_or_else(|| panic!("{method} answered: {:?}", self.responses))
     }
 
+    /// The response to the `index`-th operation (from 0), which must have
+    /// answered without an error.
+    fn result_of(&self, index: usize) -> &Value {
+        let (method, response) = self
+            .responses
+            .get(index)
+            .unwrap_or_else(|| panic!("operation {index} answered: {:?}", self.responses));
+        assert!(
+            response.get("error").is_none(),
+            "{method} (operation {index}) succeeds: {response}"
+        );
+        &response["result"]
+    }
+
     /// The record position of a line.
     fn at(&self, line: &str) -> usize {
         self.lines
@@ -451,16 +473,28 @@ impl Run {
 
 /// The SDK side of the gateway's callback bridge: the roster holds one
 /// member, the customizer gives it one callback tool, and its `after_create`
-/// succeeds unless `fail_after_create`.
-fn answer_callback(method: &str, params: &Value, fail_after_create: bool) -> Result<Value, String> {
+/// succeeds unless `fail_after_create`. With `scoped_tools` the tool is named
+/// after the handler scope of the `customize_build` call that gave it
+/// ([`scoped_tool`]), so the member's tools say which call they came from.
+fn answer_callback(
+    method: &str,
+    params: &Value,
+    fail_after_create: bool,
+    scoped_tools: bool,
+) -> Result<Value, String> {
     match method {
         "callback/roster_provider/roster" => {
             Ok(json!([{ "identity": IDENTITY, "profile": "worker" }]))
         }
         "callback/agent_customizer/customize_build" => {
             let mut draft = params["draft"].clone();
+            let name = if scoped_tools {
+                scoped_tool(params["scope_id"].as_str().unwrap_or_default())
+            } else {
+                TOOL.to_string()
+            };
             draft["external_tools"] = json!([{
-                "name": TOOL,
+                "name": name,
                 "description": "Look a value up",
                 "input_schema": { "type": "object" },
             }]);
@@ -474,10 +508,18 @@ fn answer_callback(method: &str, params: &Value, fail_after_create: bool) -> Res
     }
 }
 
+/// The tool a `customize_build` call under the handler scope `scope_id`
+/// (`customize-<identity>-<n>`) gives the member when the script names tools
+/// by scope: `lookup_<n>`.
+fn scoped_tool(scope_id: &str) -> String {
+    let call = scope_id.rsplit('-').next().unwrap_or(scope_id);
+    format!("{TOOL}_{call}")
+}
+
 /// What the driver does once the init settles ready with an identity roster.
 #[derive(Default)]
 struct Script<'a> {
-    /// Member operations, run in order.
+    /// Member operations, run in order (see [`op_request`]).
     ops: &'a [&'a str],
     /// Refuse the SDK customizer's `after_create`.
     fail_after_create: bool,
@@ -487,6 +529,39 @@ struct Script<'a> {
     /// At the first `after_create` after Ready, send to the identity, and
     /// answer the `after_create` only once that send has answered.
     send_inside_after_create: bool,
+    /// Name each `customize_build` call's tool after its handler scope.
+    scoped_tools: bool,
+}
+
+/// The request of one member operation on the roster member, whose id is the
+/// method. `meta/send` sends a tracked turn; `meta/wait_for_turn` waits for
+/// the turn of the last `meta/send` in `responses`; every other method names
+/// the identity only.
+fn op_request(method: &str, responses: &[(String, Value)]) -> Value {
+    let mut params = json!({ "identity": IDENTITY });
+    match method {
+        "meta/send" => {
+            params["content"] = json!("hello");
+            params["track_turn"] = json!(true);
+        }
+        "meta/wait_for_turn" => {
+            let ticket = responses
+                .iter()
+                .rev()
+                .find(|(sent, _)| sent == "meta/send")
+                .and_then(|(_, response)| response["result"]["turn"]["ticket"].as_str())
+                .unwrap_or_else(|| panic!("a tracked send precedes the wait: {responses:?}"));
+            params["ticket"] = json!(ticket);
+            params["timeout_ms"] = json!(60_000);
+        }
+        _ => {}
+    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": method,
+        "method": method,
+        "params": params,
+    })
 }
 
 /// Drive the `mode` host as a child process of `test`, with an identity roster
@@ -539,14 +614,6 @@ fn drive_script(
         writeln!(stdin, "{value}").expect("write");
         stdin.flush().expect("flush");
     };
-    let op = |method: &str| {
-        json!({
-            "jsonrpc": "2.0",
-            "id": method,
-            "method": method,
-            "params": { "identity": IDENTITY },
-        })
-    };
     let mut params = json!({
         "init_protocol": "accepted_then_settled",
         "init_id": format!("agent-customizer-{mode}"),
@@ -567,10 +634,12 @@ fn drive_script(
     let mut settled = false;
     let mut bootstrap_builds = 0;
     let mut later_builds = 0;
+    let mut customize_calls = Vec::new();
     let mut sdk_after_create = Vec::new();
     let mut responses: Vec<(String, Value)> = Vec::new();
     let mut pending = script.ops.iter();
     let mut current: Option<&str> = None;
+    let mut ops_sent = 0_usize;
     let mut ops_done = false;
     // The id of the `after_create` held until the send made inside it
     // answers, and that send's start, response and duration.
@@ -631,14 +700,22 @@ fn drive_script(
                 } else {
                     bootstrap_builds += 1;
                 }
+                customize_calls.push((
+                    ops_sent,
+                    message["params"]["scope_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                ));
             }
             if method == "callback/agent_customizer/after_create" {
-                sdk_after_create.push(
+                sdk_after_create.push((
+                    ops_sent,
                     message["params"]["session_id"]
                         .as_str()
                         .unwrap_or_default()
                         .to_string(),
-                );
+                ));
                 if script.send_inside_after_create && settled && self_send_sent.is_none() {
                     held_after_create = Some(id);
                     self_send_sent = Some(Instant::now());
@@ -652,8 +729,12 @@ fn drive_script(
                     continue;
                 }
             }
-            let reply = match answer_callback(method, &message["params"], script.fail_after_create)
-            {
+            let reply = match answer_callback(
+                method,
+                &message["params"],
+                script.fail_after_create,
+                script.scoped_tools,
+            ) {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err(error) => json!({ "jsonrpc": "2.0", "id": id,
                     "error": { "code": -32601, "message": error } }),
@@ -672,7 +753,8 @@ fn drive_script(
             match current {
                 Some(method) => {
                     append(&record, &format!("driver op {method}"));
-                    send(op(method));
+                    ops_sent += 1;
+                    send(op_request(method, &responses));
                 }
                 None => ops_done = true,
             }
@@ -697,7 +779,8 @@ fn drive_script(
             match current {
                 Some(method) => {
                     append(&record, &format!("driver op {method}"));
-                    send(op(method));
+                    ops_sent += 1;
+                    send(op_request(method, &responses));
                 }
                 None => ops_done = true,
             }
@@ -729,6 +812,7 @@ fn drive_script(
         seen,
         bootstrap_builds,
         later_builds,
+        customize_calls,
         sdk_after_create,
         responses,
         reset,
@@ -987,7 +1071,11 @@ fn each_customized_build_tells_after_create_once() {
         .iter()
         .map(|(_, session, _)| session.as_str())
         .collect();
-    let mut sdk_sessions: Vec<&str> = run.sdk_after_create.iter().map(String::as_str).collect();
+    let mut sdk_sessions: Vec<&str> = run
+        .sdk_after_create
+        .iter()
+        .map(|(_, session)| session.as_str())
+        .collect();
     wrapper_sessions.sort_unstable();
     sdk_sessions.sort_unstable();
     assert_eq!(
@@ -1071,5 +1159,114 @@ fn an_after_create_that_sends_to_its_own_identity_does_not_wait_out_the_callback
         told.iter().all(|(_, _, inner)| inner == "ok"),
         "{:?}",
         run.lines
+    );
+}
+
+/// A respawn of a built member asks the host's customizer once and builds
+/// the member once. Core keeps the retired member's session archived, so the
+/// respawn's seat revives the member on it; that revival stays live, and
+/// Core's wake finds the member live and prepares nothing.
+///
+/// The first delivery builds the member (its wake asks the customizer once).
+/// From the respawn to the end of the run:
+/// - one `customize_build`, while the respawn runs, and none after it;
+/// - one `after_create`, of the session the respawn keeps;
+/// - one build: the identity's tool record, which each build Core reports
+///   writes again and a warm of the live member writes once more, reads
+///   revision 3: the first delivery's build, the respawn's, then the warm;
+/// - the turn after the respawn is served by the handler scope of that one
+///   call: the driver names each call's tool after its scope, and the live
+///   member offers the tool of the respawn's call only.
+///
+/// This row fails on a respawn that builds the member twice only when Core
+/// accepts the release the seat step used to make right after the revival,
+/// as it usually does: when Core refuses that release (the member's runtime
+/// binding has not landed yet), such a respawn makes one call too, and this
+/// row passes. The deterministic RED legs are the seat step's rows
+/// (`identity_first::runtime::seat` tests), whose Core double always
+/// accepts the release.
+#[test]
+fn a_respawn_of_a_built_member_customizes_and_builds_it_once() {
+    serve_if_host_process();
+    let ops = [
+        "meta/send",
+        "meta/wait_for_turn",
+        "meta/respawn",
+        "meta/send",
+        "meta/wait_for_turn",
+        "meta/identity/warm",
+    ];
+    // Calls made while the respawn runs arrive with three operations sent.
+    const RESPAWN: usize = 3;
+    let script = Script {
+        ops: &ops,
+        after_creates: 2,
+        scoped_tools: true,
+        ..Script::default()
+    };
+    let run = drive_script(RESPAWN_BUILDS_TEST, "plain", true, true, &script);
+    assert_eq!(run.outcome(), "ready", "{:?}", run.seen);
+    for turn in [1, 4] {
+        assert_eq!(
+            run.result_of(turn)["state"],
+            "completed",
+            "operation {turn}: {:?}",
+            run.responses
+        );
+    }
+    let respawned = run.result_of(2)["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the respawn answers its session: {:?}", run.responses))
+        .to_string();
+
+    let respawn_calls: Vec<&str> = run
+        .customize_calls
+        .iter()
+        .filter(|(sent, _)| *sent == RESPAWN)
+        .map(|(_, scope)| scope.as_str())
+        .collect();
+    assert_eq!(
+        respawn_calls.len(),
+        1,
+        "the respawn asks the customizer once: {:?}",
+        run.customize_calls
+    );
+    assert!(
+        run.customize_calls.iter().all(|(sent, _)| *sent <= RESPAWN),
+        "nothing asks the customizer after the respawn: {:?}",
+        run.customize_calls
+    );
+
+    let told: Vec<&str> = run
+        .sdk_after_create
+        .iter()
+        .filter(|(sent, _)| *sent >= RESPAWN)
+        .map(|(_, session)| session.as_str())
+        .collect();
+    assert_eq!(
+        told,
+        [respawned.as_str()],
+        "the respawn tells after_create once, of the session it keeps: {:?}",
+        run.sdk_after_create
+    );
+
+    let warmed = run.result_of(5);
+    assert_eq!(warmed["session_id"], respawned.as_str(), "{warmed}");
+    assert_eq!(
+        warmed["record_revision"], 3,
+        "the first delivery's build, the respawn's one build, then the warm: {warmed}"
+    );
+    let prefix = format!("{TOOL}_");
+    let offered: Vec<&str> = warmed["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the warm lists the member's tools: {warmed}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|tool| tool.starts_with(&prefix))
+        .collect();
+    assert_eq!(
+        offered,
+        [scoped_tool(respawn_calls[0]).as_str()],
+        "the member after the respawn offers the tool of the respawn's one call: {warmed}"
     );
 }

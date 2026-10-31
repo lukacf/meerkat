@@ -47,3 +47,6 @@ meerkat_meta = ["py.typed"]
 # Short tracebacks do not print frame arguments. Transport fakes receive the
 # child's env (the whole process environment), and CI logs are public.
 addopts = "--tb=short"
+# Explicit, so a run with -W error starts cleanly on pytest-asyncio 1.4, which
+# otherwise warns at startup that the default is unset.
+asyncio_default_fixture_loop_scope = "function"

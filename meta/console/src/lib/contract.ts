@@ -80,6 +80,7 @@ export const CONSOLE_RPC_METHODS = {
   topologyApply: "meta/topology/apply",
   topologyOperationGet: "meta/topology/operation/get",
   topologyAuditQuery: "meta/topology/audit/query",
+  mobEventsQuery: "meta/mob_events/query",
 } as const;
 
 export const CONSOLE_BLOB_PATH_PREFIX = "/blobs/";

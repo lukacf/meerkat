@@ -529,6 +529,7 @@ test("stock and shared-core headless topology contracts cannot drift", async () 
     SHARED_CONSOLE_RPC_METHODS.topologyApply,
     SHARED_CONSOLE_RPC_METHODS.topologyOperationGet,
     SHARED_CONSOLE_RPC_METHODS.topologyAuditQuery,
+    SHARED_CONSOLE_RPC_METHODS.mobEventsQuery,
   ];
   const commands = [
     SHARED_CONSOLE_COMMAND_NAMES.topologyQuery,
@@ -536,6 +537,7 @@ test("stock and shared-core headless topology contracts cannot drift", async () 
     SHARED_CONSOLE_COMMAND_NAMES.topologyApply,
     SHARED_CONSOLE_COMMAND_NAMES.topologyOperationGet,
     SHARED_CONSOLE_COMMAND_NAMES.topologyAuditQuery,
+    SHARED_CONSOLE_COMMAND_NAMES.topologyMobEvents,
   ];
   assert.deepEqual(commands.map(sharedConsoleCommandMethod), methods);
 

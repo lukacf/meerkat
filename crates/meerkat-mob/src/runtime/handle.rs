@@ -10323,10 +10323,14 @@ impl MobHandle {
     /// lifecycle facts of the journal events after `after` (from the first
     /// with [`super::MobJournalCursor::START`]), reading at most `limit`
     /// events, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`]: spawns and
-    /// seats (with the identity entry a seat records), legacy adoptions,
-    /// retirement starts, retirements, member resets and mob resets. The
-    /// page's `next` is the cursor to read the next page after; a page that
-    /// read nothing answers the cursor it was asked for.
+    /// seats (with the session, the identity entry a seat records and the
+    /// rotation that seated it), legacy adoptions, retirement starts,
+    /// retirements (with the session, the entry, the cause and the rotation
+    /// that ended the incarnation), member resets and mob resets. Each fact
+    /// is one MobMachine decided in the step that wrote its row
+    /// ([`super::MemberLifecycleEvent`]). The page's `next` is the cursor to
+    /// read the next page after; a page that read nothing answers the cursor
+    /// it was asked for.
     ///
     /// A store read: no actor command (a busy actor cannot delay it), and it
     /// never wakes a member. The handle's principal must hold

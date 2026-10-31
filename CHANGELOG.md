@@ -227,10 +227,12 @@ them.
   existing variant's discriminant moves.
   Exhaustive matches must add the new variants.
   `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
-  `cause` (why the retirement started) and `MemberRetired` the public field
-  `session_archived` (whether the retirement archived the member's session),
-  both of which serde skips, so code that builds either variant literally
-  must set them (`None` and `false`).
+  `cause` (why the retirement started) and `MemberRetired` the public fields
+  `session_archived` (whether the retirement archived the member's session)
+  and `facts` (`MemberRetiredFacts`, what the row records for the member
+  lifecycle journal read), all of which serde skips, so code that builds
+  either variant literally must set them (`None`, `false` and
+  `MemberRetiredFacts::default()`).
 - `meerkat-machine-kernels`, `meerkat-machine-schema`: `MeerkatMachine`'s
   `RunStartHoldReason` (meerkat-machine-schema
   `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
@@ -400,6 +402,26 @@ them.
   member lifecycle facts after a `MobJournalCursor`, `MemberLifecyclePage`)
   and `MobHandle::members_holding_run_starts`. An entry read whose machine
   facts are incomplete answers `MobError::Internal` rather than a default.
+  Each fact of the journal read (`MemberLifecycleEvent`, every variant
+  `#[non_exhaustive]`) is one MobMachine decided in the step that wrote its
+  row, read from the machine's state before the step and from the step's
+  journal effect: a seat names its session and the rotation that seated it
+  (`SeatRotation`: `Successor`, a rotation's terminal step, which retired the
+  identity's previous incarnation in the same step, or `FreshLifeAfter`,
+  `rotate_member`'s fresh life of an identity no member held, naming the
+  incarnation it follows); a retirement names the session its incarnation
+  was bound to at its end, the entry it was the member of (also when its end
+  ended the entry), its cause (`MemberRetirementCause::Unlisted`) and the
+  rotation whose terminal step retired it (`RetiredRotation`: the target and
+  the generation and role the same step seated). A reader pairs a
+  retirement with the seat that follows it from these facts, never from
+  their positions in the journal. A row written before them, and a row that
+  closes a failed spawn, reads them absent. No row names the runtime
+  registration an incarnation held, which belongs to one process.
+  `SeatRotation` and `RetiredRotation` are `#[non_exhaustive]`, with
+  constructors. The facts are internal to the stored event codec, under keys
+  of their own with the stored schema version unchanged, so an older
+  release ignores them and its replay is unchanged.
   Behaviour is unchanged until a host declares an entry. The option and the
   reads are Rust-only; the wire contracts do not carry them.
 
@@ -452,7 +474,9 @@ them.
   any other scope answers `ReleaseOutcome::Stale` and releases nothing. The
   entry reads (`IdentityEntryView::rotation_in_flight`) and the journal's
   retirement starts (`MemberLifecycleEvent::RetirementStarted::rotation`)
-  name the target of a rotation (`RotationTarget`). The rotation record is
+  name the target of a rotation (`RotationTarget`), and its terminal names
+  its link on both of its rows (`RetiredRotation`,
+  `SeatRotation::Successor`). The rotation record is
   internal to the stored event codec: an older Meerkat release replays the
   start row as a plain retirement's. Rust-only; the wire contracts do not
   carry it.
@@ -518,7 +542,8 @@ them.
   does not list is unlisted, its member retired (its retirement's start row
   records the cause,
   `MemberLifecycleEvent::RetirementStarted::cause`,
-  `MemberRetirementCause::Unlisted`) and the entry ended
+  `MemberRetirementCause::Unlisted`, and its `Retired` fact the cause and
+  the entry it ended) and the entry ended
   (`DeclaredRosterOutcome::unlisted`); a worker is never unlisted. An
   unlisted identity listed again comes back as the same identity on the
   session its retirement archived, Dormant at its next generation with no

@@ -302,6 +302,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RebindMobOperatorSpawnProfilesInMob`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SetMobOperatorIdentityCreationInMob`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RebindMobOperatorIdentityCreationInMob`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMobOperatorIdentityCreationAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMobOperatorIdentityCreationUnbound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMobOperatorIdentityCreationTemplateNotInScope`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginUnregisterSessionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9011,6 +9026,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `InputControllerReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MobOperatorIdentityCreationResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

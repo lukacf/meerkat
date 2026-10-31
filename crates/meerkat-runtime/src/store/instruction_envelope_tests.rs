@@ -11,13 +11,17 @@
 use std::sync::Arc;
 
 use meerkat_core::Session;
+use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceipt, RunId};
 use meerkat_core::session_store::{IncrementalSessionStore, SessionStore};
 use meerkat_core::types::{Message, UserMessage};
 
 use crate::LogicalRuntimeId;
 use crate::store::spi::test_host::TestHost;
 use crate::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
-use crate::store::{RuntimeStore, SerializedSessionSnapshot, WholeBlobSessionImport};
+use crate::store::{
+    PreparedRuntimeSessionCommit, RuntimeStore, SerializedSessionSnapshot, WholeBlobSessionImport,
+};
 
 fn envelope_version(bytes: &[u8]) -> u64 {
     serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["version"]
@@ -46,20 +50,39 @@ fn session_with_entry() -> Session {
 }
 
 /// The bytes a JSONL realm's runtime store (SQLite, WholeBlob) commits.
+///
+/// The document lands the way a run's terminal boundary commits it: one
+/// prepared success boundary carrying the sealed session, the run's receipt
+/// and the owner session key. That boundary records the compaction
+/// projection intents the document carries in the store's outbox in the
+/// same transaction; a snapshot committed outside a boundary is refused for
+/// an intent the outbox does not hold yet.
 async fn sqlite_whole_blob_bytes(session: &Session) -> Vec<u8> {
     let dir = tempfile::TempDir::new().unwrap();
     let store = crate::SqliteRuntimeStore::new_whole_blob(dir.path().join("runtime.sqlite3"))
         .expect("whole-blob runtime store");
     let runtime_id = LogicalRuntimeId::for_session(session.id());
-    store
-        .commit_session_snapshot(
-            &runtime_id,
-            SerializedSessionSnapshot {
-                session_snapshot: Arc::new(session.to_persisted_bytes().unwrap()),
-            },
-        )
-        .await
-        .expect("the snapshot commits");
+    let receipt = RunBoundaryReceipt {
+        run_id: RunId::new(),
+        boundary: RunApplyBoundary::RunStart,
+        contributing_input_ids: Vec::new(),
+        conversation_digest: Some(session.transcript_content_digest().unwrap()),
+        message_count: session.messages().len(),
+        sequence: 1,
+        owner_contributions: Vec::new(),
+    };
+    RuntimeStore::commit_prepared_session_boundary(
+        &store,
+        &runtime_id,
+        PreparedRuntimeSessionCommit::success(
+            Some(BoundSessionCommit::sealed(Arc::new(session.clone())).unwrap()),
+            receipt,
+            Vec::new(),
+            Some(session.id().clone()),
+        ),
+    )
+    .await
+    .expect("the run boundary commits");
     store
         .load_committed_whole_blob_snapshot(&runtime_id)
         .await

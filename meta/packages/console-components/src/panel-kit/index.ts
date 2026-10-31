@@ -75,10 +75,13 @@ export {
 export { RelativeTime, useNow } from "./relative-time";
 export { SplitDetail } from "./split-detail";
 export { EmptyState, LoadingState, Notice } from "./states";
-export type { EmptyStateKind } from "./states";
+export type { EmptyStateKind, LoadingVariant } from "./states";
+export { EmptyIllustration } from "./empty-illustration";
+export type { IllustrationName } from "./empty-illustration";
+export { DetailDrawer, DrawerLayout, DrawerSection } from "./drawer";
 export { StatTile, TileGrid } from "./stat-tile";
 export { TECHNICAL_ID_TAIL, TechnicalId, sentenceFragment, splitTechnicalId } from "./technical-id";
-export { TechnicalDetails } from "./technical-details";
+export { TechnicalDetails, technicalDetailsText } from "./technical-details";
 export type { TechnicalDetail } from "./technical-details";
 export { SearchField, SegmentedControl, SelectField, Toolbar } from "./toolbar";
 export type { SegmentOption, SelectOption } from "./toolbar";

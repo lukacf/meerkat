@@ -3,8 +3,16 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AgentAvatar,
   Button,
   Chip,
+  DetailDrawer,
+  DrawerLayout,
+  DrawerSection,
+  EmptyIllustration,
+  EmptyState,
+  LoadingState,
+  TechnicalDetails,
   IconButton,
   OverflowMenu,
   PanelHeader,
@@ -440,5 +448,132 @@ describe("panel preferences", () => {
       "topology-menu:density:comfortable",
       "topology-menu:density:compact",
     ]);
+  });
+});
+
+function DrawerFixture() {
+  const [open, setOpen] = useState(false);
+  return (
+    <DrawerLayout
+      persistKey="topology"
+      open={open}
+      onClose={() => setOpen(false)}
+      testId="layout"
+      main={
+        <button type="button" data-testid="node" onClick={() => setOpen(true)}>
+          Triage
+        </button>
+      }
+      drawer={
+        <DetailDrawer
+          title="Triage"
+          subtitle="Coordinator · Operations team"
+          status={<StatusPill tone="live">Working</StatusPill>}
+          mark={<AgentAvatar name="Triage" size={28} live />}
+          onClose={() => setOpen(false)}
+          headingLevel={4}
+          titleClassName="workgraph-graph__detail-title"
+          actions={<Button variant="primary">Open chat</Button>}
+          technical={[{ label: "Identity", value: "identity:triage" }]}
+          testId="drawer"
+        >
+          <DrawerSection label="Connections" count={4} action="12 / h">
+            <p>Router · wired</p>
+          </DrawerSection>
+        </DetailDrawer>
+      }
+    />
+  );
+}
+
+describe("detail drawer", () => {
+  it("opens with focus on its one heading and returns focus to the opener on Escape", () => {
+    window.localStorage.clear();
+    const view = render(<DrawerFixture />);
+    const node = view.getByTestId("node");
+    node.focus();
+    fireEvent.click(node);
+    const drawer = view.getByTestId("drawer");
+    const heading = view.getByRole("heading", { level: 4, name: "Triage" });
+    expect(heading.className).toBe("cc-drawer__title workgraph-graph__detail-title");
+    expect(document.activeElement === heading).toBe(true);
+    expect(drawer.querySelectorAll("h1, h2, h3, h4, h5, h6").length).toBe(1);
+    expect(drawer.querySelector(".cc-drawer__section-label")?.textContent).toBe("Connections 4");
+    expect(view.getByTestId("layout").classList.contains("has-drawer")).toBe(true);
+    fireEvent.keyDown(heading, { key: "Escape" });
+    expect(view.queryByTestId("drawer") === null).toBe(true);
+    expect(document.activeElement === node).toBe(true);
+  });
+
+  it("closes from its close button and resizes from the keyboard, persisting the width", () => {
+    window.localStorage.clear();
+    const view = render(<DrawerFixture />);
+    fireEvent.click(view.getByTestId("node"));
+    const handle = view.getByRole("separator", { name: "Resize details" });
+    expect(handle.getAttribute("aria-valuenow")).toBe("340");
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(handle.getAttribute("aria-valuenow")).toBe("356");
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(handle.getAttribute("aria-valuenow")).toBe("440");
+    expect(window.localStorage.getItem("meta-console-drawer:topology:default")).toBe("440");
+    fireEvent.click(view.getByRole("button", { name: "Close details" }));
+    expect(view.queryByTestId("drawer") === null).toBe(true);
+  });
+});
+
+describe("states and illustrations", () => {
+  it("draws an illustration above the title, panel or inline size", () => {
+    const view = render(
+      <div>
+        <EmptyState kind="empty" illustration="connections" title="No connections yet" body="These agents are not wired." testId="empty" />
+        <EmptyState kind="error" illustration="error" inline title="Couldn't load approvals" details={[{ label: "Code", value: "-32602" }]} testId="error" />
+      </div>,
+    );
+    const art = view.getByTestId("empty").querySelector("svg.cc-illus");
+    expect(art?.getAttribute("data-illustration")).toBe("connections");
+    expect(art?.getAttribute("aria-hidden")).toBe("true");
+    expect(view.getByTestId("empty").querySelector(".cc-panel-empty__mark") === null).toBe(true);
+    expect(view.getByTestId("error").querySelector("svg.cc-illus")?.getAttribute("data-size")).toBe("inline");
+    expect(view.getByTestId("error").getAttribute("data-kind")).toBe("error");
+    expect(view.getByTestId("error").querySelector("details.cc-tech") !== null).toBe(true);
+  });
+
+  it("knows every illustration name", () => {
+    const names = ["agents", "connections", "work", "memory", "approvals-clear", "timeline", "routes", "search", "no-access", "not-configured", "error"] as const;
+    const view = render(<div>{names.map((name) => <EmptyIllustration key={name} name={name} />)}</div>);
+    expect(view.container.querySelectorAll("svg.cc-illus").length).toBe(names.length);
+    expect(Array.from(view.container.querySelectorAll("svg.cc-illus")).every((svg) => svg.childElementCount > 0)).toBe(true);
+  });
+
+  it("draws graph and timeline skeletons, announced politely", () => {
+    const view = render(
+      <div>
+        <LoadingState variant="graph" label="Loading the team map" testId="graph" />
+        <LoadingState variant="timeline" label="Loading today" testId="timeline" />
+      </div>,
+    );
+    const graph = view.getByTestId("graph");
+    expect(graph.getAttribute("role")).toBe("status");
+    expect(graph.classList.contains("cc-skeleton--graph")).toBe(true);
+    expect(graph.querySelectorAll(".cc-skeleton__node").length).toBe(9);
+    expect(view.getByTestId("timeline").querySelectorAll(".cc-skeleton__bar").length).toBe(10);
+    expect(graph.textContent).toBe("Loading the team map");
+  });
+
+  it("rings a live avatar and counts technical details with Copy all", () => {
+    const view = render(
+      <div>
+        <AgentAvatar name="Billing" size={36} live />
+        <TechnicalDetails testId="tech" items={[{ label: "Identity", value: "identity:billing" }, { label: "Session", value: "session-1" }]} />
+        <TechnicalDetails testId="inline" inline items={[{ label: "Identity", value: "identity:billing" }]} />
+      </div>,
+    );
+    const avatar = view.container.querySelector(".cc-agent__avatar");
+    expect(avatar?.className).toBe("cc-agent__avatar is-live");
+    expect(avatar?.getAttribute("data-size")).toBe("36");
+    expect(view.getByTestId("tech").querySelector("summary")?.textContent).toBe("Technical details · 2");
+    expect(view.getByRole("button", { name: "Copy all" }) !== null).toBe(true);
+    expect(view.getByTestId("inline").tagName).toBe("DIV");
+    expect(view.getByTestId("inline").querySelector(".cc-tech-id") !== null).toBe(true);
   });
 });

@@ -277,9 +277,16 @@ function assertUnitJobsMatch(workflow, label) {
     const allowed = UNIT_JOB_LINES_THAT_DIFFER.some((pattern) => pattern.test(line) && pattern.test(main[index]));
     assert.ok(allowed, `${label}: the unit and main-unit jobs differ in a line that is not a lane name: ${JSON.stringify(line)} / ${JSON.stringify(main[index])}`);
   });
+  // One run of the row, and the known-red ratchet (a row with known reds
+  // runs them alone after it, under their bounded profile).
   const nextest = unit.filter((line) => line.includes("nextest run"));
-  assert.equal(nextest.length, 1, `${label}: one nextest run in the unit job`);
-  assert.ok(main.includes(nextest[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const row = nextest.filter((line) => line.includes("--profile ci-pr "));
+  assert.equal(row.length, 1, `${label}: one nextest run of the row in the unit job`);
+  assert.ok(main.includes(row[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const ratchet = nextest.filter((line) => !row.includes(line));
+  assert.equal(ratchet.length, 1, `${label}: the unit job's only other nextest run is the known-red ratchet`);
+  assert.match(ratchet[0], /--profile ci-known-reds -E "\$\{KNOWN_REDS\}"/, `${label}: the ratchet runs the known reds alone`);
+  assert.ok(main.includes(ratchet[0]), `${label}: main-unit runs the unit job's ratchet`);
 }
 
 // What each event runs. The push runs every lane over every target; a pull
@@ -2207,12 +2214,19 @@ for (const path of [
 // carries every suite as an extra main unit row, and a pull request carries
 // the suites of a changed package that runs its unit tests there.
 {
-  const featureFlags = /^-p (\S+) --features [a-z0-9-]+(,[a-z0-9-]+)*$/;
+  // A suite built `with` other packages names them after its own, and its
+  // features by package.
+  const featureFlags = /^-p (\S+)((?: -p \S+)*) --features ([a-z0-9-]+\/)?[a-z0-9-]+(,([a-z0-9-]+\/)?[a-z0-9-]+)*$/;
   const facade = planFor(["crates/meerkat/src/experimental_gpt_live.rs"]);
   assert.ok(facade.main_feature_unit_shards.length >= 2, "main carries the feature suites");
   for (const suite of facade.main_feature_unit_shards) {
     const match = featureFlags.exec(suite.package_flags);
     assert.ok(match, `feature suite ${suite.name} flags: ${suite.package_flags}`);
+    const features = suite.package_flags.split(" --features ")[1].split(",");
+    assert.ok(
+      features.every((feature) => (match[2] ? feature.startsWith(`${match[1]}/`) : !feature.includes("/"))),
+      `${suite.name} names its features by package exactly when it builds with other packages`,
+    );
     assert.deepEqual(suite.packages, [match[1]], `${suite.name} runs exactly its package`);
     assert.ok(suite.packages[0] in facade.package_model, `${suite.name} names a workspace package`);
   }

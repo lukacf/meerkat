@@ -938,7 +938,7 @@ jobs:
   # four (audits-k, audits-m, audits-n, audits-o) for its declared apply's
   # apply, legacy, roles and hosted parts (180, 230, 196 and 212 s locally
   # with 4 workers), and a fourteenth (audits-q) for the created identity
-  # audit (217 s locally); none of these eight is measured on a hosted
+  # audit (225 s locally); none of these eight is measured on a hosted
   # runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.

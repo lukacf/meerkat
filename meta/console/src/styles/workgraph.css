@@ -582,6 +582,16 @@ button.workgraph-drawer__link-title:focus-visible {
     gap: 8px;
   }
 }
+/* Five figures need about 720 px in one row: between the kit's 2 x 2 fold
+   (under 480 px) and that, they wrap three and two. */
+@container cc-panel (min-width: 480px) and (max-width: 719px) {
+  .workgraph__glance.cc-glance {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .workgraph__glance.cc-glance > :nth-child(3n + 1) { border-left: 0; }
+  .workgraph__glance.cc-glance > :nth-child(n + 4) { border-top: 1px solid var(--_cc-border-soft); }
+}
 @container cc-panel (max-width: 479px) {
   .workgraph-goal__actions { opacity: 1; }
   .workgraph-goal__owner { max-width: 100%; }

@@ -458,13 +458,24 @@ test("activity counts created and closed items per local day, ending today", () 
   assert.equal(days[6].start, new Date(2026, 6, 8).getTime());
 });
 
-test("done by: the owner of the item's last claim in the events window", () => {
+test("done by: the owner who held the item when it closed, else plain Done", () => {
   const claim = (seq: number, itemId: string, id: string, name?: string) => ({
     seq, kind: "claimed", item_id: itemId, at: at(seq),
     payload: { item: { id: itemId, claim: { owner: { key: { kind: "agent", id }, display_name: name } } } },
   });
-  const doneBy = workGraphDoneBy([claim(3, "x", "billing", "Billing"), claim(1, "x", "returns", "Returns"), claim(2, "y", "shipping"), { seq: 4, kind: "closed", item_id: "x" }]);
-  assert.deepEqual([...doneBy].sort(), [["x", "Billing"], ["y", "Shipping"]]);
+  const closed = (seq: number, itemId: string, status = "completed") => ({
+    seq, kind: "closed", item_id: itemId, at: at(seq), payload: { item: { id: itemId, status } },
+  });
+  const released = (seq: number, itemId: string) => ({ seq, kind: "released", item_id: itemId, at: at(seq) });
+  const doneBy = workGraphDoneBy([
+    // Out of order on purpose: the window is read by seq.
+    claim(3, "x", "billing", "Billing"), closed(4, "x"), claim(1, "x", "returns", "Returns"),
+    claim(2, "open-one", "shipping"),
+    claim(5, "dropped", "intake"), released(6, "dropped"), closed(7, "dropped"),
+    claim(8, "broke", "orders"), closed(9, "broke", "failed"),
+    closed(10, "no-claim"),
+  ]);
+  assert.deepEqual([...doneBy], [["x", "Billing"]]);
 });
 
 test("ages read compactly", () => {

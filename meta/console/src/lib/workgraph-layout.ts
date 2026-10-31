@@ -1089,30 +1089,44 @@ export function workGraphActivityDays(
   return result;
 }
 
-/// Who finished each completed item, by name: the server clears the owner
-/// on close and events carry no actor, so this is the owner of the item's
-/// last claim in the events window.
+/// Who finished each completed item, as far as the events window shows it.
+/// Events carry no actor, so "Done by" names the owner who held the item
+/// when its `closed` event landed: the last claim before the close with no
+/// release in between. An item whose claim or close is outside the window
+/// reads plain "Done".
 export function workGraphDoneBy(
   events: readonly WorkGraphWireEvent[],
   directory?: AgentDirectory,
 ): Map<string, string> {
-  const latest = new Map<string, { seq: number; at: number; name: string }>();
-  for (const event of events) {
-    if (textId(event.kind).replace(/^item_/, "") !== "claimed") continue;
+  const ordered = events
+    .map((event, index) => ({ event, index, seq: typeof event.seq === "number" ? event.seq : Number.NaN }))
+    .sort((left, right) => {
+      if (Number.isFinite(left.seq) && Number.isFinite(right.seq) && left.seq !== right.seq) return left.seq - right.seq;
+      return left.index - right.index;
+    });
+  const holder = new Map<string, string>();
+  const doneBy = new Map<string, string>();
+  for (const { event } of ordered) {
     const payload = event.payload && typeof event.payload === "object" ? event.payload as { item?: WorkGraphWireItem } : null;
     const item = payload?.item;
     const itemId = textId(event.item_id) || textId(item?.id);
-    if (!item || !itemId) continue;
-    const owner = workGraphItemOwner(item, directory);
-    if (!owner) continue;
-    const seq = typeof event.seq === "number" ? event.seq : -1;
-    const at = Date.parse(textId(event.at));
-    const previous = latest.get(itemId);
-    if (!previous || seq > previous.seq || (seq === previous.seq && at > previous.at)) {
-      latest.set(itemId, { seq, at: Number.isFinite(at) ? at : 0, name: owner.name });
+    if (!itemId) continue;
+    const kind = textId(event.kind).replace(/^item_/, "");
+    if (kind === "claimed") {
+      const owner = item ? workGraphItemOwner(item, directory) : null;
+      if (owner) holder.set(itemId, owner.name);
+      else holder.delete(itemId);
+    } else if (kind === "released") {
+      holder.delete(itemId);
+    } else if (kind === "closed") {
+      const name = holder.get(itemId);
+      const status = textId(item?.status);
+      if (name && (!status || status === "completed")) doneBy.set(itemId, name);
+      else doneBy.delete(itemId);
+      holder.delete(itemId);
     }
   }
-  return new Map([...latest].map(([itemId, value]) => [itemId, value.name]));
+  return doneBy;
 }
 
 // ── Attention bindings and activity in words ─────────────────────────────

@@ -464,8 +464,10 @@ function GoalCard({
   const owner = workGraphItemOwner(item, directory);
   const actions = workGraphItemActions(item, itemId, canManage, handlers);
   const goalBlockers = blockers.get(itemId);
-  const { progress } = group;
   const frame = model.frames.find((candidate) => candidate.id === itemId);
+  // The graph's frame counts the same items (cancelled ones are not part of
+  // the goal's work); the tree's own count is the fallback.
+  const progress = frame?.progress ?? group.progress;
   const technical: TechnicalDetail[] = [{ label: "Work item ID", value: itemId }];
   for (const binding of bindings) {
     if (binding.binding_id) technical.push({ label: "Attention binding ID", value: binding.binding_id });
@@ -880,7 +882,8 @@ export function WorkGraphPanel({
         showDone={showDone}
         showCancelled={showCancelled}
         highlightCriticalPath={highlightCriticalPath}
-        density={density}
+        // Narrow panes draw compact cards (168 x 36) whatever the density.
+        density={density === "compact" || (width !== null && width < 600) ? "compact" : "comfortable"}
         canManage={canManage}
         handlers={handlers}
         cacheKey="panel"
@@ -983,6 +986,10 @@ export function WorkGraphPanel({
         counts.blocked ? { key: "blocked", text: `${counts.blocked} blocked`, tone: "warn" } : null,
         counts.failed ? { key: "failed", text: `${counts.failed} failed`, tone: "crit" } : null,
         counts.ready ? { key: "ready", text: `${counts.ready} ready`, tone: "ok" } : null,
+        // Under 480 px the strip folds to four figures: TO FINISH moves here.
+        width !== null && width < 480 && chainLength > 0
+          ? { key: "to-finish", text: `${plural(chainLength, "step")} to finish` }
+          : null,
       ];
   const viewOptions: MenuEntry[] = [
     {

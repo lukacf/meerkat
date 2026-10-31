@@ -301,10 +301,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   what Core's journal says of its step: a seat its role, session, identity
   entry, whether its archived session was gone, and the rotation that
   seated it (Core's `SeatRotation`: a rotation's terminal step, naming the
-  incarnation the same step retired, or a fresh life after the identity's
-  last incarnation); a retirement its role, session, identity entry, cause
-  and the rotation whose terminal step retired it (Core's
-  `RetiredRotation`: its target, successor and successor role).
+  incarnation the same step retired; a fresh life after the identity's
+  last incarnation; or a host's legacy respawn, naming the incarnation it
+  retired); a retirement its role, session, identity entry, cause and the
+  rotation whose terminal step retired it (Core's `RetiredRotation`: its
+  target, successor and successor role).
   `RetirementStarted`, `EntryAdopted` and `LegacyReset` carry the other
   kinds Core journals, so the bridge drops none. `member()` names a fact's
   member, and the `with_` builders (`with_session`, `with_identity_entry`,
@@ -552,6 +553,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     delete ran them inline, and a kill lost them. The verb's record keeps
     the one of the step that ended the incarnation (an unlisting) while the
     projection has not reached that end, so both run;
+  - a host's legacy respawn of an identity's member (`MobHandle::respawn`,
+    `respawn_with_successor_spec`), which Core journals as a retirement and
+    then a seat that names the incarnation it follows, owes what a rotation
+    no Meta verb asked for owes: the hook hears `rotated` (`role_move` when
+    the seat takes another role) and the session the respawn left is
+    distilled, as before. That is read from the seat's fact (and the
+    retired incarnation's session and role from Core's member history),
+    never from where the two steps sit in the journal; a respawn onto the
+    same session owes nothing;
   - an identity runtime that no identity context serves is bound by the
     public view an embedder hands the RPC handler, or by its restore, and so
     runs the side effects of its steps; one that nothing binds records

@@ -153,6 +153,7 @@ export function parseSideChatForkResult(result: unknown): SideChatForkResult {
 const INSTRUCTION_GAP_TEXT: Record<string, string> = {
   not_effective_in_source: "not active in the source",
   body_unreadable: "its text could not be read",
+  head_body_retired: "a compaction of the source retired its text",
   activation_refused: "the runtime refused it",
 };
 

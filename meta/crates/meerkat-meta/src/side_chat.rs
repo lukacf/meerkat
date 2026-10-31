@@ -547,6 +547,10 @@ pub enum SideChatInstructionGap {
     NotEffectiveInSource,
     /// The copied row's body does not match its declared content digest.
     BodyUnreadable,
+    /// A compaction of the source retired the copied head's body: a later
+    /// activation of its key superseded it, and the fork's prefix ends
+    /// before that activation, so there is no body to activate here.
+    HeadBodyRetired,
     /// Meerkat refused the activation in the side chat.
     ActivationRefused { message: String },
 }
@@ -1236,6 +1240,9 @@ fn inherited_head_body<'a>(
 ) -> Result<&'a str, SideChatInstructionGap> {
     if source_session != Some(&head.identity.origin_session_id) {
         return Err(SideChatInstructionGap::NotEffectiveInSource);
+    }
+    if head.body_retired {
+        return Err(SideChatInstructionGap::HeadBodyRetired);
     }
     activation_body(&head.identity, &head.content).ok_or(SideChatInstructionGap::BodyUnreadable)
 }

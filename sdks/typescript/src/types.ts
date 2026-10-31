@@ -1505,7 +1505,7 @@ export interface SessionOptions {
   /**
    * Scoped tool grant gate: built-in tool families and tool names the session
    * mounts hidden and refuses at dispatch until `grantTool` opens them. The
-   * client sends it only to a server whose contract (0.9.8 or later) takes
+   * client sends it only to a server whose contract (0.9.9 or later) takes
    * it: an older server would build the session with these tools ungated.
    */
   grantGatedTools?: {

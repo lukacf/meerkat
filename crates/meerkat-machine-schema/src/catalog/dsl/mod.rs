@@ -4238,7 +4238,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Stale",
                 ],
             ),
-            // Identity entries (0.9.8).
+            // Identity entries (0.9.9).
             NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared"]),
             // Rotation targets (0.9.8): a new session, or the member's own.
             NamedTypeBinding::string_enum("RotationTarget", &["FreshSession", "SameSession"]),

@@ -24,6 +24,11 @@ import {
 } from "./ci-hook-coverage.mjs";
 import {
   FEATURE_UNIT_SUITES,
+  TOOLKIT_MOBKIT_KNOWN_REDS,
+  TOOLKIT_MOBKIT_TEST_DEBT,
+  checkKnownRedsDoc,
+  featureSuiteFilters,
+  featureSuiteFlags,
   GOVERNANCE_DOC_PATTERNS,
   GUARD_LANE_INPUTS,
   HOSTED_RUNNER_EXCLUDED_BINARIES,
@@ -272,9 +277,16 @@ function assertUnitJobsMatch(workflow, label) {
     const allowed = UNIT_JOB_LINES_THAT_DIFFER.some((pattern) => pattern.test(line) && pattern.test(main[index]));
     assert.ok(allowed, `${label}: the unit and main-unit jobs differ in a line that is not a lane name: ${JSON.stringify(line)} / ${JSON.stringify(main[index])}`);
   });
+  // One run of the row, and the known-red ratchet (a row with known reds
+  // runs them alone after it, under their bounded profile).
   const nextest = unit.filter((line) => line.includes("nextest run"));
-  assert.equal(nextest.length, 1, `${label}: one nextest run in the unit job`);
-  assert.ok(main.includes(nextest[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const row = nextest.filter((line) => line.includes("--profile ci-pr "));
+  assert.equal(row.length, 1, `${label}: one nextest run of the row in the unit job`);
+  assert.ok(main.includes(row[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const ratchet = nextest.filter((line) => !row.includes(line));
+  assert.equal(ratchet.length, 1, `${label}: the unit job's only other nextest run is the known-red ratchet`);
+  assert.match(ratchet[0], /--profile ci-known-reds -E "\$\{KNOWN_REDS\}"/, `${label}: the ratchet runs the known reds alone`);
+  assert.ok(main.includes(ratchet[0]), `${label}: main-unit runs the unit job's ratchet`);
 }
 
 // What each event runs. The push runs every lane over every target; a pull
@@ -614,8 +626,97 @@ function assertArchivedLanes(plan, label) {
       /^ {10}if \[\[ -n "\$\{PARTITION\}" \]\]; then\n {12}partition_args=\(--partition "\$\{PARTITION\}"\)\n {10}fi$/m,
       `${job} passes a partition only for a row that sets one`,
     );
-    assert.match(text, /nextest run \$\{PACKAGES\} \$\{TARGETS\} --profile ci-pr "\$\{partition_args\[@\]\}" \\$/m, `${job} runs the row's partition`);
+    assert.match(
+      text,
+      /nextest run \$\{PACKAGES\} \$\{TARGETS\} --profile ci-pr "\$\{partition_args\[@\]\}" "\$\{filter_args\[@\]\}" \\$/m,
+      `${job} runs the row's partition and filter`,
+    );
   }
+}
+
+// A feature suite built with other packages, or with known reds: the
+// toolkit-mobkit[native-host] suite builds toolkit-mobkit with meerkat-connect
+// (which turns its native host on), runs toolkit-mobkit's tests only and
+// none of its known reds, then runs the known reds that fail every time and
+// needs each one to fail. Its known-red list and the crate's test-debt page
+// name the same tests under the same classes.
+{
+  const suite = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "toolkit-mobkit" && candidate.id === "native-host");
+  assert.ok(suite, "toolkit-mobkit has a native-host feature suite");
+  assert.deepEqual(suite.with, ["meerkat-connect"], "the native-host suite builds with meerkat-connect");
+  assert.equal(suite.pullRequest, false, "the native-host suite runs on the push only");
+  assert.equal(featureSuiteFlags(suite), "-p toolkit-mobkit -p meerkat-connect --features toolkit-mobkit/native-host");
+  const steady = TOOLKIT_MOBKIT_KNOWN_REDS.filter((entry) => !entry.intermittent);
+  const filters = featureSuiteFilters(suite);
+  assert.ok(filters.filter.startsWith("package(toolkit-mobkit) and not (test(="), "the suite runs its package's tests, without its known reds");
+  for (const entry of TOOLKIT_MOBKIT_KNOWN_REDS) {
+    assert.ok(filters.filter.includes(`test(=${entry.test})`), `the suite excludes ${entry.test}`);
+    assert.equal(filters.known_reds.includes(`test(=${entry.test})`), !entry.intermittent, `the ratchet runs ${entry.test} unless it is intermittent`);
+  }
+  assert.ok(filters.known_reds.startsWith("package(toolkit-mobkit) and (test(="), "the ratchet runs the package's steady known reds");
+  assert.equal(filters.known_red_count, steady.length, "the ratchet counts the steady known reds");
+  // A suite without companions or known reds keeps its plain flags and no filter.
+  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
+  assert.equal(featureSuiteFlags(plain), "-p meerkat-connect --features console");
+  assert.deepEqual(featureSuiteFilters(plain), {});
+
+  // The page and the list agree, and every drift between them is refused.
+  const page = readFileSync(resolve(root, TOOLKIT_MOBKIT_TEST_DEBT), "utf8");
+  checkKnownRedsDoc(page, TOOLKIT_MOBKIT_KNOWN_REDS, TOOLKIT_MOBKIT_TEST_DEBT);
+  const doc = "# t\n\n## Class one\n\n- `a::b`\n\n## Class two\n\n| Test | Fix |\n|---|---|\n| `c::d` | x |\n";
+  const list = [{ test: "a::b", anchor: "class-one" }, { test: "c::d", anchor: "class-two" }];
+  checkKnownRedsDoc(doc, list, "doc");
+  assert.throws(() => checkKnownRedsDoc(doc, [list[0]], "doc"), /c::d \(#class-two\) is not a known red/, "a page-only test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [...list, { test: "e::f", anchor: "class-one" }], "doc"), /e::f is not on doc/, "a list-only test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [list[0], { test: "c::d", anchor: "class-one" }], "doc"), /names #class-one, but doc lists it under #class-two/, "a moved test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [...list, list[0]], "doc"), /a::b is listed twice/, "a repeated entry is refused");
+  assert.throws(() => checkKnownRedsDoc(`${doc}- \`a::b\`\n`, list, "doc"), /a::b is listed twice/, "a test the page lists twice is refused");
+
+  // The push plan runs the suite as a main unit row; a pull request leaves it.
+  const path = "connect/crates/toolkit-mobkit/src/lib.rs";
+  const push = planFor([path], ["--event", "push"]);
+  const row = push.main_feature_unit_shards.find((candidate) => candidate.name === "toolkit-mobkit[native-host]");
+  assert.ok(row, "a toolkit-mobkit change runs the native-host suite on the push");
+  assert.equal(row.package_flags, featureSuiteFlags(suite));
+  assert.equal(row.filter, filters.filter);
+  assert.equal(row.known_reds, filters.known_reds);
+  assert.equal(row.known_red_count, filters.known_red_count);
+  const pr = planFor([path], ["--event", "pull_request"]);
+  assert.ok(!pr.unit_feature_shards.some((candidate) => candidate.name === "toolkit-mobkit[native-host]"), "a pull request leaves the native-host suite to the push");
+  const githubLinesFor = (args) =>
+    Object.fromEntries(run(["--format", "github", ...args]).stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  const pushLines = githubLinesFor(["--event", "push", "--", path]);
+  const matrixRow = bothWaves(pushLines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").find((candidate) => candidate.name === row.name);
+  assert.ok(matrixRow, "the native-host suite is a main unit matrix row");
+  assert.deepEqual(
+    [matrixRow.packages, matrixRow.filter, matrixRow.known_reds, matrixRow.known_red_count],
+    [row.package_flags, row.filter, row.known_reds, String(row.known_red_count)],
+    "the matrix row carries the suite's filter and known reds",
+  );
+
+  // The unit jobs read the row's filter and known reds; the ratchet runs the
+  // known reds alone under the bounded ci-known-reds profile and needs every
+  // one to fail.
+  const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+    const text = jobLines(workflow, job).join("\n");
+    assert.match(text, /^ {10}FILTER: \$\{\{ matrix\.filter \}\}$/m, `${job} reads the row's filter`);
+    assert.match(text, /^ {10}KNOWN_REDS: \$\{\{ matrix\.known_reds \}\}$/m, `${job} reads the row's known reds`);
+    assert.match(text, /^ {10}KNOWN_RED_COUNT: \$\{\{ matrix\.known_red_count \}\}$/m, `${job} reads the row's known-red count`);
+    assert.match(
+      text,
+      /^ {10}if \[\[ -n "\$\{FILTER\}" \]\]; then\n {12}filter_args=\(-E "\$\{FILTER\}"\)\n {10}fi$/m,
+      `${job} passes a filter only for a row that sets one`,
+    );
+    assert.match(text, /--profile ci-known-reds -E "\$\{KNOWN_REDS\}"/, `${job} runs the known reds alone under the bounded profile`);
+    assert.match(
+      text,
+      /\$\{KNOWN_RED_COUNT\} tests\? run: 0 passed, \$\{KNOWN_RED_COUNT\} failed\(,\|\$\)/,
+      `${job} needs every known red to fail`,
+    );
+  }
+  const nextest = readFileSync(resolve(root, ".config/nextest.toml"), "utf8");
+  assert.match(nextest, /^\[profile\.ci-known-reds\]\n(?:#[^\n]*\n)*inherits = "fast"\nslow-timeout = \{ period = "30s", terminate-after = 2 \}$/m, "the ratchet profile bounds each test");
 }
 
 // Budget by construction: every package outside the chain models under the
@@ -2113,12 +2214,19 @@ for (const path of [
 // carries every suite as an extra main unit row, and a pull request carries
 // the suites of a changed package that runs its unit tests there.
 {
-  const featureFlags = /^-p (\S+) --features [a-z0-9-]+(,[a-z0-9-]+)*$/;
+  // A suite built `with` other packages names them after its own, and its
+  // features by package.
+  const featureFlags = /^-p (\S+)((?: -p \S+)*) --features ([a-z0-9-]+\/)?[a-z0-9-]+(,([a-z0-9-]+\/)?[a-z0-9-]+)*$/;
   const facade = planFor(["crates/meerkat/src/experimental_gpt_live.rs"]);
   assert.ok(facade.main_feature_unit_shards.length >= 2, "main carries the feature suites");
   for (const suite of facade.main_feature_unit_shards) {
     const match = featureFlags.exec(suite.package_flags);
     assert.ok(match, `feature suite ${suite.name} flags: ${suite.package_flags}`);
+    const features = suite.package_flags.split(" --features ")[1].split(",");
+    assert.ok(
+      features.every((feature) => (match[2] ? feature.startsWith(`${match[1]}/`) : !feature.includes("/"))),
+      `${suite.name} names its features by package exactly when it builds with other packages`,
+    );
     assert.deepEqual(suite.packages, [match[1]], `${suite.name} runs exactly its package`);
     assert.ok(suite.packages[0] in facade.package_model, `${suite.name} names a workspace package`);
   }
@@ -3305,7 +3413,7 @@ for (const path of [
         assert.deepEqual(
           plan.main_feature_unit_shards.map((row) => row.package_flags).sort(),
           FEATURE_UNIT_SUITES.filter((suite) => plan.closure.includes(suite.package))
-            .map((suite) => `-p ${suite.package} --features ${suite.features.join(",")}`).sort(),
+            .map((suite) => featureSuiteFlags(suite)).sort(),
           `${label}: the feature suites of the product's closure`,
         );
         for (const row of plan.main_feature_unit_shards) {

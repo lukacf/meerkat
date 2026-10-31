@@ -136,6 +136,14 @@ package(meerkat-runtime) and (
 '''
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+[profile.ci-known-reds]
+# The known-red ratchet of a feature suite (`known_reds` in the unit jobs,
+# FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs): every test it runs is
+# expected to fail, the slowest after about 25 s, so one that runs past a
+# minute is cut off. A timeout is not a failure, so the ratchet fails.
+inherits = "fast"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
 [profile.ci-integration]
 # The BuildBuddy Native integration-fast lane (tools/buildbuddy/full_lane_test.sh):
 # fast's selection plus a kill bound. fast only reports a test still running

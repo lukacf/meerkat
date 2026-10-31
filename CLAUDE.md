@@ -521,6 +521,13 @@ and its CI must be green before a release tag (`require_ci_green`):
   Live suites). A new test behind a non-default feature needs a suite, or no
   lane runs it. A push runs no `unit` lane: the unit rows it would run (the
   same shards and suites) run verbatim in `main-unit` (`unit_rows_on_main`).
+  A suite can build `with` other packages (toolkit-mobkit's `native-host`
+  suite builds with meerkat-connect and runs toolkit-mobkit's tests only)
+  and carry known reds: each excluded by name and filed under its class in
+  the crate's test-debt page, which the plan checks against the list. The
+  row then runs the known reds that fail every time (nextest profile
+  `ci-known-reds`) and fails unless every one still fails, so a fixed test
+  leaves the list and the page in the same change.
 - `integration`: the `tests/*.rs` binaries (`nextest -p <package> --test
   '*'`) of each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs`
   whose trigger packages or paths changed (meerkat-runtime;

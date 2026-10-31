@@ -1630,12 +1630,12 @@ export class MeerkatClient {
 
   /**
    * Refuse a grant gate before sending it to a server that would drop it:
-   * before contract 0.9.8 `session/create` ignores `grant_gated_tools` and
-   * builds the session with the gated tools ungated.
+   * before contract 0.9.9 (released 0.9.8 included) `session/create` ignores
+   * `grant_gated_tools` and builds the session with the gated tools ungated.
    */
   private requireGrantGateSupport(options?: SessionOptions): void {
     if (options?.grantGatedTools == null) return;
-    const minimum = [0, 9, 8];
+    const minimum = [0, 9, 9];
     if (!this.serverContractAtLeast(minimum)) {
       throw new CapabilityUnavailableError(
         "CAPABILITY_UNAVAILABLE",

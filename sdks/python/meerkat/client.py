@@ -495,9 +495,9 @@ _CALLER_IDEMPOTENCY_KEY_MIN_CONTRACT = (0, 9, 5)
 _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
 
 # The first server contract that takes `grant_gated_tools` on session/create.
-# An older server ignores the field and builds the session with the gated
-# tools ungated, so the SDK refuses to send a gate to it.
-_GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 8)
+# An older server, released 0.9.8 included, ignores the field and builds the
+# session with the gated tools ungated, so the SDK refuses to send a gate to it.
+_GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 9)
 
 
 def _contract_parts(version: str) -> tuple[int, ...] | None:
@@ -1589,7 +1589,7 @@ class MeerkatClient:
         ``grant_gated_tools`` (``{"families": [...], "tools": [...]}``) gates
         built-in tool families and tool names: the session mounts them hidden
         and refuses them until :meth:`grant_tool` opens them. It is sent only
-        to a server whose contract (0.9.8 or later) takes it.
+        to a server whose contract (0.9.9 or later) takes it.
 
         Example::
 

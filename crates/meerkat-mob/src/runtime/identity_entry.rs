@@ -1506,4 +1506,156 @@ mod tests {
         assert_eq!(empty.next, MobJournalCursor::new(6));
         assert!(empty.records.is_empty());
     }
+
+    /// The journal read answers what a row records of the facts MobMachine
+    /// decided: a seat's session (its row's session binding) and the
+    /// rotation that seated it; a retirement's session, the entry it was the
+    /// member of, why it ended and the rotation whose terminal step retired
+    /// it. A retirement row that records none of them, as one written before
+    /// them, reads them absent.
+    ///
+    /// RED (before the read maps them): every one of them reads absent.
+    #[test]
+    fn the_lifecycle_page_reads_the_facts_its_rows_record() {
+        use crate::runtime::RotationTarget;
+        let mob = MobId::from("lifecycle-mob");
+        let identity = AgentIdentity::from("rotated");
+        let retired_session = SessionId::new();
+        let seated_session = SessionId::new();
+        let rotation = RetiredRotation::new(
+            RotationTarget::FreshSession,
+            Generation::new(1),
+            ProfileName::from("lead"),
+        );
+        let mut spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::new(1),
+            FenceToken::new(2),
+            AgentRuntimeId::new(identity.clone(), Generation::new(1)),
+            ProfileName::from("lead"),
+        )
+        .with_bridge_member_ref(Some(crate::event::MemberRef::from_bridge_session_id(
+            seated_session.clone(),
+        )));
+        spawned.seat_rotation = Some(SeatRotation::successor(
+            Generation::new(0),
+            RotationTarget::FreshSession,
+        ));
+        let retired = |generation: u64, facts: crate::event::MemberRetiredFacts| {
+            MobEventKind::MemberRetired {
+                agent_identity: identity.clone(),
+                generation: Generation::new(generation),
+                role: ProfileName::from("worker"),
+                session_archived: false,
+                facts,
+            }
+        };
+        let event = |cursor: u64, kind: MobEventKind| MobEvent {
+            cursor,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob.clone(),
+            kind,
+        };
+        let events = [
+            event(
+                1,
+                retired(
+                    0,
+                    crate::event::MemberRetiredFacts {
+                        session_id: Some(retired_session.clone()),
+                        cause: None,
+                        identity_entry: Some(IdentityEntryOrigin::Declared),
+                        unknown_identity_entry: None,
+                        rotation: Some(rotation.clone()),
+                    },
+                ),
+            ),
+            event(2, MobEventKind::MemberSpawned(spawned)),
+            event(3, retired(1, crate::event::MemberRetiredFacts::default())),
+        ];
+        let page = member_lifecycle_page(&mob, MobJournalCursor::START, &events);
+        let facts = page
+            .records
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            facts,
+            vec![
+                MemberLifecycleEvent::Retired {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(0),
+                    role: ProfileName::from("worker"),
+                    session_id: Some(retired_session),
+                    identity_entry: Some(IdentityEntryOrigin::Declared),
+                    cause: None,
+                    rotation: Some(rotation),
+                },
+                MemberLifecycleEvent::Spawned {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(1),
+                    role: ProfileName::from("lead"),
+                    identity_entry: None,
+                    history_unavailable: None,
+                    session_id: Some(seated_session),
+                    rotation: Some(SeatRotation::successor(
+                        Generation::new(0),
+                        RotationTarget::FreshSession,
+                    )),
+                },
+                MemberLifecycleEvent::Retired {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(1),
+                    role: ProfileName::from("worker"),
+                    session_id: None,
+                    identity_entry: None,
+                    cause: None,
+                    rotation: None,
+                },
+            ],
+            "the read answers the facts each row records"
+        );
+    }
+
+    /// The journal read maps exactly the six member lifecycle row kinds
+    /// (`member_lifecycle_event`): a row kind dropped from it, or one added
+    /// to it without a decision on what it records, fails here.
+    #[test]
+    fn the_lifecycle_mapping_names_the_six_row_kinds() {
+        let source = include_str!("identity_entry.rs");
+        let start = source
+            .find("fn member_lifecycle_event(")
+            .expect("the mapping");
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("the end of the mapping");
+        let mut kinds = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| {
+                line.match_indices("MobEventKind::")
+                    .map(move |(at, prefix)| {
+                        let rest = &line[at + prefix.len()..];
+                        let name = rest
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        &rest[..name]
+                    })
+            })
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(
+            kinds,
+            [
+                "MemberReset",
+                "MemberRetired",
+                "MemberRetirementStarted",
+                "MemberSessionBindingRecovered",
+                "MemberSpawned",
+                "MobReset",
+            ]
+        );
+    }
 }

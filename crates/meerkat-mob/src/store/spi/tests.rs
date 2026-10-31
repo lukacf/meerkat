@@ -970,11 +970,15 @@ async fn the_identity_write_fence_declares_the_hosts_longest_commit() {
 
 /// Every field the stored event codec keeps beyond the public event
 /// contract survives a reopen of the host store's mob storage: a member's
-/// bridge ref, placed spawn, identity intent digest, peer endpoint and direct
-/// fence; a recovered binding's session and endpoint; a retirement's endpoint,
-/// topology mark and the rotation it carries out; an abandoned respawn's
-/// runtime and fence. A restarted mob rebuilds its roster and topology from
-/// them.
+/// bridge ref, placed spawn, identity intent digest, peer endpoint, direct
+/// fence and the rotation that seated it; a recovered binding's session and
+/// endpoint; a retirement's endpoint, topology mark and the rotation it
+/// carries out; a retired incarnation's session, cause, entry and rotation;
+/// an abandoned respawn's runtime and fence. A restarted mob rebuilds its
+/// roster and topology from them, and the journal read its facts.
+///
+/// RED (before the codec stores the journal read's facts): the reopen loses
+/// the seat's rotation and the retirement's facts.
 #[tokio::test]
 async fn a_reopen_keeps_every_replay_only_event_field() {
     use crate::event::{MemberSessionBindingRecoveredEvent, MemberSpawnedEvent};
@@ -1000,31 +1004,33 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
         "inproc://mob/worker/worker",
     )
     .expect("member peer endpoint");
+    let mut spawned = MemberSpawnedEvent::new(
+        identity.clone(),
+        generation,
+        fence,
+        runtime.clone(),
+        ProfileName::from("worker"),
+    )
+    .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
+    .with_identity_intent_authority_digest(Some("sha256:intent".to_string()))
+    .with_placed_spawn_id(Some(PlacedSpawnId::new()))
+    .with_member_peer_endpoint(Some(endpoint.clone()))
+    .with_direct_member_fence(Some(BridgeDirectMemberFence {
+        mob_id: "mob".to_string(),
+        agent_identity: identity.to_string(),
+        generation: generation.get(),
+        fence_token: 1,
+        member_session_id: session.to_string(),
+        runtime_session_token: BridgeDirectRuntimeSessionToken::new(),
+    }))
+    .with_history_unavailable(Some(crate::runtime::HistoryUnavailable::new(
+        SessionId::new(),
+    )));
+    spawned.seat_rotation = Some(crate::runtime::SeatRotation::fresh_life_after(
+        Generation::new(7),
+    ));
     let kinds = vec![
-        MobEventKind::MemberSpawned(
-            MemberSpawnedEvent::new(
-                identity.clone(),
-                generation,
-                fence,
-                runtime.clone(),
-                ProfileName::from("worker"),
-            )
-            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
-            .with_identity_intent_authority_digest(Some("sha256:intent".to_string()))
-            .with_placed_spawn_id(Some(PlacedSpawnId::new()))
-            .with_member_peer_endpoint(Some(endpoint.clone()))
-            .with_direct_member_fence(Some(BridgeDirectMemberFence {
-                mob_id: "mob".to_string(),
-                agent_identity: identity.to_string(),
-                generation: generation.get(),
-                fence_token: 1,
-                member_session_id: session.to_string(),
-                runtime_session_token: BridgeDirectRuntimeSessionToken::new(),
-            }))
-            .with_history_unavailable(Some(crate::runtime::HistoryUnavailable::new(
-                SessionId::new(),
-            ))),
-        ),
+        MobEventKind::MemberSpawned(spawned),
         MobEventKind::MemberSessionBindingRecovered(
             MemberSessionBindingRecoveredEvent::new(
                 identity.clone(),
@@ -1039,7 +1045,7 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             generation,
             role: ProfileName::from("worker"),
             releasing: Some(session.clone()),
-            session_id: Some(session),
+            session_id: Some(session.clone()),
             retiring_peer_endpoint: Some(endpoint),
             preserve_machine_topology: true,
             rotation: Some(Box::new(crate::runtime::MemberRotationRecord {
@@ -1069,7 +1075,17 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             generation,
             role: ProfileName::from("worker"),
             session_archived: true,
-            facts: crate::event::MemberRetiredFacts::default(),
+            facts: crate::event::MemberRetiredFacts {
+                session_id: Some(session),
+                cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
+                identity_entry: Some(crate::runtime::IdentityEntryOrigin::Declared),
+                unknown_identity_entry: None,
+                rotation: Some(crate::runtime::RetiredRotation::new(
+                    crate::runtime::RotationTarget::FreshSession,
+                    Generation::new(generation.get() + 1),
+                    ProfileName::from("lead"),
+                )),
+            },
         },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,

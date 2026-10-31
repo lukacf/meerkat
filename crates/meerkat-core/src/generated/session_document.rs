@@ -5,6 +5,7 @@
     unused_parens,
     unused_variables,
     clippy::bool_comparison,
+    clippy::cloned_instead_of_copied,
     clippy::cmp_owned,
     clippy::collapsible_else_if,
     clippy::field_reassign_with_default,

@@ -1,6 +1,7 @@
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApprovalAttention, ApprovalCard, HostAttentionCard } from "./approval-card";
+import { ApprovalAttention, ApprovalCard, HostAttentionCard, HostDecideSourcesProvider } from "./approval-card";
+import { ConversationApprovals } from "./conversation-approvals";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 
 afterEach(cleanup);
@@ -52,6 +53,58 @@ describe("ApprovalCard", () => {
     expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
     expect(decide).not.toHaveBeenCalled();
   });
+  it("links a read-only session to the host's decide pages instead of a dead Approve", () => {
+    const decideLinks = [{ sourceId: "host", label: "Host", href: "/host/decide?decision=request%3A1" }];
+    const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={vi.fn()} readOnly decideLinks={decideLinks} />);
+    const link = view.getByRole("link", { name: "Decide in Host: Publish release artifacts" });
+    expect(link.getAttribute("href")).toBe("/host/decide?decision=request%3A1");
+    expect(link.getAttribute("target")).toBe("_top");
+    // Drawn as a console button, like the host card's Open link.
+    expect(link.classList.contains("cc-btn")).toBe(true);
+    expect(link.textContent).toBe("Decide in Host");
+    expect(view.queryByRole("button", { name: "Approve" }) === null).toBe(true);
+    expect(view.queryByText("Read-only access") === null).toBe(true);
+    // A session that can decide keeps its buttons; the links are for read-only sessions only.
+    view.rerender(<ApprovalCard request={request} resourceStatus="ready" onDecide={vi.fn()} decideLinks={decideLinks} />);
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("links only a pending approval: a settled or expired card keeps its read-only note", () => {
+    const decideLinks = [{ sourceId: "host", label: "Host", href: "/host/decide/request%3A1" }];
+    const expired = normalizePendingApproval({ ...request.raw, status: "expired" })!;
+    expect(expired.status).toBe("expired");
+    const view = render(<ApprovalCard request={expired} resourceStatus="ready" onDecide={vi.fn()} readOnly decideLinks={decideLinks} />);
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+    expect(view.getByText("Read-only access")).toBeTruthy();
+    view.rerender(<ApprovalCard request={request} resourceStatus="ready" onDecide={vi.fn()} readOnly decideLinks={decideLinks}
+      decision={{ phase: "settled", action: "approve" }} />);
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+    expect(view.getByText("Read-only access")).toBeTruthy();
+  });
+
+  it("keeps the disabled buttons on a read-only card with no usable link", () => {
+    const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={vi.fn()} readOnly decideLinks={[]} />);
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByText("Read-only access")).toBeTruthy();
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+  });
+
+  it("names an unlabelled request in its decide link as the card's title reads it", () => {
+    const unlabelled = normalizePendingApproval({ pending_id: "request:2", action_id: "read-calendar" })!;
+    const view = render(<ApprovalCard request={unlabelled} resourceStatus="ready" onDecide={vi.fn()} readOnly
+      decideLinks={[{ sourceId: "host", label: "Host", href: "/host/decide/request%3A2" }]} />);
+    expect(view.getByRole("link", { name: "Decide in Host: Read calendar" }).getAttribute("href")).toBe("/host/decide/request%3A2");
+  });
+
+  it("links a card whose decision was refused for the session's access", () => {
+    const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={vi.fn()} readOnly
+      decideLinks={[{ sourceId: "host", label: "Host", href: "/host/decide/request%3A1" }]}
+      decision={{ phase: "unavailable", action: "approve", error: "Approval decisions are unavailable with current access" }} />);
+    expect(view.getByRole("link", { name: "Decide in Host: Publish release artifacts" })).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Approve" }) === null).toBe(true);
+  });
+
   it("labels a known pre-dispatch refusal as unavailable with neutral state", () => {
     const decide = vi.fn();
     const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={decide} readOnly
@@ -186,6 +239,13 @@ describe("host-provided attention", () => {
     expect(view.queryByRole("status") === null).toBe(true);
     expect(view.queryByText("Approval needed") === null).toBe(true);
   });
+  it("keeps a long source label whole in its chip's tooltip", () => {
+    const sourceLabel = "Regional operations approvals desk for plugin permissions";
+    const view = render(<HostAttentionCard item={{ ...item, sourceLabel }} />);
+    const source = view.getByText(`From ${sourceLabel}`);
+    expect(source.classList.contains("cc-chip")).toBe(true);
+    expect(source.getAttribute("title")).toBe(`From ${sourceLabel}`);
+  });
   it("names every Open link after its item", () => {
     const view = render(<>{[item, { ...item, id: "b", title: "Renew a token" }].map((entry) => <HostAttentionCard key={entry.id} item={entry} />)}</>);
     expect(view.getAllByRole("link").map((link) => link.getAttribute("aria-label"))).toEqual(["Open: Confirm a setting", "Open: Renew a token"]);
@@ -212,5 +272,30 @@ describe("host-provided attention", () => {
     expect(view.getByTestId("approval-attention")).toBeTruthy();
     view.rerender(<ApprovalAttention hostItems={0} onOpen={vi.fn()} />);
     expect(view.queryByTestId("approval-attention") === null).toBe(true);
+  });
+});
+
+describe("ConversationApprovals host decide links", () => {
+  const inChat = normalizePendingApproval({ ...request.raw, pending_id: "chat 1", origin: { identity: "agent", conversation_id: "review" } })!;
+  const chatSnapshot = (readOnly: boolean): PendingApprovalSnapshot => ({ scopeKey: "agent", status: "ready", requests: [inChat], decisions: {}, readOnly });
+  const sources = [{ id: "host", label: "Host", url: "/host/attention", decide_href: "/host/decide/{decision_id}" }];
+  const chat = (props: Partial<React.ComponentProps<typeof ConversationApprovals>>) => (
+    <ConversationApprovals approvalIdentity="agent" conversationId="review" approvalSnapshot={chatSnapshot(false)} onApprovalDecision={vi.fn()} {...props} />
+  );
+  it("links a read-only chat card to the host's decide page, like the inbox", () => {
+    const view = render(<HostDecideSourcesProvider value={sources}>{chat({ approvalSnapshot: chatSnapshot(true) })}</HostDecideSourcesProvider>);
+    expect(view.getByRole("link", { name: "Decide in Host: Publish release artifacts" }).getAttribute("href")).toBe("/host/decide/chat%201");
+    expect(view.queryByRole("button", { name: "Approve" }) === null).toBe(true);
+    // No decide handler is read-only too.
+    view.rerender(<HostDecideSourcesProvider value={sources}>{chat({ onApprovalDecision: undefined })}</HostDecideSourcesProvider>);
+    expect(view.getByRole("link", { name: "Decide in Host: Publish release artifacts" })).toBeTruthy();
+  });
+  it("keeps a writable chat card's buttons, and a read-only one's without sources", () => {
+    const view = render(<HostDecideSourcesProvider value={sources}>{chat({})}</HostDecideSourcesProvider>);
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
+    view.rerender(chat({ approvalSnapshot: chatSnapshot(true) }));
+    expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

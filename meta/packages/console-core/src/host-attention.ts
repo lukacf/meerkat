@@ -12,6 +12,15 @@ export interface HostAttentionSourceConfig {
   id: string;
   label: string;
   url: string;
+  /** Where the host decides an approval this session cannot: a same-origin
+   *  path; `{decision_id}` in it becomes the URL-encoded decision id. */
+  decide_href?: string;
+}
+
+export interface HostDecideLink {
+  sourceId: string;
+  label: string;
+  href: string;
 }
 
 export interface HostAttentionDetail {
@@ -70,6 +79,32 @@ function text(value: unknown): string | null {
   return trimmed.length > HOST_ATTENTION_LIMITS.textLength
     ? `${trimmed.slice(0, HOST_ATTENTION_LIMITS.textLength - 1)}…`
     : trimmed;
+}
+
+const DECISION_ID = "{decision_id}";
+
+/** The host pages where a decision this session cannot make is decided, one per
+ *  source that declares `decide_href`. The placeholder is filled URL-encoded,
+ *  and a link that is not a same-origin path, before or after filling, is
+ *  dropped. Without the placeholder the link is the host's page in general. */
+export function hostDecideLinks(sources: readonly HostAttentionSourceConfig[] | undefined, decisionId: string): HostDecideLink[] {
+  let encoded: string | null;
+  try {
+    encoded = encodeURIComponent(decisionId);
+  } catch {
+    // A lone surrogate cannot be encoded: only a link that needs the id drops.
+    encoded = null;
+  }
+  const links: HostDecideLink[] = [];
+  for (const source of sources || []) {
+    const template = source.decide_href;
+    if (!isSameOriginPath(template)) continue;
+    const parts = template.split(DECISION_ID);
+    if (parts.length > 1 && encoded === null) continue;
+    const href = parts.join(encoded ?? "");
+    if (isSameOriginPath(href)) links.push({ sourceId: source.id, label: source.label, href });
+  }
+  return links;
 }
 
 /** The valid items of one source's answer, bounded; anything else is dropped. */

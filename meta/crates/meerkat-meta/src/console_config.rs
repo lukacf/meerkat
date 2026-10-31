@@ -142,13 +142,27 @@ pub struct ConsoleAttentionSourceConfig {
     pub label: String,
     /// A same-origin path (the operator panel path rules).
     pub url: String,
+    /// A same-origin path where the host decides an approval this console
+    /// session cannot. `{decision_id}` in it is replaced by the URL-encoded
+    /// decision id; without the placeholder it is the host's page in general.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide_href: Option<String>,
 }
 
 impl ConsoleAttentionSourceConfig {
     fn normalized(mut self) -> Self {
         self.id = self.id.trim().to_string();
         self.label = self.label.trim().to_string();
-        // Validated as written, like an operator panel path.
+        // Validated as written, like an operator panel path. An invalid
+        // decide link drops only the link: the source's items stay.
+        let id = &self.id;
+        self.decide_href = self.decide_href.take().filter(|href| {
+            let valid = valid_operator_panel_path(href);
+            if !valid {
+                tracing::warn!(source = %id, "console attention decide_href dropped: it must be a same-origin path");
+            }
+            valid
+        });
         self
     }
 
@@ -1281,6 +1295,7 @@ url = "/host/again"
                 id: "host-items".to_string(),
                 label: "Host".to_string(),
                 url: "/host/attention".to_string(),
+                decide_href: None,
             }]
         );
         let json = serde_json::to_value(&config)
@@ -1294,6 +1309,68 @@ url = "/host/again"
                 .get("attention")
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_decide_href_must_be_a_same_origin_path_and_only_the_link_is_dropped()
+    -> Result<(), ConsoleConfigError> {
+        let config = load_console_ui_config_from_toml(
+            r#"
+[[attention.sources]]
+id = "filled"
+label = "Filled"
+url = "/host/attention"
+decide_href = "/host/decide?decision={decision_id}"
+
+[[attention.sources]]
+id = "page"
+label = "Page"
+url = "/host/attention"
+decide_href = "/host/approvals"
+
+[[attention.sources]]
+id = "remote"
+label = "Remote"
+url = "/host/attention"
+decide_href = "https://evil.example/decide/{decision_id}"
+
+[[attention.sources]]
+id = "authority"
+label = "Authority"
+url = "/host/attention"
+decide_href = "//evil.example/decide/{decision_id}"
+
+[[attention.sources]]
+id = "dots"
+label = "Dots"
+url = "/host/attention"
+decide_href = "/host/../decide/{decision_id}"
+"#,
+        )?;
+        let links: Vec<(&str, Option<&str>)> = config
+            .attention
+            .sources
+            .iter()
+            .map(|source| (source.id.as_str(), source.decide_href.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                ("filled", Some("/host/decide?decision={decision_id}")),
+                ("page", Some("/host/approvals")),
+                ("remote", None),
+                ("authority", None),
+                ("dots", None),
+            ]
+        );
+        let json = serde_json::to_value(&config)
+            .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))?;
+        assert_eq!(
+            json["attention"]["sources"][0]["decide_href"],
+            "/host/decide?decision={decision_id}"
+        );
+        assert!(json["attention"]["sources"][2].get("decide_href").is_none());
         Ok(())
     }
 

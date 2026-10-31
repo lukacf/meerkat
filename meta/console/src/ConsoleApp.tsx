@@ -243,6 +243,7 @@ import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type 
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
+import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
 import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft } from "./lib/send-attempt-storage";
@@ -2765,6 +2766,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     snapshot: PendingApprovalSnapshot;
   }>();
   const [selectedApprovalId, setSelectedApprovalId] = React.useState<string>();
+  // Each time Needs you opens the inbox: the inbox shows Pending again.
+  const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
   React.useEffect(() => {
@@ -2819,6 +2822,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }, [hostAttentionKey]);
   function openApproval(pendingId?: string) {
     setSelectedApprovalId(pendingId);
+    setApprovalOpens((count) => count + 1);
     dock.openTarget(buildControlTarget("gating"), "replace_focused");
   }
   const hasVoiceHost = experience?.voice?.readiness_method === "meta/console/voice/readiness";
@@ -5649,6 +5653,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide={() => {}}
           readOnly
           hostAttention={hostAttention || { status: "loading", items: [], failedSources: [] }}
+          showPending={approvalOpens}
         />
       );
     }
@@ -5683,6 +5688,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
+          hostDecideSources={hostAttentionSources}
+          showPending={approvalOpens}
         />
       );
     if (target.kind === "topology") {
@@ -5751,6 +5758,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
+          hostDecideSources={hostAttentionSources}
+          showPending={approvalOpens}
         />
       );
     if (target.kind === "logs")
@@ -5889,6 +5898,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
     <AgentDirectoryProvider directory={agentDirectory}>
+    <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
       className="cc-theme-scope meta-shell"
       data-cc-theme={theme}
@@ -6012,6 +6022,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </HostDecideSourcesProvider>
     </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>

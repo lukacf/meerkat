@@ -387,6 +387,12 @@ describe("TopologyPanel", () => {
     expect(screen.queryByTestId("topology-legend")).toBeNull();
   });
 
+  test("a failed live read keeps the map and says it shows the last roster", () => {
+    render(<TopologyPanel view="graph" activity={[]} agents={[]} nodes={NODES} error="fetch failed: ECONNREFUSED" updatedAtMs={Date.now() - 60_000} />);
+    expect(screen.getByTestId("topology-error")).toHaveTextContent("Live topology unavailable, showing the last roster");
+    expect(screen.getByTestId("topology-node:commander")).toBeInTheDocument();
+  });
+
   test("opens the drawer on an agent and disconnects a peer from it", () => {
     const onRequestMutation = vi.fn();
     render(

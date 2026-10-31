@@ -242,6 +242,9 @@ const subscribeNothing = () => () => {};
 const versionZero = () => 0;
 
 /** The window from the activity history: totals per pair, the window before, the trend. */
+/** What a failed live read says: the map keeps the roster it had. */
+const LIVE_UNAVAILABLE = "Live topology unavailable, showing the last roster";
+
 function topologySourceWindow(source: ConsoleTopologyActivitySource, now: number, windowMs: number): TopologyTrafficWindow {
   const start = now - windowMs;
   const traffic = source.traffic({ sinceMs: start, untilMs: now }).map((entry) => ({
@@ -847,7 +850,7 @@ export function TopologyPanel({
         <PanelBody className="topo__body">
           {error || liveUnavailable ? (
             <StatusToast
-              error={error || "Live topology unavailable, showing the last roster"}
+              error={LIVE_UNAVAILABLE}
               errorTestId="topology-error"
               updatedAt={updatedAtMs ?? undefined}
               onRetry={onRefresh}

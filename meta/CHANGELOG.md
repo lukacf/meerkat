@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Upgrade
 
+- A host's own `MobSessionService` wrapper (around the session service it
+  passes to `MobBootstrapSpec::new`) must forward the three member
+  operator-instruction methods Meerkat 0.9.9 adds,
+  `record_member_instruction_target`, `release_member_instruction_target`
+  and `read_member_instructions`, to the service it wraps. Their defaults
+  refuse typed (`durability_unavailable`), so a wrapper that keeps them
+  compiles and blocks the operator instructions of every member behind it;
+  Meta's own wrappers forward them (see Changed).
+
+- A rollback to Meta 0.9.7 (on Core 0.9.8) does not resume a gateway whose
+  own mob recorded an operator instruction: the mob's journal holds rows at
+  mob event schema 10, which Core 0.9.8 refuses, so the gateway's mob does
+  not start. Before such a rollback, run `rkat storage doctor` on the
+  current release and destroy, or move out of the mob root, every mob
+  database it lists under `operator-instruction-mob-events`, as Core's
+  CHANGELOG describes in its Upgrade notes.
+
 - The lifecycle side effects of identities (the customizer's `after_create`,
   the host's retirement hook, the distillation of a retired session, the exit
   interview of an unlisted or deleted identity) keep their cursor, what each
@@ -348,6 +365,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Python SDK passes evidence dicts through, `withdraws` included.
 
 ### Changed
+
+- Both of Meta's mob session service wrappers (the pre-build delegation and
+  the after-create wrapper) forward a mob member's operator-instruction
+  delivery, release and read to the session service they wrap, so a mob's
+  operator instructions reach its members behind them.
 
 - `meta/fork_helper` on the Console answers a source agent the console's
   visibility policy hides as unknown (`-32001`, `data.kind`

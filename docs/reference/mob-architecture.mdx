@@ -215,14 +215,18 @@ and before the start's member plan, and MobMachine decides each row from its
 presence and the replayed facts:
 
 - A present row of a seated local member records the member a `Created`
-  entry.
+  entry. Whichever local member the journal seats under the name is the
+  created one: a name holds one member at a time, and no declaration takes
+  a created entry's name (`NameOwnedByCreated`), so a member a predecessor
+  seated under it, whose spawn row carries no origin, is that entry's.
 - A present row whose identity the replay left without a member (a build
   that predates created entries retired it) records the entry unseated, owed
   its seat (`SeatOwed`), with the session its member was last bound to as its
-  revival record. Once the mob runs (after the start, or the lift of a
-  stopped mob), Core seats it again, Dormant, on that session, from its
-  member's last spawn row. An entry it cannot seat stays owed its seat, and
-  the failure is logged.
+  revival record. Once the mob runs (after the start, or a stopped mob's
+  resume), Core seats it again, Dormant, on that session, from its member's
+  last spawn row and with no roster labels, so no label-based authority
+  reaches a created identity. An entry it cannot seat stays owed its seat,
+  and the failure is logged.
 - A row pending its host's preparation records the entry unseated
   (`TemplatePreparation`), and no dormant seat takes it.
 - A removed entry's row reserves the name as removed: it is never an entry
@@ -246,8 +250,10 @@ neither spawns nor retires a reserved name, the declared apply refuses a
 created, removed or unreadable name for that identity alone (see
 [The declared apply](#the-declared-apply)), the legacy adoption answers
 `NotAdoptable` for any of them, and the agent lane refuses an unreadable
-member as an identity member. A mob reset keeps the reserved names, which
-the identity store holds; the destroy clears them.
+member as an identity member. The host's own lifecycle calls on the member an
+unreadable name keeps (a retire, a respawn, a rotation) are not refused by
+the reservation. A mob reset keeps the reserved names, which the identity
+store holds; the destroy clears them.
 
 The reads need no actor command and never wake a member:
 

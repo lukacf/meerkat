@@ -127,7 +127,13 @@ that holds no created entry row sees no change but the new read answers.
   host store SPI reads its identity intents one entry at a time: an entry
   whose row this build cannot decode is kept as stored, read as unreadable
   for its identity alone and written back untouched on every rewrite of the
-  group. Before, one such row failed the whole mob's open.
+  group. Before, one such row failed the whole mob's open. An entry it
+  cannot attribute to an identity (an envelope or a key it cannot read)
+  still fails the open.
+- **A SQLite mob adopts beside a created row.** An identity-first adoption
+  reads the host-adopted intent rows alone, so a created entry's row no
+  longer refuses the adoption of another identity, and the intent list
+  leaves created rows out.
 
 ### Downgrading to 0.9.8
 

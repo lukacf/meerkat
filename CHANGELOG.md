@@ -258,9 +258,9 @@ them.
   `RecoveredPresence` (`Present`, `PresentUnseated`, `Tombstone`,
   `Unreadable`) is new, and the machine enums new in this release gain
   variants: `IdentityEntryOrigin` gains `Created`, `UnseatedEntryCause`
-  `TemplatePreparation`, `IdentityEntryVerdict` `RefusedNameOwnedByCreated`,
-  `RefusedNameTombstoned` and `RefusedNameUnreadable`, and
-  `AgentLaneMemberAdmissionKind` `UnreadableName`. The kernel
+  `TemplatePreparation`, and `IdentityEntryVerdict`
+  `RefusedNameOwnedByCreated`, `RefusedNameTombstoned` and
+  `RefusedNameUnreadable`. The kernel
   `generated::mob::TransitionId` gains, appended last,
   `ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning`,
   `ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped`,
@@ -554,7 +554,8 @@ them.
   from its presence and the replayed facts: a seated member's row records it
   a created entry; a row whose member a build that predates created entries
   retired records the entry owed its seat, and once the mob runs Core seats
-  it again, Dormant, on the session its member was last bound to; a pending
+  it again, Dormant, on the session its member was last bound to and with
+  no roster labels; a pending
   row records the entry unseated (`UnseatedEntryCause::TemplatePreparation`);
   a removed entry's row reserves its name as removed; and a row this build
   cannot read, or one the journal contradicts, reserves the name as
@@ -672,14 +673,20 @@ them.
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
 - `meerkat-mob`: a mob storage on the host store SPI reads its identity
-  intents one entry at a time. A created entry's row is kept as one; an
+  intents one entry at a time. A created entry's row is kept as one, and an
   entry whose row this build cannot decode is kept as stored, read as
   unreadable for its identity alone and written back untouched on every
-  rewrite of the group; and an entry whose key cannot be read is kept by
-  name. Every identity-first mutation (an adoption, a member tool
-  declaration, a convergence resolution) refuses an identity whose row is a
-  created entry's or unreadable. Before, one entry a later build wrote failed
-  the whole mob's open.
+  rewrite of the group. Every identity-first mutation (an adoption, a member
+  tool declaration, a convergence resolution) refuses an identity whose row
+  is a created entry's or unreadable. Before, one entry a later build wrote
+  failed the whole mob's open. An entry this build cannot attribute to an
+  identity (an envelope or a key it cannot read) still fails the open, as
+  an entry of any other group does.
+- `meerkat-mob`: on SQLite, an identity-first adoption reads the mob's
+  host-adopted intent rows alone when it recomputes their wiring, so a
+  created entry's row, or any row of a later schema, no longer refuses every
+  adoption in its mob; and the intent list (`list_identity_intents`) leaves
+  such rows out, as the intent scan does.
 
 ### Fixed
 

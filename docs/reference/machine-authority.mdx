@@ -240,8 +240,9 @@ refuses a reserved name: a ladder opened before the reservation seats no
 member, and the shell aborts it with the name's admission answer,
 `MobError::IdentityMember`), the worker reconcile helpers
 skip it, the declared apply refuses it typed (`RefusedNameTombstoned`,
-`RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable` and the
-agent lane's admission `UnreadableName`. Custody of one origin never takes
+`RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable`, and
+the agent lane's admission answers the name's member `IdentityMember`.
+Custody of one origin never takes
 an entry of the other (`IdentityMemberOfAnotherOrigin`): entry custody takes
 a `Declared` entry's name only, and created custody (`BeginSpawnExec`'s and
 `ProbeMemberAdmission`'s `created_custody`, recorded in

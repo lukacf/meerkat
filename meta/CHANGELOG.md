@@ -335,6 +335,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `AgentMemoryRuntimeInjector::record_identity_retired_at` write through it
   and answer the store's error.
 
+- `meta/prune_member_system_rows` (host-only): removes the ordinary System
+  rows a host names from a member's current session in one audited rewrite,
+  through Meerkat's `SessionServiceTranscriptEditExt::prune_system_rows`,
+  without waking the member or calling a model. Each row is named by its
+  0-based index and the `sha256:<hex>` digest of its content, as a member
+  history read showed it; a stale or wrong row is refused typed (`-32602`,
+  `data.kind` `system_row_prune_refused` with the row's `index` and `cause`)
+  and nothing is written. `retire_superseded_activation_bodies` also retires
+  the bodies of superseded instruction activations in the same commit. A
+  running member answers `-32015`, and a candidate launch refuses the verb
+  (`-32047` `candidate_launch`). The SDKs add
+  `MetaRuntime.prune_member_system_rows` (Python) and
+  `MetaRuntime.pruneMemberSystemRows` (TypeScript), the typed
+  `SystemRowPruneRefusedError` with its `index` and `cause`, and the
+  constants `SYSTEM_ROW_PRUNE_REFUSED_KIND` and
+  `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary).
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's

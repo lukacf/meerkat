@@ -2019,8 +2019,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/stop_member_run",
     "meta/force_cancel_member",
     "meta/compact_member",
-    // A rewrite of a member's session transcript.
+    // Rewrites of a member's session transcript.
     "meta/bound_member_transcript",
+    "meta/prune_member_system_rows",
     "meta/member_activate_instruction",
     "meta/live/open",
     "meta/console/send",
@@ -2700,6 +2701,7 @@ async fn handle_unified_rpc_json_inner(
                     "meta/wait_for_turn",
                     "meta/compact_member",
                     "meta/bound_member_transcript",
+                    "meta/prune_member_system_rows",
                     "meta/member_activate_instruction",
                     "meta/member_instruction_activations",
                     "meta/reconcile_identity",
@@ -6217,6 +6219,19 @@ async fn handle_unified_rpc_json_inner(
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_bound_member_transcript(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/prune_member_system_rows" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_prune_member_system_rows(
                 runtime,
                 ctx,
                 &request.params,

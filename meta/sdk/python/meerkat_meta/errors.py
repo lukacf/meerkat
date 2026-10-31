@@ -50,6 +50,23 @@ FLOW_ROLE_TARGETS_REFUSED_KIND: str = "flow_role_targets_refused"
 # activation params or another binding (``-32602``). The error data is
 # ``{"kind": FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND, "run_id", "flow_id"}``.
 FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND: str = "flow_run_idempotency_conflict"
+# ``meta/prune_member_system_rows`` refused a row it names (JSON-RPC invalid
+# params, ``-32602``); nothing was written. The error data is
+# ``{"kind": SYSTEM_ROW_PRUNE_REFUSED_KIND, "index", "cause"}``.
+SYSTEM_ROW_PRUNE_REFUSED_KIND: str = "system_row_prune_refused"
+# The refusal causes, a closed vocabulary: a new cause is a breaking change.
+SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: frozenset[str] = frozenset(
+    {
+        "out_of_bounds",
+        "duplicate_index",
+        "not_a_system_row",
+        "prompt_version_row",
+        "instruction_activation_row",
+        "operator_instruction_entry_row",
+        "digest_mismatch",
+        "before_operator_instruction_entry",
+    }
+)
 # The refusal kinds, a closed vocabulary: a new kind is a breaking change.
 FLOW_ROLE_TARGET_REFUSAL_KINDS: frozenset[str] = frozenset(
     {
@@ -666,6 +683,37 @@ class FlowRoleTargetsRefusedError(RpcError):
         self.refusal: dict[str, Any] = dict(refusal) if isinstance(refusal, dict) else {}
         kind = self.refusal.get("kind")
         self.refusal_kind: str | None = kind if isinstance(kind, str) else None
+
+
+class SystemRowPruneRefusedError(RpcError):
+    """Raised when ``meta/prune_member_system_rows`` refused a row it names;
+    nothing was written.
+
+    The gateway answers invalid params (``-32602``) with data ``kind``
+    ``"system_row_prune_refused"``; both must match, and any other ``-32602``
+    answer stays a plain :class:`RpcError`. ``index`` is the refused row's
+    index and ``cause`` one of :data:`SYSTEM_ROW_PRUNE_REFUSAL_CAUSES`
+    (``None`` when the gateway sent none). A ``digest_mismatch`` means the
+    transcript changed since your history read: read it again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            -32602,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        self.index = _data_int(data, "index")
+        self.cause = _data_str(data, "cause")
 
 
 class FlowRunIdempotencyConflictError(RpcError):

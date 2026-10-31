@@ -327,6 +327,17 @@ them.
 
 ### Fixed
 
+- `meerkat-mob`, `meerkat-rpc`: a run kept open at a committed round, by a
+  requeue stop or a crash, whose input carries a per-turn LLM selection (a
+  model, provider, self-hosted server, provider params or auth binding) now
+  resumes at the next start, under the LLM identity that selection saved with
+  the session before the run's first round. Before, a mob member's runtime
+  executor applied the selection again ahead of the resumed dispatch, and an
+  RPC session runtime swapped its client the same way; the resumed session
+  reads as ahead of its committed boundary until the run commits, so that step
+  was refused before the turn on every attempt, and the run's input never
+  completed. A fresh run's selection is applied as before.
+
 - `meerkat-core`: a pending or approved human consent (R3) is now kept
   across unrelated authorization changes and past the end of its decision's
   own validity window, and withdrawn only when its binding, review tier or

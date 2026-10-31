@@ -31,12 +31,13 @@ def release_line(version):
 # A package from 0.9 on installs the public Meta release; a 0.8 package keeps MobKit.
 META = release_line(VERSION) >= (0, 9)
 RUNTIME = "Meta" if META else "MobKit"
-# Meta releases up to 0.9.6 stay in the standalone repository under v tags;
-# later ones come from the monorepo under meta-v tags (its v tags are Core's).
-# Both publish the same archive and checksum manifest names.
+# Meta releases up to 0.9.7 stay in the standalone repository under v tags
+# (0.9.7, the last of them, was published there); later ones come from the
+# monorepo under meta-v tags (its v tags are Core's). Both publish the same
+# archive and checksum manifest names.
 RELEASE_URL = (f"https://github.com/lukacf/meerkat-mobkit/releases/download/v{VERSION}" if not META
     else f"https://github.com/lukacf/meerkat-meta/releases/download/v{VERSION}"
-    if release_line(VERSION) <= (0, 9, 6)
+    if release_line(VERSION) <= (0, 9, 7)
     else f"https://github.com/lukacf/meerkat/releases/download/meta-v{VERSION}")
 ARCHITECTURES = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "AMD64": "x86_64"}
 MAX_MANIFEST_BYTES = 1024 * 1024

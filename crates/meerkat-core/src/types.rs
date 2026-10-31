@@ -1944,6 +1944,31 @@ pub fn superseded_system_prompt_offsets(messages: &[Message]) -> std::collection
         .collect()
 }
 
+/// Whether the newest System row the model reads as a prompt holds exactly
+/// `prompt`. A prompt row is a System row without an append identity, an
+/// instruction activation or an operator-instruction entry, that is not a
+/// superseded prompt version; the rows after it that are not prompt rows do
+/// not count.
+pub(crate) fn newest_prompt_row_is(messages: &[Message], prompt: &str) -> bool {
+    let superseded = superseded_system_prompt_offsets(messages);
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(offset, message)| match message {
+            Message::System(system)
+                if system.identity.is_none()
+                    && system.instruction_activation.is_none()
+                    && system.instruction_entry.is_none()
+                    && !superseded.contains(&offset) =>
+            {
+                Some(system)
+            }
+            _ => None,
+        })
+        .is_some_and(|system| system.content == prompt)
+}
+
 /// Materialize the transcript view presented to a model or summarizer.
 ///
 /// Historical prompt versions remain durable transcript rows and therefore

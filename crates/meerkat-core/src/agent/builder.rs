@@ -320,7 +320,10 @@ impl AgentBuilder {
     ///
     /// On a resumed transcript this is a new instruction boundary, not a
     /// replacement for any earlier System event. Provider projection cannot
-    /// suppress or reposition the authored row.
+    /// suppress or reposition the authored row. A resume whose prompt is
+    /// exactly the newest System row the model reads as a prompt (no append
+    /// identity, instruction activation or operator-instruction entry, and
+    /// not a superseded prompt version) appends nothing.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -597,8 +600,9 @@ impl AgentBuilder {
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
         // An explicitly supplied prompt is an ordinary ordered System append,
-        // including on resume. Only implicit default composition is limited to
-        // a fresh transcript.
+        // including on resume, unless it is exactly the newest prompt row the
+        // model reads: then the resume changes nothing, and appends nothing.
+        // Only implicit default composition is limited to a fresh transcript.
         let system_prompt = if let Some(prompt) = self.system_prompt {
             Some(prompt)
         } else if session.messages().is_empty()
@@ -615,7 +619,9 @@ impl AgentBuilder {
         } else {
             None
         };
-        if let Some(prompt) = system_prompt {
+        if let Some(prompt) = system_prompt
+            && !crate::types::newest_prompt_row_is(session.messages(), &prompt)
+        {
             session.append_system_message(prompt);
         }
 

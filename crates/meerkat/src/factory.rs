@@ -9596,7 +9596,9 @@ impl AgentFactory {
         }
         // A bare resume authors nothing. An explicit prompt decision on resume
         // is different: it materializes a new ordinary System message at the
-        // current transcript boundary, whatever the binding. Nothing here
+        // current transcript boundary, whatever the binding, unless the
+        // assembled prompt is exactly the newest prompt row the model reads
+        // (the builder then appends nothing). Nothing here
         // checks the provider wire: a wire that cannot carry a System message
         // at that position refuses the request that would carry it with a
         // typed projection error, and the session's resolved

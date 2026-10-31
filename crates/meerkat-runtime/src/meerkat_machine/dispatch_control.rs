@@ -2809,6 +2809,15 @@ impl MeerkatMachine {
                 })
             }
             meerkat_core::image_generation::SwitchTurnControlResult::Denied { reason, .. } => {
+                // A denied request ends here; the session keeps serving on
+                // its current model. `CapabilityPolicy` covers a target that
+                // cannot carry the session's transcript.
+                tracing::warn!(
+                    session_id = %session_id,
+                    target_model = %target_model,
+                    reason = ?reason,
+                    "a committed model-routing request was denied; the session keeps its current model"
+                );
                 let record = meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
                     request_id: handoff.request_id,
                     originating_run_id: handoff.originating_run_id,

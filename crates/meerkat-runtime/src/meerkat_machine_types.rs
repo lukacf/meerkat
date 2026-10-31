@@ -362,7 +362,13 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
     /// instruction activations. The routing machine denies a switch onto a
     /// target that cannot: the refusal is permanent, so a request held for it
     /// would never end. A host decides it before any client for the target
-    /// is built. The default carries every target.
+    /// is built.
+    ///
+    /// The default carries every target, which is right only for a host
+    /// that never refuses a target permanently. A host that can (one whose
+    /// own swap guard refuses a target for the session's transcript) must
+    /// answer `false` for that target, or its committed routing requests
+    /// fail at the apply instead of ending Denied.
     async fn switch_target_carries_session_transcript(
         &self,
         _session_id: &SessionId,

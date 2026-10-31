@@ -4084,7 +4084,8 @@ async fn a_round_full_of_held_members_does_not_starve_the_next_one() {
 /// member, as a storage fault would, and the first retention passes
 /// report more work, as a long backlog would. A put of one subscription can
 /// be held before it reaches the store, so a test acts while the owner is
-/// between two of its writes. It counts what it is asked.
+/// between two of its writes, or fail once, as a storage fault would. It
+/// counts what it is asked.
 struct FaultyStore {
     inner: SqliteAnnouncementStore,
     failing: Option<Member>,
@@ -4100,6 +4101,14 @@ struct FaultyStore {
     panic_next_round: std::sync::atomic::AtomicBool,
     /// The next put of this subscription waits until the test releases it.
     held_put: Mutex<Option<HeldPut>>,
+    /// The next put of this subscription fails as a storage fault would,
+    /// before anything of it reaches the store.
+    failing_put: Mutex<Option<SubscriptionId>>,
+    /// Off, the escalation cursor read is refused as by a store that keeps
+    /// no escalations, and a round's health pass ends at it. On, it reads
+    /// the SQLite store's cursor, and the health pass goes on to its
+    /// declarations retry.
+    health_passes: std::sync::atomic::AtomicBool,
 }
 
 /// A put a [`FaultyStore`] holds before it reaches the store: the
@@ -4143,7 +4152,20 @@ impl FaultyStore {
             pass_times: Mutex::new(Vec::new()),
             panic_next_round: std::sync::atomic::AtomicBool::new(false),
             held_put: Mutex::new(None),
+            failing_put: Mutex::new(None),
+            health_passes: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Fail the next put of the subscription `id` with a storage fault,
+    /// before anything of it reaches the store.
+    fn fail_put(&self, id: &str) {
+        *self.failing_put.lock().unwrap() = Some(sid(id));
+    }
+
+    /// Let a round's health pass run on this store (see `health_passes`).
+    fn run_health_passes(&self) {
+        self.health_passes.store(true, Ordering::SeqCst);
     }
 
     /// Hold the next put of the subscription `id`: the owner has made every
@@ -4195,8 +4217,8 @@ impl AnnouncementStore for FaultyStore {
             .await
     }
 
-    /// The owner's put: held here when the test holds it, before anything of
-    /// it reaches the store.
+    /// The owner's put: held here when the test holds it, or failed when the
+    /// test fails it, before anything of it reaches the store.
     async fn put_subscription_with_facts(
         &self,
         operation: &OperationId,
@@ -4205,6 +4227,16 @@ impl AnnouncementStore for FaultyStore {
         now_ms: u64,
     ) -> Result<Subscription> {
         self.wait_if_held(&request.id).await;
+        let failing = self
+            .failing_put
+            .lock()
+            .unwrap()
+            .take_if(|failing| *failing == request.id);
+        if failing.is_some() {
+            return Err(AnnouncementStoreError::Storage(
+                "injected put failure".into(),
+            ));
+        }
         self.inner
             .put_subscription_with_facts(operation, request, facts, now_ms)
             .await
@@ -4272,6 +4304,18 @@ impl AnnouncementStore for FaultyStore {
         now_ms: u64,
     ) -> Result<()> {
         self.inner.remove_declaration_mark(kind, id, now_ms).await
+    }
+
+    /// The SQLite store's cursor when the test runs health passes on this
+    /// store; otherwise refused as the trait's default refuses it.
+    async fn last_escalation_cursor(&self) -> Result<u64> {
+        if self.health_passes.load(Ordering::SeqCst) {
+            self.inner.last_escalation_cursor().await
+        } else {
+            Err(AnnouncementStoreError::Storage(
+                "this announcement store keeps no escalations".to_string(),
+            ))
+        }
     }
 
     async fn known_mobs(&self) -> Result<BTreeSet<MobId>> {

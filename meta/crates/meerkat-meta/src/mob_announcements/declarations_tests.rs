@@ -1629,6 +1629,77 @@ async fn a_declarations_read_waits_for_the_reconcile_in_flight() {
     );
 }
 
+/// A reconcile a store failure stops leaves the records it had not reached
+/// without a mark, and nothing is pending. The health pass finishes it: the
+/// next round makes the record and marks it applied, so the declarations
+/// read whole again without waiting for another start, apply or change in
+/// the gateway's set of mobs.
+#[tokio::test]
+async fn a_reconcile_a_store_failure_stopped_is_finished_at_the_health_pass() {
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+    let declaring = |revision: u64, ids: &[&str]| {
+        serde_json::json!({
+            "revision": revision,
+            "subscriptions": ids
+                .iter()
+                .zip(["ops.one", "ops.two"])
+                .map(|(id, topic)| declared_subscription(id, "agent:a", &[topic]))
+                .collect::<Vec<_>>(),
+        })
+    };
+    let applied = |ids: &[&str]| {
+        (
+            serde_json::json!(2),
+            ids.iter()
+                .map(|id| ((*id).to_string(), "applied".to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    store.run_health_passes();
+    let native = Arc::new(native_serving(&[]));
+    declaring_over(&store, &native, declaring(1, &["declared-a"]))
+        .reconcile_declarations()
+        .await
+        .unwrap();
+
+    // The next start's reconcile of revision 2 records the revision, then
+    // the store fails declared-b's put, and the reconcile stops there.
+    let service = declaring_over(&store, &native, declaring(2, &["declared-a", "declared-b"]));
+    store.fail_put("declared-b");
+    let stopped = tokio::time::timeout(BOUND, service.reconcile_declarations())
+        .await
+        .expect("the reconcile ends");
+    assert!(
+        matches!(
+            stopped,
+            Err(AnnouncementError::Store(AnnouncementStoreError::Storage(_)))
+        ),
+        "the store failure stops the reconcile: {stopped:?}"
+    );
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a"]),
+        "the stopped reconcile left declared-b without a mark"
+    );
+
+    // The next round's health pass finishes the reconcile.
+    tokio::time::timeout(BOUND, service.run_round())
+        .await
+        .expect("the round ends")
+        .unwrap();
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a", "declared-b"]),
+        "the health pass reconciles a declared record a stopped reconcile left without a mark"
+    );
+    assert_eq!(
+        subscription_state(&service, "declared-b").await.as_deref(),
+        Some("active")
+    );
+}
+
 /// Options naming the applied revision with other declarations change
 /// nothing, as an apply at runtime moved the gateway past them: the gateway
 /// warns once per boot, naming the revision and both digests, and keeps the

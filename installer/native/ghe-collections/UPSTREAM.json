@@ -1,0 +1,141 @@
+{
+  "repository": "https://github.com/github/github-mcp-server",
+  "version": "v2.0.3",
+  "commit": "b98d115bbb080e9555466a96656ec4df605aea21",
+  "files": [
+    {
+      "path": "pkg/github/pullrequests.go",
+      "git_blob": "70fdfa197a8f0e9f526cbdd67d70e42ae3848a93",
+      "sha256": "60a4357e4df461f656250439e4f7e1bb0848c0bc2655cd73576710e15d4c8af7",
+      "bytes": 97153
+    },
+    {
+      "path": "pkg/github/minimal_types.go",
+      "git_blob": "b005223cd3e60a50ff3a5050a405cf30a3018015",
+      "sha256": "49464a349d6216fa6ac3307835f4ea2ab22cf8071566bf4c031724f30769cb34",
+      "bytes": 79247
+    },
+    {
+      "path": "pkg/github/consolidated_pull_request_types.go",
+      "git_blob": "6d6abaed632877104c657497245b72296bc0f331",
+      "sha256": "ed38d4c176acdcd946577bdc69c57994070a3b5fc661d399dbc92457411d78a5",
+      "bytes": 22284
+    },
+    {
+      "path": "pkg/github/pullrequests_test.go",
+      "git_blob": "d0f8887e6a4ed10c6a861915964f2029c57e37ab",
+      "sha256": "bc1c28e59b8e2241c5a30ccfee1f894f723d4286a6ded232dc84e9edfdce4f58",
+      "bytes": 156819
+    },
+    {
+      "path": "pkg/github/issues.go",
+      "git_blob": "30005854aaf2cc583f26600925432ec4550ddeee",
+      "sha256": "ffc7cb691392736f75cfba4d23e7043fb69f25efb854a4d66ac749e3dab58b35",
+      "bytes": 152081
+    },
+    {
+      "path": "pkg/github/repositories.go",
+      "git_blob": "b884f4888db69c1b2d1faaa77119262c93e262ef",
+      "sha256": "55746dd86a7971b0a38358a06df15ff849963f6e8e7c2fb62e68cbe6f4c1f91c",
+      "bytes": 111464
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_commits.snap",
+      "git_blob": "ddd55bac9122e3bc1b4abae2135d41b866df6e69",
+      "sha256": "72a89a08ee118ce162227d12eb52afd5d1d35de6be6f23144abdf3f993fc3a9e",
+      "bytes": 10375
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/get_commit.snap",
+      "git_blob": "8aef83dbc5f6e856f55c0e1065c803912c06824c",
+      "sha256": "2c6a32da66dc511737e29471a0a8bb277e20af42831aec1371c9c0a28d3c67d3",
+      "bytes": 10051
+    },
+    {
+      "path": "pkg/github/actions.go",
+      "git_blob": "dc71ab5261be3864c4a3d4e464ef0448b3466751",
+      "sha256": "e6c67424d9a4cea4170c49bbcc42923e1a43c05b711ab540d7be01d19013fd3d",
+      "bytes": 41232
+    },
+    {
+      "path": "pkg/github/actions_types.go",
+      "git_blob": "ffdd689b00abdab3550e939756cff71948081c41",
+      "sha256": "2905f2ce3df4cc5d46353678752f3fbe967c5bd57188df3abb517bcb6600ae61",
+      "bytes": 22929
+    },
+    {
+      "path": "pkg/github/workflow_enums.go",
+      "git_blob": "ec68a1474764f226e910d262c2fe9308e1bb5b66",
+      "sha256": "fe6974e8907962e02c9fd55daf36ef7ca5c77040faada4d62991570511ea557e",
+      "bytes": 1101
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/actions_list.snap",
+      "git_blob": "28b7a789fcc71ae29069b62a8ed0bd86940a23e9",
+      "sha256": "366ac64d75c7235274a3c902705f89718a1b19aa15f32cdcfce13863c64f1501",
+      "bytes": 29262
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/actions_get.snap",
+      "git_blob": "8e87fadf6b720dd8eb9bc4d692c8821881b93e12",
+      "sha256": "64562b61a7bb5b4f6e16ffd169aa391527a2eb4d2d6bc48de699e8c3a2834c50",
+      "bytes": 25112
+    },
+    {
+      "path": "pkg/github/actions_minimal_test.go",
+      "git_blob": "a2d547b33fa537655cf5ad6c943724bd8a96fe88",
+      "sha256": "358ef5259d4df0792def421836c79ecdb6dd81a43a8eba4b2fec8430c9cae77c",
+      "bytes": 10464
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_issues.snap",
+      "git_blob": "420577b1978775a547d93f0c3babb54d46204692",
+      "sha256": "e89db4668ef6c20901d7d91cac8485b4c1f8f2eb4afc6f244f79ae79032cf403",
+      "bytes": 3447
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/issue_read.snap",
+      "git_blob": "4a4356bfe512ef59bf39210d61fbaa5aa1767854",
+      "sha256": "a8e48cd54d911d8b9b975450bffb03fc995498a291f5c1ed82332780d74f6f9b",
+      "bytes": 23080
+    },
+    {
+      "path": "pkg/github/consolidated_issue_types.go",
+      "git_blob": "ccd84e017325b61208be76073d448052f2845537",
+      "sha256": "0429aef2d743fb6a13912d4e6db15ba2c5eb7165757a6347170ef2d361c402f3",
+      "bytes": 24194
+    },
+    {
+      "path": "pkg/github/issues_test.go",
+      "git_blob": "79eeb22100a1e56d66ede6071779f17cba9ff26f",
+      "sha256": "cc608e7fa3f0e4f4d58c27d7626d0ec5a669167ba10f5ec5addacab956d863ca",
+      "bytes": 260110
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_pull_requests.snap",
+      "git_blob": "d37986d529cc883367367038a455955205bbf4ba",
+      "sha256": "d5d621c6f4a83c551fa6ef398c67ad85ded9f2b83ebddae2d187d05a6e6aec89",
+      "bytes": 2670
+    }
+  ],
+  "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run.",
+  "native_projection": {
+    "repository": "https://github.com/lukacf/meerkat",
+    "commit": "fdfb7b8905a4769934caa945a49e19ede066fe8a",
+    "files": [
+      {
+        "path": "crates/meerkat-mcp/src/protocol.rs",
+        "git_blob": "a22101cbf42f1ceece273af8770458b915f7c1bf",
+        "sha256": "32d26d6db5ca6f584365117ab751ba91bd89a6df98360718535166e0a5a34e6c",
+        "bytes": 15893
+      },
+      {
+        "path": "crates/meerkat-core/src/types.rs",
+        "git_blob": "3236d43528f91b3bea7cc38172bd2a709db9507b",
+        "sha256": "2e2b79dfdd88c067dd0b218139c188f2d8ca9539c7e811dc57ced0af55161d1f",
+        "bytes": 186878
+      }
+    ],
+    "behavior": "Core removes JSON text equal to structuredContent and retains differing text plus Structured. Map ContentBlock variants directly; text_content() concatenates representations. Source-inspected only, no native build or installed result claimed."
+  }
+}

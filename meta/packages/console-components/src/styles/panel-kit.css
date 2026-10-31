@@ -5,8 +5,10 @@
    for machine values only.
 
    Tone rule: status colour comes from data-tone (neutral, info, ok, warn,
-   crit, locked). The member accent is never a status colour; it marks
-   selection, the active tab, primary actions and live activity.
+   crit, locked, live). Every tone also has a shape (the StatusMark), so
+   colour never carries meaning alone. The member accent is never an
+   outcome; it means "now": live activity, the selection, the active tab
+   and the primary action (the live tone is the accent's own meaning).
    =================================================================== */
 
 .cc-theme-scope {
@@ -17,47 +19,65 @@
   --_cc-panel-fs-label: 10.5px;
   --_cc-panel-fs-mono: 11px;
   --_cc-panel-pad-x: 20px;
-  --_cc-panel-row-h: 36px;
   --_cc-panel-control-h: 28px;
+  /* Density (spec A4.3): comfortable here, compact on a PanelShell with
+     data-density="compact" and in every pane under 480 px. */
+  --_cc-panel-row-h: 40px;
+  --_cc-card-pad: 12px 14px;
+  --_cc-figure-size: var(--_cc-fs-figure);
+  --_cc-lane-min-h: 88px;
+}
+.cc-panel[data-density="compact"] {
+  --_cc-panel-row-h: var(--_cc-density-row);
+  --_cc-card-pad: 8px 10px;
+  --_cc-figure-size: 16px;
+  --_cc-lane-min-h: 64px;
 }
 
 /* ── Tones ─────────────────────────────────────────────────────── */
 
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row) {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar) {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="info"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="info"] {
   --_cc-tone: var(--_cc-link);
   --_cc-tone-ink: var(--_cc-link-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-link) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-link) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="ok"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="ok"] {
   --_cc-tone: var(--_cc-positive);
   --_cc-tone-ink: var(--_cc-positive-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-positive) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-positive) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="warn"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="warn"] {
   --_cc-tone: var(--_cc-warning);
   --_cc-tone-ink: var(--_cc-warning-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-warning) 14%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-warning) 36%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="crit"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="crit"] {
   --_cc-tone: var(--_cc-negative);
   --_cc-tone-ink: var(--_cc-negative-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-negative) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-negative) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="locked"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="locked"] {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
+}
+/* Live ("happening now"): the accent, with the foreground as its ink. */
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="live"] {
+  --_cc-tone: var(--_cc-viz-live);
+  --_cc-tone-ink: var(--_cc-foreground);
+  --_cc-tone-fill: var(--_cc-viz-live-soft);
+  --_cc-tone-line: color-mix(in oklch, var(--_cc-member-accent) 32%, transparent);
 }
 
 /* ── Utilities ─────────────────────────────────────────────────── */
@@ -1236,6 +1256,12 @@ button.cc-tile:focus-visible,
 }
 
 @container cc-panel (max-width: 479px) {
+  .cc-panel > * {
+    --_cc-panel-row-h: var(--_cc-density-row);
+    --_cc-card-pad: 8px 10px;
+    --_cc-figure-size: 16px;
+    --_cc-lane-min-h: 64px;
+  }
   .cc-panel-head__actions {
     flex-basis: 100%;
     justify-content: flex-start;

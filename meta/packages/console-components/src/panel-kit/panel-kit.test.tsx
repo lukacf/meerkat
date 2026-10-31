@@ -120,9 +120,15 @@ describe("copy helpers", () => {
 
 describe("tone map", () => {
   it("maps status words to one tone each", () => {
-    expect(statusTone("in_progress")).toBe("info");
-    expect(statusTone("In progress")).toBe("info");
-    expect(statusTone("running")).toBe("info");
+    // In-progress words are live ("happening now", spec A2.4); info keeps
+    // the informative ones.
+    expect(statusTone("in_progress")).toBe("live");
+    expect(statusTone("In progress")).toBe("live");
+    expect(statusTone("running")).toBe("live");
+    expect(statusTone("claimed")).toBe("live");
+    expect(statusTone("retrying")).toBe("info");
+    expect(statusTone("queued")).toBe("info");
+    expect(statusTone("sent")).toBe("ok");
     expect(statusTone("completed")).toBe("ok");
     expect(statusTone("healthy")).toBe("ok");
     expect(statusTone("delivered")).toBe("ok");

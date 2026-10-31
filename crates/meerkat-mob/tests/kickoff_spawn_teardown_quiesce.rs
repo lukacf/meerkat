@@ -105,6 +105,7 @@ fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge
             effective_profile_override_present: false,
             effective_model_override_present: false,
             entry_custody: false,
+            created_custody: false,
         },
     )
     .expect("begin spawn exec must be accepted");

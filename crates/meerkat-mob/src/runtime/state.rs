@@ -849,6 +849,14 @@ pub(super) enum MobCommand {
         admission_tx: tokio::sync::watch::Sender<bool>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// The retire of an identity whose roster lists no incarnation. The
+    /// actor answers it with MobMachine's `RetireAbsent` verdict in its own
+    /// step and starts nothing: the command names no incarnation, so it can
+    /// retire or cancel no later incarnation of the identity.
+    RetireAbsent {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     Respawn {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
@@ -1460,6 +1468,19 @@ pub(super) enum MobCommand {
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
         release_rx: oneshot::Receiver<()>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// State injection, test builds only: arm the actor to reserve
+    /// `agent_identity` as unreadable in its machine state, as the boot
+    /// scan's Unreadable arm does, the moment that name's local spawn ladder
+    /// opens (`BeginSpawnExec`), before the ladder's close is prepared. No
+    /// production path reserves a name under an open ladder: the boot scan
+    /// runs before any ladder opens, and `BeginSpawnExec` refuses a reserved
+    /// name. `injected_tx` answers once the name is reserved.
+    #[cfg(test)]
+    InjectUnreadableNameAtLadderOpenForTest {
+        agent_identity: crate::ids::AgentIdentity,
+        injected_tx: oneshot::Sender<Result<(), MobError>>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Queue one routed effect behind the actor's pending routed effects; the
@@ -2232,6 +2253,7 @@ impl MobCommand {
             Self::Spawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HostRuntimeIncarnationObserved { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Retire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RetireAbsent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Respawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RetireAll { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SubmitWork { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2321,6 +2343,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
             #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
@@ -2429,6 +2455,7 @@ impl MobCommand {
             Self::HostOrphanReleaseCompleted { .. } => "HostOrphanReleaseCompleted",
             Self::PlacedBehaviorCompleted { .. } => "PlacedBehaviorCompleted",
             Self::Retire { .. } => "Retire",
+            Self::RetireAbsent { .. } => "RetireAbsent",
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
@@ -2549,6 +2576,10 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                "InjectUnreadableNameAtLadderOpenForTest"
+            }
             #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => "QueueRoutedEffectForTest",
             #[cfg(test)]

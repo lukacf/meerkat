@@ -122,7 +122,9 @@ impl EntryMob {
             .expect("the entry read answers")
         {
             IdentityEntryRead::Entry(view) => Some(view.standing),
-            IdentityEntryRead::NotAnEntry { .. } => None,
+            IdentityEntryRead::NotAnEntry { .. }
+            | IdentityEntryRead::Unreadable { .. }
+            | IdentityEntryRead::Removed => None,
         }
     }
 
@@ -134,7 +136,9 @@ impl EntryMob {
             .expect("the entry read answers")
         {
             IdentityEntryRead::Entry(view) => Some(view.origin),
-            IdentityEntryRead::NotAnEntry { .. } => None,
+            IdentityEntryRead::NotAnEntry { .. }
+            | IdentityEntryRead::Unreadable { .. }
+            | IdentityEntryRead::Removed => None,
         }
     }
 

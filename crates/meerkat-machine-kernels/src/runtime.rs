@@ -1795,18 +1795,29 @@ impl GeneratedMachineKernel {
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let [identity_to_runtime, identity_entry_origins, desired]: [KernelValue; 3] =
-            args.try_into().map_err(|_| {
-                self.eval_error(
-                    transition_name,
-                    "mob_machine_members_to_spawn expects three args",
-                )
-            })?;
+        let [
+            identity_to_runtime,
+            identity_entry_origins,
+            identity_entry_tombstones,
+            identity_entry_unreadable,
+            desired,
+        ]: [KernelValue; 5] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_members_to_spawn expects five args",
+            )
+        })?;
         let identity_to_runtime = identity_to_runtime
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let identity_entry_origins = identity_entry_origins
             .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_tombstones = identity_entry_tombstones
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_unreadable = identity_entry_unreadable
+            .into_set()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
             .into_set()
@@ -1817,6 +1828,8 @@ impl GeneratedMachineKernel {
                 .filter(|identity| {
                     !identity_to_runtime.contains_key(identity)
                         && !identity_entry_origins.contains_key(identity)
+                        && !identity_entry_tombstones.contains(identity)
+                        && !identity_entry_unreadable.contains(identity)
                 })
                 .collect(),
         ))
@@ -1830,12 +1843,13 @@ impl GeneratedMachineKernel {
         let [
             identity_to_runtime,
             identity_entry_origins,
+            identity_entry_unreadable,
             desired,
             retire_stale,
-        ]: [KernelValue; 4] = args.try_into().map_err(|_| {
+        ]: [KernelValue; 5] = args.try_into().map_err(|_| {
             self.eval_error(
                 transition_name,
-                "mob_machine_members_to_retire expects four args",
+                "mob_machine_members_to_retire expects five args",
             )
         })?;
         let identity_to_runtime = identity_to_runtime
@@ -1843,6 +1857,9 @@ impl GeneratedMachineKernel {
             .map_err(|error| self.eval_error(transition_name, error))?;
         let identity_entry_origins = identity_entry_origins
             .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_unreadable = identity_entry_unreadable
+            .into_set()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
             .into_set()
@@ -1857,7 +1874,9 @@ impl GeneratedMachineKernel {
             identity_to_runtime
                 .into_keys()
                 .filter(|identity| {
-                    !desired.contains(identity) && !identity_entry_origins.contains_key(identity)
+                    !desired.contains(identity)
+                        && !identity_entry_origins.contains_key(identity)
+                        && !identity_entry_unreadable.contains(identity)
                 })
                 .collect(),
         ))
@@ -4939,6 +4958,7 @@ mod tests {
 
         let identity_to_runtime = KernelValue::Map(BTreeMap::from([(agent_a.clone(), runtime_a)]));
         let no_entries = KernelValue::Map(BTreeMap::new());
+        let no_names = KernelValue::Set(BTreeSet::new());
         let desired = KernelValue::Set(BTreeSet::from([agent_a.clone(), agent_b.clone()]));
         let members_to_spawn = kernel
             .eval_native_helper(
@@ -4946,6 +4966,8 @@ mod tests {
                 vec![
                     identity_to_runtime.clone(),
                     no_entries.clone(),
+                    no_names.clone(),
+                    no_names.clone(),
                     desired.clone(),
                 ],
                 &transition,
@@ -4961,6 +4983,7 @@ mod tests {
                 vec![
                     identity_to_runtime.clone(),
                     no_entries.clone(),
+                    no_names.clone(),
                     KernelValue::Set(BTreeSet::from([agent_b.clone()])),
                     KernelValue::Bool(true),
                 ],
@@ -4976,7 +4999,8 @@ mod tests {
                 "mob_machine_members_to_retire",
                 vec![
                     identity_to_runtime.clone(),
-                    no_entries,
+                    no_entries.clone(),
+                    no_names.clone(),
                     desired.clone(),
                     KernelValue::Bool(false),
                 ],
@@ -4998,7 +5022,13 @@ mod tests {
         let entries_spawned = kernel
             .eval_native_helper(
                 "mob_machine_members_to_spawn",
-                vec![identity_to_runtime.clone(), entries.clone(), desired],
+                vec![
+                    identity_to_runtime.clone(),
+                    entries.clone(),
+                    no_names.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                ],
                 &transition,
             )
             .expect("members to spawn over entries");
@@ -5007,8 +5037,9 @@ mod tests {
             .eval_native_helper(
                 "mob_machine_members_to_retire",
                 vec![
-                    identity_to_runtime,
+                    identity_to_runtime.clone(),
                     entries,
+                    no_names.clone(),
                     KernelValue::Set(BTreeSet::new()),
                     KernelValue::Bool(true),
                 ],
@@ -5016,6 +5047,52 @@ mod tests {
             )
             .expect("members to retire over entries");
         assert_eq!(entries_retired, KernelValue::Set(BTreeSet::new()));
+        // Nor a reserved name: agent.b, desired and removed (its tombstone)
+        // or unreadable, is not spawned, and agent.a, bound and unreadable,
+        // is not retired.
+        let only_b = KernelValue::Set(BTreeSet::from([agent_b.clone()]));
+        let tombstone_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    only_b.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                ],
+                &transition,
+            )
+            .expect("members to spawn over a tombstone");
+        assert_eq!(tombstone_spawned, KernelValue::Set(BTreeSet::new()));
+        let unreadable_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    no_names.clone(),
+                    only_b,
+                    desired,
+                ],
+                &transition,
+            )
+            .expect("members to spawn over an unreadable name");
+        assert_eq!(unreadable_spawned, KernelValue::Set(BTreeSet::new()));
+        let unreadable_retired = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![
+                    identity_to_runtime,
+                    no_entries,
+                    KernelValue::Set(BTreeSet::from([agent_a.clone()])),
+                    no_names,
+                    KernelValue::Bool(true),
+                ],
+                &transition,
+            )
+            .expect("members to retire over an unreadable name");
+        assert_eq!(unreadable_retired, KernelValue::Set(BTreeSet::new()));
 
         // A destroy abandons the next sessions of the FreshSession rotations
         // only: agent.b's same-session rotation names its own session.

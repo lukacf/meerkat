@@ -910,7 +910,7 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         [
             "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
             "audits-h", "audits-i", "audits-j", "audits-k", "audits-l", "audits-m", "audits-n",
-            "audits-o"
+            "audits-o", "audits-q"
         ],
         "every audit shard runs"
     );

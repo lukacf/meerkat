@@ -70,8 +70,10 @@
 \*     entry custody and its membership commit) and its abort; the dormant
 \*     seat's refusal of a held or hosted entry; member 1 recovered and
 \*     retired by replay (ever created), declared held; the seal; Stop,
-\*     Resume and Complete, where the declaration and the seal refuse; the
-\*     declared apply's open fact (open, busy, refused, closed).
+\*     Resume, Complete and the forced destroy (which ends the held spawn's
+\*     ladder, its membership committed or not), where the declaration and
+\*     the seal refuse; the declared apply's open fact (open, busy, refused,
+\*     closed).
 \*   placed (PlacedSpec): one member host bound and the owner bridge, member 2
 \*     declared placed (hosted on its first use) and member 1 declared local
 \*     (owed its seat): the placed spawn ladder opened with or without entry
@@ -140,7 +142,7 @@
 \*     changes nothing); AuditResumeHeldOnlyWhenOwed (it answers held only a
 \*     member whose host preparation is owed); all action properties.
 \*   held: AuditHeldDeclareExactlyOne and AuditSealExactlyOne (in the
-\*     Stopped and Completed phases too); AuditApplyOpenExactlyOne
+\*     Stopped, Completed and Destroyed phases too); AuditApplyOpenExactlyOne
 \*     (invariant, ENABLED form: exactly one arm answers an apply's opening);
 \*     AuditDormantSeatTakesOnlyOwedEntries (action property: the dormant seat
 \*     never seats an entry awaiting its held creation or hosted on its
@@ -155,9 +157,10 @@
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations. With --mutants the runner also seeds defects into a
 \* copy of the generated model and requires TLC to refuse each (see
-\* identity_entry_audit.sh). No origin other than Declared exists yet, so the
-\* declared apply's explicit origin check has no refusal to reach here; the
-\* release that adds an origin adds its row and mutant.
+\* identity_entry_audit.sh). These runs record no Created entry and reserve
+\* no name, so the declared apply's refusals of a Created entry's, a removed
+\* or an unreadable name are checked by created_identity_audit's names run,
+\* with a mutant of the origin check.
 \*
 \* The TLC configs are DERIVED from the generated ci.cfg on every run by
 \* identity_entry_audit.sh.
@@ -211,6 +214,9 @@ DeclareEnabled(id, s) ==
        ENABLED DeclareIdentityEntryMobNotRunningCompleted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]),
        ENABLED DeclareIdentityEntryMobNotRunningDestroyed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]) >>
 
+\* (The declared apply's refusals of a created, removed or unreadable name
+\* answer only a name these runs never record; created_identity_audit counts
+\* them beside these arms.)
 DeclareOneArm(id, s) == Cardinality({i \in 1..15 : DeclareEnabled(id, s)[i]}) = 1
 
 \* Every arm of the seal of one desired set, in every lifecycle phase.
@@ -237,6 +243,7 @@ AdoptArm(id, g, observed) ==
     \/ AdoptLegacyIdentityEntryStaleObservation(id, g, observed)
     \/ AdoptLegacyIdentityEntryNotSeated(id, g, observed)
     \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed)
+    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, observed)
     \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed)
     \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)
 
@@ -294,7 +301,7 @@ AAuthorize ==
 AOpen(inc) ==
     BeginSpawnExecFresh(Id1, inc[1], inc[2], inc[3], AuditDigest, FALSE, AuditMode, Some(inc[4]), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, TRUE)
+                        None, None, None, None, FALSE, FALSE, TRUE, FALSE)
 ASeatAs(inc, archived, unborn, fresh) ==
     CommitDormantSeatRunning(Id1, inc[1], inc[2], inc[3], FALSE, AuditMode, inc[4], None, archived, FALSE, unborn, fresh, FALSE)
 ASeat(inc) == \E archived \in BOOLEAN, unborn \in BOOLEAN, fresh \in BOOLEAN : ASeatAs(inc, archived, unborn, fresh)
@@ -816,7 +823,7 @@ H2Authorize ==
 H2Open(custody) ==
     BeginSpawnExecFresh(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, Some(Sess2), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, custody)
+                        None, None, None, None, FALSE, FALSE, custody, FALSE)
 H2Spawn ==
     CommitSpawnMembershipFresh(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, Some(Sess2), None,
                                None, None, None, None, None, FALSE)
@@ -852,6 +859,8 @@ HeldNext ==
     \/ ResumeStopped
     \/ AuditQuiesceComplete
     \/ CompleteRunning
+    \/ AuditQuiesceDestroy
+    \/ DestroyFromAny
     \/ ApplyOpenArm
     \/ ApplyCloseArm
 
@@ -894,12 +903,23 @@ AuditWitnessEverCreatedOwedSeat ==
     /\ Id1 \notin DOMAIN identity_to_runtime
     /\ Id1 \in DOMAIN identity_runtime_generations
     /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE, None, "None")
+\* The forced destroy ends a ladder whose membership committed, and the
+\* startup binding request its commit recorded: no ladder or request
+\* outlives the members it named.
+AuditWitnessDestroyEndsCommittedLadder ==
+    /\ Id2 \in DOMAIN spawn_exec_phase
+    /\ spawn_exec_phase[Id2] = "MembershipCommitted"
+    /\ member_startup_binding_requested # {}
+    /\ DestroyFromAny
+    /\ DOMAIN spawn_exec_phase' = {}
+    /\ member_startup_binding_requested' = {}
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting
 NotAuditWitnessHeldSpawnSeats == [][~AuditWitnessHeldSpawnSeats]_vars
 NotAuditWitnessHosted == ~AuditWitnessHosted
 NotAuditWitnessEverCreatedOwedSeat == [][~AuditWitnessEverCreatedOwedSeat]_vars
 NotAuditWitnessApplyBusy == [][~AuditWitnessApplyBusy]_vars
+NotAuditWitnessDestroyEndsCommittedLadder == [][~AuditWitnessDestroyEndsCommittedLadder]_vars
 
 (***************************************************************************)
 (* The placed run.                                                         *)
@@ -920,7 +940,7 @@ PAuthorize(id) ==
 POpen(id, rid, f, custody) ==
     BeginSpawnExecRemote(id, rid, f, 0, AuditDigest, FALSE, AuditMode, None, None, Some(Host1),
                          FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                         None, Some(PlacedSpawn1), Some(AuditOperation), Some(Sess3), FALSE, FALSE, custody)
+                         None, Some(PlacedSpawn1), Some(AuditOperation), Some(Sess3), FALSE, FALSE, custody, FALSE)
 PAbort(id) == AbortSpawnExecMaterializePendingRunning(id)
 \* The placed member's commit (member 2, on the session its host created,
 \* endpoint 2), its retirement (releasing its binding) and the placed end.

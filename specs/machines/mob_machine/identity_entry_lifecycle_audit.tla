@@ -78,7 +78,7 @@ LEntryReplay ==
 LReseatOpenAs(custody) ==
     BeginSpawnExecFresh(Id1, Rid2, 2, 1, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, custody)
+                        None, None, None, None, FALSE, FALSE, custody, FALSE)
 LReseatOpen == \E custody \in BOOLEAN : LReseatOpenAs(custody)
 
 \* The reseat itself (the retire run's RReseat).

@@ -5886,6 +5886,22 @@ pub(crate) struct MemberBindingJournalRead {
     pub(crate) intent_rows: BTreeMap<AgentIdentity, crate::runtime::MemberIdentityManagement>,
 }
 
+/// How a member binding history reads one created identity entry's row: a
+/// row this build reads is a created entry, which MobMachine drives; any
+/// other is unreadable.
+pub(crate) fn created_row_management(
+    observation: &crate::identity::CreatedIdentityObservation,
+) -> crate::runtime::MemberIdentityManagement {
+    match observation {
+        crate::identity::CreatedIdentityObservation::Created(_) => {
+            crate::runtime::MemberIdentityManagement::CreatedEntry
+        }
+        crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
+            crate::runtime::MemberIdentityManagement::IntentUnreadable
+        }
+    }
+}
+
 /// How a member binding history reads one stored identity intent row: a row
 /// this build validates is intent-managed; an unsupported or malformed row is
 /// unreadable; no row is no entry.
@@ -6098,6 +6114,19 @@ pub struct IdentityIntentScanPage {
 /// Hard contract bound for one identity-intent discovery read.
 pub const IDENTITY_INTENT_SCAN_PAGE_MAX: usize = 256;
 
+/// One bounded, keyset-ordered page of created identity entries' rows (the
+/// intents table's rows of schema version 2 and later), in the identity
+/// intent scan's physical-key order.
+///
+/// `next` is present only when another row is known to exist; a page can
+/// name fewer rows than its limit (the scan skips the host-adopted intents'
+/// rows) and still have a `next`.
+#[derive(Debug, Clone, Default)]
+pub struct CreatedIdentityScanPage {
+    pub observations: BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>,
+    pub next: Option<IdentityIntentScanCursor>,
+}
+
 /// First-class persistence owner for level-triggered mob identity intent.
 ///
 /// This is intentionally separate from [`MobRuntimeMetadataStore`]: intent,
@@ -6207,6 +6236,23 @@ pub trait MobIdentityStore: Send + Sync {
         _limit: usize,
     ) -> Result<IdentityIntentScanPage, MobStoreError> {
         Err(MobStoreError::IdentityIntentScanUnavailable)
+    }
+
+    /// Read at most `limit` created identity entries' rows (schema version 2
+    /// and later) after `after`, in the intent scan's physical-key order: a
+    /// row this build reads and validates is `Created`, any other is
+    /// `Unreadable`, for its identity alone. The host-adopted intents' rows
+    /// are the intent scan's ([`Self::scan_identity_intents_page`]), and
+    /// the built-in stores leave the created rows out of it. The default, a
+    /// storage that never holds a created entry (a custom composition, which
+    /// refuses every created identity operation), reads none.
+    async fn scan_created_identities_page(
+        &self,
+        _mob_id: &MobId,
+        _after: Option<&IdentityIntentScanCursor>,
+        _limit: usize,
+    ) -> Result<CreatedIdentityScanPage, MobStoreError> {
+        Ok(CreatedIdentityScanPage::default())
     }
 
     async fn observe_identity_lease(

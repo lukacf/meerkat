@@ -30,6 +30,23 @@
 //! unseated entry is not journaled: after a restart, the next apply declares
 //! it again.
 //!
+//! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
+//! in the mob's identity store: its created entry row. Every start recovers
+//! it from that row, after the journal replay and before the start's member
+//! plan: a present row of a seated member records the member a created
+//! entry; a present row whose member the journal shows retired (a build that
+//! predates created entries retired it) records the entry owed its seat, and
+//! the start seats it again, Dormant, on its archived session; a row pending
+//! its host's preparation records it unseated
+//! ([`UnseatedEntryCause::TemplatePreparation`]); and a removed entry's row
+//! reserves its name for good ([`IdentityEntryRead::Removed`]). A row this
+//! build cannot read, a row the journal contradicts, and a member row whose
+//! origin this build does not know reserve the name as unreadable
+//! ([`IdentityEntryRead::Unreadable`]). Nothing acts on a reserved name: no
+//! spawn, seat, declaration, worker reconcile, adoption or agent-lane
+//! command. The declared apply never declares over a created entry, and its
+//! seal never unlists one.
+//!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
 //! [`super::MobHandle::member_lifecycle_events`],
@@ -71,18 +88,26 @@ pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat whose spec carried
     /// entry custody, or the adoption of a legacy member.
     Declared,
+    /// Created at runtime: its desired record is its created entry row in
+    /// the mob's identity store, from which every start recovers it, and
+    /// MobMachine alone drives its member. No declared apply declares over
+    /// it or unlists it, and no worker reconcile, spawn or agent-lane
+    /// command acts on it.
+    Created,
 }
 
 impl IdentityEntryOrigin {
     pub(crate) fn from_machine(origin: mob_dsl::IdentityEntryOrigin) -> Self {
         match origin {
             mob_dsl::IdentityEntryOrigin::Declared => Self::Declared,
+            mob_dsl::IdentityEntryOrigin::Created => Self::Created,
         }
     }
 
     pub(crate) fn to_machine(self) -> mob_dsl::IdentityEntryOrigin {
         match self {
             Self::Declared => mob_dsl::IdentityEntryOrigin::Declared,
+            Self::Created => mob_dsl::IdentityEntryOrigin::Created,
         }
     }
 
@@ -90,15 +115,18 @@ impl IdentityEntryOrigin {
     pub(crate) fn as_stored(self) -> &'static str {
         match self {
             Self::Declared => "declared",
+            Self::Created => "created",
         }
     }
 
     /// The origin a journal row's stored token names. `None` for a token
-    /// this build does not know (a row a later release wrote): the row then
-    /// replays as an ordinary member.
+    /// this build does not know (a row a later release wrote): the row keeps
+    /// the token as stored, and its replay reserves the identity's name as
+    /// unreadable, so nothing acts on it.
     pub(crate) fn from_stored(token: &str) -> Option<Self> {
         match token {
             "declared" => Some(Self::Declared),
+            "created" => Some(Self::Created),
             _ => None,
         }
     }
@@ -124,6 +152,10 @@ pub enum UnseatedEntryCause {
     /// ([`super::MobHandle::spawn_held_until`] with entry custody), never a
     /// dormant seat.
     HeldCreation,
+    /// A created entry whose host preparation is pending: it has no member
+    /// until its host settles the preparation, and no seat takes its name
+    /// meanwhile.
+    TemplatePreparation,
 }
 
 impl UnseatedEntryCause {
@@ -132,6 +164,7 @@ impl UnseatedEntryCause {
             mob_dsl::UnseatedEntryCause::SeatOwed => Self::SeatOwed,
             mob_dsl::UnseatedEntryCause::HostedOnFirstUse => Self::HostedOnFirstUse,
             mob_dsl::UnseatedEntryCause::HeldCreation => Self::HeldCreation,
+            mob_dsl::UnseatedEntryCause::TemplatePreparation => Self::TemplatePreparation,
         }
     }
 }
@@ -323,6 +356,17 @@ pub enum IdentityEntryRead {
     NotAnEntry { worker: Option<WorkerMember> },
     /// The identity is an entry.
     Entry(IdentityEntryView),
+    /// The identity's entry is one this build cannot read: its created entry
+    /// row is in a format this build does not know, the journal contradicts
+    /// the row, or its member's row names an origin this build does not
+    /// know. The name is reserved: it keeps what the journal recorded for
+    /// it, and nothing new acts on it (no spawn or seat starts, and no
+    /// declaration, worker reconcile, adoption or agent-lane command acts).
+    /// `member` is where the member that holds the name stands, if one does.
+    Unreadable { member: Option<EntryStanding> },
+    /// The identity was a created entry and was removed: its name is never
+    /// an entry or a member again.
+    Removed,
 }
 
 /// One page of [`super::MobHandle::identity_entries`].
@@ -331,6 +375,10 @@ pub enum IdentityEntryRead {
 pub struct IdentityEntryPage {
     /// The entries after the page's start, in identity order.
     pub entries: Vec<IdentityEntryView>,
+    /// The names of the page whose entry this build cannot read
+    /// ([`IdentityEntryRead::Unreadable`]), in identity order: listed here,
+    /// never in `entries`. Each counts toward the page's limit.
+    pub unreadable: Vec<AgentIdentity>,
     /// The identity to start the next page after; `None` on the last page.
     pub next: Option<AgentIdentity>,
 }
@@ -347,6 +395,9 @@ pub struct UnseatedEntryCounts {
     /// Entries awaiting their held creation
     /// ([`UnseatedEntryCause::HeldCreation`]).
     pub held_creation: usize,
+    /// Created entries awaiting their host's preparation
+    /// ([`UnseatedEntryCause::TemplatePreparation`]).
+    pub template_preparation: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -355,6 +406,9 @@ pub struct UnseatedEntryCounts {
 pub struct IdentityCensus {
     /// Identity entries the host declared.
     pub declared: usize,
+    /// Identity entries created at runtime
+    /// ([`IdentityEntryOrigin::Created`]).
+    pub created: usize,
     /// Entries whose member is seated and not retiring.
     pub seated: usize,
     /// Entries whose member's retirement is in flight.
@@ -367,6 +421,23 @@ pub struct IdentityCensus {
     pub host_preparation_pending: usize,
     /// Entries with a rotation in flight.
     pub rotation_in_flight: usize,
+    /// Names of removed created entries ([`IdentityEntryRead::Removed`]).
+    pub tombstoned: usize,
+    /// Names whose entry this build cannot read
+    /// ([`IdentityEntryRead::Unreadable`]). They are counted here alone,
+    /// and while there is one the census is incomplete
+    /// ([`Self::is_complete`]).
+    pub unreadable: usize,
+}
+
+impl IdentityCensus {
+    /// Whether the census counts every identity entry of the mob: `false`
+    /// while a name's entry is unreadable ([`Self::unreadable`]), since the
+    /// other counts cannot include what this build cannot read.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unreadable == 0
+    }
 }
 
 /// A position in a mob's journal: the cursor of the last event a reader
@@ -596,6 +667,16 @@ pub(crate) fn identity_entry_read(
     identity: &AgentIdentity,
 ) -> Result<IdentityEntryRead, MobError> {
     let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    // A name whose entry this build cannot read is reserved, whatever else
+    // the machine records for it.
+    if state.identity_entry_unreadable.contains(&dsl_identity) {
+        return Ok(IdentityEntryRead::Unreadable {
+            member: seated_member(state, &dsl_identity)?,
+        });
+    }
+    if state.identity_entry_tombstones.contains(&dsl_identity) {
+        return Ok(IdentityEntryRead::Removed);
+    }
     if let Some(origin) = state.identity_entry_origins.get(&dsl_identity) {
         return Ok(IdentityEntryRead::Entry(entry_view(
             state,
@@ -618,36 +699,75 @@ pub(crate) fn identity_entry_page(
     limit: usize,
 ) -> Result<IdentityEntryPage, MobError> {
     let limit = limit.clamp(1, IDENTITY_ENTRY_PAGE_MAX);
-    let mut range = match after {
-        Some(after) => state.identity_entry_origins.range((
-            Bound::Excluded(mob_dsl::AgentIdentity::from_domain(after)),
-            Bound::Unbounded,
-        )),
-        None => state
-            .identity_entry_origins
-            .range::<mob_dsl::AgentIdentity, _>(..),
+    let start = match after {
+        Some(after) => Bound::Excluded(mob_dsl::AgentIdentity::from_domain(after)),
+        None => Bound::Unbounded,
     };
-    let mut entries = Vec::new();
-    for (identity, origin) in range.by_ref().take(limit) {
-        entries.push(entry_view(state, identity, *origin)?);
+    // The entries and the unreadable names, merged in identity order: an
+    // unreadable name is listed once, as unreadable, even when the machine
+    // records an origin for it.
+    let mut origins = state
+        .identity_entry_origins
+        .range((start.clone(), Bound::Unbounded))
+        .peekable();
+    let mut unreadable = state
+        .identity_entry_unreadable
+        .range((start, Bound::Unbounded))
+        .peekable();
+    let mut page = IdentityEntryPage {
+        entries: Vec::new(),
+        unreadable: Vec::new(),
+        next: None,
+    };
+    let mut last = None;
+    for _ in 0..limit {
+        let unreadable_first = match (origins.peek(), unreadable.peek()) {
+            (None, None) => break,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (Some((entry, _)), Some(name)) => name <= entry,
+        };
+        if unreadable_first {
+            let Some(name) = unreadable.next() else {
+                break;
+            };
+            if origins.peek().is_some_and(|(entry, _)| *entry == name) {
+                origins.next();
+            }
+            page.unreadable.push(AgentIdentity::from(name.0.as_str()));
+            last = Some(name);
+        } else {
+            let Some((identity, origin)) = origins.next() else {
+                break;
+            };
+            page.entries.push(entry_view(state, identity, *origin)?);
+            last = Some(identity);
+        }
     }
-    let next = if range.next().is_some() {
-        entries.last().map(|entry| entry.identity.clone())
-    } else {
-        None
-    };
-    Ok(IdentityEntryPage { entries, next })
+    if origins.peek().is_some() || unreadable.peek().is_some() {
+        page.next = last.map(|identity| AgentIdentity::from(identity.0.as_str()));
+    }
+    Ok(page)
 }
 
 /// [`super::MobHandle::identity_census`] over one published machine state.
 pub(crate) fn identity_census(
     state: &mob_dsl::MobMachineState,
 ) -> Result<IdentityCensus, MobError> {
-    let mut census = IdentityCensus::default();
+    let mut census = IdentityCensus {
+        tombstoned: state.identity_entry_tombstones.len(),
+        unreadable: state.identity_entry_unreadable.len(),
+        ..IdentityCensus::default()
+    };
     for (identity, origin) in &state.identity_entry_origins {
+        // An unreadable name is counted as unreadable alone.
+        if state.identity_entry_unreadable.contains(identity) {
+            continue;
+        }
         let view = entry_view(state, identity, *origin)?;
         match view.origin {
             IdentityEntryOrigin::Declared => census.declared += 1,
+            IdentityEntryOrigin::Created => census.created += 1,
         }
         match view.standing {
             EntryStanding::Seated(_) => census.seated += 1,
@@ -660,6 +780,9 @@ pub(crate) fn identity_census(
             }
             EntryStanding::Unseated(UnseatedEntryCause::HeldCreation) => {
                 census.unseated_by_cause.held_creation += 1;
+            }
+            EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation) => {
+                census.unseated_by_cause.template_preparation += 1;
             }
         }
         if view.broken.is_some() {
@@ -1049,12 +1172,22 @@ mod tests {
                 mob_dsl::UnseatedEntryCause::HeldCreation,
                 UnseatedEntryCause::HeldCreation,
             ),
+            (
+                "preparing",
+                mob_dsl::UnseatedEntryCause::TemplatePreparation,
+                UnseatedEntryCause::TemplatePreparation,
+            ),
         ];
         for (name, machine_cause, _) in unseated {
             let identity = mob_dsl::AgentIdentity::from(name);
+            let origin = if machine_cause == mob_dsl::UnseatedEntryCause::TemplatePreparation {
+                mob_dsl::IdentityEntryOrigin::Created
+            } else {
+                mob_dsl::IdentityEntryOrigin::Declared
+            };
             state
                 .identity_entry_origins
-                .insert(identity.clone(), mob_dsl::IdentityEntryOrigin::Declared);
+                .insert(identity.clone(), origin);
             state
                 .identity_entry_unseated
                 .insert(identity, machine_cause);
@@ -1081,16 +1214,91 @@ mod tests {
             "{read:?}"
         );
         let census = identity_census(&state).expect("the census");
-        assert_eq!((census.declared, census.seated), (4, 1));
+        assert_eq!((census.declared, census.created, census.seated), (4, 1, 1));
         assert_eq!(
             census.unseated_by_cause,
             UnseatedEntryCounts {
                 seat_owed: 1,
                 hosted_on_first_use: 1,
                 held_creation: 1,
+                template_preparation: 1,
             }
         );
         assert_eq!(census.host_preparation_pending, 1);
+        assert!(census.is_complete());
+    }
+
+    /// A reserved name reads as what reserves it, never as an entry or a
+    /// worker: an unreadable name with the standing of the member that holds
+    /// it (even when the machine records an origin for it), and a removed
+    /// created entry's name as removed. The page lists an unreadable name
+    /// among the unreadable ones, in identity order, and never a removed
+    /// one; the census counts both apart and is incomplete while a name is
+    /// unreadable.
+    #[test]
+    fn a_reserved_name_reads_unreadable_or_removed_and_the_census_is_incomplete() {
+        let mut state = mob_dsl::MobMachineState::default();
+        seat(&mut state, "entry-a", true);
+        seat(&mut state, "unreadable-member", false);
+        seat(&mut state, "unreadable-entry", true);
+        for name in ["unreadable-member", "unreadable-entry", "unreadable-free"] {
+            state
+                .identity_entry_unreadable
+                .insert(mob_dsl::AgentIdentity::from(name));
+        }
+        state
+            .identity_entry_tombstones
+            .insert(mob_dsl::AgentIdentity::from("removed"));
+
+        for (name, seated) in [
+            ("unreadable-member", true),
+            ("unreadable-entry", true),
+            ("unreadable-free", false),
+        ] {
+            let read = identity_entry_read(&state, &AgentIdentity::from(name));
+            assert!(
+                matches!(
+                    &read,
+                    Ok(IdentityEntryRead::Unreadable { member })
+                        if member.is_some() == seated
+                ),
+                "{name}: {read:?}"
+            );
+        }
+        assert_eq!(
+            identity_entry_read(&state, &AgentIdentity::from("removed")).expect("a read"),
+            IdentityEntryRead::Removed
+        );
+
+        let first = identity_entry_page(&state, None, 2).expect("the first page");
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|entry| entry.identity.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-a"]
+        );
+        assert_eq!(
+            first.unreadable,
+            vec![AgentIdentity::from("unreadable-entry")]
+        );
+        assert_eq!(first.next, Some(AgentIdentity::from("unreadable-entry")));
+        let second = identity_entry_page(&state, first.next.as_ref(), 2).expect("the second page");
+        assert!(second.entries.is_empty());
+        assert_eq!(
+            second.unreadable,
+            vec![
+                AgentIdentity::from("unreadable-free"),
+                AgentIdentity::from("unreadable-member"),
+            ]
+        );
+        assert_eq!(second.next, None);
+
+        let census = identity_census(&state).expect("the census");
+        assert_eq!((census.declared, census.seated), (1, 1));
+        assert_eq!((census.tombstoned, census.unreadable), (1, 3));
+        assert!(!census.is_complete());
     }
 
     /// A retirement cause round-trips through its stored token, and a token

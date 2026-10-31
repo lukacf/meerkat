@@ -29,11 +29,12 @@
 \*   AuditDecisionKeepsRowsAndHeads: the decision changes the retired counts
 \*     only.
 \*
-\* The witnesses (NotAuditWitness*, expected violations, checked in one TLC
-\* run with -continue): a decision retired a body, a decision kept a copied
-\* retired head as it was, and a key with three rows retired two. The
-\* runner's --mutants mode seeds five defects into a copy of the generated
-\* model and requires TLC to refuse each with the invariant it targets:
+\* The witnesses (NotAuditWitness*, expected violations, each checked in a
+\* TLC run of its own without -continue): a decision retired a body, a
+\* decision kept a copied retired head as it was, and a key with three rows
+\* retired two. The runner's --mutants mode seeds five defects into a copy of
+\* the generated model and requires TLC to refuse each with the invariant it
+\* targets, run as its only invariant:
 \* retire every row (the decision's count taken as the rows), retire nothing
 \* new (the decision's update dropped), drop the own-head clause from the
 \* recovery guard, retire inside the recovery, and lower a recovered count

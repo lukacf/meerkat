@@ -839,9 +839,10 @@ fi
 # it retires every superseded row, never lowers a recovered count and
 # changes nothing else, and an own newest row keeps its body. It first
 # checks that the generated model defines both arms it drives, and requires
-# its three witnesses reached. --mutants refuses five seeded defects, each by
-# the invariant it targets. Not yet measured; it joins the shard of the other
-# session-document audit as a small one.
+# its three witnesses reached, each in a capped run of its own without
+# -continue. --mutants refuses five seeded defects, each run with the
+# invariant it targets as its only invariant. Not yet measured; it joins the
+# shard of the other session-document audit as a small one.
 activation_body_retirement_audit="${workspace_root}/specs/machines/session_document/activation_body_retirement_audit.sh"
 if [[ ! -x "${activation_body_retirement_audit}" ]]; then
   echo "error: activation body retirement audit runner is missing from workspace runfiles: ${activation_body_retirement_audit}" >&2

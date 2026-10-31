@@ -66,8 +66,9 @@
 //! or a legacy respawn's seat follows. Which retirement owes what is decided
 //! in one place ([`retirement_owes`]), the facts first; a legacy respawn's
 //! seat, whose retirement was a step of its own, owes what such a rotation
-//! owes, with the session and role of the incarnation it follows read from
-//! Core's member history, which the seat's fact does not carry. Whether a
+//! owes, with the session and role of the incarnation it follows, which the
+//! seat's fact does not carry, read by that exact generation from Core's
+//! member history, else from the retirement Core journaled for it. Whether a
 //! seat's incarnation is still Core's is read from Core's standing of the
 //! identity's member (`SessionBridge::member_standing`); that standing is the
 //! state Core's actor last published, which can trail the journal by the
@@ -1253,6 +1254,76 @@ async fn seats_ended_since(
         after = page.next;
     }
     Ok(ended)
+}
+
+/// The session and role of `member`'s incarnation `generation`, which the
+/// legacy respawn's seat at the journal event `seat` names, read from the
+/// retirement Core journaled for that incarnation: the journal is read back
+/// from the seat, a page at a time, nearest first.
+///
+/// The read is total. Core journals a legacy respawn as two steps, the
+/// retirement of the incarnation (its `Retired` row names the session the
+/// incarnation was bound to at its end and the role it ran under) and then
+/// the seat, which names the incarnation from the respawn hold the
+/// retirement's start installed and the seat's step took; so that
+/// retirement lies before the seat. And Core's journal keeps every member
+/// lifecycle event its member history folds, retirements included. A
+/// journal with no such retirement before the seat breaks that, and fails
+/// the page: the respawn stays owed, each later run reads the page again,
+/// and the projection reads stalled with this failure while it lasts.
+async fn respawned_incarnation(
+    bridge: &Arc<dyn SessionBridge>,
+    member: &meerkat_mob::AgentIdentity,
+    generation: u64,
+    seat: u64,
+) -> Result<(Option<SessionId>, meerkat_mob::ProfileName), PageError> {
+    // The window of journal events read next is (after, last].
+    let mut last = seat.saturating_sub(1);
+    while last > 0 {
+        let after = last.saturating_sub(PAGE_LIMIT as u64);
+        let page = match bridge
+            .member_lifecycle_journal_page(after, PAGE_LIMIT)
+            .await
+        {
+            Ok(page) => page,
+            Err(BridgeError::Unsupported { .. }) => {
+                return Err(PageError::Unreadable(
+                    "read the pages of Core's member lifecycle journal",
+                ));
+            }
+            Err(error) => {
+                return Err(PageError::Failed(format!(
+                    "reading Core's member lifecycle journal after {after} for the incarnation a \
+                     respawn retired: {error}"
+                )));
+            }
+        };
+        let retired = page
+            .records
+            .iter()
+            .filter(|record| record.cursor <= last)
+            .rev()
+            .find_map(|record| match &record.fact {
+                MemberLifecycleFact::Retired {
+                    member: retired,
+                    generation: ended,
+                    role,
+                    session,
+                    ..
+                } if retired == member && *ended == generation => {
+                    Some((session.clone(), role.clone()))
+                }
+                _ => None,
+            });
+        if let Some(retired) = retired {
+            return Ok(retired);
+        }
+        last = after;
+    }
+    Err(PageError::Failed(format!(
+        "Core's member lifecycle journal holds no retirement of the incarnation {generation} of \
+         {member} before the respawn's seat at {seat}, which names it"
+    )))
 }
 
 /// The durable identity a Core member id names.
@@ -2825,8 +2896,9 @@ impl IdentityRuntime {
     /// asked for and of its legacy respawns, from the page's one read of
     /// Core's member history ([`page_members`]: whether each member is the
     /// identity's, and the session and role of the incarnation a respawn
-    /// retired, which its seat's fact does not carry) and, for each seat,
-    /// Core's standing of the identity's member. A seat is told
+    /// retired, which its seat's fact does not carry, else read from Core's
+    /// journal) and, for each seat, Core's standing of the identity's
+    /// member. A seat is told
     /// `after_create` while Core still holds its incarnation, seated or
     /// retiring; one whose incarnation ended since is told nothing, its
     /// retirement standing for it.
@@ -2847,14 +2919,27 @@ impl IdentityRuntime {
         } = pending;
         let members = page_members(bridge).await?;
         for respawn in respawns {
-            // The incarnation the respawn retired, as Core's member history
-            // keeps it. One the history no longer keeps owes nothing here.
-            let Some(retired) = members.incarnation(&respawn.member, respawn.predecessor, None)
-            else {
-                continue;
-            };
-            let retired_session = retired.session_id().cloned();
-            let retired_role = retired.role().clone();
+            // The session and role of the incarnation the respawn retired,
+            // which the seat's fact does not carry, read by its exact
+            // generation: from Core's member history, else from the
+            // retirement Core journaled for it, a read that is total
+            // ([`respawned_incarnation`]). Reading the history departs from
+            // reading a session from its step's own facts only: the
+            // retirement may lie pages before the seat, and the history
+            // answers without reading back to it.
+            let (retired_session, retired_role) =
+                match members.incarnation(&respawn.member, respawn.predecessor, None) {
+                    Some(retired) => (retired.session_id().cloned(), retired.role().clone()),
+                    None => {
+                        respawned_incarnation(
+                            bridge,
+                            &respawn.member,
+                            respawn.predecessor,
+                            respawn.cursor,
+                        )
+                        .await?
+                    }
+                };
             // A member no identity-first step made is a worker's.
             if !members.is_identitys(
                 &respawn.identity,

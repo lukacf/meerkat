@@ -618,6 +618,8 @@ pub(super) struct PreparedRetirement {
     generation: u64,
     /// The step's intent was recorded, in place of `Some` intent an earlier
     /// step recorded for the same incarnation.
+    #[allow(clippy::option_option)]
+    // None: nothing recorded; Some(earlier): recorded over `earlier`
     recorded: Option<Option<LifecycleEffectIntent>>,
     /// The incarnation as the retirement hook reads it, when a hook is
     /// installed.

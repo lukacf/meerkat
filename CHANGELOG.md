@@ -235,7 +235,8 @@ them.
   and `facts` (`MemberRetiredFacts`, what the row records for the member
   lifecycle journal read), all of which serde skips, so code that builds
   either variant literally must set them (`None`, `false` and
-  `MemberRetiredFacts::default()`).
+  `MemberRetiredFacts::default()`), and an exhaustive pattern without `..`
+  must name them.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`: `MeerkatMachine`'s
   `RunStartHoldReason` (meerkat-machine-schema
   `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
@@ -777,25 +778,35 @@ them.
   Each fact of the journal read (`MemberLifecycleEvent`, every variant
   `#[non_exhaustive]`) is one MobMachine decided in the step that wrote its
   row, read from the machine's state before the step and from the step's
-  journal effect: a seat names its session and the rotation that seated it
+  journal effect: a seat names its session (a placed member's too: the
+  session its member host keeps) and the rotation that seated it
   (`SeatRotation`: `Successor`, a rotation's terminal step, which retired the
-  identity's previous incarnation in the same step, or `FreshLifeAfter`,
+  identity's previous incarnation in the same step; `FreshLifeAfter`,
   `rotate_member`'s fresh life of an identity no member held, naming the
-  incarnation it follows); a retirement names the session its incarnation
-  was bound to at its end, the entry it was the member of (also when its end
-  ended the entry), its cause (`MemberRetirementCause::Unlisted`) and the
-  rotation whose terminal step retired it (`RetiredRotation`: the target and
-  the generation and role the same step seated). A reader pairs a
-  retirement with the seat that follows it from these facts, never from
-  their positions in the journal. A row written before them reads them
-  absent, as do the rows that close a spawn with no retirement step of the
-  machine (a membership step that failed after the spawn row was durable,
-  and a resumed spawn's rollback). No row names the runtime registration an
+  incarnation it follows; or `RespawnAfter`, the seat of a respawn of a
+  member no identity entry holds, `MobHandle::respawn` or
+  `respawn_with_successor_spec`, naming the incarnation the respawn retired,
+  whose retirement held the identity's topology for it); a retirement names
+  the session its incarnation was bound to at its end, the entry it was the
+  member of (also when its end ended the entry), its cause
+  (`MemberRetirementCause::Unlisted`) and the rotation whose terminal step
+  retired it (`RetiredRotation`: the target and the generation and role the
+  same step seated). A reader pairs a retirement with the seat that follows
+  it from these facts, never from their positions in the journal. A
+  retirement's facts, a seat's rotation and a placed seat's session read as
+  absent on a row written before them (a seat's own session binding is one
+  its row always recorded), and as absent in a form this build cannot read,
+  so the row still decodes. Two rows that close a spawn record no facts: the
+  row after a membership step that failed once the spawn row was durable,
+  and the end of a resumed spawn's rollback, which MobMachine records
+  without a journal effect. No row names the runtime registration an
   incarnation held, which belongs to one process.
   `SeatRotation` and `RetiredRotation` are `#[non_exhaustive]`, with
-  constructors. The facts are internal to the stored event codec, under keys
-  of their own with the stored schema version unchanged, so an older
-  release ignores them and its replay is unchanged.
+  constructors, and `MemberRetiredFacts::for_test` (feature `test-support`)
+  builds a row's facts for a test that injects the row. The facts are
+  internal to the stored event codec, under keys of their own with the
+  stored schema version unchanged, so an older release ignores them and its
+  replay is unchanged.
   Behaviour is unchanged until a host declares an entry. The option and the
   reads are Rust-only; the wire contracts do not carry them.
 
@@ -1553,6 +1564,17 @@ them.
   roster, is the new pure admission input `AdmitReset`: every guard of
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
+- `meerkat-mob`, `meerkat-machine-schema`: a mob reset (`MobHandle::reset`)
+  ends every identity's retained incarnation history in MobMachine, as a
+  restart after the reset does (the resume replays only the events after
+  the last reset): `ResetToRunning` folds each identity's retained
+  generation into its generation high-water and drops the retained
+  generation, fence, profile and runtime mode. Before, the running mob kept
+  them until a restart, so the same history gave two machine states: a
+  fresh life after a reset (`rotate_member` of an identity no member holds)
+  named a pre-reset incarnation (`SeatRotation::FreshLifeAfter`) only until
+  a restart. Minting is unchanged: an identity's next incarnation still
+  mints above every generation it used.
 - `meerkat-mob`: a mob storage on the host store SPI reads its identity
   intents one entry at a time. A created entry's row is kept as one, and an
   entry whose row this build cannot decode is kept as stored, read as

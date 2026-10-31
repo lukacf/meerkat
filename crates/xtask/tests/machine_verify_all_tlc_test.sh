@@ -521,8 +521,15 @@ fi
 # its six witnesses reached and refuses four seeded defects (--mutants): a
 # mint helper that ignores the high-water, a recovery without its seal
 # guard, a recovery without its not-lowered guard, and the exact-successor
-# replay rule, which must leave both replay witnesses unreachable. 4 steps
-# reach every witness.
+# replay rule, which must leave both replay witnesses unreachable. Its reset
+# run adds the retirement of the recovered member and the mob reset
+# (ResetToRunning folds each retained generation into the high-water and
+# drops the retained history, as a restart after the reset does), checks
+# that the machine retains a generation only for the current reset epoch and
+# mints above every generation seated, requires its witness reached, and
+# refuses two seeded defects, each by its target invariant alone: a reset
+# that keeps the retained history, and one that drops it without the fold.
+# 4 steps reach every witness.
 generation_highwater_audit="${workspace_root}/specs/machines/mob_machine/generation_highwater_audit.sh"
 if [[ ! -x "${generation_highwater_audit}" ]]; then
   echo "error: generation high-water audit runner is missing from workspace runfiles: ${generation_highwater_audit}" >&2

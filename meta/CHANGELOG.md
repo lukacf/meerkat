@@ -361,8 +361,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   row by both its record and the identity it went into. A record's detail
   (`meta/memory/panel/record`) likewise lists only the injections into
   identities the caller may read. Before, the Console hid some of these rows
-  in the browser after they had arrived. Dream history (`dreams`,
-  `dream_runs`) still spans scopes and is not filtered per row.
+  in the browser after they had arrived. Dream history
+  (`meta/memory/panel/dreams` and `dream_runs`) spans a realm's scopes, so it
+  now lists a realm's runs only to a caller who may read every memory scope
+  the realm holds: each identity with memory there, its mobs
+  (`mob.memory.read`) and, once operator records exist,
+  `operator.memory.read`. Any other caller gets the usual answer with none of
+  that realm's runs and the new result field `withheld_by_access: true`
+  (`false` otherwise), so a client can tell withheld history from none.
 
 ### Known limitations
 

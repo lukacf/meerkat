@@ -4443,7 +4443,9 @@ fn console_rpc_access_requirements(
         },
         // Dream history is realm-level steward activity spanning scopes; it
         // requires the unscoped read grant (a rule with no resource
-        // selector), same as realm-scope record reads.
+        // selector), same as realm-scope record reads. The handlers then list
+        // a realm's runs only to a caller who may read every memory scope in
+        // it (`memory_panel_realm_fully_readable`).
         "meta/memory/panel/dreams" => one(ACTION_AGENT_MEMORY_READ, None),
         // Durable dream verdict sheets + the usage-audit review queue: same
         // realm-level read posture as dream history.
@@ -4958,6 +4960,28 @@ async fn memory_panel_retain_readable_records<T>(
         .collect();
     rows.retain(|row| readable.contains(record_id(row)));
     Ok(())
+}
+
+/// Whether the caller may read every memory scope `realm` holds, each by
+/// [`memory_panel_scope_visible`]: every identity with memory there, its mobs
+/// (`mob.memory.read`), the operator scope once operator records exist
+/// (`operator.memory.read`) and the realm scope. A steward dream spans the
+/// realm's scopes, so its runs are listed only to such a caller. Call it
+/// after reading the runs: the store never deletes a record, so every scope
+/// a run read before touched is then among the realm's scopes.
+async fn memory_panel_realm_fully_readable(
+    store: &dyn crate::memory::capabilities::MemoryPanelStore,
+    view: Option<&AccessView>,
+    realm: &str,
+) -> Result<bool, crate::identity_first::agent_memory::AgentMemoryError> {
+    if !view.is_some_and(AccessView::enforced) {
+        return Ok(true);
+    }
+    Ok(store
+        .scope_overview(realm)
+        .await?
+        .iter()
+        .all(|row| memory_panel_scope_visible(view, &row.scope)))
 }
 
 /// Quarantined content is reviewer-only, and stays so across the status
@@ -5486,8 +5510,15 @@ fn memory_quarantine_refusal_error(
     }
 }
 
+/// Steward dream-run summaries reconstructed from the audit rows, newest
+/// first. A run spans its realm's scopes, so a realm's runs are listed only
+/// to a caller who may read every memory scope there
+/// ([`memory_panel_realm_fully_readable`]). For any other caller they are
+/// left out and `withheld_by_access` is true, so the panel can tell withheld
+/// history from none.
 async fn handle_memory_panel_dreams(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
+    view: Option<&AccessView>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5501,9 +5532,15 @@ async fn handle_memory_panel_dreams(
         Err(err) => return memory_panel_store_error(response_id, err),
     };
     let mut runs = Vec::new();
+    let mut withheld_by_access = false;
     for realm in &realms {
-        match store.dream_history(realm, limit).await {
-            Ok(history) => runs.extend(history.into_iter().map(|run| (realm.clone(), run))),
+        let history = match store.dream_history(realm, limit).await {
+            Ok(history) => history,
+            Err(err) => return memory_panel_store_error(response_id, err),
+        };
+        match memory_panel_realm_fully_readable(store, view, realm).await {
+            Ok(true) => runs.extend(history.into_iter().map(|run| (realm.clone(), run))),
+            Ok(false) => withheld_by_access = true,
             Err(err) => return memory_panel_store_error(response_id, err),
         }
     }
@@ -5527,16 +5564,22 @@ async fn handle_memory_panel_dreams(
         .collect();
     response_value(
         response_id,
-        Some(json!({ "runs": rows, "realms": realms })),
+        Some(json!({
+            "runs": rows,
+            "realms": realms,
+            "withheld_by_access": withheld_by_access,
+        })),
         None,
     )
 }
 
 /// Durable dream verdict sheets (`dream_runs` table): phases, verdict
 /// counters, skips, and partition label per run — survives restarts, unlike
-/// the audit-trail reconstruction served by `panel/dreams`.
+/// the audit-trail reconstruction served by `panel/dreams`. Listed per realm
+/// as `panel/dreams` lists its runs, with the same `withheld_by_access`.
 async fn handle_memory_panel_dream_runs(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
+    view: Option<&AccessView>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5550,9 +5593,15 @@ async fn handle_memory_panel_dream_runs(
         Err(err) => return memory_panel_store_error(response_id, err),
     };
     let mut runs = Vec::new();
+    let mut withheld_by_access = false;
     for realm in &realms {
-        match store.dream_runs(realm, limit).await {
-            Ok(rows) => runs.extend(rows.into_iter().map(|run| (realm.clone(), run))),
+        let sheets = match store.dream_runs(realm, limit).await {
+            Ok(sheets) => sheets,
+            Err(err) => return memory_panel_store_error(response_id, err),
+        };
+        match memory_panel_realm_fully_readable(store, view, realm).await {
+            Ok(true) => runs.extend(sheets.into_iter().map(|run| (realm.clone(), run))),
+            Ok(false) => withheld_by_access = true,
             Err(err) => return memory_panel_store_error(response_id, err),
         }
     }
@@ -5576,7 +5625,11 @@ async fn handle_memory_panel_dream_runs(
         .collect();
     response_value(
         response_id,
-        Some(json!({ "runs": rows, "realms": realms })),
+        Some(json!({
+            "runs": rows,
+            "realms": realms,
+            "withheld_by_access": withheld_by_access,
+        })),
         None,
     )
 }
@@ -9829,11 +9882,13 @@ async fn handle_console_runtime_rpc_with_visibility(
         })
         .await,
         "meta/memory/panel/dreams" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_dreams(memory_panel, &request.params, response_id).await
+            handle_memory_panel_dreams(memory_panel, access_view, &request.params, response_id)
+                .await
         })
         .await,
         "meta/memory/panel/dream_runs" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_dream_runs(memory_panel, &request.params, response_id).await
+            handle_memory_panel_dream_runs(memory_panel, access_view, &request.params, response_id)
+                .await
         })
         .await,
         "meta/memory/panel/audit_verdicts" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {

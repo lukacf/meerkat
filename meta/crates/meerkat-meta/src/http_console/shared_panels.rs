@@ -90,8 +90,12 @@ pub(super) async fn dispatch(
         "meta/memory/panel/quarantine" => {
             handle_memory_panel_quarantine(store, access_view, &params, id).await
         }
-        "meta/memory/panel/dreams" => handle_memory_panel_dreams(store, &params, id).await,
-        "meta/memory/panel/dream_runs" => handle_memory_panel_dream_runs(store, &params, id).await,
+        "meta/memory/panel/dreams" => {
+            handle_memory_panel_dreams(store, access_view, &params, id).await
+        }
+        "meta/memory/panel/dream_runs" => {
+            handle_memory_panel_dream_runs(store, access_view, &params, id).await
+        }
         "meta/memory/panel/audit_verdicts" => {
             handle_memory_panel_audit_verdicts(store, access_view, &params, id).await
         }

@@ -244,6 +244,7 @@ import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelive
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
 import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
 import { ActivityLedgerProvider, createActivityLedger, createAgentResolver, type ActivityLedger } from "./lib/activity-ledger";
+import { consoleNavControls } from "./lib/nav-controls";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -2867,60 +2868,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       topologyQueryResult,
     ],
   );
-  const visibleControls = React.useMemo<NavKind[]>(() => {
-    const runtimeControls: NavKind[] = hasMobControlSurface
-      ? [
-          "topology",
-          "timeline",
-          "gating",
-          "roster",
-          "routing",
-          "logs",
-          "health",
-        ]
-      : ["topology", "timeline", "roster", "logs", "health"];
-    const sidebarConfig = experience?.console_config?.sidebar;
-    const allowedByRuntime = new Set(runtimeControls);
-    const configuredVisible = (sidebarConfig?.visible_controls || [])
-      .map(normalizeNavKind)
-      .filter(
-        (kind): kind is NavKind => Boolean(kind) && allowedByRuntime.has(kind),
-      );
-    if (configuredVisible.length > 0) {
-      const extra: NavKind[] = [];
-      if (experience?.access?.can_administer === true) extra.push("access");
-      // An empty shared registry offers a setup explanation only. Configured
-      // services still require the server-projected read/view grants.
-      if (emptyPanelRegistry || experience?.memory?.can_read === true) extra.push("memory");
-      if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-        extra.push("workgraph");
-      }
-      return extra.length > 0 ? [...configuredVisible, ...extra] : configuredVisible;
-    }
-    const hidden = new Set(
-      (sidebarConfig?.hidden_controls || [])
-        .map(normalizeNavKind)
-        .filter((kind): kind is NavKind => Boolean(kind)),
-    );
-    const controls = runtimeControls.filter((kind) => !hidden.has(kind));
-    // The Access admin surface is gated server-side per principal, never by
-    // view config: administrators always get it, nobody else ever does.
-    if (experience?.access?.can_administer === true) controls.push("access");
-    // Empty shared registries keep these destinations discoverable without
-    // making store requests or replacing configured-service access checks.
-    if (emptyPanelRegistry || experience?.memory?.can_read === true) controls.push("memory");
-    if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-      controls.push("workgraph");
-    }
-    return controls;
-  }, [
+  // The views the console offers (lib/nav-controls.ts): Access for
+  // administrators only, Memory when readable and, on a team runtime with
+  // no memory store, as a "not set up" entry, WorkGraph when viewable, and
+  // Schedules when the gateway lists them.
+  const visibleControls = React.useMemo<NavKind[]>(() => consoleNavControls({
+    hasMobControlSurface,
+    sidebar: experience?.console_config?.sidebar,
+    access: experience?.access,
+    memory: experience?.memory,
+    workgraph: experience?.workgraph,
+    emptyPanelRegistry,
+    schedulesListed: scheduleOffer.list,
+  }), [
     experience?.console_config?.sidebar,
-    experience?.access?.can_administer,
-    experience?.memory?.can_read,
-    experience?.workgraph?.available,
-    experience?.workgraph?.can_view,
+    experience?.access,
+    experience?.memory,
+    experience?.workgraph,
     emptyPanelRegistry,
     hasMobControlSurface,
+    scheduleOffer.list,
   ]);
 
   // =========================================================================

@@ -664,10 +664,9 @@ them.
   refuses a placed forked participant with it (only under
   `reactivate_inherited`), the 0.9.8 controller fails the create closed
   with an untyped internal error (`failed to decode command bridge reply`)
-  in place of `ForkInstructionRefused`. Nothing is created on either side
-  and nothing is retried, but a 0.9.8 temporary council reports
-  `participant_seating_failed` for that seat and keeps a cleanup debt for
-  it. A 0.9.9 controller reads the typed refusal.
+  in place of `ForkInstructionRefused`; nothing is created on either side
+  and nothing is retried. A 0.9.9 controller reads the typed refusal (see
+  Upgrade notes).
 
 - `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
   `SessionDocumentMachine` decides which superseded instruction activation
@@ -1820,6 +1819,22 @@ them.
   decision waits for its owner to settle the permit (record the commit, or
   release or refuse the permit). Back the file up with the state root, as a
   WAL-complete copy.
+
+- Upgrade mob controllers together with their member hosts before relying
+  on `reactivate_inherited` for placed forks of members whose instruction
+  heads a compaction may have retired. A 0.9.8 controller cannot decode a
+  0.9.9 host's `head_body_retired` refusal: the placed fork fails closed
+  with an untyped internal error, and creates nothing. A 0.9.8 temporary
+  council that meets it ends `participant_seating_failed` and keeps an
+  "acquisition is ambiguous" cleanup debt for that seat, and nothing clears
+  that debt: the seat stays `Pending`, the controller holds no local record
+  of a create on a member host, and the council store has no operation that
+  forgets a record, so every recovery sweep records the debt again;
+  destroying the council's temporary mob or the source mob does not clear
+  it, and neither does upgrading that controller (0.9.9 reconciles the seat
+  the same way). With a 0.9.9 controller the refusal is typed: the council
+  ends `participant_fork_instruction_refused` and its seat settles with no
+  debt.
 
 - A downgrade to 0.9.8 is refused for every session whose document 0.9.9
   writes at session envelope 5: a session that carries operator-instruction

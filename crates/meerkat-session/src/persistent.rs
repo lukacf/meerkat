@@ -52,7 +52,8 @@ use meerkat_core::service::{
     SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult,
 };
 use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
@@ -19001,6 +19002,57 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
             parent_revision: commit.parent_revision.clone(),
             revision: commit.revision.clone(),
             message_count: saved.messages().len(),
+            commit,
+        })
+    }
+
+    /// The prune takes the path of every same-session rewrite: the
+    /// transcript-edit mutation guard (an active runtime admission or a
+    /// running turn is `Busy`), the committed source, the core prune, the
+    /// session-document authorization of the rewrite, and the persisted
+    /// commit under the session's hosting claim. A dormant session is
+    /// written store-only and is not woken; a live idle one converges on
+    /// the commit. The session's pending compaction projection intents
+    /// carry forward unchanged, as for every rewrite, and the runtime's
+    /// finalization settles them; an unsettled projection does not refuse
+    /// the prune.
+    async fn prune_system_rows(
+        &self,
+        id: &SessionId,
+        req: SystemRowPruneRequest,
+    ) -> Result<SystemRowPruneResult, SessionError> {
+        let _mutation_guard = self.transcript_edit_mutation_guard(id).await?;
+        let mut source = self.source_session_for_transcript_edit_locked(id).await?;
+        source = self.normalized_session_for_persistence(source).await?;
+        let Some(pruned) = source
+            .prune_system_rows(req)
+            .map_err(meerkat_core::TranscriptEditError::into_session_error)?
+        else {
+            let revision = source.transcript_revision().map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to read transcript head revision: {err}"
+                )))
+            })?;
+            return Ok(SystemRowPruneResult::NothingToPrune {
+                session_id: id.clone(),
+                revision,
+                message_count: source.messages().len(),
+            });
+        };
+        self.authorize_transcript_edit(id, TranscriptEditKind::Rewrite)?;
+        let meerkat_core::SystemRowPruneCommit {
+            commit,
+            removed_rows,
+            retired_bodies,
+        } = pruned;
+        let saved = self.persist_transcript_rewrite(source, &commit).await?;
+        Ok(SystemRowPruneResult::Pruned {
+            session_id: saved.id().clone(),
+            parent_revision: commit.parent_revision.clone(),
+            revision: commit.revision.clone(),
+            message_count: saved.messages().len(),
+            removed_rows,
+            retired_bodies,
             commit,
         })
     }

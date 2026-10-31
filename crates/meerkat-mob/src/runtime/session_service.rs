@@ -1445,9 +1445,11 @@ pub trait MobSessionService:
 
     /// Release a retiring member's session target on behalf of its mob, as
     /// MobMachine authorized it ([`crate::MemberInstructionRelease`]): the
-    /// target empties and is unowned, so the session's host or a later owner
-    /// can own it. Never wakes the session. A target no owner holds answers
-    /// "already unowned"; another owner's target is refused.
+    /// target empties and is unowned, so a mob's later record can own it.
+    /// The session's host cannot: the member binding a mob stamps is never
+    /// cleared, so the host's writes and adoption stay refused
+    /// (`owned_by_mob`). Never wakes the session. A target no owner holds
+    /// answers "already unowned"; another owner's target is refused.
     async fn release_member_instruction_target(
         self: Arc<Self>,
         release: crate::operator_instruction::MemberInstructionRelease,
@@ -1481,7 +1483,7 @@ pub trait MobSessionService:
 
     /// Stamp the member binding a dormant resume seat implies on the seat's
     /// stored session, store-only, before the seat commits
-    /// ([`meerkat_session::PersistentSessionService::bind_seated_member_session`]):
+    /// (`PersistentSessionService::bind_seated_member_session`):
     /// a session that names no member binding (its host's own) becomes the
     /// member's at the seat, without a wake, so its host's
     /// operator-instruction writes are refused from then on and the mob's

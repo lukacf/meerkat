@@ -8028,6 +8028,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// member's, is left as it is (its first wake admits or refuses it). A
     /// live session is refused (`Busy`): a dormant seat binds a session no
     /// runtime serves.
+    // Hidden from the docs as `record_mob_instruction_target` and
+    // `release_mob_instruction_target` are: a mob-only store write, reached
+    // only through the mob session service
+    // (`MobSessionService::bind_seated_member_session`, which the CLI, RPC
+    // and Meta wrappers forward), never a host surface.
+    #[doc(hidden)]
     pub async fn bind_seated_member_session(
         &self,
         session_id: &SessionId,

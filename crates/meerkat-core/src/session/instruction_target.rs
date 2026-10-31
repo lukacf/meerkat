@@ -1439,12 +1439,14 @@ impl Session {
     /// a session-owned target starts from what is in effect: the target
     /// becomes the slots in effect, and no pending write of the session
     /// carries over. A new owner of an unowned target (a host adopting a
-    /// released member, a mob attaching to it) starts from that empty
-    /// target, so what is still in effect is revoked at the next fresh run
-    /// start. The authority refuses a rebind to the owner the target already
-    /// has, to no owner, and of a mob-owned target, which only its mob's
-    /// release frees; a mob member's session refuses its own host's adoption
-    /// (`owned_by_mob`), as it refuses its host's writes.
+    /// session no mob built or seated, a mob attaching to it) starts from
+    /// that empty target, so what is still in effect is revoked at the next
+    /// fresh run start. The authority refuses a rebind to the owner the
+    /// target already has, to no owner, and of a mob-owned target, which
+    /// only its mob's release frees; a mob member's session refuses its own
+    /// host's adoption (`owned_by_mob`), as it refuses its host's writes,
+    /// and still does after its mob released the target: the member
+    /// binding a mob stamps is never cleared.
     pub fn rebind_instruction_owner(
         &mut self,
         owner: InstructionTargetOwner,

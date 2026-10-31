@@ -1325,9 +1325,15 @@ button.cc-tile:focus-visible,
   background: var(--_cc-border-soft);
 }
 .cc-meter__seg {
+  flex-shrink: 1;
+  box-sizing: content-box;
+  min-width: 3px;
   height: 100%;
   background: var(--_cc-tone);
 }
+/* Segments sit 2 px apart on the surface (spec A3.8). */
+.cc-meter__seg + .cc-meter__seg { border-left: 2px solid var(--_cc-meter-gap, var(--_cc-surface-card)); }
+.cc-meter__seg[data-rest="true"] { border-right: 2px solid var(--_cc-meter-gap, var(--_cc-surface-card)); }
 .cc-meter__seg[data-tone="neutral"] { background: var(--_cc-foreground-subtle); }
 .cc-meter__label {
   font-size: 11px;
@@ -1686,6 +1692,330 @@ button.cc-tile:focus-visible,
 .cc-view-options__reset:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
 .cc-view-options__reset:disabled { color: var(--_cc-foreground-meta); opacity: 0.6; cursor: default; }
 
+/* ── Figures: glance strip and figure tiles (spec A3.3) ────────────
+   An instrument panel under the header: figure cells in one row, 1 px
+   rules between them, no boxes. Proportional figures; the tone only ever
+   adds a mark. */
+.cc-glance {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  flex: none;
+  min-width: 0;
+  padding: 0 calc(var(--_cc-panel-pad-x) - 12px);
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.cc-glance > * + * { border-left: 1px solid var(--_cc-border-soft); }
+.cc-figure {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  margin: 0;
+  padding: 11px 12px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.cc-figure { cursor: pointer; transition: background var(--_cc-dur-fast) ease; }
+button.cc-figure:hover { background: var(--_cc-surface-hover); }
+button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.cc-figure.is-pressed {
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 0 -2px 0 var(--_cc-member-accent);
+}
+.cc-figure__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__label-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cc-figure__fig {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+}
+.cc-figure__value {
+  font-size: var(--_cc-figure-size);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--_cc-foreground-strong);
+  font-variant-numeric: proportional-nums;
+  white-space: nowrap;
+}
+.cc-figure--hero .cc-figure__value {
+  font-size: var(--_cc-fs-hero);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.cc-figure__of {
+  font-size: 12px;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__trend,
+.cc-figure__meter {
+  align-self: center;
+  flex: none;
+  margin-left: 6px;
+}
+.cc-figure__meter { display: inline-flex; align-items: center; }
+.cc-figure__foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 5px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__foot-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cc-figure__delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.cc-figure__delta[data-tone="ok"] { color: var(--_cc-positive-ink); }
+.cc-figure__delta[data-tone="crit"] { color: var(--_cc-negative-ink); }
+.cc-figure__arrow { width: 11px; height: 11px; stroke-width: 2.25; }
+.cc-figure__arrow.is-up { transform: rotate(-45deg); }
+.cc-figure__arrow.is-down { transform: rotate(45deg); }
+.cc-figure__skeleton {
+  display: inline-block;
+  width: 40px;
+  height: calc(var(--_cc-figure-size) * 0.95);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-soft);
+}
+.cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
+
+/* ── Micro charts (spec A3.8) ──────────────────────────────────────
+   SVG in the viz tokens; no colour for identity. Every chart svg sets its
+   own fill and stroke (the console resets svg to a 16 px stroked icon). */
+.cc-viz-tick {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-fs-tick);
+  fill: var(--_cc-foreground-meta);
+  stroke: none;
+  font-variant-numeric: tabular-nums;
+}
+.cc-spark,
+.cc-activity,
+.cc-dots,
+.cc-heat__box,
+.cc-barcode {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  line-height: 0;
+  vertical-align: middle;
+}
+.cc-spark__svg,
+.cc-activity__svg,
+.cc-dots__svg,
+.cc-heat__svg,
+.cc-barcode__svg,
+.cc-ring {
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+}
+.cc-spark__svg:focus-visible,
+.cc-activity__svg:focus-visible,
+.cc-heat__svg:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-spark__line {
+  fill: none;
+  stroke: var(--_cc-viz-mid);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.cc-spark__area { fill: var(--_cc-viz-mid); fill-opacity: 0.1; stroke: none; }
+.cc-spark__ring { fill: var(--_cc-viz-plate); stroke: none; }
+.cc-spark__dot { fill: var(--_cc-viz-ink); stroke: none; }
+.cc-spark__dot.is-live,
+.cc-spark__bar.is-live,
+.cc-activity__bar.is-live { fill: var(--_cc-viz-live); }
+.cc-spark__bar,
+.cc-activity__bar { fill: var(--_cc-viz-mid); stroke: none; transition: fill var(--_cc-dur-fast) ease; }
+.cc-spark__bar.is-hover,
+.cc-activity__bar.is-hover { fill: var(--_cc-viz-edge-strong); }
+.cc-spark__bar.is-live.is-hover,
+.cc-activity__bar.is-live.is-hover { fill: var(--_cc-viz-live); }
+.cc-spark__zero,
+.cc-activity__zero { fill: var(--_cc-viz-faint); stroke: none; }
+.cc-spark__base,
+.cc-activity__base,
+.cc-dots__base { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-spark__cross { stroke: var(--_cc-viz-edge-strong); stroke-width: 1; }
+
+/* The chart's hover and focus label: e2, inside the chart's box. */
+.cc-chart-tip {
+  position: absolute;
+  z-index: 5;
+  box-sizing: border-box;
+  padding: 3px 7px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-overlay);
+  box-shadow: var(--_cc-shadow-sm);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 6px));
+}
+.cc-chart-tip[data-align="start"] { transform: translate(-8px, calc(-100% - 6px)); }
+.cc-chart-tip[data-align="end"] { transform: translate(calc(-100% + 8px), calc(-100% - 6px)); }
+
+.cc-minibar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.cc-minibar__track {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-viz-faint);
+}
+.cc-minibar__track[style] { flex: none; }
+.cc-minibar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--_cc-viz-ink);
+}
+.cc-minibar[data-tone]:not([data-tone="neutral"]) .cc-minibar__fill { background: var(--_cc-tone); }
+.cc-minibar__value {
+  flex: none;
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cc-barcode { display: inline-flex; flex-direction: column; gap: 4px; line-height: 1; }
+.cc-barcode__seg { stroke: none; }
+.cc-barcode__seg[data-kind="filled"] { fill: var(--_cc-viz-ink); }
+.cc-barcode__seg[data-kind="live"] { fill: var(--_cc-viz-live); }
+.cc-barcode__seg[data-kind="outlined"] { fill: var(--_cc-viz-plate); stroke: var(--_cc-viz-ink); stroke-width: 1; }
+.cc-barcode__seg[data-kind="unlit"] { fill: var(--_cc-viz-faint); fill-opacity: 0.55; }
+.cc-barcode__peak { stroke: var(--_cc-viz-ink); stroke-opacity: 0.55; stroke-width: 1.5; }
+.cc-barcode-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__foot .cc-barcode-legend { font-size: 11px; }
+.cc-barcode-legend__item { display: inline-flex; align-items: center; gap: 4px; }
+.cc-barcode-legend__mark {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  background: var(--_cc-viz-ink);
+}
+.cc-barcode-legend__mark[data-kind="outlined"] { background: transparent; box-shadow: inset 0 0 0 1px var(--_cc-viz-ink); }
+.cc-barcode-legend__mark[data-kind="live"] { background: var(--_cc-viz-live); }
+
+.cc-ring { flex: none; vertical-align: middle; }
+.cc-ring__track { fill: none; stroke: var(--_cc-viz-faint); }
+.cc-ring__arc { fill: none; stroke: var(--_cc-viz-ink); }
+.cc-ring__arc[data-kind="live"] { stroke: var(--_cc-viz-live); }
+.cc-ring__arc[data-kind="blocked"] { stroke: var(--_cc-warning); }
+
+.cc-heat { display: inline-flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cc-heat__label {
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  fill: var(--_cc-foreground-meta);
+  stroke: none;
+}
+.cc-heat__cell { stroke: none; fill: var(--_cc-viz-grid); }
+.cc-heat__cell.is-active { stroke: var(--_cc-viz-ink); stroke-width: 1.5; }
+.cc-heat__cell[data-level="1"], .cc-heat__swatch[data-level="1"] { fill: var(--_cc-viz-seq-1); background: var(--_cc-viz-seq-1); }
+.cc-heat__cell[data-level="2"], .cc-heat__swatch[data-level="2"] { fill: var(--_cc-viz-seq-2); background: var(--_cc-viz-seq-2); }
+.cc-heat__cell[data-level="3"], .cc-heat__swatch[data-level="3"] { fill: var(--_cc-viz-seq-3); background: var(--_cc-viz-seq-3); }
+.cc-heat__cell[data-level="4"], .cc-heat__swatch[data-level="4"] { fill: var(--_cc-viz-seq-4); background: var(--_cc-viz-seq-4); }
+.cc-heat__cell[data-level="5"], .cc-heat__swatch[data-level="5"] { fill: var(--_cc-viz-seq-5); background: var(--_cc-viz-seq-5); }
+.cc-heat__cell[data-level="6"], .cc-heat__swatch[data-level="6"] { fill: var(--_cc-viz-seq-6); background: var(--_cc-viz-seq-6); }
+.cc-heat__cell[data-level="7"], .cc-heat__swatch[data-level="7"] { fill: var(--_cc-viz-seq-7); background: var(--_cc-viz-seq-7); }
+.cc-heat__legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-heat__swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--_cc-viz-grid);
+}
+.cc-heat__swatch:first-of-type { margin-left: 3px; }
+.cc-heat__swatch:last-of-type { margin-right: 3px; }
+
+.cc-dots__mark {
+  --_cc-dot-ink: var(--_cc-viz-ink);
+  fill: var(--_cc-dot-ink);
+  stroke: none;
+  outline: none;
+}
+.cc-dots__mark[data-tone="ok"] { --_cc-dot-ink: var(--_cc-positive); }
+.cc-dots__mark[data-tone="info"] { --_cc-dot-ink: var(--_cc-link); }
+.cc-dots__mark[data-tone="warn"] { --_cc-dot-ink: var(--_cc-warning); }
+.cc-dots__mark[data-tone="crit"] { --_cc-dot-ink: var(--_cc-negative); }
+.cc-dots__mark[data-tone="neutral"],
+.cc-dots__mark[data-tone="locked"] { --_cc-dot-ink: var(--_cc-viz-mid); }
+.cc-dots__mark[data-tone="live"],
+.cc-dots__mark.is-live { --_cc-dot-ink: var(--_cc-viz-live); }
+.cc-dots__mark.is-faint { --_cc-dot-ink: var(--_cc-viz-faint); }
+.cc-dots__mark[data-shape="hollow"] { fill: var(--_cc-viz-plate); stroke: var(--_cc-dot-ink); stroke-width: 1.5; }
+.cc-dots__mark.is-active,
+.cc-dots__mark:focus-visible { stroke: var(--_cc-focus-ring); stroke-width: 2; paint-order: stroke; }
+.cc-dots__mark.is-selected { stroke: var(--_cc-viz-live); stroke-width: 1.5; paint-order: stroke; }
+.cc-dots.is-selectable .cc-dots__svg { cursor: pointer; }
+.cc-dots__now { stroke: var(--_cc-viz-live); stroke-width: 1; }
+
 /* ── Hover reveal (spec A4.1) ──────────────────────────────────────
    Secondary controls fade in when their container is hovered or holds
    focus, is selected, or the control is open; opacity only, so they stay
@@ -1727,6 +2057,14 @@ button.cc-tile:focus-visible,
 }
 
 @container cc-panel (max-width: 479px) {
+  .cc-glance {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cc-glance > :nth-child(2n + 1) { border-left: 0; }
+  .cc-glance > :nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
+  .cc-glance > :nth-child(n + 5) { display: none; }
+  .cc-figure__trend { display: none; }
   .cc-reveal { opacity: 1; }
   .cc-menu__fold { display: block; }
   .cc-panel-head--v2 .cc-panel-head__actions {

@@ -96,3 +96,33 @@ export type {
 } from "./menu";
 export { ViewOptions, ViewOptionsMenu } from "./view-options";
 export type { ViewOptionsControl, ViewOptionsProps } from "./view-options";
+export { GlanceStrip } from "./glance-strip";
+export { FigureTile, deltaTone, formatDelta, formatFigure } from "./figure-tile";
+export type { FigureDelta } from "./figure-tile";
+export { ChartTooltip } from "./chart-tooltip";
+
+// Micro charts (spec A3.8) live in ../viz/charts; the kit re-exports them.
+export { Sparkline } from "../viz/charts/sparkline";
+export type { SparkPoint, SparkValues } from "../viz/charts/sparkline";
+export { ActivityBars } from "../viz/charts/activity-bars";
+export { MiniBar } from "../viz/charts/mini-bar";
+export { BarcodeLegend, BarcodeMeter, barcodeUnitsPerSegment } from "../viz/charts/barcode-meter";
+export type { BarcodeLabels } from "../viz/charts/barcode-meter";
+export { HeatStrip, heatLevels } from "../viz/charts/heat-strip";
+export type { HeatRow } from "../viz/charts/heat-strip";
+export { ProgressRing, progressWords } from "../viz/charts/progress-ring";
+export { DotStrip } from "../viz/charts/dot-strip";
+export type { DotShape, DotStripItem } from "../viz/charts/dot-strip";
+export {
+  binCounts,
+  binIndex,
+  binTimes,
+  brushRange,
+  createTimeScale,
+  formatTimeRange,
+  formatTimeTick,
+  niceTimeStep,
+  nowMarker,
+  timeTicks,
+} from "../viz/charts/time-axis";
+export type { TimeScale, TimeTick, TimeTickFormat, TimeTickOptions } from "../viz/charts/time-axis";

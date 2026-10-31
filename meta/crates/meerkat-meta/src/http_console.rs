@@ -17603,6 +17603,143 @@ comms = true
         Ok(())
     }
 
+    /// A shared Console lists a realm's dream history only to a caller who
+    /// may read every memory scope the realm holds, as a runtime's own
+    /// console does. Through a registered runtime's store whose dream wrote
+    /// into two identities' memory, a caller with the unscoped read grant and
+    /// a deny on one of them gets no runs and `withheld_by_access: true`, and
+    /// a caller who may read both gets the runs and `false`.
+    #[tokio::test]
+    async fn aggregator_dream_history_needs_every_scope_of_the_realm()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::StagedMemoryStore as _;
+        use crate::memory::StewardStore as _;
+        use crate::memory::records::MemoryAuthor;
+        use crate::memory::staged::StagedBatchKind;
+
+        let memory_dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(memory_dir.path())?;
+        let token = store
+            .stage(crate::StagedMutationBatch {
+                kind: StagedBatchKind::FreshWrite,
+                realm: "default".to_string(),
+                author: MemoryAuthor::Steward {
+                    run_id: "run-shared-1".to_string(),
+                },
+                ops: ["router", "delivery"]
+                    .into_iter()
+                    .map(|identity| crate::StagedOp::Create {
+                        id: None,
+                        scope: crate::MemoryScope::Identity {
+                            realm: "default".to_string(),
+                            identity: identity.to_string(),
+                        },
+                        record: crate::NewMemoryRecord {
+                            kind: crate::MemoryKind::Fact,
+                            title: format!("{identity} consolidated"),
+                            description: format!("{identity} consolidated description"),
+                            body: format!("{identity} consolidated body"),
+                            tags: Vec::new(),
+                            evidence: Vec::new(),
+                            verification: None,
+                        },
+                        trust: crate::TrustTier::AgentObserved,
+                        derived_from: Vec::new(),
+                        rationale: Some(format!("consolidated {identity}'s notes")),
+                        created_at_ms: None,
+                        updated_at_ms: None,
+                    })
+                    .collect(),
+            })
+            .await?;
+        store.commit(token).await?;
+        store
+            .save_dream_run(
+                "default",
+                crate::memory::PersistedDreamRun {
+                    run_id: "run-shared-1".to_string(),
+                    partition_label: "realm".to_string(),
+                    started_at_ms: 1,
+                    completed_at_ms: 2,
+                    ops_committed: 2,
+                    detail: "{}".to_string(),
+                },
+            )
+            .await?;
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = 'panel-dream-filter'\n[profiles.worker]\nmodel = 'gpt-6-astra'\n",
+        )?;
+        let runtime = Arc::new(
+            crate::UnifiedRuntime::builder()
+                .definition(definition)
+                .default_llm_client(Arc::new(TestClient::default()))
+                .build()
+                .await?,
+        );
+        runtime.set_memory_panel_store(Arc::new(store));
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime(crate::console_aggregator::ConsoleRuntimeRegistration {
+            runtime_key: "repo".into(),
+            identity_namespace: "repo".into(),
+            runtime: runtime.clone(),
+            visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+        });
+        // The realm holds identity memory only, so reading every identity
+        // reads every scope it holds.
+        let read_every_identity = crate::access::AccessRule {
+            id: "read-memory".into(),
+            actions: vec![ACTION_AGENT_VIEW.into(), ACTION_AGENT_MEMORY_READ.into()],
+            ..Default::default()
+        };
+        let deny_delivery = crate::access::AccessRule {
+            id: "deny-delivery-memory".into(),
+            effect: crate::access::AccessEffect::Deny,
+            actions: vec![ACTION_AGENT_MEMORY_READ.into()],
+            agents: vec!["delivery".into()],
+            ..Default::default()
+        };
+        for (rules, withheld) in [
+            (vec![read_every_identity.clone(), deny_delivery], true),
+            (vec![read_every_identity], false),
+        ] {
+            let controller = AccessController::new(crate::access::AccessControlConfig {
+                enabled: true,
+                admins: vec!["admin@example.test".into()],
+                rules,
+                ..Default::default()
+            })?;
+            let view = controller.view_for_subject(Some("viewer@example.test"));
+            for method in ["meta/memory/panel/dreams", "meta/memory/panel/dream_runs"] {
+                let response = handle_console_aggregator_rpc(
+                    Some(aggregator.clone()),
+                    rpc_request_with_params(method, json!({"runtime_key": "repo"})),
+                    true,
+                    true,
+                    Some(&controller),
+                    Some(&view),
+                    &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                )
+                .await;
+                let runs = response["result"]["runs"]
+                    .as_array()
+                    .ok_or_else(|| format!("{method} answered no runs: {response}"))?;
+                assert_eq!(
+                    runs.iter()
+                        .any(|run| run["run_id"] == json!("run-shared-1")),
+                    !withheld,
+                    "{method} lists the run only to a caller who may read every scope: {response}"
+                );
+                assert_eq!(
+                    response["result"]["withheld_by_access"],
+                    json!(withheld),
+                    "{method}: {response}"
+                );
+            }
+        }
+        runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_only_aggregator_capabilities_omit_mutating_methods() {
         let response = handle_console_aggregator_rpc(

@@ -3840,6 +3840,167 @@ async fn memory_panel_record_usage_withholds_denied_identities() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// Seed one durable dream verdict sheet (`dream_runs`) for the steward dream
+/// [`seeded_memory_store`] committed (`run-dream-1`, which `dreams`
+/// reconstructs from the audit rows).
+async fn seed_dream_run_sheet(store: &meerkat_meta::SqliteAgentMemoryStore) {
+    store
+        .save_dream_run(
+            "default",
+            meerkat_meta::memory::PersistedDreamRun {
+                run_id: "run-dream-1".to_string(),
+                partition_label: "realm".to_string(),
+                started_at_ms: 1,
+                completed_at_ms: 2,
+                ops_committed: 1,
+                detail: json!({ "phases": [], "verdicts": {}, "skips": [] }).to_string(),
+            },
+        )
+        .await
+        .expect("dream run sheet");
+}
+
+/// The results of `meta/memory/panel/dreams` and `dream_runs`, by method,
+/// each answered without an error.
+async fn dream_history_reads(app: &axum::Router) -> Vec<(&'static str, Value)> {
+    let mut answers = Vec::new();
+    for method in ["dreams", "dream_runs"] {
+        let response = rpc(app, &format!("meta/memory/panel/{method}"), json!({})).await;
+        assert_eq!(response["error"], Value::Null, "{method}: {response:#?}");
+        answers.push((method, response["result"].clone()));
+    }
+    answers
+}
+
+/// A steward dream spans its realm's scopes, so the realm's dream history
+/// (`dreams`, and the `dream_runs` sheets) is listed only to a caller who may
+/// read every memory scope the realm holds. A caller with the unscoped read
+/// grant that misses one of them (one identity's memory, the mob scope, or
+/// the operator scope while operator records exist) gets the usual answer
+/// with no runs and `withheld_by_access: true`.
+#[tokio::test]
+async fn memory_panel_dream_history_is_withheld_without_every_scope() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, ..) = seeded_memory_store(memory_dir.path()).await;
+    seed_dream_run_sheet(&store).await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+
+    let reads = |id: &str, actions: &[&str]| AccessRule {
+        id: id.to_string(),
+        actions: actions.iter().copied().map(String::from).collect(),
+        ..AccessRule::default()
+    };
+    let every_read = [
+        "agent.view",
+        "agent.memory.read",
+        "mob.memory.read",
+        "operator.memory.read",
+    ];
+    for (missing, rules) in [
+        (
+            "one identity's memory",
+            vec![
+                reads("read-every-scope", &every_read),
+                AccessRule {
+                    id: "deny-delivery-memory".to_string(),
+                    effect: meerkat_meta::AccessEffect::Deny,
+                    actions: vec!["agent.memory.read".to_string()],
+                    agents: vec!["delivery".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+        ),
+        (
+            "the mob scope",
+            vec![reads(
+                "read-all-but-mob",
+                &["agent.view", "agent.memory.read", "operator.memory.read"],
+            )],
+        ),
+        (
+            "the operator scope",
+            vec![reads(
+                "read-all-but-operator",
+                &["agent.view", "agent.memory.read", "mob.memory.read"],
+            )],
+        ),
+    ] {
+        runtime.set_access_controller(
+            AccessController::new(AccessControlConfig {
+                enabled: true,
+                admins: vec!["root@example.test".to_string()],
+                rules,
+                ..AccessControlConfig::default()
+            })
+            .expect("controller"),
+        );
+        let app = runtime.build_reference_app_router(decision_state(false));
+        for (method, result) in dream_history_reads(&app).await {
+            assert_eq!(
+                result["runs"],
+                json!([]),
+                "a caller missing {missing} must get no {method} runs: {result:#?}"
+            );
+            assert_eq!(
+                result["withheld_by_access"],
+                json!(true),
+                "{method} must say access withheld the runs from a caller missing {missing}: \
+                 {result:#?}"
+            );
+        }
+    }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A caller who may read every memory scope of the realm (each identity, the
+/// mob, the operator and the realm scope) gets the realm's whole dream
+/// history, `dreams` and `dream_runs` alike, with `withheld_by_access: false`.
+#[tokio::test]
+async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, ..) = seeded_memory_store(memory_dir.path()).await;
+    seed_dream_run_sheet(&store).await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![AccessRule {
+                id: "read-every-scope".to_string(),
+                actions: vec![
+                    "agent.view".to_string(),
+                    "agent.memory.read".to_string(),
+                    "mob.memory.read".to_string(),
+                    "operator.memory.read".to_string(),
+                ],
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller"),
+    );
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    for (method, result) in dream_history_reads(&app).await {
+        assert!(
+            result["runs"]
+                .as_array()
+                .is_some_and(|runs| runs.iter().any(|run| run["run_id"] == json!("run-dream-1"))),
+            "a realm-wide reader gets the {method} run: {result:#?}"
+        );
+        assert_eq!(
+            result["withheld_by_access"],
+            json!(false),
+            "{method}: {result:#?}"
+        );
+    }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// The operator half of quarantine review over the console: the decision
 /// composes EXISTING grants. The reviewer grant alone decides nothing; it
 /// must meet the per-row read grants and the identity's own write (release)

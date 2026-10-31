@@ -10174,8 +10174,19 @@ impl SessionRuntime {
                 }
                 None => self.reserve_active_turn(session_id).await?.into_admission(),
             };
-            // Hot-swap LLM client if model/provider overrides are present.
-            if let Some(ref ov) = overrides
+            // Hot-swap LLM client if model/provider overrides are present. A
+            // resumed run continues under the LLM identity its first dispatch
+            // swapped to: that swap saved the session with it before the
+            // run's first round commit, and the resumed actor, seeded from
+            // the run's provisional tail, carries it. Until the run commits,
+            // that actor reads as ahead of the committed boundary, so the
+            // swap's live reads and its save cannot run for it.
+            let resumed_run = primitive
+                .turn_metadata()
+                .and_then(|metadata| metadata.execution_kind)
+                == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
+            if !resumed_run
+                && let Some(ref ov) = overrides
                 && (ov.model.is_some()
                     || ov.provider.is_some()
                     || ov.self_hosted_server_id.is_some()

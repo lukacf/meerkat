@@ -13606,6 +13606,15 @@ fn runtime_llm_reconfigure_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Option<meerkat_runtime::SessionLlmReconfigureRequest> {
     let metadata = primitive.turn_metadata()?;
+    // A resumed run continues under the LLM identity its first dispatch
+    // applied: that reconfigure saved the session with it before the run's
+    // first round commit, and the resumed actor, seeded from the run's
+    // provisional tail, carries it. Until the run commits, that actor reads
+    // as ahead of the committed boundary, so the reconfigure's live reads
+    // and its save cannot run for it.
+    if metadata.execution_kind == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun) {
+        return None;
+    }
     if metadata.model.is_none()
         && metadata.provider.is_none()
         && metadata.self_hosted_server_id.is_none()
@@ -13744,7 +13753,9 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         // the run as failed. The session service degrades the member's
         // registration first, so the runtime loop leaves the run to the
         // session's next registration, as the service apply does for a turn
-        // the stop cut short.
+        // the stop cut short. A resumed run runs no such step (see
+        // `runtime_llm_reconfigure_request_from_primitive`); for it this
+        // check is a backstop ahead of the service apply's own.
         if self
             .session_service
             .runtime_turn_lost_its_host_runtime(&self.bridge_session_id, Some(&run_id))

@@ -5404,14 +5404,17 @@ async fn an_input_to_an_idle_member_after_its_host_runtime_stopped_waits_for_the
 /// that host's runtime stops before the hold is released; the process keeps
 /// running.
 ///
-/// The runtime loop skips the pre-dequeue step for a resumed run, so the
-/// member executor's own check ahead of the turn is the one that meets the
-/// lost actor: without it the override's LLM reconfigure would fail there
-/// and the loop would record the resumed run as failed. With it, once
-/// another part of the process releases the hold, the loop stops serving the
-/// session within its bound, the registration waits for a reload, the run's
-/// input stays bound to the open run, and a third host resumes the run once
-/// and records no failed run.
+/// The runtime loop skips the pre-dequeue step for a resumed run, and the
+/// member executor runs no per-turn LLM reconfigure for one: the run
+/// continues under the model its first dispatch applied and saved. So no
+/// step ahead of the service apply needs the lost actor, and the service
+/// apply's own check would degrade the registration. The member executor's
+/// check at the top of its apply still runs first and degrades it; it stays
+/// as a backstop, and this row no longer isolates it. Once another part of
+/// the process releases the hold, the loop stops serving the session within
+/// its bound, the registration waits for a reload, the run's input stays
+/// bound to the open run, and a third host resumes the run once, on the
+/// overriding model, and records no failed run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resumed_run_after_its_host_runtime_stopped_waits_for_the_next_start() {
     use meerkat_runtime::input_state::InputLifecycleState;

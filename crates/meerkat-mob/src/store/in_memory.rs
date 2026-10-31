@@ -822,35 +822,92 @@ fn identity_authority_blocked(detail: impl Into<String>) -> MobStoreError {
     }
 }
 
-/// The rows of one in-memory scan page, and the cursor of its next page.
-type InMemoryScanPage<V> = (
-    BTreeMap<AgentIdentity, V>,
-    Option<super::IdentityIntentScanCursor>,
-);
-
-/// One page of an in-memory keyset scan: at most `limit` of `rows` (already
-/// after the cursor, in identity order), and the cursor of the last one when
-/// more remain.
-fn in_memory_scan_page<V>(
-    rows: BTreeMap<AgentIdentity, V>,
-    limit: usize,
-) -> Result<InMemoryScanPage<V>, MobStoreError> {
-    let has_more = rows.len() > limit;
-    let page: BTreeMap<AgentIdentity, V> = rows.into_iter().take(limit).collect();
-    let next = if has_more {
-        let Some(identity) = page.keys().next_back() else {
-            return Err(MobStoreError::Internal(
-                "identity scan continuation has no returned row".to_string(),
-            ));
-        };
-        Some(super::IdentityIntentScanCursor::new(
-            "text",
-            identity.as_str().as_bytes().to_vec(),
-        ))
-    } else {
-        None
+/// The identity an in-memory identity scan continues after: the text of its
+/// cursor, which this store issues.
+fn in_memory_scan_after(
+    after: Option<&super::IdentityIntentScanCursor>,
+    scan: &str,
+) -> Result<Option<AgentIdentity>, MobStoreError> {
+    let Some(after) = after else {
+        return Ok(None);
     };
-    Ok((page, next))
+    if after.storage_class() != "text" {
+        return Err(MobStoreError::Internal(format!(
+            "in-memory {scan} scan received a non-text cursor"
+        )));
+    }
+    std::str::from_utf8(after.physical_identity())
+        .map(|identity| Some(AgentIdentity::from(identity)))
+        .map_err(|_| {
+            MobStoreError::Internal(format!(
+                "in-memory {scan} scan received a cursor that is not UTF-8"
+            ))
+        })
+}
+
+/// One mob's rows of an identity map after `after`, in identity order, read
+/// lazily from the map's own order.
+fn mob_rows_after<'a, V>(
+    rows: &'a BTreeMap<(MobId, AgentIdentity), V>,
+    mob_id: &'a MobId,
+    after: Option<&AgentIdentity>,
+) -> impl Iterator<Item = (&'a AgentIdentity, &'a V)> + 'a {
+    let start = match after {
+        Some(after) => std::ops::Bound::Excluded((mob_id.clone(), after.clone())),
+        None => std::ops::Bound::Included((mob_id.clone(), AgentIdentity::from(""))),
+    };
+    rows.range((start, std::ops::Bound::Unbounded))
+        .take_while(move |((stored_mob_id, _), _)| stored_mob_id == mob_id)
+        .map(|((_, identity), row)| (identity, row))
+}
+
+/// A row of one of the two identity maps an identity scan merges.
+enum ScanRow<'a, A, B> {
+    First(&'a AgentIdentity, &'a A),
+    Second(&'a AgentIdentity, &'a B),
+}
+
+/// Two identity-ordered row iterators merged into one, in identity order,
+/// lazily: a scan page reads the rows it returns and one more. The maps an
+/// identity scan merges hold disjoint identities.
+fn merge_scan_rows<'a, A: 'a, B: 'a>(
+    first: impl Iterator<Item = (&'a AgentIdentity, &'a A)>,
+    second: impl Iterator<Item = (&'a AgentIdentity, &'a B)>,
+) -> impl Iterator<Item = ScanRow<'a, A, B>> {
+    let mut first = first.peekable();
+    let mut second = second.peekable();
+    std::iter::from_fn(move || {
+        let take_first = match (first.peek(), second.peek()) {
+            (Some((left, _)), Some((right, _))) => left <= right,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        if take_first {
+            first
+                .next()
+                .map(|(identity, row)| ScanRow::First(identity, row))
+        } else {
+            second
+                .next()
+                .map(|(identity, row)| ScanRow::Second(identity, row))
+        }
+    })
+}
+
+/// The cursor of the next page after `page`: its last row's identity.
+fn in_memory_next_cursor<V>(
+    page: &BTreeMap<AgentIdentity, V>,
+) -> Result<super::IdentityIntentScanCursor, MobStoreError> {
+    let Some(identity) = page.keys().next_back() else {
+        return Err(MobStoreError::Internal(
+            "identity scan continuation has no returned row".to_string(),
+        ));
+    };
+    Ok(super::IdentityIntentScanCursor::new(
+        "text",
+        identity.as_str().as_bytes().to_vec(),
+    ))
 }
 
 /// An identity-first mutation (an adoption, a member tool declaration, a
@@ -1409,52 +1466,47 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
                 super::IDENTITY_INTENT_SCAN_PAGE_MAX
             )));
         }
-        if let Some(after) = after
-            && after.storage_class() != "text"
-        {
-            return Err(MobStoreError::Internal(
-                "in-memory identity intent scan received a non-text cursor".to_string(),
-            ));
-        }
+        let after = in_memory_scan_after(after, "identity intent")?;
 
         let aggregate = self.aggregate.read().await;
         let state = &aggregate.identity;
-        let after_bytes = after.map(super::IdentityIntentScanCursor::physical_identity);
-        let after_cursor = |identity: &AgentIdentity| {
-            after_bytes.is_none_or(|after| identity.as_str().as_bytes() > after)
-        };
-        // The host-adopted intents' rows, and the unreadable rows of their
-        // schema; a created entry's row is the created identity scan's.
-        let mut rows: BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>> =
-            BTreeMap::new();
-        for ((stored_mob_id, identity), record) in &state.intents {
-            if stored_mob_id != mob_id || !after_cursor(identity) {
-                continue;
+        // The host-adopted intents' rows and the unreadable rows of their
+        // schema, in identity order; a created entry's row is the created
+        // identity scan's. Only the rows the page returns are classified.
+        let rows = merge_scan_rows(
+            mob_rows_after(&state.intents, mob_id, after.as_ref()),
+            mob_rows_after(&state.unreadable_intents, mob_id, after.as_ref())
+                .filter(|(_, raw)| !raw.created_domain),
+        );
+        let mut observations = BTreeMap::new();
+        let mut next = None;
+        for row in rows {
+            if observations.len() == limit {
+                next = Some(in_memory_next_cursor(&observations)?);
+                break;
             }
             #[cfg(test)]
             aggregate
                 .identity_scan_classifications
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let observation = if record.mob_id != *mob_id || record.intent.identity() != identity {
-                malformed_identity_record(
-                    record,
-                    "identity intent record does not match its physical mob/identity key",
-                )?
-            } else {
-                classify_identity_record(record, IdentityIntentRecord::validate)?
+            let (identity, observation) = match row {
+                ScanRow::First(identity, record) => {
+                    let observation = if record.mob_id != *mob_id
+                        || record.intent.identity() != identity
+                    {
+                        malformed_identity_record(
+                            record,
+                            "identity intent record does not match its physical mob/identity key",
+                        )?
+                    } else {
+                        classify_identity_record(record, IdentityIntentRecord::validate)?
+                    };
+                    (identity, observation)
+                }
+                ScanRow::Second(identity, raw) => (identity, raw.intent_observation()),
             };
-            rows.insert(identity.clone(), observation);
+            observations.insert(identity.clone(), observation);
         }
-        for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
-            if stored_mob_id == mob_id && !raw.created_domain && after_cursor(identity) {
-                #[cfg(test)]
-                aggregate
-                    .identity_scan_classifications
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                rows.insert(identity.clone(), raw.intent_observation());
-            }
-        }
-        let (observations, next) = in_memory_scan_page(rows, limit)?;
         Ok(super::IdentityIntentScanPage { observations, next })
     }
 
@@ -1470,62 +1522,62 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
                 super::IDENTITY_INTENT_SCAN_PAGE_MAX
             )));
         }
-        if let Some(after) = after
-            && after.storage_class() != "text"
-        {
-            return Err(MobStoreError::Internal(
-                "in-memory created identity scan received a non-text cursor".to_string(),
-            ));
-        }
+        let after = in_memory_scan_after(after, "created identity")?;
         let aggregate = self.aggregate.read().await;
         let state = &aggregate.identity;
-        let after_bytes = after.map(super::IdentityIntentScanCursor::physical_identity);
-        let after_cursor = |identity: &AgentIdentity| {
-            after_bytes.is_none_or(|after| identity.as_str().as_bytes() > after)
-        };
-        let mut rows: BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation> =
-            BTreeMap::new();
-        for ((stored_mob_id, identity), record) in &state.created {
-            if stored_mob_id != mob_id || !after_cursor(identity) {
-                continue;
+        // The created entries' rows and the unreadable rows of schema
+        // version 2 and later, in identity order. Only the rows the page
+        // returns are classified.
+        let rows = merge_scan_rows(
+            mob_rows_after(&state.created, mob_id, after.as_ref()),
+            mob_rows_after(&state.unreadable_intents, mob_id, after.as_ref())
+                .filter(|(_, raw)| raw.created_domain),
+        );
+        let mut observations = BTreeMap::new();
+        let mut next = None;
+        for row in rows {
+            if observations.len() == limit {
+                next = Some(in_memory_next_cursor(&observations)?);
+                break;
             }
             #[cfg(test)]
             aggregate
                 .identity_scan_classifications
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let observation = if record.mob_id != *mob_id || record.agent_identity != *identity {
-                crate::identity::CreatedIdentityObservation::Unreadable {
-                    evidence_digest: identity_evidence_digest(record)?,
-                    detail: "created identity record does not match its physical mob/identity key"
-                        .to_string(),
+            let (identity, observation) = match row {
+                ScanRow::First(identity, record) => {
+                    let observation = if record.mob_id != *mob_id
+                        || record.agent_identity != *identity
+                    {
+                        crate::identity::CreatedIdentityObservation::Unreadable {
+                            evidence_digest: identity_evidence_digest(record)?,
+                            detail: "created identity record does not match its physical \
+                                     mob/identity key"
+                                .to_string(),
+                        }
+                    } else {
+                        match record.validate() {
+                            Ok(()) => {
+                                crate::identity::CreatedIdentityObservation::Created(record.clone())
+                            }
+                            Err(error) => crate::identity::CreatedIdentityObservation::Unreadable {
+                                evidence_digest: identity_evidence_digest(record)?,
+                                detail: error.to_string(),
+                            },
+                        }
+                    };
+                    (identity, observation)
                 }
-            } else {
-                match record.validate() {
-                    Ok(()) => crate::identity::CreatedIdentityObservation::Created(record.clone()),
-                    Err(error) => crate::identity::CreatedIdentityObservation::Unreadable {
-                        evidence_digest: identity_evidence_digest(record)?,
-                        detail: error.to_string(),
-                    },
-                }
-            };
-            rows.insert(identity.clone(), observation);
-        }
-        for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
-            if stored_mob_id == mob_id && raw.created_domain && after_cursor(identity) {
-                #[cfg(test)]
-                aggregate
-                    .identity_scan_classifications
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                rows.insert(
-                    identity.clone(),
+                ScanRow::Second(identity, raw) => (
+                    identity,
                     crate::identity::CreatedIdentityObservation::Unreadable {
                         evidence_digest: raw.evidence_digest(),
                         detail: raw.detail.clone(),
                     },
-                );
-            }
+                ),
+            };
+            observations.insert(identity.clone(), observation);
         }
-        let (observations, next) = in_memory_scan_page(rows, limit)?;
         Ok(super::CreatedIdentityScanPage { observations, next })
     }
 

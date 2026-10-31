@@ -243,6 +243,7 @@ import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type 
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
 import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
+import { ActivityLedgerProvider, createActivityLedger, createAgentResolver, type ActivityLedger } from "./lib/activity-ledger";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -3809,24 +3810,31 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const workGraphPanelDockedRef = React.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
   const workGraphRefreshTimerRef = React.useRef<number | null>(null);
-  // One timeline scope per console controller. Its accepted frame keys
-  // outlive the subscription, which starts again whenever the storage
-  // namespace changes (the experience names its runtime once it loads) or
-  // the operator reconnects: the new subscription's recent page then
-  // delivers only frames this console has not accepted, never the buffered
-  // ones a second time.
-  const timelineScopeRef = React.useRef<{ owner: object; dedupe: ConsoleTimelineDedupe } | null>(null);
+  // One timeline scope per console controller: the frame keys this console
+  // has accepted and the activity ledger its frames feed. The keys outlive
+  // the subscription, which starts again whenever the storage namespace
+  // changes (the experience names its runtime once it loads) or the
+  // operator reconnects: the new subscription's recent page then delivers
+  // only frames this console has not accepted, never the buffered ones a
+  // second time.
+  const timelineScopeRef = React.useRef<{ owner: object; dedupe: ConsoleTimelineDedupe; ledger: ActivityLedger } | null>(null);
+  if (timelineScopeRef.current?.owner !== consoleController) {
+    timelineScopeRef.current = { owner: consoleController, dedupe: createConsoleTimelineDedupe(), ledger: createActivityLedger() };
+  }
+  const timelineScope = timelineScopeRef.current;
+  const bufferScopeRef = React.useRef(timelineScope);
+  // The ledger names peers the way the roster does.
+  React.useEffect(() => {
+    timelineScope.ledger.setResolver(createAgentResolver(agents));
+  }, [agents, timelineScope]);
 
   React.useEffect(() => {
-    let scope = timelineScopeRef.current;
-    if (!scope || scope.owner !== consoleController) {
+    const scope = timelineScope;
+    if (bufferScopeRef.current !== scope) {
       // Another controller is another scope: its buffers start empty.
-      if (scope) {
-        activityRef.current = [];
-        commitLiveFrames([]);
-      }
-      scope = { owner: consoleController, dedupe: createConsoleTimelineDedupe() };
-      timelineScopeRef.current = scope;
+      bufferScopeRef.current = scope;
+      activityRef.current = [];
+      commitLiveFrames([]);
     }
     // Seed activity with recent history (only on mount) — apply same
     // filter as SSE. The activity rail is its own concern; it doesn't
@@ -3848,6 +3856,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const cause: RenderCause = frame.event === "text_delta" ? "text"
         : frame.event === "text_complete" || HISTORY_REFRESH_EVENTS.has(frame.event) || isTerminalTurnCompletedFrame(frame) ? "now"
         : "frame";
+      // The activity ledger counts every frame, before any buffer filters it.
+      scope.ledger.ingest(frame);
       // Activity rail (independent buffer). Both buffers hold one copy of
       // a frame: a copy delivered again replaces an older version of it in
       // place, and is ignored otherwise.
@@ -5923,6 +5933,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
     <AgentDirectoryProvider directory={agentDirectory}>
+    <ActivityLedgerProvider ledger={timelineScope.ledger}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
       className="cc-theme-scope meta-shell"
@@ -6048,6 +6059,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       </div>
     </div>
     </HostDecideSourcesProvider>
+    </ActivityLedgerProvider>
     </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>

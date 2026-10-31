@@ -295,6 +295,7 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
       segments: [who, " started a turn"],
       snippet: snippetOf(textOf(data.content ?? data.text ?? data.prompt ?? data.input)),
       span: runSpan(frame, data, "start"),
+      eventKey: `turn-start:${agent ?? ""}:${runIdOf(frame, data) || interactionIdOf(frame, data) || frame.id}`,
     };
   }
   if (event === "run_started") {
@@ -305,6 +306,7 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
       verb: "started a turn",
       segments: [who, " started a turn"],
       span: runSpan(frame, data, "start"),
+      eventKey: `turn-start:${agent ?? ""}:${runIdOf(frame, data) || interactionIdOf(frame, data) || frame.id}`,
       // The run's request already lists (user_input, a message); its end lists its outcome.
       internal: true,
     };
@@ -369,6 +371,7 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
   if (event === "turn_started" || event === "turn_completed") {
     const runId = runIdOf(frame, data) || interactionIdOf(frame, data);
     const start = event === "turn_started";
+    const turnNumber = numberValue(data.turn_number);
     return {
       family: "turn",
       tone: "neutral",
@@ -376,6 +379,7 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
       verb: start ? "called the model" : "got the model's answer",
       segments: [who, start ? " called the model" : " got the model's answer"],
       ...(agent ? { span: { kind: "turn" as const, key: `turn:${agent}:${runId}`, edge: start ? "start" as const : "end" as const, ...(runId ? { runId } : {}) } } : {}),
+      ...(start && turnNumber !== undefined ? { eventKey: `model-call:${agent ?? ""}:${runId}:${turnNumber}` } : {}),
       internal: true,
     };
   }
@@ -500,6 +504,7 @@ function classifyTool(frame: ConsoleFrame, data: Data, who: FrameSegment, direct
       verb: `started ${toolWords}`,
       segments: [who, ` started ${toolWords}`],
       span: toolSpan("start"),
+      eventKey: `tool-start:${callKey}`,
       internal: true,
     };
   }
@@ -689,7 +694,8 @@ function classifySystemNotice(frame: ConsoleFrame, data: Data, who: FrameSegment
     actor: sender,
     ...(recipient ? { target: recipient } : {}),
     snippet: snippetOf(detail),
-    eventKey: `comms:${frame.id || textValue(block.request_id) || textValue(block.delivery_id)}`,
+    // The envelope's delivery id names one message in every copy of its notice.
+    eventKey: `comms:${receiver ?? ""}:${outgoing ? "out" : "in"}:${textValue(block.delivery_id) || textValue(block.request_id) || frame.id}`,
   };
 }
 

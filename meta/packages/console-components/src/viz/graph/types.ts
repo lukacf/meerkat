@@ -119,6 +119,10 @@ export interface VizNode {
   hub?: boolean;
   /** Item cards: an owner initial drawn before the sublabel. */
   avatar?: string;
+  /** Goal nodes: a progress ring between the title and the meta (done ink, in progress accent, blocked warning). */
+  progress?: VizProgress;
+  /** Goal nodes: a right-aligned trailer ("Coordinator · Leading the work") with an optional avatar initial. */
+  trailing?: { text: string; avatar?: string };
   /** Extra classes on the node element (classes tests pin). */
   className?: string;
   attributes?: VizAttributes;
@@ -128,6 +132,14 @@ export interface VizNode {
   title?: string;
   /** Payload for the panel's drawer; the view never reads it. */
   data?: unknown;
+}
+
+/** A goal's progress in items. */
+export interface VizProgress {
+  done: number;
+  inProgress?: number;
+  blocked?: number;
+  total: number;
 }
 
 export interface VizEdge {
@@ -143,6 +155,12 @@ export interface VizEdge {
   /** A word or count on a plate ("12/h", "replaces"). */
   label?: string;
   state?: VizEdgeState;
+  /**
+   * The mark at the midpoint: a warn triangle or a crit diamond. Defaults to
+   * warn for `declared` and crit for `failed`; null draws none (an
+   * operator-suppressed declared pair is intentional, not degraded).
+   */
+  mark?: "warn" | "crit" | null;
   /** Hover tooltip text ("Triage to Support · 12 messages in the last hour"). */
   title?: string;
   className?: string;
@@ -267,6 +285,11 @@ export interface GraphViewProps {
 
   /** `auto`: shown when two or more relations or node kinds are drawn. */
   legend?: "auto" | "on" | "off";
+  /**
+   * One meta line at the foot of the legend ("Routes need routing access").
+   * Shown whenever the legend is not "off", even where "auto" would hide it.
+   */
+  legendNote?: ReactNode;
   /** `auto`: shown when the content exceeds the view by 20 % or zoom > 1. */
   minimap?: "auto" | "on" | "off";
   /** The zoom controls (bottom left). */

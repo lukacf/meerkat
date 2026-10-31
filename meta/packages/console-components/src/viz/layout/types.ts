@@ -49,6 +49,8 @@ export interface PlacedLane {
   label: string;
   y: number;
   h: number;
+  /** The y of the band's first row of marks: the label aligns with it. */
+  labelY: number;
 }
 
 /** A frame rectangle (x, y top-left) with its header strip. */

@@ -960,6 +960,29 @@ async fn a_caller_dropped_mid_call_neither_cancels_the_call_nor_poisons_the_stor
     assert_restart_keeps_every_table(process, "a dropped caller").await;
 }
 
+/// A store call that panics on the copy's thread answers a fixed storage
+/// failure: what it failed with is logged, never carried into the error,
+/// which a caller can answer on the wire.
+#[tokio::test]
+async fn a_store_call_that_panics_answers_a_fixed_failure() {
+    let host = Arc::new(InMemoryHostStore::new());
+    let process = Process::open(&host).await;
+    let failed = process
+        .mirror
+        .run(|_: &Connection| -> super::types::Result<()> {
+            panic!("a store call panicked with a detail of its own")
+        })
+        .await
+        .expect_err("the call fails");
+    assert_eq!(
+        failed,
+        super::types::AnnouncementStoreError::Storage(
+            "an announcement store call ended without an answer".to_string()
+        ),
+        "the failure names the call, not what its task failed with"
+    );
+}
+
 /// A collector step at its largest (a hundred items whose bodies fill the
 /// step's byte cap) and a call whose rows pass the realm's batch budget,
 /// which spill to a chunk, come back whole after a restart.

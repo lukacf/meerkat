@@ -1704,6 +1704,7 @@ mod tests {
             generation: Generation::new(generation),
             role: ProfileName::from("worker"),
             session_archived: false,
+            facts: crate::event::MemberRetiredFacts::default(),
         }
     }
 

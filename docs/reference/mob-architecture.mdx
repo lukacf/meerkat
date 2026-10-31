@@ -265,7 +265,7 @@ The reads need no actor command and never wake a member:
 | `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, and the target of a rotation of it in flight (`RotationTarget`), if any; `NotAnEntry` with the worker that holds the identity, if any; `Unreadable`, with the standing of the member that holds the name, if any, for a name whose entry this build cannot read; or `Removed` for a removed created entry's name. |
 | `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. The page's unreadable names are listed apart (`IdentityEntryPage::unreadable`), in identity order, and count toward its limit. |
 | `identity_census()` | The entries declared and created, seated, retiring, unseated by cause (`UnseatedEntryCounts`), Broken, with host preparation pending and with a rotation in flight, and the removed and unreadable names. While a name is unreadable the census is incomplete (`IdentityCensus::is_complete`): its other counts cannot include what this build cannot read. |
-| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records, and the `HistoryUnavailable` notice of a seat on a fresh session whose archived session was gone), legacy adoptions, retirement starts (with the target of the rotation a start belongs to, and the cause `Unlisted` when the declared apply's seal started it), retirements, member resets and mob resets. |
+| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the session the incarnation was seated on, the entry a row records, the `HistoryUnavailable` notice of a seat on a fresh session whose archived session was gone, and the rotation that seated it, `SeatRotation`), legacy adoptions, retirement starts (with the target of the rotation a start belongs to, and the cause `Unlisted` when the declared apply's seal started it), retirements (with the session the incarnation was bound to at its end, the entry it was the member of, the cause `Unlisted` when its end ended the entry the seal unlisted, and the rotation whose terminal step retired it, `RetiredRotation`), member resets and mob resets. |
 | `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
 
 All but the journal read answer from the machine state the actor last
@@ -276,6 +276,28 @@ read `ControlScope::SubscribeEvents`. An entry read whose machine facts are
 incomplete answers `MobError::Internal` rather than a default. An entry's
 fields are internal to the stored event codec, so an older release reads an
 entry's rows as an ordinary member's.
+
+Each fact of the journal read is one MobMachine decided in the step that
+wrote its row, read from the machine's state before that step and from the
+step's journal effect; the replay reads none of them. A rotation's terminal
+step journals its link on both of its rows: the retirement names the
+rotation's target and the incarnation and role the same step seated
+(`RetiredRotation`), and the seat names the incarnation that step retired
+(`SeatRotation::Successor`). `rotate_member` of an identity no member holds
+seats a fresh life whose row names the incarnation it follows
+(`SeatRotation::FreshLifeAfter`, the generation MobMachine retains for the
+identity before the step that seats the fresh life); the fresh life of an
+identity no incarnation preceded since the mob's last reset names none. Any
+other seat or retirement names no rotation, wherever it sits in the journal,
+so a reader pairs a retirement with the seat that follows it from the facts,
+never from their positions. A rotation's retirement records no cause: the
+rotation keeps the identity's standing. No row names the runtime
+registration an incarnation held, which belongs to one process. A row
+written before these facts reads them absent, as do the rows that close a
+spawn with no retirement step of the machine (a membership step that failed
+after the spawn row was durable, and a resumed spawn's rollback). They are
+internal to the stored event codec, under keys of their own, so an older
+release ignores them.
 
 ### The declared apply
 
@@ -327,7 +349,8 @@ every Declared entry it does not list is unlisted (never a created entry, nor
 a name this build cannot read). Its member, when one is
 seated, is retired; the retirement's start row records the cause `Unlisted`
 (`MemberLifecycleEvent::RetirementStarted::cause`), and the end of the
-retirement ends the entry. An unlisted entry no member holds is removed at
+retirement ends the entry; the retirement's `Retired` fact names the cause
+and the entry it ended. An unlisted entry no member holds is removed at
 once. A worker is never unlisted. The answer names each unlisted entry
 (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or `Failed`, which
 the next complete apply retries). Any other retirement keeps the entry: a

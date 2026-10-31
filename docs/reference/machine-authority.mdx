@@ -180,7 +180,16 @@ journal row of its own: the replay derives an entry's unseated standing and
 its archived session from its member's retirement rows (the terminal row
 records whether the retirement archived the session, `session_archived`, and
 the replay passes whether the incarnation was hosted elsewhere,
-`hosted_incarnation`), and the next apply declares the rest again. The seal
+`hosted_incarnation`), and the next apply declares the rest again. Some
+row fields are journal-only facts, for the member lifecycle journal read
+(`MobHandle::member_lifecycle_events`), and the replay reads none of them:
+a retirement's session, the entry it was the member of, its cause (the
+seal's mark) and the rotation whose terminal step retired it, and a seat's
+session and the rotation that seated it (a rotation's terminal step, or
+`rotate_member`'s fresh life of an identity no member holds, which follows
+the generation the machine retains for the identity). The shell writes each
+from the machine's state before the step or from the step's journal effect;
+no machine input or effect field carries them. The seal
 of a complete roster (`SealDeclaredRoster`) marks the seated Declared entries
 it does not list (`identity_entry_retiring`) and removes the unseated ones;
 a declaration that lists a marked entry again before its retirement started

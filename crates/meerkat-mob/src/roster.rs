@@ -1109,6 +1109,7 @@ mod tests {
             generation: Generation::INITIAL,
             role: ProfileName::from(role),
             session_archived: false,
+            facts: crate::event::MemberRetiredFacts::default(),
         }
     }
 
@@ -2196,6 +2197,7 @@ mod tests {
                 generation: Generation::INITIAL,
                 role: ProfileName::from("worker"),
                 session_archived: false,
+                facts: crate::event::MemberRetiredFacts::default(),
             },
         ));
         assert!(

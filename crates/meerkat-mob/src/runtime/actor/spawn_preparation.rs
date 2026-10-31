@@ -105,6 +105,10 @@ pub(super) struct SpawnPreparationCarry {
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    pub(super) fresh_life: bool,
     pub(super) owner_bridge_session_id: Option<SessionId>,
     pub(super) ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Held spawn request, handed to the provisioning task.

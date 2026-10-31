@@ -230,7 +230,13 @@ impl<'de> Deserialize<'de> for MemberRef {
 // of an unlisted identity entry's retirement, and a stored `MemberSpawned`
 // the internal `history_unavailable` notice of a seat on a fresh session whose
 // identity's archived session is gone; a reader that predates them ignores
-// them.
+// them. A stored `MemberRetired` may also carry the internal facts of the
+// member lifecycle journal read (`retired_session`, `retired_cause`,
+// `retired_entry`, `retired_rotation`), and a stored `MemberSpawned` the
+// internal `seat_rotation`; the replay reads none of them, and a reader that
+// predates them ignores them. A cause, a rotation or a seat rotation this
+// build cannot read decodes as none, and an entry origin it does not know
+// keeps its token.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -600,6 +606,15 @@ pub enum MobEventKind {
         /// as false.
         #[serde(skip, default)]
         session_archived: bool,
+        /// What the row records for the member lifecycle journal read
+        /// ([`crate::MemberLifecycleEvent::Retired`]): the retired
+        /// incarnation's session, the identity entry it was the member of,
+        /// why it ended and the rotation whose terminal step retired it. The
+        /// replay reads none of it. Stored only by the internal event codec;
+        /// a reader that predates it ignores it, and a journal written before
+        /// it decodes it as absent.
+        #[serde(skip, default)]
+        facts: MemberRetiredFacts,
     },
     /// A respawn attempt terminally abandoned the topology preserved for the
     /// retired incarnation.
@@ -1214,6 +1229,15 @@ pub struct MemberSpawnedEvent {
     /// ignores it, and journals written before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// What seated this incarnation when a rotation did: a rotation's
+    /// terminal step, which retired the identity's previous incarnation in
+    /// the same step, or a fresh life of an identity no member held
+    /// ([`crate::runtime::SeatRotation`]). For the member lifecycle journal
+    /// read; the replay reads none of it. Stored only by the internal event
+    /// codec; a reader that predates it ignores it, and journals written
+    /// before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) seat_rotation: Option<crate::runtime::SeatRotation>,
 }
 
 impl MemberSpawnedEvent {
@@ -1253,6 +1277,7 @@ impl MemberSpawnedEvent {
             unknown_identity_entry: None,
             resume_from_role: None,
             history_unavailable: None,
+            seat_rotation: None,
         }
     }
 
@@ -1266,6 +1291,18 @@ impl MemberSpawnedEvent {
 
     pub(crate) fn history_unavailable(&self) -> Option<&crate::runtime::HistoryUnavailable> {
         self.history_unavailable.as_ref()
+    }
+
+    pub(crate) fn with_seat_rotation(
+        mut self,
+        seat_rotation: Option<crate::runtime::SeatRotation>,
+    ) -> Self {
+        self.seat_rotation = seat_rotation;
+        self
+    }
+
+    pub(crate) fn seat_rotation(&self) -> Option<crate::runtime::SeatRotation> {
+        self.seat_rotation
     }
 
     pub(crate) fn with_resume_from_role(mut self, resume_from_role: Option<ProfileName>) -> Self {
@@ -1509,6 +1546,132 @@ impl MemberSessionBindingRecoveredEvent {
 
     pub(crate) fn member_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
         self.member_peer_endpoint.as_ref()
+    }
+}
+
+/// What a [`MobEventKind::MemberRetired`] row records for the member
+/// lifecycle journal read ([`crate::MemberLifecycleEvent::Retired`]) beyond
+/// its public fields: the session the retired incarnation was bound to, the
+/// identity entry it was the member of, why it ended, and the rotation whose
+/// terminal step retired it.
+///
+/// MobMachine decided each in the step that ended the incarnation: the
+/// writer records them from the machine's state before that step and from
+/// the step's journal effect. The replay reads none of them; a host reads
+/// them through the journal read ([`crate::MobHandle::member_lifecycle_events`]).
+/// The internal event codec stores them (`retired_session`, `retired_cause`,
+/// `retired_entry`, `retired_rotation`) and the public event payload never
+/// carries them; a row written before them decodes them as absent (the
+/// default), as do the rows that close a spawn with no retirement step of the
+/// machine (a membership step that failed after the spawn row was durable,
+/// and a resumed spawn's rollback).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberRetiredFacts {
+    /// The session its `MemberRetired` journal effect names: the session the
+    /// incarnation was bound to at its end (none for a peer-only member).
+    pub(crate) session_id: Option<SessionId>,
+    /// Why the incarnation ended, when the journal records it: the declared
+    /// apply's seal unlisted the identity, and the end ended its entry.
+    pub(crate) cause: Option<crate::runtime::MemberRetirementCause>,
+    /// The identity entry the incarnation was the member of when its
+    /// retirement ended (read before the step that may end the entry).
+    pub(crate) identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The stored origin token of the row's identity entry when this build
+    /// does not know it (a row a later release wrote): the internal codec
+    /// writes it back as it was stored.
+    pub(crate) unknown_identity_entry: Option<String>,
+    /// The rotation whose terminal step retired the incarnation and seated
+    /// the identity's next one.
+    pub(crate) rotation: Option<crate::runtime::RetiredRotation>,
+}
+
+impl MemberRetiredFacts {
+    pub(crate) fn new(
+        session_id: Option<SessionId>,
+        cause: Option<crate::runtime::MemberRetirementCause>,
+        identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+        rotation: Option<crate::runtime::RetiredRotation>,
+    ) -> Self {
+        Self {
+            session_id,
+            cause,
+            identity_entry,
+            unknown_identity_entry: None,
+            rotation,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MemberRetiredFacts {
+    /// Write the facts into a stored `MemberRetired` row's kind object, each
+    /// under its own key; an absent fact writes no key.
+    fn encode_stored(
+        &self,
+        kind: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(session_id) = &self.session_id {
+            kind.insert(
+                "retired_session".to_string(),
+                serde_json::to_value(session_id)?,
+            );
+        }
+        if let Some(cause) = self.cause {
+            kind.insert(
+                "retired_cause".to_string(),
+                Value::String(cause.as_stored().to_string()),
+            );
+        }
+        // The entry's origin, or the token of an origin this build does not
+        // know, written back as it was stored.
+        if let Some(token) = self
+            .identity_entry
+            .map(|origin| origin.as_stored().to_string())
+            .or_else(|| self.unknown_identity_entry.clone())
+        {
+            kind.insert("retired_entry".to_string(), Value::String(token));
+        }
+        if let Some(rotation) = &self.rotation {
+            kind.insert("retired_rotation".to_string(), rotation.to_stored()?);
+        }
+        Ok(())
+    }
+
+    /// Take the facts out of a stored `MemberRetired` row's kind object. A
+    /// row written before them reads them absent. A cause or a rotation this
+    /// build cannot read (a later release's) reads as none, and an entry
+    /// origin it does not know keeps its token for the next encode.
+    fn take_stored(kind: &mut serde_json::Map<String, Value>) -> Result<Self, serde_json::Error> {
+        let session_id = kind
+            .remove("retired_session")
+            .map(serde_json::from_value::<SessionId>)
+            .transpose()?;
+        let cause = kind
+            .remove("retired_cause")
+            .map(serde_json::from_value::<String>)
+            .transpose()?
+            .and_then(|token| crate::runtime::MemberRetirementCause::from_stored(&token));
+        let entry = kind
+            .remove("retired_entry")
+            .map(serde_json::from_value::<String>)
+            .transpose()?;
+        let identity_entry = entry
+            .as_deref()
+            .and_then(crate::runtime::IdentityEntryOrigin::from_stored);
+        let unknown_identity_entry = entry.filter(|_| identity_entry.is_none());
+        let rotation = kind
+            .remove("retired_rotation")
+            .map(crate::runtime::RetiredRotation::from_stored)
+            .transpose()?
+            .flatten();
+        Ok(Self {
+            session_id,
+            cause,
+            identity_entry,
+            unknown_identity_entry,
+            rotation,
+        })
     }
 }
 
@@ -1779,6 +1942,22 @@ impl MobEventKind {
             )),
         }
     }
+
+    /// The facts a `MemberRetired` row records for the member lifecycle
+    /// journal read.
+    pub(crate) fn retired_facts(&self) -> Option<&MemberRetiredFacts> {
+        match self {
+            Self::MemberRetired { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retired_facts_mut(&mut self) -> Option<&mut MemberRetiredFacts> {
+        match self {
+            Self::MemberRetired { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -1993,6 +2172,17 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
         kind.insert("session_archived".to_string(), Value::Bool(true));
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(seat_rotation) = member_spawned.seat_rotation()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("seat_rotation".to_string(), seat_rotation.to_stored()?);
+    }
+    if let Some(facts) = event.kind.retired_facts()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        facts.encode_stored(kind)?;
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -2295,6 +2485,29 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<bool>)
         .transpose()?
         .unwrap_or(false);
+    // What seated a MemberSpawned row's incarnation when a rotation did, and
+    // a MemberRetired row's facts, for the member lifecycle journal read: a
+    // row written before them reads them absent, and one this build cannot
+    // read (a later release's) reads as none. The replay reads none of them.
+    let spawned_seat_rotation = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_rotation")
+            } else {
+                None
+            }
+        })
+        .map(crate::runtime::SeatRotation::from_stored)
+        .transpose()?
+        .flatten();
+    let retired_facts = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .filter(|kind| kind.get("type").and_then(Value::as_str) == Some("member_retired"))
+        .map(MemberRetiredFacts::take_stored)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2393,6 +2606,16 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     }
     if retired_session_archived {
         event.kind.set_retired_session_archived(true)?;
+    }
+    if let Some(seat_rotation) = spawned_seat_rotation
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.seat_rotation = Some(seat_rotation);
+    }
+    if let Some(facts) = retired_facts
+        && let Some(stored) = event.kind.retired_facts_mut()
+    {
+        *stored = facts;
     }
     Ok(event)
 }
@@ -3400,6 +3623,7 @@ mod tests {
                 generation: Generation::new(0),
                 role: ProfileName::from("worker"),
                 session_archived,
+                facts: MemberRetiredFacts::default(),
             },
         };
         let archived = row(true);
@@ -3435,6 +3659,273 @@ mod tests {
                 .kind
                 .retired_session_archived()
         );
+    }
+
+    /// What a retirement row records for the member lifecycle journal read
+    /// (its session, the identity entry it was the member of, why it ended,
+    /// and the rotation whose terminal step retired it) rides the row as
+    /// internal fields under keys of their own: the stored row carries them,
+    /// the public payload never does, a reader that predates them parses the
+    /// row, a row written before them decodes them as absent, and a cause or
+    /// a rotation target this build does not know decodes as none. The stored
+    /// schema version stays 9.
+    ///
+    /// RED (before the codec stores them): the stored row carries no
+    /// `retired_session`, and its decode answers no facts.
+    #[test]
+    fn stored_retired_facts_roundtrip_and_stay_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberRetired {
+                agent_identity: AgentIdentity::from("retired-identity"),
+                generation: Generation::new(0),
+                role: ProfileName::from("worker"),
+                session_archived: true,
+                facts: MemberRetiredFacts {
+                    session_id: Some(sid.clone()),
+                    cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
+                    identity_entry: Some(crate::runtime::IdentityEntryOrigin::Declared),
+                    unknown_identity_entry: None,
+                    rotation: Some(crate::runtime::RetiredRotation::new(
+                        crate::runtime::RotationTarget::FreshSession,
+                        Generation::new(1),
+                        ProfileName::from("lead"),
+                    )),
+                },
+            },
+        };
+        let public = serde_json::to_value(&event).expect("public event payload");
+        for key in [
+            "facts",
+            "retired_session",
+            "retired_cause",
+            "retired_entry",
+            "retired_rotation",
+        ] {
+            assert!(
+                public["kind"].get(key).is_none(),
+                "the public event never carries {key}"
+            );
+        }
+        let encoded = encode_stored_mob_event(&event).expect("encode");
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(stored["schema_version"], 9, "the stored schema stays 9");
+        assert_eq!(
+            stored["event"]["kind"]["retired_session"],
+            json!(sid.to_string()),
+            "the stored row carries the retired session"
+        );
+        assert_eq!(stored["event"]["kind"]["retired_cause"], json!("unlisted"));
+        assert_eq!(stored["event"]["kind"]["retired_entry"], json!("declared"));
+        assert_eq!(
+            stored["event"]["kind"]["retired_rotation"],
+            json!({"target": "fresh_session", "successor": 1, "successor_role": "lead"})
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode");
+        assert_eq!(
+            decoded.kind, event.kind,
+            "the stored row round-trips its facts"
+        );
+        let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
+            .expect("a payload with the unknown keys still parses");
+        assert_eq!(older_reader.cursor, 1);
+
+        let decode_variant = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+            let mut variant = stored.clone();
+            let kind = variant
+                .get_mut("event")
+                .and_then(|event| event.get_mut("kind"))
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("stored kind object");
+            edit(kind);
+            let bytes = serde_json::to_vec(&variant).expect("encode variant");
+            match decode_stored_mob_event(&bytes)
+                .expect("decode variant")
+                .kind
+            {
+                MobEventKind::MemberRetired { facts, .. } => facts,
+                other => panic!("a retirement row: {other:?}"),
+            }
+        };
+        assert_eq!(
+            decode_variant(&|kind| {
+                for key in [
+                    "retired_session",
+                    "retired_cause",
+                    "retired_entry",
+                    "retired_rotation",
+                ] {
+                    kind.remove(key);
+                }
+            }),
+            MemberRetiredFacts::default(),
+            "a row written before the facts decodes them as absent"
+        );
+        let later = decode_variant(&|kind| {
+            kind.insert("retired_cause".to_string(), json!("a_later_cause"));
+            kind.insert(
+                "retired_rotation".to_string(),
+                json!({"target": "a_later_target", "successor": 1, "successor_role": "lead"}),
+            );
+        });
+        assert_eq!(
+            (later.session_id, later.cause, later.rotation),
+            (Some(sid), None, None),
+            "a cause or a rotation target a later release wrote decodes as none"
+        );
+    }
+
+    /// The identity entry a retirement row records keeps the rule of the
+    /// seat rows for an origin token this build does not know: the row
+    /// decodes with no known entry and the token kept, and an encode writes
+    /// the token back as it was stored.
+    ///
+    /// RED (before the codec stores the facts): the stored row carries no
+    /// `retired_entry`.
+    #[test]
+    fn an_unknown_stored_retired_entry_token_is_kept_and_written_back() {
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberRetired {
+                agent_identity: AgentIdentity::from("created-identity"),
+                generation: Generation::new(0),
+                role: ProfileName::from("worker"),
+                session_archived: false,
+                facts: MemberRetiredFacts {
+                    identity_entry: Some(crate::runtime::IdentityEntryOrigin::Created),
+                    ..MemberRetiredFacts::default()
+                },
+            },
+        };
+        let encoded = encode_stored_mob_event(&event).expect("encode");
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"]["retired_entry"],
+            json!("created"),
+            "the stored row carries the entry's origin"
+        );
+        stored["event"]["kind"]["retired_entry"] = json!("a_later_origin");
+        let bytes = serde_json::to_vec(&stored).expect("encode the later row");
+        let decoded = decode_stored_mob_event(&bytes).expect("decode the later row");
+        let MobEventKind::MemberRetired { facts, .. } = &decoded.kind else {
+            panic!("a retirement row: {decoded:?}");
+        };
+        assert_eq!(facts.identity_entry, None);
+        assert_eq!(
+            facts.unknown_identity_entry.as_deref(),
+            Some("a_later_origin")
+        );
+        let again: serde_json::Value = serde_json::from_slice(
+            &encode_stored_mob_event(&decoded).expect("encode the decoded row"),
+        )
+        .expect("parse");
+        assert_eq!(
+            again["event"]["kind"]["retired_entry"],
+            json!("a_later_origin"),
+            "the token is written back as stored"
+        );
+    }
+
+    /// What seated an incarnation, when a rotation did, rides its seat row
+    /// as an internal field (`seat_rotation`): the stored row carries it,
+    /// the public payload never does, a reader that predates it parses the
+    /// row, a row written before it decodes as no rotation, and a kind or a
+    /// target this build does not know decodes as none.
+    ///
+    /// RED (before the codec stores it): the stored row carries no
+    /// `seat_rotation`.
+    #[test]
+    fn stored_seat_rotation_roundtrips_and_stays_internal() {
+        use crate::runtime::{RotationTarget, SeatRotation};
+        let identity = AgentIdentity::from("seated-identity");
+        for (generation, seat_rotation, stored_form) in [
+            (
+                Generation::new(2),
+                SeatRotation::successor(Generation::new(1), RotationTarget::SameSession),
+                json!({"kind": "successor", "predecessor": 1, "target": "same_session"}),
+            ),
+            (
+                Generation::new(4),
+                SeatRotation::fresh_life_after(Generation::new(3)),
+                json!({"kind": "fresh_life_after", "predecessor": 3}),
+            ),
+        ] {
+            let mut spawned = MemberSpawnedEvent::new(
+                identity.clone(),
+                generation,
+                FenceToken::new(1),
+                AgentRuntimeId::new(identity.clone(), generation),
+                ProfileName::from("worker"),
+            );
+            spawned.seat_rotation = Some(seat_rotation);
+            let event = MobEvent {
+                cursor: 1,
+                timestamp: Utc::now(),
+                mob_id: MobId::from("test-mob"),
+                kind: MobEventKind::MemberSpawned(spawned),
+            };
+            let public = serde_json::to_value(&event).expect("public event payload");
+            assert!(
+                public["kind"].get("seat_rotation").is_none(),
+                "the public event never carries the seat rotation"
+            );
+            let encoded = encode_stored_mob_event(&event).expect("encode");
+            let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+            assert_eq!(
+                stored["event"]["kind"]["seat_rotation"], stored_form,
+                "the stored row carries the seat rotation"
+            );
+            let decoded = decode_stored_mob_event(&encoded).expect("decode").kind;
+            assert_eq!(
+                decoded
+                    .member_spawned()
+                    .and_then(|spawned| spawned.seat_rotation),
+                Some(seat_rotation)
+            );
+            let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
+                .expect("a payload with the unknown key still parses");
+            assert_eq!(older_reader.cursor, 1);
+            for (replacement, label) in [
+                (None, "a row written before the field"),
+                (
+                    Some(json!({"kind": "a_later_kind", "predecessor": 1})),
+                    "a kind a later release wrote",
+                ),
+                (
+                    Some(
+                        json!({"kind": "successor", "predecessor": 1, "target": "a_later_target"}),
+                    ),
+                    "a target a later release wrote",
+                ),
+            ] {
+                let mut variant = stored.clone();
+                let kind = variant
+                    .get_mut("event")
+                    .and_then(|event| event.get_mut("kind"))
+                    .and_then(serde_json::Value::as_object_mut)
+                    .expect("stored kind object");
+                kind.remove("seat_rotation");
+                if let Some(value) = replacement {
+                    kind.insert("seat_rotation".to_string(), value);
+                }
+                let bytes = serde_json::to_vec(&variant).expect("encode variant");
+                let decoded = decode_stored_mob_event(&bytes)
+                    .expect("decode variant")
+                    .kind;
+                assert_eq!(
+                    decoded
+                        .member_spawned()
+                        .and_then(|spawned| spawned.seat_rotation),
+                    None,
+                    "{label} decodes as no rotation"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3584,20 +4075,22 @@ mod tests {
             "inproc://test-mob/worker/researcher",
         )
         .expect("member peer endpoint");
-        let kind = MobEventKind::MemberSpawned(
-            MemberSpawnedEvent::new(
-                identity.clone(),
-                Generation::INITIAL,
-                FenceToken::new(1),
-                AgentRuntimeId::initial(identity),
-                ProfileName::from("worker"),
-            )
-            // set the internal pointer so we know the exclusion is real,
-            // not a side-effect of it being None.
-            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
-            .with_placed_spawn_id(Some(crate::ids::PlacedSpawnId::new()))
-            .with_member_peer_endpoint(Some(endpoint)),
-        );
+        let mut spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(1),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("worker"),
+        )
+        // set the internal pointer so we know the exclusion is real,
+        // not a side-effect of it being None.
+        .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+        .with_placed_spawn_id(Some(crate::ids::PlacedSpawnId::new()))
+        .with_member_peer_endpoint(Some(endpoint));
+        spawned.seat_rotation = Some(crate::runtime::SeatRotation::fresh_life_after(
+            Generation::INITIAL,
+        ));
+        let kind = MobEventKind::MemberSpawned(spawned);
 
         let value = serde_json::to_value(&kind).expect("serialize mob event kind");
         let object = value
@@ -3617,6 +4110,10 @@ mod tests {
         assert!(
             !serialized.contains("placed_spawn_id"),
             "public MemberSpawned wire shape must never expose placed_spawn_id; got: {serialized}",
+        );
+        assert!(
+            !serialized.contains("seat_rotation") && !serialized.contains("fresh_life_after"),
+            "public MemberSpawned wire shape must never expose the seat rotation; got: {serialized}",
         );
 
         // And the standard struct fields ARE present.
@@ -4203,6 +4700,7 @@ mod tests {
             generation: Generation::new(2),
             role: ProfileName::from("worker"),
             session_archived: false,
+            facts: MemberRetiredFacts::default(),
         });
     }
 

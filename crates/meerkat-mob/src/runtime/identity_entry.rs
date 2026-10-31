@@ -62,7 +62,7 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
 use crate::MobError;
-use crate::event::{MobEvent, MobEventKind};
+use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, Generation, MobId, ProfileName};
 use crate::machines::mob_machine as mob_dsl;
 
@@ -465,7 +465,208 @@ impl MobJournalCursor {
     }
 }
 
+/// What seated a member incarnation, when a rotation did: the `rotation` of
+/// [`MemberLifecycleEvent::Spawned`].
+///
+/// Each fact is MobMachine's: a rotation's terminal step, or the generation
+/// the machine retained for an identity no member held. The seat's journal
+/// row records it, so a reader pairs a retirement with the seat that follows
+/// it from the facts alone, never from their positions in the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SeatRotation {
+    /// A rotation's terminal step seated the incarnation: the same MobMachine
+    /// step retired the identity's incarnation `predecessor`, whose `Retired`
+    /// fact names this rotation ([`RetiredRotation`]), and seated this one
+    /// at `target`, a new session (a reset, a deletion) or the member's own
+    /// (a same-session successor).
+    #[non_exhaustive]
+    Successor {
+        /// The incarnation the same step retired.
+        predecessor: Generation,
+        /// Where the rotation seated this incarnation.
+        target: super::RotationTarget,
+    },
+    /// A fresh life of an identity no member held
+    /// ([`super::MobHandle::rotate_member`] of an identity whose last
+    /// incarnation's retirement had ended): it follows `predecessor`, that
+    /// last incarnation, the generation MobMachine retained for the identity
+    /// since the mob's last reset. The rotation is the request's; the seat is
+    /// an ordinary one, and nothing retired in its step.
+    #[non_exhaustive]
+    FreshLifeAfter {
+        /// The identity's last incarnation, which its own retirement ended.
+        predecessor: Generation,
+    },
+}
+
+impl SeatRotation {
+    /// A rotation's terminal step that retired `predecessor` and seated the
+    /// incarnation at `target`.
+    #[must_use]
+    pub fn successor(predecessor: Generation, target: super::RotationTarget) -> Self {
+        Self::Successor {
+            predecessor,
+            target,
+        }
+    }
+
+    /// A fresh life of an identity no member held, following its last
+    /// incarnation `predecessor`.
+    #[must_use]
+    pub fn fresh_life_after(predecessor: Generation) -> Self {
+        Self::FreshLifeAfter { predecessor }
+    }
+
+    /// The incarnation the seated one follows.
+    #[must_use]
+    pub fn predecessor(&self) -> Generation {
+        match self {
+            Self::Successor { predecessor, .. } | Self::FreshLifeAfter { predecessor } => {
+                *predecessor
+            }
+        }
+    }
+
+    /// The stored form of the seat rotation on a seat's journal row
+    /// (`seat_rotation`).
+    pub(crate) fn to_stored(self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(match self {
+            Self::Successor {
+                predecessor,
+                target,
+            } => StoredSeatRotation {
+                kind: "successor".to_string(),
+                predecessor,
+                target: Some(rotation_target_token(target).to_string()),
+            },
+            Self::FreshLifeAfter { predecessor } => StoredSeatRotation {
+                kind: "fresh_life_after".to_string(),
+                predecessor,
+                target: None,
+            },
+        })
+    }
+
+    /// The seat rotation a stored form names. One this build cannot read as
+    /// one (a kind or a target a later release wrote) reads as none: the row
+    /// is an ordinary seat here, and the replay reads none of it. A malformed
+    /// form fails the decode.
+    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
+        let stored: StoredSeatRotation = serde_json::from_value(value)?;
+        let predecessor = stored.predecessor;
+        Ok(match stored.kind.as_str() {
+            "successor" => stored
+                .target
+                .as_deref()
+                .and_then(rotation_target_from_token)
+                .map(|target| Self::successor(predecessor, target)),
+            "fresh_life_after" => Some(Self::fresh_life_after(predecessor)),
+            _ => None,
+        })
+    }
+}
+
+/// The stored form of a [`SeatRotation`]: its kind, the incarnation it
+/// follows and, for a rotation's terminal step, its target's token.
+#[derive(Serialize, Deserialize)]
+struct StoredSeatRotation {
+    kind: String,
+    predecessor: Generation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+}
+
+/// The stored form of a [`RetiredRotation`], with its target's token.
+#[derive(Serialize, Deserialize)]
+struct StoredRetiredRotation {
+    target: String,
+    successor: Generation,
+    successor_role: ProfileName,
+}
+
+/// The stored token of a rotation target: its serde form, as the rotation
+/// record of a retirement start row stores it.
+fn rotation_target_token(target: super::RotationTarget) -> &'static str {
+    match target {
+        super::RotationTarget::FreshSession => "fresh_session",
+        super::RotationTarget::SameSession => "same_session",
+    }
+}
+
+/// The rotation target a stored token names; `None` for a token this build
+/// does not know (a later release's target).
+fn rotation_target_from_token(token: &str) -> Option<super::RotationTarget> {
+    match token {
+        "fresh_session" => Some(super::RotationTarget::FreshSession),
+        "same_session" => Some(super::RotationTarget::SameSession),
+        _ => None,
+    }
+}
+
+/// The rotation whose terminal step retired a member incarnation: the
+/// `rotation` of [`MemberLifecycleEvent::Retired`]. The same MobMachine step
+/// seated the identity's next incarnation, `successor`, under
+/// `successor_role`, and its `Spawned` fact names this retirement back
+/// ([`SeatRotation::Successor`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetiredRotation {
+    /// Where the rotation seated the next incarnation: a new session (a
+    /// reset, a deletion) or the member's own (a same-session successor).
+    pub target: super::RotationTarget,
+    /// The incarnation the same step seated.
+    pub successor: Generation,
+    /// The role the same step seated it under.
+    pub successor_role: ProfileName,
+}
+
+impl RetiredRotation {
+    /// The rotation that seated `successor` under `successor_role` at
+    /// `target`.
+    #[must_use]
+    pub fn new(
+        target: super::RotationTarget,
+        successor: Generation,
+        successor_role: ProfileName,
+    ) -> Self {
+        Self {
+            target,
+            successor,
+            successor_role,
+        }
+    }
+
+    /// The stored form of the rotation on a retirement's journal row
+    /// (`retired_rotation`).
+    pub(crate) fn to_stored(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(StoredRetiredRotation {
+            target: rotation_target_token(self.target).to_string(),
+            successor: self.successor,
+            successor_role: self.successor_role.clone(),
+        })
+    }
+
+    /// The rotation a stored form names. One whose target this build does
+    /// not know (a later release's) reads as none: the replay reads none of
+    /// it. A malformed form fails the decode.
+    pub(crate) fn from_stored(value: serde_json::Value) -> Result<Option<Self>, serde_json::Error> {
+        let stored: StoredRetiredRotation = serde_json::from_value(value)?;
+        Ok(rotation_target_from_token(&stored.target)
+            .map(|target| Self::new(target, stored.successor, stored.successor_role)))
+    }
+}
+
 /// One member lifecycle fact of the journal.
+///
+/// Every fact is one MobMachine decided, read from the journal row that
+/// records it: a row records the machine's state before the step that wrote
+/// it, or the step's own journal effect. A row written before a field was
+/// recorded reads it as absent, as do the two rows that close a spawn with no
+/// retirement step of the machine: a spawn whose membership step failed
+/// after its spawn row was durable, and a resumed spawn's rollback. No row
+/// records the runtime registration an incarnation held: a registration
+/// belongs to one process, and none of a stopped process outlives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberLifecycleEvent {
@@ -473,14 +674,21 @@ pub enum MemberLifecycleEvent {
     /// a rotation's terminal. `identity_entry` is set for the member of an
     /// identity entry, and `history_unavailable` for an identity seated on a
     /// fresh session because its archived session is gone from the store.
+    /// `session_id` is the session it was seated on (none for a member bound
+    /// to no session of its own, a peer-only member), and `rotation` is set
+    /// when a rotation seated it ([`SeatRotation`]).
+    #[non_exhaustive]
     Spawned {
         agent_identity: AgentIdentity,
         generation: Generation,
         role: ProfileName,
         identity_entry: Option<IdentityEntryOrigin>,
         history_unavailable: Option<HistoryUnavailable>,
+        session_id: Option<SessionId>,
+        rotation: Option<SeatRotation>,
     },
     /// A legacy member was adopted as an identity entry.
+    #[non_exhaustive]
     EntryAdopted {
         agent_identity: AgentIdentity,
         generation: Generation,
@@ -493,25 +701,41 @@ pub enum MemberLifecycleEvent {
     /// retirement started: the declared apply unlisted the identity
     /// ([`MemberRetirementCause::Unlisted`]), and the retirement's end ends
     /// its entry.
+    #[non_exhaustive]
     RetirementStarted {
         agent_identity: AgentIdentity,
         generation: Generation,
         rotation: Option<super::RotationTarget>,
         cause: Option<MemberRetirementCause>,
     },
-    /// A member incarnation was retired.
+    /// A member incarnation was retired. `session_id` is the session it was
+    /// bound to at its end (none for a peer-only member). `identity_entry`
+    /// is the identity entry it was the member of when its retirement ended,
+    /// set even when that end ended the entry. `cause` says why the
+    /// incarnation ended: [`MemberRetirementCause::Unlisted`] when the
+    /// declared apply's seal unlisted the identity and the end ended its
+    /// entry; none for any other end. `rotation` is set when a rotation's
+    /// terminal step retired it and seated the identity's next incarnation
+    /// in the same step ([`RetiredRotation`]); such an end has no cause.
+    #[non_exhaustive]
     Retired {
         agent_identity: AgentIdentity,
         generation: Generation,
         role: ProfileName,
+        session_id: Option<SessionId>,
+        identity_entry: Option<IdentityEntryOrigin>,
+        cause: Option<MemberRetirementCause>,
+        rotation: Option<RetiredRotation>,
     },
     /// A legacy member reset carried the member to its next generation.
+    #[non_exhaustive]
     Reset {
         agent_identity: AgentIdentity,
         previous_generation: Generation,
         new_generation: Generation,
     },
     /// The mob was reset: no member before it is a member after it.
+    #[non_exhaustive]
     MobReset,
 }
 
@@ -811,6 +1035,13 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             role: spawned.role.clone(),
             identity_entry: spawned.identity_entry(),
             history_unavailable: spawned.history_unavailable().cloned(),
+            // The session the seat's journal effect named, which its row
+            // records as the member's binding.
+            session_id: spawned
+                .bridge_member_ref()
+                .and_then(MemberRef::bridge_session_id)
+                .cloned(),
+            rotation: spawned.seat_rotation(),
         }),
         MobEventKind::MemberSessionBindingRecovered(recovered) => {
             recovered
@@ -837,11 +1068,16 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             agent_identity,
             generation,
             role,
+            facts,
             ..
         } => Some(MemberLifecycleEvent::Retired {
             agent_identity: agent_identity.clone(),
             generation: *generation,
             role: role.clone(),
+            session_id: facts.session_id.clone(),
+            identity_entry: facts.identity_entry,
+            cause: facts.cause,
+            rotation: facts.rotation.clone(),
         }),
         MobEventKind::MemberReset {
             agent_identity,
@@ -945,6 +1181,119 @@ pub(crate) fn machine_entry_origin(
         .get(&mob_dsl::AgentIdentity::from_domain(identity))
         .copied()
         .map(IdentityEntryOrigin::from_machine)
+}
+
+// ---------------------------------------------------------------------------
+// What a retirement's journal rows record
+// ---------------------------------------------------------------------------
+
+/// Why `identity`'s retirement started or ended, as its journal rows record
+/// it, read from `state`, MobMachine's state before the step that writes the
+/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal
+/// marks the identity's entry (`identity_entry_retiring`). The seal marks
+/// only a member whose retirement has not started and never drops the mark
+/// of one whose retirement has, so the start row and the end's row read the
+/// same mark, and the end of a marked retirement ends the entry. The one
+/// reader of the mark for the journal: the start row and the plain terminal
+/// row read it here. A rotation's terminal keeps the identity's standing and
+/// records no cause.
+pub(crate) fn stored_retirement_cause(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Option<MemberRetirementCause> {
+    state
+        .identity_entry_retiring
+        .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+        .then_some(MemberRetirementCause::Unlisted)
+}
+
+/// The session a retirement's `MemberRetired` journal effect names, as its
+/// row records it.
+pub(crate) fn retired_session(
+    session_id: Option<&mob_dsl::SessionId>,
+) -> Result<Option<SessionId>, MobError> {
+    session_id
+        .map(|session| {
+            SessionId::parse(&session.0).map_err(|error| {
+                MobError::Internal(format!(
+                    "a retirement's journal effect names an invalid session id '{}': {error}",
+                    session.0
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// What the terminal row of a plain retirement (a retire's end, or a
+/// destroy's) records for the journal read: the session its `MemberRetired`
+/// journal effect names (`session_id`, none for a peer-only member), and the
+/// cause and the identity entry read from `state`, MobMachine's state before
+/// the step, which may end the entry. No rotation ended it.
+pub(crate) fn plain_retirement_facts(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+    session_id: Option<&mob_dsl::SessionId>,
+) -> Result<crate::event::MemberRetiredFacts, MobError> {
+    Ok(crate::event::MemberRetiredFacts::new(
+        retired_session(session_id)?,
+        stored_retirement_cause(state, identity),
+        machine_entry_origin(state, identity),
+        None,
+    ))
+}
+
+/// What the row of `rotate_member`'s fresh life of an identity no member
+/// holds names ([`SeatRotation::FreshLifeAfter`]): the incarnation it
+/// follows, the generation MobMachine retains for the identity
+/// (`identity_runtime_generations`, which a retirement keeps) in `state`, the
+/// machine state before the step that seats the fresh life, whose seat arm
+/// mints the next generation from it. None for an identity no incarnation
+/// preceded since the mob's last reset.
+pub(crate) fn fresh_life_rotation(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Option<SeatRotation> {
+    state
+        .identity_runtime_generations
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+        .map(|generation| SeatRotation::fresh_life_after(Generation::new(generation.0)))
+}
+
+/// The link a rotation's terminal step journals on both of its rows, as
+/// MobMachine decided it: the rotation's target, which the machine recorded
+/// at the rotation's start and the step consumes (`member_rotation_targets`
+/// in `before`, the state before the step), and the incarnation and role the
+/// step seated (`identity_runtime_generations` and `member_profile_names` in
+/// `after`, the step's own state). A fact missing from either state is a
+/// defect, answered as one.
+pub(crate) fn rotation_link(
+    before: &mob_dsl::MobMachineState,
+    after: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Result<RetiredRotation, MobError> {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    let missing = |fact: &str| {
+        MobError::Internal(format!(
+            "the rotation of '{identity}' holds no {fact} in the machine state"
+        ))
+    };
+    let target = before
+        .member_rotation_targets
+        .get(&dsl_identity)
+        .copied()
+        .map(super::RotationTarget::from_machine)
+        .ok_or_else(|| missing("target"))?;
+    let successor = after
+        .identity_runtime_generations
+        .get(&dsl_identity)
+        .map(|generation| Generation::new(generation.0))
+        .ok_or_else(|| missing("seated generation"))?;
+    let successor_role = after
+        .member_profile_names
+        .get(&dsl_identity)
+        .map(|profile| ProfileName::from(profile.as_str()))
+        .ok_or_else(|| missing("seated role"))?;
+    Ok(RetiredRotation::new(target, successor, successor_role))
 }
 
 #[cfg(test)]
@@ -1347,6 +1696,7 @@ mod tests {
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             ),
         ];
@@ -1369,5 +1719,157 @@ mod tests {
         let empty = member_lifecycle_page(&mob, MobJournalCursor::new(6), &[]);
         assert_eq!(empty.next, MobJournalCursor::new(6));
         assert!(empty.records.is_empty());
+    }
+
+    /// The journal read answers what a row records of the facts MobMachine
+    /// decided: a seat's session (its row's session binding) and the
+    /// rotation that seated it; a retirement's session, the entry it was the
+    /// member of, why it ended and the rotation whose terminal step retired
+    /// it. A retirement row that records none of them, as one written before
+    /// them, reads them absent.
+    ///
+    /// RED (before the read maps them): every one of them reads absent.
+    #[test]
+    fn the_lifecycle_page_reads_the_facts_its_rows_record() {
+        use crate::runtime::RotationTarget;
+        let mob = MobId::from("lifecycle-mob");
+        let identity = AgentIdentity::from("rotated");
+        let retired_session = SessionId::new();
+        let seated_session = SessionId::new();
+        let rotation = RetiredRotation::new(
+            RotationTarget::FreshSession,
+            Generation::new(1),
+            ProfileName::from("lead"),
+        );
+        let mut spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::new(1),
+            FenceToken::new(2),
+            AgentRuntimeId::new(identity.clone(), Generation::new(1)),
+            ProfileName::from("lead"),
+        )
+        .with_bridge_member_ref(Some(crate::event::MemberRef::from_bridge_session_id(
+            seated_session.clone(),
+        )));
+        spawned.seat_rotation = Some(SeatRotation::successor(
+            Generation::new(0),
+            RotationTarget::FreshSession,
+        ));
+        let retired = |generation: u64, facts: crate::event::MemberRetiredFacts| {
+            MobEventKind::MemberRetired {
+                agent_identity: identity.clone(),
+                generation: Generation::new(generation),
+                role: ProfileName::from("worker"),
+                session_archived: false,
+                facts,
+            }
+        };
+        let event = |cursor: u64, kind: MobEventKind| MobEvent {
+            cursor,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob.clone(),
+            kind,
+        };
+        let events = [
+            event(
+                1,
+                retired(
+                    0,
+                    crate::event::MemberRetiredFacts {
+                        session_id: Some(retired_session.clone()),
+                        cause: None,
+                        identity_entry: Some(IdentityEntryOrigin::Declared),
+                        unknown_identity_entry: None,
+                        rotation: Some(rotation.clone()),
+                    },
+                ),
+            ),
+            event(2, MobEventKind::MemberSpawned(spawned)),
+            event(3, retired(1, crate::event::MemberRetiredFacts::default())),
+        ];
+        let page = member_lifecycle_page(&mob, MobJournalCursor::START, &events);
+        let facts = page
+            .records
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            facts,
+            vec![
+                MemberLifecycleEvent::Retired {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(0),
+                    role: ProfileName::from("worker"),
+                    session_id: Some(retired_session),
+                    identity_entry: Some(IdentityEntryOrigin::Declared),
+                    cause: None,
+                    rotation: Some(rotation),
+                },
+                MemberLifecycleEvent::Spawned {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(1),
+                    role: ProfileName::from("lead"),
+                    identity_entry: None,
+                    history_unavailable: None,
+                    session_id: Some(seated_session),
+                    rotation: Some(SeatRotation::successor(
+                        Generation::new(0),
+                        RotationTarget::FreshSession,
+                    )),
+                },
+                MemberLifecycleEvent::Retired {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(1),
+                    role: ProfileName::from("worker"),
+                    session_id: None,
+                    identity_entry: None,
+                    cause: None,
+                    rotation: None,
+                },
+            ],
+            "the read answers the facts each row records"
+        );
+    }
+
+    /// The journal read maps exactly the six member lifecycle row kinds
+    /// (`member_lifecycle_event`): a row kind dropped from it, or one added
+    /// to it without a decision on what it records, fails here.
+    #[test]
+    fn the_lifecycle_mapping_names_the_six_row_kinds() {
+        let source = include_str!("identity_entry.rs");
+        let start = source
+            .find("fn member_lifecycle_event(")
+            .expect("the mapping");
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("the end of the mapping");
+        let mut kinds = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| {
+                line.match_indices("MobEventKind::")
+                    .map(move |(at, prefix)| {
+                        let rest = &line[at + prefix.len()..];
+                        let name = rest
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        &rest[..name]
+                    })
+            })
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(
+            kinds,
+            [
+                "MemberReset",
+                "MemberRetired",
+                "MemberRetirementStarted",
+                "MemberSessionBindingRecovered",
+                "MemberSpawned",
+                "MobReset",
+            ]
+        );
     }
 }

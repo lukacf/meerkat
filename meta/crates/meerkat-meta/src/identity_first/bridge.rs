@@ -8468,7 +8468,9 @@ impl SessionBridge for MobSessionBridge {
                         role,
                         ..
                     } => MemberLifecycleFact::retired(agent_identity, generation.get(), role),
-                    meerkat_mob::MemberLifecycleEvent::MobReset => MemberLifecycleFact::mob_reset(),
+                    meerkat_mob::MemberLifecycleEvent::MobReset { .. } => {
+                        MemberLifecycleFact::mob_reset()
+                    }
                     _ => return None,
                 };
                 Some(MemberLifecycleFactRecord::new(record.cursor.get(), fact))

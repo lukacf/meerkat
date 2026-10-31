@@ -14495,6 +14495,7 @@ mod tests {
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             ),
             event(3, spawned(Generation::new(1), durable.clone())),
@@ -15977,6 +15978,7 @@ mod tests {
                 generation,
                 role: ProfileName::from("worker"),
                 session_archived: false,
+                facts: crate::event::MemberRetiredFacts::default(),
             },
         }
     }
@@ -17321,6 +17323,7 @@ mod tests {
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             },
             placed_spawned_event(
@@ -17442,6 +17445,7 @@ mod tests {
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             },
             placed_spawned_event(
@@ -18487,6 +18491,7 @@ mod tests {
                     generation,
                     role: ProfileName::from("worker"),
                     session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
                 },
             ),
         ]
@@ -19105,6 +19110,7 @@ mod tests {
                         generation: generation_zero,
                         role: ProfileName::from("worker"),
                         session_archived: false,
+                        facts: crate::event::MemberRetiredFacts::default(),
                     },
                 ),
             ];

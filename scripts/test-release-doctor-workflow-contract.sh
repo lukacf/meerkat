@@ -400,6 +400,25 @@ elif name in ("attestation-main-only", "attestation-any-release-branch", "attest
         f"             {rules[name]} and\n"
         "             ((.schema_version == 1",
     )
+elif name in ("ci-run-main-only", "ci-run-any-release-branch", "ci-run-branches-reordered"):
+    # The exact-commit CI lookup's branches: the pre-maintenance-release
+    # rule (main only), any release branch instead of the tag's version's (no
+    # branch in the query, any release/ branch in the filter), and an
+    # equivalent spelling that queries the release branch first.
+    branches = '            const branches = ["main", releaseBranch];\n'
+    if name == "ci-run-main-only":
+        replace_once(branches, '            const branches = ["main"];\n')
+    elif name == "ci-run-any-release-branch":
+        replace_once(
+            '                  workflow_id: "ci.yml",\n                  branch,\n',
+            '                  workflow_id: "ci.yml",\n',
+        )
+        replace_once(
+            "                      run.head_branch === branch &&\n",
+            '                      (run.head_branch === "main" || run.head_branch.startsWith("release/")) &&\n',
+        )
+    else:
+        replace_once(branches, '            const branches = [releaseBranch, "main"];\n')
 elif name in (
     "evidence-main-only",
     "evidence-any-release-branch",
@@ -1053,6 +1072,8 @@ mutate tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml"
 expect_pass tag-validation-reflowed "${TEST_ROOT}/tag-validation-reflowed.yml" tag-validation
 mutate attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml"
 expect_pass attestation-ref-reordered "${TEST_ROOT}/attestation-ref-reordered.yml" tag-validation
+mutate ci-run-branches-reordered "${TEST_ROOT}/ci-run-branches-reordered.yml"
+expect_pass ci-run-branches-reordered "${TEST_ROOT}/ci-run-branches-reordered.yml" tag-validation
 mutate evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml"
 expect_pass evidence-branch-reordered "${TEST_ROOT}/evidence-branch-reordered.yml" semver-evidence
 mutate prebuild-lookup-if-reflowed "${TEST_ROOT}/prebuild-lookup-if-reflowed.yml"
@@ -1137,6 +1158,12 @@ expect_fail_named tag-validation-ignores-sdk-host "${TEST_ROOT}/tag-validation-i
 
 # A maintenance release is tagged on release/<version>: CI and semver
 # evidence from that branch qualifies next to main's, and from no other.
+mutate ci-run-main-only "${TEST_ROOT}/ci-run-main-only.yml"
+expect_fail_named ci-run-main-only "${TEST_ROOT}/ci-run-main-only.yml" \
+  "refuses the successful CI run of a push to release/0.0.0 (a maintenance release of the tag's version)" tag-validation
+mutate ci-run-any-release-branch "${TEST_ROOT}/ci-run-any-release-branch.yml"
+expect_fail_named ci-run-any-release-branch "${TEST_ROOT}/ci-run-any-release-branch.yml" \
+  "accepts the successful CI run of a push to release/9.9.9 (another version's release branch)" tag-validation
 mutate attestation-main-only "${TEST_ROOT}/attestation-main-only.yml"
 expect_fail_named attestation-main-only "${TEST_ROOT}/attestation-main-only.yml" \
   "refuses the CI attestation of a push to release/0.0.0 (a maintenance release of the tag's version)" tag-validation

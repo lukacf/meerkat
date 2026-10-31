@@ -468,11 +468,12 @@ impl MobJournalCursor {
 /// What seated a member incarnation, when a rotation did: the `rotation` of
 /// [`MemberLifecycleEvent::Spawned`].
 ///
-/// Each fact is MobMachine's: a rotation's terminal step, or the generation
-/// the machine retained for an identity no member held. The seat's journal
-/// row records it, so a reader pairs a retirement with the seat that follows
-/// it from the facts alone, never from their positions in the journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Each fact is MobMachine's: a rotation's terminal step, the generation the
+/// machine retained for an identity no member held, or the respawn hold a
+/// retirement left for its successor. The seat's journal row records it, so
+/// a reader pairs a retirement with the seat that follows it from the facts
+/// alone, never from their positions in the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SeatRotation {
     /// A rotation's terminal step seated the incarnation: the same MobMachine
@@ -498,6 +499,18 @@ pub enum SeatRotation {
         /// The identity's last incarnation, which its own retirement ended.
         predecessor: Generation,
     },
+    /// A respawn seated the incarnation in two machine steps
+    /// ([`super::MobHandle::respawn`] or
+    /// [`super::MobHandle::respawn_with_successor_spec`] of a member no
+    /// identity entry holds): the retirement of `predecessor` held the
+    /// identity's topology for its successor (MobMachine's respawn hold),
+    /// and this seat's step took the hold. The retirement, a step of its
+    /// own, names no rotation.
+    #[non_exhaustive]
+    RespawnAfter {
+        /// The incarnation the respawn retired.
+        predecessor: Generation,
+    },
 }
 
 impl SeatRotation {
@@ -518,31 +531,43 @@ impl SeatRotation {
         Self::FreshLifeAfter { predecessor }
     }
 
+    /// A respawn's seat, following the incarnation `predecessor` the
+    /// respawn retired.
+    #[must_use]
+    pub fn respawn_after(predecessor: Generation) -> Self {
+        Self::RespawnAfter { predecessor }
+    }
+
     /// The incarnation the seated one follows.
     #[must_use]
     pub fn predecessor(&self) -> Generation {
         match self {
-            Self::Successor { predecessor, .. } | Self::FreshLifeAfter { predecessor } => {
-                *predecessor
-            }
+            Self::Successor { predecessor, .. }
+            | Self::FreshLifeAfter { predecessor }
+            | Self::RespawnAfter { predecessor } => *predecessor,
         }
     }
 
     /// The stored form of the seat rotation on a seat's journal row
     /// (`seat_rotation`).
-    pub(crate) fn to_stored(self) -> Result<serde_json::Value, serde_json::Error> {
+    pub(crate) fn to_stored(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(match self {
             Self::Successor {
                 predecessor,
                 target,
             } => StoredSeatRotation {
                 kind: "successor".to_string(),
-                predecessor,
-                target: Some(rotation_target_token(target).to_string()),
+                predecessor: *predecessor,
+                target: Some(rotation_target_token(*target).to_string()),
             },
             Self::FreshLifeAfter { predecessor } => StoredSeatRotation {
                 kind: "fresh_life_after".to_string(),
-                predecessor,
+                predecessor: *predecessor,
+                target: None,
+            },
+            Self::RespawnAfter { predecessor } => StoredSeatRotation {
+                kind: "respawn_after".to_string(),
+                predecessor: *predecessor,
                 target: None,
             },
         })
@@ -562,6 +587,7 @@ impl SeatRotation {
                 .and_then(rotation_target_from_token)
                 .map(|target| Self::successor(predecessor, target)),
             "fresh_life_after" => Some(Self::fresh_life_after(predecessor)),
+            "respawn_after" => Some(Self::respawn_after(predecessor)),
             _ => None,
         })
     }
@@ -1041,7 +1067,7 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
                 .bridge_member_ref()
                 .and_then(MemberRef::bridge_session_id)
                 .cloned(),
-            rotation: spawned.seat_rotation(),
+            rotation: spawned.seat_rotation().cloned(),
         }),
         MobEventKind::MemberSessionBindingRecovered(recovered) => {
             recovered
@@ -1232,6 +1258,7 @@ pub(crate) fn retired_session(
 pub(crate) fn plain_retirement_facts(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
+    agent_runtime_id: &crate::ids::AgentRuntimeId,
     session_id: Option<&mob_dsl::SessionId>,
 ) -> Result<crate::event::MemberRetiredFacts, MobError> {
     Ok(crate::event::MemberRetiredFacts::new(

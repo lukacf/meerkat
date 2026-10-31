@@ -137,7 +137,7 @@ fn seated(
             SeatFacts {
                 role: role.clone(),
                 session_id: session_id.clone(),
-                rotation: *rotation,
+                rotation: rotation.clone(),
             },
         )),
         _ => None,

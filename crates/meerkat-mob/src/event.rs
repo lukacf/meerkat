@@ -1231,13 +1231,22 @@ pub struct MemberSpawnedEvent {
     pub(crate) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
     /// What seated this incarnation when a rotation did: a rotation's
     /// terminal step, which retired the identity's previous incarnation in
-    /// the same step, or a fresh life of an identity no member held
+    /// the same step, a fresh life of an identity no member held, or a
+    /// respawn's seat after the retirement that held its topology
     /// ([`crate::runtime::SeatRotation`]). For the member lifecycle journal
     /// read; the replay reads none of it. Stored only by the internal event
     /// codec; a reader that predates it ignores it, and journals written
     /// before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) seat_rotation: Option<crate::runtime::SeatRotation>,
+    /// The session the seat's journal effect named when the row's member ref
+    /// carries none: a placed member's, which its member host keeps (the
+    /// placed row's ref is the host peer's, with no session). For the member
+    /// lifecycle journal read; the replay reads none of it. Stored only by
+    /// the internal event codec; a reader that predates it ignores it, and
+    /// journals written before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) seat_session: Option<SessionId>,
 }
 
 impl MemberSpawnedEvent {
@@ -1278,6 +1287,7 @@ impl MemberSpawnedEvent {
             resume_from_role: None,
             history_unavailable: None,
             seat_rotation: None,
+            seat_session: None,
         }
     }
 
@@ -1301,8 +1311,17 @@ impl MemberSpawnedEvent {
         self
     }
 
-    pub(crate) fn seat_rotation(&self) -> Option<crate::runtime::SeatRotation> {
-        self.seat_rotation
+    pub(crate) fn seat_rotation(&self) -> Option<&crate::runtime::SeatRotation> {
+        self.seat_rotation.as_ref()
+    }
+
+    pub(crate) fn with_seat_session(mut self, seat_session: Option<SessionId>) -> Self {
+        self.seat_session = seat_session;
+        self
+    }
+
+    pub(crate) fn seat_session(&self) -> Option<&SessionId> {
+        self.seat_session.as_ref()
     }
 
     pub(crate) fn with_resume_from_role(mut self, resume_from_role: Option<ProfileName>) -> Self {
@@ -1600,6 +1619,25 @@ impl MemberRetiredFacts {
             unknown_identity_entry: None,
             rotation,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MemberRetiredFacts {
+    /// Test support: the facts a `MemberRetired` row records, for a test
+    /// that injects the row into a mob store ([`NewMobEvent::for_test`])
+    /// and reads it back through the member lifecycle journal read: the
+    /// session the retired incarnation was bound to at its end, why it
+    /// ended, the identity entry it was the member of and the rotation that
+    /// retired it.
+    #[must_use]
+    pub fn for_test(
+        session_id: Option<SessionId>,
+        cause: Option<crate::runtime::MemberRetirementCause>,
+        identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+        rotation: Option<crate::runtime::RetiredRotation>,
+    ) -> Self {
+        Self::new(session_id, cause, identity_entry, rotation)
     }
 }
 
@@ -3854,6 +3892,11 @@ mod tests {
                 SeatRotation::fresh_life_after(Generation::new(3)),
                 json!({"kind": "fresh_life_after", "predecessor": 3}),
             ),
+            (
+                Generation::new(6),
+                SeatRotation::respawn_after(Generation::new(5)),
+                json!({"kind": "respawn_after", "predecessor": 5}),
+            ),
         ] {
             let mut spawned = MemberSpawnedEvent::new(
                 identity.clone(),
@@ -3862,7 +3905,7 @@ mod tests {
                 AgentRuntimeId::new(identity.clone(), generation),
                 ProfileName::from("worker"),
             );
-            spawned.seat_rotation = Some(seat_rotation);
+            spawned.seat_rotation = Some(seat_rotation.clone());
             let event = MobEvent {
                 cursor: 1,
                 timestamp: Utc::now(),
@@ -3884,7 +3927,7 @@ mod tests {
             assert_eq!(
                 decoded
                     .member_spawned()
-                    .and_then(|spawned| spawned.seat_rotation),
+                    .and_then(|spawned| spawned.seat_rotation.clone()),
                 Some(seat_rotation)
             );
             let older_reader: MobEvent = serde_json::from_value(stored["event"].clone())
@@ -3920,7 +3963,7 @@ mod tests {
                 assert_eq!(
                     decoded
                         .member_spawned()
-                        .and_then(|spawned| spawned.seat_rotation),
+                        .and_then(|spawned| spawned.seat_rotation.clone()),
                     None,
                     "{label} decodes as no rotation"
                 );

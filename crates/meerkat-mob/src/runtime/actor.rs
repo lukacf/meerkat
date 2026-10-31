@@ -53488,6 +53488,7 @@ impl MobActor {
             let facts = super::identity_entry::plain_retirement_facts(
                 self.dsl_authority.state(),
                 &ctx.entry.agent_identity,
+                &ctx.entry.agent_runtime_id,
                 journal_session.as_ref(),
             )?;
             self.append_retire_event_for_entry(
@@ -54165,6 +54166,7 @@ impl MobActor {
             let facts = super::identity_entry::plain_retirement_facts(
                 self.dsl_authority.state(),
                 &ctx.entry.agent_identity,
+                &ctx.entry.agent_runtime_id,
                 journal_session.as_ref(),
             )?;
             self.append_retire_event_for_entry(

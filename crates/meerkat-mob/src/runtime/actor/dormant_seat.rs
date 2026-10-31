@@ -2267,7 +2267,7 @@ impl SettledSeatChunk {
                     .with_history_unavailable(seat.candidate.history_unavailable.clone())
                     // A fresh life of an identity no member held (a rotation's
                     // request) names the incarnation it follows.
-                    .with_seat_rotation(seat.seat_rotation)
+                    .with_seat_rotation(seat.seat_rotation.clone())
                     // A resume seat that takes another role than its session
                     // was last built under records the declared migration,
                     // which the session's next build declares.

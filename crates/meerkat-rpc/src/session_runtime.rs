@@ -28223,6 +28223,74 @@ mod tests {
         );
     }
 
+    /// The same stop, with a help session that `help/ask` ran on the host's
+    /// runtime, and then a turn sent to it from another runtime of the
+    /// process.
+    ///
+    /// A help session continues only on the live session that ran it and is
+    /// never rebuilt from storage. Its actor ended with the stopped runtime,
+    /// so the turn could only wait for the session's next registration, which
+    /// refuses to rebuild it: the turn is refused before its admission with
+    /// the typed `help_session_not_resumable`, as after a restart, and
+    /// nothing is left owed. The session runtime's read of whether the
+    /// session is live must not ask the lost actor: such a read fails, and
+    /// the turn would be refused with that error instead.
+    #[test]
+    fn a_turn_to_a_help_session_after_its_hosts_runtime_stopped_is_refused_as_not_resumable() {
+        const PROMPT: &str = "a help question sent after the host's runtime stopped";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let host = rpc_host_runtime();
+        let (runtime, help_session) = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(recorder.clone()));
+            let help_session = rpc_help_ask(&runtime).await;
+            (runtime, help_session)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+        let process = process_runtime_outliving_the_host();
+        let (refusal, observed) = process.block_on(async {
+            let refusal = run_rpc_turn(&runtime, &help_session, PROMPT).await.err();
+            let refused_as = refusal.as_ref().map(|refusal| {
+                (
+                    refusal.code,
+                    refusal.data.as_ref().map(|data| data["kind"].clone()),
+                )
+            });
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&help_session)
+                .await
+                .is_some();
+            let left_open = open_inputs_carrying(&realm.runtime_store, &help_session, PROMPT).await;
+            let prompt_requests = recorder
+                .requests()
+                .iter()
+                .filter(|request| format!("{request:?}").contains(PROMPT))
+                .count();
+            drop(runtime);
+            (
+                refusal,
+                (refused_as, reload_required, left_open, prompt_requests),
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                Some((
+                    error::SESSION_NOT_RUNNING,
+                    Some(serde_json::json!("help_session_not_resumable"))
+                )),
+                false,
+                Vec::new(),
+                0
+            ),
+            "a turn sent to a help session after the host's runtime stopped is refused as not \
+             resumable before its admission, and nothing is left owed: {refusal:?}"
+        );
+    }
+
     /// The live open consumes the staged prompt and persists that with its
     /// row, so the persisted pending flag is clear after the first turn, and
     /// a restart does not deliver the prompt again: the transcript keeps

@@ -6475,6 +6475,16 @@ pub(super) struct BatchWireTrustRollback {
     comms: Arc<dyn CoreCommsRuntime>,
 }
 
+/// How one local member's destroy disposal ended.
+enum DestroyMemberDisposal {
+    /// Its steps ran; the report says whether one failed.
+    Steps(DisposalReport),
+    /// The member's operator-instruction target was not released before its
+    /// archive record: the member stays seated with its delivery facts, and a
+    /// retried destroy releases the target again.
+    InstructionReleasePending(MobError),
+}
+
 /// What a destroy admission hands its cleanup: the report so far, whether
 /// the destroy input is still needed, the roster it admitted against and the
 /// retire trust plans it proved.
@@ -52094,7 +52104,7 @@ impl MobActor {
     /// critical per-member cleanup steps succeed. General member disposal
     /// removes roster state in a finally block, but destroy retries rebuild
     /// cleanup work from the roster after a partial attempt.
-    async fn dispose_member_for_destroy(&mut self, ctx: &DisposalContext) -> DisposalReport {
+    async fn dispose_member_for_destroy(&mut self, ctx: &DisposalContext) -> DestroyMemberDisposal {
         // Both phases are built in their own frames: at opt-level 0 each
         // awaited future reserved twice its size in this poll frame.
         let (mut report, archive_disposal) =
@@ -52112,13 +52122,7 @@ impl MobActor {
             })
             .await
             {
-                report.aborted_at = Some((
-                    DisposalStep::ArchiveSession,
-                    MobError::Internal(format!(
-                        "the member's operator instruction target was not released: {error}"
-                    )),
-                ));
-                return report;
+                return DestroyMemberDisposal::InstructionReleasePending(error);
             }
             if let Err(error) =
                 boxed_arm_future(|| self.record_destroy_member_retirement_archived(ctx, disposal))
@@ -52141,7 +52145,7 @@ impl MobActor {
                 }
             }
         }
-        report
+        DestroyMemberDisposal::Steps(report)
     }
 
     async fn execute_destroy_step(
@@ -54923,7 +54927,23 @@ impl MobActor {
             }
         };
         if !disposal_already_complete {
-            let disposal_report = boxed_arm_future(|| self.dispose_member_for_destroy(&ctx)).await;
+            let disposal = boxed_arm_future(|| self.dispose_member_for_destroy(&ctx)).await;
+            let disposal_report = match disposal {
+                DestroyMemberDisposal::Steps(steps) => steps,
+                DestroyMemberDisposal::InstructionReleasePending(error) => {
+                    // The member stays seated with its delivery facts and no
+                    // archive record. The destroy goes on with the other
+                    // members and answers incomplete naming each such member,
+                    // so one retry releases them all.
+                    report.push_error(format!(
+                        "{}: disposal aborted at {}: the member's operator instruction \
+                         target was not released: {error}",
+                        entry.agent_identity,
+                        DisposalStep::ArchiveSession
+                    ));
+                    return Ok(());
+                }
+            };
             if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
                 report.push_error(format!("{}: {error}", entry.agent_identity));
                 if let Some(refusal) = Self::destroy_disposal_reload_refusal(&disposal_report) {
@@ -55548,7 +55568,10 @@ impl MobActor {
                 .remove(&entry.agent_identity)
                 .unwrap_or_else(RetireTrustCleanupPlan::empty);
             // Keep nested disposal futures out of this destroy coordinator's
-            // debug stack frame while retaining inline polling and drop.
+            // debug stack frame while retaining inline polling and drop. A
+            // member whose operator-instruction release did not land is named
+            // in the report and stays seated; the destroy goes on with the
+            // next member and answers incomplete below.
             boxed_arm_future(|| {
                 self.dispose_local_member_after_destroy_admission(entry, plan, &mut report)
             })

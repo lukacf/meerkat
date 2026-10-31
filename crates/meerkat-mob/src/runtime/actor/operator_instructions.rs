@@ -30,6 +30,27 @@ use meerkat_core::{
 /// How long a destroy waits for one member's operator-instruction release.
 const DESTROY_INSTRUCTION_RELEASE_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Realize a member's authorized operator-instruction release within
+/// `deadline`, for a retirement (its own deadline) and a destroy
+/// ([`DESTROY_INSTRUCTION_RELEASE_BOUND`]). Past the deadline the step fails
+/// typed and retryable (`MobError::RetirementInProgress` at stage
+/// `operator_instruction_target_release`), its member still seated, and a
+/// re-drive or a retried destroy releases the target again. A release that
+/// lands answers at once: the bound never delays it.
+pub(super) async fn bounded_member_instruction_release(
+    deadline: Instant,
+    session_id: SessionId,
+    realize: impl std::future::Future<Output = Result<(), MobError>>,
+) -> Result<(), MobError> {
+    match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), realize).await {
+        Ok(result) => result,
+        Err(_) => Err(MobError::RetirementInProgress {
+            session_id,
+            stage: "operator_instruction_target_release".to_string(),
+        }),
+    }
+}
+
 /// What MobMachine answered a write or revoke.
 enum WriteVerdict {
     Committed { generation: u64 },
@@ -466,13 +487,12 @@ impl MobActor {
         };
         let released_session = release.session_id().clone();
         let realize = self.member_instruction_release_future(agent_identity, release);
-        match tokio::time::timeout(DESTROY_INSTRUCTION_RELEASE_BOUND, realize).await {
-            Ok(result) => result,
-            Err(_) => Err(MobError::RetirementInProgress {
-                session_id: released_session,
-                stage: "operator_instruction_target_release".to_string(),
-            }),
-        }
+        bounded_member_instruction_release(
+            Instant::now() + DESTROY_INSTRUCTION_RELEASE_BOUND,
+            released_session,
+            realize,
+        )
+        .await
     }
 
     /// Realize a retiring member's authorized release. The member's delivery
@@ -503,6 +523,21 @@ impl MobActor {
                 | Err(meerkat_core::service::SessionInstructionError::Session(
                     meerkat_core::service::SessionError::NotFound { .. },
                 )) => Ok(()),
+                // A session whose recorded target or instruction history does
+                // not read holds no target this release can clear: as for a
+                // session that is gone, there is nothing to release, so a
+                // retirement or a destroy never waits on it.
+                Err(meerkat_core::service::SessionInstructionError::Refused(
+                    InstructionWriteError::Malformed(error),
+                )) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "the member session's operator instruction state does not read: there \
+                         is no target to release"
+                    );
+                    Ok(())
+                }
                 // A service that keeps no durable document holds no target to
                 // release; so does a session service wrapper that does not
                 // forward the release (its members' deliveries were blocked
@@ -590,5 +625,38 @@ fn refusal_error(
             })
         }
         Refusal::MobTerminal => OperatorInstructionError::MobTerminal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bound on a member's release, which a retirement takes from its own
+    /// deadline: a release that has not landed by the deadline fails the
+    /// step typed and retryable at the release stage, and one that lands
+    /// answers its own result at once.
+    #[tokio::test]
+    async fn a_release_past_its_deadline_fails_typed_and_retryable() {
+        let session_id = SessionId::new();
+        let deadline = Instant::now();
+        let error = bounded_member_instruction_release(
+            deadline,
+            session_id.clone(),
+            std::future::pending::<Result<(), MobError>>(),
+        )
+        .await
+        .expect_err("a release that never lands is bounded by its deadline");
+        assert!(
+            matches!(
+                &error,
+                MobError::RetirementInProgress { session_id: released, stage }
+                    if released == &session_id && stage == "operator_instruction_target_release"
+            ),
+            "the step fails typed and retryable: {error:?}"
+        );
+        bounded_member_instruction_release(deadline, session_id, std::future::ready(Ok(())))
+            .await
+            .expect("a release that lands answers at once, past its deadline or not");
     }
 }

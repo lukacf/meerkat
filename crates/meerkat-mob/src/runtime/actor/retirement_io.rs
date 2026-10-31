@@ -2383,18 +2383,12 @@ impl MobActor {
             "retire-instruction-target-release",
             RetirementFenceScope::SelfOnly,
             async move {
-                let result = match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()),
+                let result = super::operator_instructions::bounded_member_instruction_release(
+                    deadline,
+                    released_session,
                     realize,
                 )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(MobError::RetirementInProgress {
-                        session_id: released_session,
-                        stage: "operator_instruction_target_release".to_string(),
-                    }),
-                };
+                .await;
                 RetirementObservation::InstructionTargetReleased { disposal, result }
             },
         );

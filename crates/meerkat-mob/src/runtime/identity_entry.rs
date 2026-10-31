@@ -1182,6 +1182,102 @@ pub(crate) fn machine_entry_origin(
         .map(IdentityEntryOrigin::from_machine)
 }
 
+// ---------------------------------------------------------------------------
+// What a retirement's journal rows record
+// ---------------------------------------------------------------------------
+
+/// Why `identity`'s retirement started or ended, as its journal rows record
+/// it, read from `state`, MobMachine's state before the step that writes the
+/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal
+/// marks the identity's entry (`identity_entry_retiring`). The seal marks
+/// only a member whose retirement has not started and never drops the mark
+/// of one whose retirement has, so the start row and the end's row read the
+/// same mark, and the end of a marked retirement ends the entry. The one
+/// reader of the mark for the journal: the start row and the plain terminal
+/// row read it here. A rotation's terminal keeps the identity's standing and
+/// records no cause.
+pub(crate) fn stored_retirement_cause(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Option<MemberRetirementCause> {
+    state
+        .identity_entry_retiring
+        .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+        .then_some(MemberRetirementCause::Unlisted)
+}
+
+/// The session a retirement's `MemberRetired` journal effect names, as its
+/// row records it.
+pub(crate) fn retired_session(
+    session_id: Option<&mob_dsl::SessionId>,
+) -> Result<Option<SessionId>, MobError> {
+    session_id
+        .map(|session| {
+            SessionId::parse(&session.0).map_err(|error| {
+                MobError::Internal(format!(
+                    "a retirement's journal effect names an invalid session id '{}': {error}",
+                    session.0
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// What the terminal row of a plain retirement (a retire's end, or a
+/// destroy's) records for the journal read: the session its `MemberRetired`
+/// journal effect names (`session_id`, none for a peer-only member), and the
+/// cause and the identity entry read from `state`, MobMachine's state before
+/// the step, which may end the entry. No rotation ended it.
+pub(crate) fn plain_retirement_facts(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+    session_id: Option<&mob_dsl::SessionId>,
+) -> Result<crate::event::MemberRetiredFacts, MobError> {
+    Ok(crate::event::MemberRetiredFacts::new(
+        retired_session(session_id)?,
+        stored_retirement_cause(state, identity),
+        machine_entry_origin(state, identity),
+        None,
+    ))
+}
+
+/// The link a rotation's terminal step journals on both of its rows, as
+/// MobMachine decided it: the rotation's target, which the machine recorded
+/// at the rotation's start and the step consumes (`member_rotation_targets`
+/// in `before`, the state before the step), and the incarnation and role the
+/// step seated (`identity_runtime_generations` and `member_profile_names` in
+/// `after`, the step's own state). A fact missing from either state is a
+/// defect, answered as one.
+pub(crate) fn rotation_link(
+    before: &mob_dsl::MobMachineState,
+    after: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> Result<RetiredRotation, MobError> {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    let missing = |fact: &str| {
+        MobError::Internal(format!(
+            "the rotation of '{identity}' holds no {fact} in the machine state"
+        ))
+    };
+    let target = before
+        .member_rotation_targets
+        .get(&dsl_identity)
+        .copied()
+        .map(super::RotationTarget::from_machine)
+        .ok_or_else(|| missing("target"))?;
+    let successor = after
+        .identity_runtime_generations
+        .get(&dsl_identity)
+        .map(|generation| Generation::new(generation.0))
+        .ok_or_else(|| missing("seated generation"))?;
+    let successor_role = after
+        .member_profile_names
+        .get(&dsl_identity)
+        .map(|profile| ProfileName::from(profile.as_str()))
+        .ok_or_else(|| missing("seated role"))?;
+    Ok(RetiredRotation::new(target, successor, successor_role))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

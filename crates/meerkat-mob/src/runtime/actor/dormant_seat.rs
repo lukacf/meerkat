@@ -1621,6 +1621,14 @@ impl MobActor {
         let committed = transitions.first().ok_or_else(|| {
             MobError::Internal("the rotation's terminal applied no transition".into())
         })?;
+        // The retirement's facts for the journal read, as this step decides
+        // them: the session its journal effect names and the entry the
+        // identity holds (a rotation keeps it), read before the step.
+        let retired_session = super::super::identity_entry::retired_session(session_id.as_ref())?;
+        let retired_entry = super::super::identity_entry::machine_entry_origin(
+            self.dsl_authority.state(),
+            identity,
+        );
         Self::require_member_lifecycle_journal_effect(
             committed,
             mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -1846,7 +1854,21 @@ impl MobActor {
             prepared.authority.state(),
             identity,
         );
-        let spawned = spawned.with_identity_entry(identity_entry);
+        // The link both rows journal, as this step decides it: the target
+        // MobMachine recorded at the rotation's start, which the step
+        // consumes, and the incarnation and role it seats. A rotation keeps
+        // the identity's standing: its retirement records no cause.
+        let link = super::super::identity_entry::rotation_link(
+            self.dsl_authority.state(),
+            prepared.authority.state(),
+            identity,
+        )?;
+        let spawned = spawned
+            .with_identity_entry(identity_entry)
+            .with_seat_rotation(Some(crate::runtime::SeatRotation::successor(
+                entry.generation,
+                link.target,
+            )));
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -1856,7 +1878,12 @@ impl MobActor {
                     generation: entry.generation,
                     role: entry.role.clone(),
                     session_archived: disposal == mob_dsl::MemberSessionDisposal::Archived,
-                    facts: crate::event::MemberRetiredFacts::default(),
+                    facts: crate::event::MemberRetiredFacts::new(
+                        retired_session,
+                        None,
+                        retired_entry,
+                        Some(link),
+                    ),
                 },
             },
             NewMobEvent {

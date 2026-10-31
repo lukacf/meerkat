@@ -53437,6 +53437,7 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
+            let journal_session = if is_peer_only { None } else { session_id };
             Self::require_member_lifecycle_journal_effect(
                 &prepared.transition,
                 mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -53444,12 +53445,22 @@ impl MobActor {
                 &ctx.entry.agent_runtime_id,
                 None,
                 ctx.entry.generation,
-                if is_peer_only { None } else { session_id },
+                journal_session.clone(),
                 "dispose_member_archive_completed",
+            )?;
+            // What the row records for the journal read, as this step decides
+            // it: the session its journal effect names, and the cause and the
+            // entry from the machine state before the step (the end of an
+            // unlisted retirement ends the entry in it).
+            let facts = super::identity_entry::plain_retirement_facts(
+                self.dsl_authority.state(),
+                &ctx.entry.agent_identity,
+                journal_session.as_ref(),
             )?;
             self.append_retire_event_for_entry(
                 &ctx.entry,
                 !is_peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+                facts,
             )
             .await?;
         }
@@ -54096,6 +54107,12 @@ impl MobActor {
         };
         let prepared =
             self.prepare_dsl_signal_transition(archive_signal, "destroy_member_archive_completed")?;
+        let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+        let journal_session = if peer_only {
+            None
+        } else {
+            session_id_for_journal
+        };
         Self::require_member_lifecycle_journal_effect(
             &prepared.transition,
             mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -54103,21 +54120,24 @@ impl MobActor {
             &ctx.entry.agent_runtime_id,
             None,
             ctx.entry.generation,
-            if Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed {
-                None
-            } else {
-                session_id_for_journal
-            },
+            journal_session.clone(),
             "destroy_member_archive_completed",
         )?;
         if !self
             .retire_event_exists(&ctx.entry.agent_identity, ctx.entry.generation)
             .await?
         {
-            let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+            // As the retire's terminal: the session the journal effect names,
+            // and the cause and the entry from the state before the step.
+            let facts = super::identity_entry::plain_retirement_facts(
+                self.dsl_authority.state(),
+                &ctx.entry.agent_identity,
+                journal_session.as_ref(),
+            )?;
             self.append_retire_event_for_entry(
                 &ctx.entry,
                 !peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+                facts,
             )
             .await?;
         }
@@ -64158,13 +64178,12 @@ impl MobActor {
         // cause, so a replay marks the entry again and the end of the
         // retirement ends the entry, as it does live. The seal marks only a
         // member whose retirement has not started and never drops the mark of
-        // one whose retirement has, so the mark here is the mark at the end.
-        let cause = self
-            .dsl_authority
-            .state()
-            .identity_entry_retiring
-            .contains(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
-            .then_some(super::MemberRetirementCause::Unlisted);
+        // one whose retirement has, so the mark here is the mark at the end,
+        // which the terminal row reads through the same helper.
+        let cause = super::identity_entry::stored_retirement_cause(
+            self.dsl_authority.state(),
+            &entry.agent_identity,
+        );
         let desired = MobEventKind::MemberRetirementStarted {
             agent_identity: entry.agent_identity.clone(),
             agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -64232,18 +64251,22 @@ impl MobActor {
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.
     /// `session_archived` records that the retirement archived the member's
     /// session (its disposal was Archived): replay records an identity
-    /// entry's archived session from it, as the live terminal does.
+    /// entry's archived session from it, as the live terminal does. `facts`
+    /// is what the row records for the member lifecycle journal read, as the
+    /// terminal step decided it
+    /// ([`super::identity_entry::plain_retirement_facts`]).
     async fn append_retire_event_for_entry(
         &mut self,
         entry: &RosterEntry,
         session_archived: bool,
+        facts: crate::event::MemberRetiredFacts,
     ) -> Result<(), MobError> {
         let desired = MobEventKind::MemberRetired {
             agent_identity: entry.agent_identity.clone(),
             generation: entry.generation,
             role: entry.role.clone(),
             session_archived,
-            facts: crate::event::MemberRetiredFacts::default(),
+            facts,
         };
         let append = self
             .events

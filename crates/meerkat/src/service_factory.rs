@@ -1884,6 +1884,17 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .map(|profile| profile.inline_video)
     }
 
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        // As for inline video: a config that cannot be read freshly answers
+        // "unknown", never a lowering from a stale snapshot.
+        let config = self.resolve_config().await.ok()?;
+        let registry = config.model_registry(meerkat_models::canonical()).ok()?;
+        Some(registry.instruction_lowering_for_identity(&config, identity))
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,

@@ -3422,6 +3422,19 @@ pub trait SessionAgentBuilder: Send + Sync {
         meerkat_models::inline_video_support_for(identity.provider, &identity.model)
     }
 
+    /// How operator-instruction entries lower for the model and binding
+    /// `identity` names, as this builder serves them
+    /// (`meerkat_core::ModelRegistry::instruction_lowering_for_identity`),
+    /// or `None` when this builder cannot tell. A session's instruction read
+    /// reports it, so a status read can say why a pending change waits.
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        let _ = identity;
+        None
+    }
+
     /// The auth binding a build that names `auth_binding` records in its
     /// session's metadata: the same binding stamped with the realm that
     /// declares it (a binding a realm inherits is recorded under its owner).
@@ -4745,6 +4758,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         auth_binding: &meerkat_core::AuthBindingRef,
     ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
         self.builder.recorded_auth_binding(auth_binding).await
+    }
+
+    /// How operator-instruction entries lower for `identity`, as this
+    /// service's builder serves it
+    /// ([`SessionAgentBuilder::instruction_lowering_for_identity`]).
+    pub(crate) async fn instruction_lowering_for_identity(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        self.builder
+            .instruction_lowering_for_identity(identity)
+            .await
     }
 
     /// Where this service's builds keep the durable comms identity of each

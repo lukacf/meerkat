@@ -19565,7 +19565,19 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInst
         let effective =
             meerkat_core::effective_operator_instructions(session.id(), session.messages())
                 .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
-        Ok(meerkat_core::service::SessionInstructionRead { target, effective })
+        let lowering = match session.session_metadata() {
+            Some(metadata) => {
+                self.inner
+                    .instruction_lowering_for_identity(&metadata.llm_identity())
+                    .await
+            }
+            None => None,
+        };
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering,
+        })
     }
 }
 

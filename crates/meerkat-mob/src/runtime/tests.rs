@@ -5791,7 +5791,11 @@ impl MobSessionService for MockSessionService {
         let effective =
             meerkat_core::effective_operator_instructions(session.id(), session.messages())
                 .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
-        Ok(meerkat_core::service::SessionInstructionRead { target, effective })
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering: None,
+        })
     }
 
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {

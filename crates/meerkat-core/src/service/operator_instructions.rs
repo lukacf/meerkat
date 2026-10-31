@@ -52,12 +52,19 @@ impl From<InstructionStateError> for SessionInstructionError {
     }
 }
 
-/// A session's committed operator-instruction state: its recorded target
-/// and the effective set its own entry rows leave.
+/// A session's committed operator-instruction state: its recorded target,
+/// the effective set its own entry rows leave, and how its model lowers
+/// entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInstructionRead {
     pub target: Option<SessionInstructionState>,
     pub effective: EffectiveOperatorInstructions,
+    /// How entries lower for the model and binding the session records, as
+    /// its service resolves them (`ModelRegistry::instruction_lowering_for_identity`);
+    /// `None` when the service cannot tell. A pending change waits for a
+    /// run start that can apply it: one inside the leading System prefix
+    /// for `LeadingPrefixOnly`, none for `Unavailable`.
+    pub lowering: Option<crate::InstructionLowering>,
 }
 
 /// Operator-instruction extension for [`SessionService`]: a session's own

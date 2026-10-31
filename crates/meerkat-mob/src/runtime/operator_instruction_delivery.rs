@@ -172,16 +172,23 @@ impl OperatorInstructionDeliveryShared {
             .cloned()
     }
 
-    /// Drop the bookkeeping of members that are no longer seated.
-    fn retain_members(&self, seated: &BTreeSet<AgentIdentity>) {
+    /// Drop the bookkeeping of members `state` no longer seats. It reads the
+    /// roster only for the members it holds bookkeeping for, never the whole
+    /// roster.
+    fn retain_members(&self, state: &mob_dsl::MobMachineState) {
+        let seated = |identity: &AgentIdentity| {
+            state
+                .identity_to_runtime
+                .contains_key(&mob_dsl::AgentIdentity::from_domain(identity))
+        };
         self.last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|identity, _| seated.contains(identity));
+            .retain(|identity, _| seated(identity));
         self.member_locks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|identity, lock| seated.contains(identity) || Arc::strong_count(lock) > 1);
+            .retain(|identity, lock| seated(identity) || Arc::strong_count(lock) > 1);
     }
 }
 
@@ -442,6 +449,17 @@ fn classify_delivery_result(
         })
     };
     match result {
+        // The session holds a later generation under this mob's id than the
+        // mob ever minted: an earlier incarnation of the mob id recorded it
+        // (the mob was destroyed and a new one took its id before the old
+        // target was released). The snapshot it holds is not this mob's, so
+        // the delivery is not current; it is retried, and the status read
+        // shows why.
+        Ok(receipt) if receipt.target_generation > generation => DeliveryResult::Retry(format!(
+            "the member session holds operator instruction generation {} under this mob's id, \
+             above this mob's generation {generation}: an earlier mob with this id recorded it",
+            receipt.target_generation
+        )),
         Ok(_) => DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Recorded {
             agent_identity: agent_identity.clone(),
             session_id: session_id.clone(),
@@ -648,16 +666,20 @@ impl OperatorInstructionDeliveryReconciler {
     /// Start every deliverable member's delivery the lanes have room for,
     /// and answer when the next scan is due.
     fn scan(&self, lanes: &mut DeliveryLanes) -> Duration {
-        let (candidates, seated) = {
+        let candidates = {
             let state = self.handle.machine_state_watch_rx.borrow();
-            let seated = state
-                .identity_to_runtime
-                .keys()
-                .map(|identity| AgentIdentity::from(identity.0.as_str()))
-                .collect::<BTreeSet<_>>();
-            (deliverable_members(&state), seated)
+            self.shared.retain_members(&state);
+            // A mob with nothing owed and nothing under way has nothing to
+            // scan: the next machine change or the safety interval wakes it.
+            if state.member_instruction_owed.is_empty()
+                && lanes.in_flight.is_empty()
+                && lanes.feeding.is_empty()
+                && lanes.retry.is_empty()
+            {
+                return super::RECONCILE_SAFETY_INTERVAL;
+            }
+            deliverable_members(&state)
         };
-        self.shared.retain_members(&seated);
         let owed = candidates
             .iter()
             .map(|(identity, generation, _)| (identity.clone(), *generation))
@@ -1021,8 +1043,20 @@ impl MobHandle {
             (_, true) => (None, MemberInstructionEffectiveRead::Ok),
         };
         let live_channel_open = self.member_live_channel_open(session_id.as_ref()).await;
-        let leading_prefix_only = residency == MemberInstructionResidency::Live
-            && self.member_lowers_leading_prefix_only(identity).await;
+        // The session's resolved lowering, as its service reads it; without
+        // one, the model's resolved capabilities (a dormant member's from
+        // the catalog, read-only) tell whether it lowers only inside the
+        // leading System prefix.
+        let lowering = match read.as_ref().and_then(|read| read.lowering) {
+            Some(lowering) => lowering,
+            None => {
+                if !unborn && self.member_lowers_leading_prefix_only(identity).await {
+                    meerkat_core::InstructionLowering::LeadingPrefixOnly
+                } else {
+                    meerkat_core::InstructionLowering::MidConversation
+                }
+            }
+        };
         let slots = desired
             .iter()
             .map(|record| {
@@ -1033,7 +1067,7 @@ impl MobHandle {
                     read.as_ref(),
                     &delivery_state,
                     unborn,
-                    leading_prefix_only,
+                    lowering,
                 )
             })
             .collect();
@@ -1067,8 +1101,9 @@ impl MobHandle {
         false
     }
 
-    /// Whether a live member's model takes System rows only inside the
-    /// leading System prefix, from its resolved capabilities.
+    /// Whether a member's model takes System rows only inside the leading
+    /// System prefix, from its resolved capabilities (a live member's
+    /// registration, a dormant member's model from the catalog).
     async fn member_lowers_leading_prefix_only(&self, identity: &AgentIdentity) -> bool {
         match self.member_status(identity).await {
             Ok(snapshot) => snapshot
@@ -1187,7 +1222,7 @@ fn member_slot_status(
     read: Option<&SessionInstructionRead>,
     delivery: &MemberInstructionDeliveryState,
     unborn: bool,
-    leading_prefix_only: bool,
+    lowering: meerkat_core::InstructionLowering,
 ) -> MemberInstructionSlotStatus {
     let selected = record.target.selects(identity, &ProfileName::from(profile));
     let desired = MemberInstructionSlotView {
@@ -1241,13 +1276,19 @@ fn member_slot_status(
         MemberInstructionSlotState::Pending {
             reason: MemberInstructionPendingReason::DeliveryOwed,
         }
-    } else if leading_prefix_only {
-        MemberInstructionSlotState::Pending {
-            reason: MemberInstructionPendingReason::LeadingPrefixOnlyLowering,
-        }
     } else {
         MemberInstructionSlotState::Pending {
-            reason: MemberInstructionPendingReason::AwaitingRunStart,
+            reason: match lowering {
+                meerkat_core::InstructionLowering::Unavailable => {
+                    MemberInstructionPendingReason::LoweringUnavailable
+                }
+                meerkat_core::InstructionLowering::LeadingPrefixOnly => {
+                    MemberInstructionPendingReason::LeadingPrefixOnlyLowering
+                }
+                meerkat_core::InstructionLowering::MidConversation => {
+                    MemberInstructionPendingReason::AwaitingRunStart
+                }
+            },
         }
     };
     MemberInstructionSlotStatus {

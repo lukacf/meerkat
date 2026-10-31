@@ -99019,6 +99019,10 @@ mod owned_retirement;
 mod provisional_tail_check;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
+/// The retire of an identity with no roster incarnation is MobMachine's
+/// answer (`RetireAbsent`) in every phase, never the handle's own.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod retire_absent;
 /// `MobHandle::retire_at_scope` retires the incarnation its delivery scope
 /// names, admitted in every step's own actor command, or nothing.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

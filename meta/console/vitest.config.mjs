@@ -68,6 +68,9 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     include: [
+      // New tests take the .vitest.test suffix and need no entry here.
+      "console/src/**/*.vitest.test.{ts,tsx}",
+      "packages/*/src/**/*.vitest.test.{ts,tsx}",
       "console/src/lib/custom-panels.test.tsx",
       "console/src/mcp-apps/host.test.tsx",
       "console/src/mcp-apps/native-host.test.ts",

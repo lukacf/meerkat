@@ -683,6 +683,29 @@ jobs:
       - name: Deprecated backend stays unreferenced
         run: make deprecated-backend-gate
 
+      # The Mintlify parse and link check of the docs site (docs/, the MobKit
+      # mirror included) and of MobKit's source pages (meta/docs), last in the
+      # job on the Node.js it sets up itself. publish-mobkit-docs.yml runs the
+      # same check on docs/ only after a merge to main, where an MDX error (a
+      # raw angle-bracket placeholder in prose, or a code span broken across
+      # lines inside a component, say) fails the publication; here it fails
+      # the pull request instead. The mint version is the one
+      # publish-mobkit-docs.yml pins; change both together. Each directory's
+      # .mintignore keeps its internal records, which MDX cannot parse, out
+      # of the check.
+      - name: Setup Node.js for the Mintlify docs parse
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Mintlify parse and links (docs)
+        working-directory: docs
+        run: npx --yes mint@4.2.728 broken-links
+
+      - name: Mintlify parse and links (meta/docs)
+        working-directory: meta/docs
+        run: npx --yes mint@4.2.728 broken-links
+
   ratchets:
     name: Generation ratchets
     needs: [changes, stagger]

@@ -7619,8 +7619,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text11) => {
-  return text11.charAt(0).toUpperCase() + text11.slice(1);
+var capitalizeFirstCharacter = (text12) => {
+  return text12.charAt(0).toUpperCase() + text12.slice(1);
 };
 function getUnitTypeFromNumber(number5) {
   const abs = Math.abs(number5);
@@ -20918,11 +20918,11 @@ var EMBEDDED_PEER_ACK_TOKEN_RE = /\bACK_?FROM_?PEER_?peer[-_][a-z0-9][a-z0-9_-]*
 var EMBEDDED_PEER_RESPONSE_TOKEN_RE = /\bpeer[-_]merge[-_][a-z0-9][a-z0-9_-]*\b/gi;
 var LEGACY_INLINE_CODE_PLACEHOLDER_RE = /@@CODE\d+@@/g;
 function normalizeProjectDisplayLabel(value) {
-  const text11 = String(value || "").trim();
-  if (!text11) {
+  const text12 = String(value || "").trim();
+  if (!text12) {
     return "";
   }
-  return text11.split(/[\s_-]+/u).filter(Boolean).map((part) => part.replace(/^[a-z]/u, (char) => char.toUpperCase())).join(" ");
+  return text12.split(/[\s_-]+/u).filter(Boolean).map((part) => part.replace(/^[a-z]/u, (char) => char.toUpperCase())).join(" ");
 }
 function escapeHtml(value) {
   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -20938,12 +20938,12 @@ function safeConsoleHref(value) {
   }
   return null;
 }
-function renderConversationInlineMarkdown(text11, options = {}) {
+function renderConversationInlineMarkdown(text12, options = {}) {
   const displayNormalization = options.displayNormalization !== false;
   const codeTokens = [];
   const tokenPrefix = "\uE000CCODE";
   const tokenSuffix = "\uE001";
-  const source = displayNormalization ? normalizeConversationDisplayText(text11 || "") : String(text11 || "");
+  const source = displayNormalization ? normalizeConversationDisplayText(text12 || "") : String(text12 || "");
   const escaped = escapeHtml(source).replace(/`([^`]+)`/g, (_match, code4) => {
     const index2 = codeTokens.push('<code class="cc-rich-inline-code">'.concat(code4, "</code>")) - 1;
     return "".concat(tokenPrefix).concat(index2).concat(tokenSuffix);
@@ -20953,16 +20953,16 @@ function renderConversationInlineMarkdown(text11, options = {}) {
   }).replace(/\n/g, "<br />");
   return escaped.replace(new RegExp("".concat(tokenPrefix, "(\\d+)").concat(tokenSuffix), "g"), (_match, index2) => codeTokens[Number(index2)] || "");
 }
-function normalizeLegacyInlineCodePlaceholders(text11) {
-  const source = String(text11 || "");
+function normalizeLegacyInlineCodePlaceholders(text12) {
+  const source = String(text12 || "");
   if (!LEGACY_INLINE_CODE_PLACEHOLDER_RE.test(source)) {
     return source;
   }
   LEGACY_INLINE_CODE_PLACEHOLDER_RE.lastIndex = 0;
   return source.split(/\n/u).map((line) => line.replace(/\s*@@CODE\d+@@\s*(?:[—–-]\s*)?/g, " ").replace(/\s*,\s*(?=,|and\b|or\b|[.;:!?]|$)/gi, " ").replace(/\s*\+\s*/g, " ").replace(/\s+([,.;:!?])/g, "$1").replace(/\s{2,}/g, " ").trim()).filter(Boolean).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function normalizeEmbeddedMachinePeerTokens(text11) {
-  const source = String(text11 || "");
+function normalizeEmbeddedMachinePeerTokens(text12) {
+  const source = String(text12 || "");
   if (!EMBEDDED_MACHINE_PEER_TOKEN_RE.test(source) && !EMBEDDED_PEER_ACK_TOKEN_RE.test(source)) {
     return source;
   }
@@ -20970,8 +20970,8 @@ function normalizeEmbeddedMachinePeerTokens(text11) {
   EMBEDDED_PEER_ACK_TOKEN_RE.lastIndex = 0;
   return source.split(/\n/u).map((line) => line.replace(EMBEDDED_PEER_ACK_TOKEN_RE, "acknowledgement").replace(EMBEDDED_PEER_RESPONSE_TOKEN_RE, "response token").replace(EMBEDDED_MACHINE_PEER_TOKEN_RE, " ").replace(/\bcontaining\s*([.;])/gi, "$1").replace(/^Meta live peer smoke[.:]?\s*/i, "Peer check. ").replace(/\s+([,.;:!?])/g, "$1").replace(/:\s*([.;])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").replace(/\s{2,}/g, " ").trim()).filter(Boolean).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function normalizePeerSteeringPrompt(text11) {
-  const source = String(text11 || "").trim();
+function normalizePeerSteeringPrompt(text12) {
+  const source = String(text12 || "").trim();
   if (!source) {
     return "";
   }
@@ -21037,33 +21037,33 @@ function normalizePeerSteeringPrompt(text11) {
   }
   return source;
 }
-function normalizeDisplayPunctuation(text11) {
-  return String(text11 || "").split(/\n/u).map((line) => line.replace(/\b(verified|received):\s*`?(?:response token|acknowledgement)`?\.?$/i, "$1.").replace(/:\s*\./g, ".").replace(/:\s*$/g, ".").replace(/\s+([,.;:!?])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").trim()).filter((line) => line && !/^[\s"'“”‘’`´.,;:!?()[\]{}<>—–-]+$/u.test(line)).join("\n").trim();
+function normalizeDisplayPunctuation(text12) {
+  return String(text12 || "").split(/\n/u).map((line) => line.replace(/\b(verified|received):\s*`?(?:response token|acknowledgement)`?\.?$/i, "$1.").replace(/:\s*\./g, ".").replace(/:\s*$/g, ".").replace(/\s+([,.;:!?])/g, "$1").replace(/([.;:!?]){2,}/g, "$1").trim()).filter((line) => line && !/^[\s"'“”‘’`´.,;:!?()[\]{}<>—–-]+$/u.test(line)).join("\n").trim();
 }
-function normalizeConversationDisplayText(text11) {
+function normalizeConversationDisplayText(text12) {
   return normalizeDisplayPunctuation(
-    normalizePeerSteeringPrompt(normalizeEmbeddedMachinePeerTokens(normalizeLegacyInlineCodePlaceholders(text11)))
+    normalizePeerSteeringPrompt(normalizeEmbeddedMachinePeerTokens(normalizeLegacyInlineCodePlaceholders(text12)))
   );
 }
 function conversationRichPeerIntentForDisplay(intent, body) {
-  const text11 = String(intent || "").trim();
-  if (!text11) {
+  const text12 = String(intent || "").trim();
+  if (!text12) {
     return void 0;
   }
-  if (HIDDEN_PEER_DISPLAY_INTENTS.has(text11.toLowerCase()) || UUID_RE.test(text11) || MACHINE_PEER_TOKEN_RE.test(text11)) {
+  if (HIDDEN_PEER_DISPLAY_INTENTS.has(text12.toLowerCase()) || UUID_RE.test(text12) || MACHINE_PEER_TOKEN_RE.test(text12)) {
     return void 0;
   }
   if (body && String(body).trim()) {
     return void 0;
   }
-  return text11;
+  return text12;
 }
 function normalizeConversationDisplayLabel(label) {
-  const text11 = String(label || "").trim().replace(/\s+/g, " ");
-  if (!text11 || UUID_RE.test(text11) || MACHINE_PEER_TOKEN_RE.test(text11)) {
+  const text12 = String(label || "").trim().replace(/\s+/g, " ");
+  if (!text12 || UUID_RE.test(text12) || MACHINE_PEER_TOKEN_RE.test(text12)) {
     return "";
   }
-  const withoutToken = text11.replace(MACHINE_PEER_TOKEN_SUFFIX_RE, "").trim();
+  const withoutToken = text12.replace(MACHINE_PEER_TOKEN_SUFFIX_RE, "").trim();
   if (!withoutToken || UUID_RE.test(withoutToken) || MACHINE_PEER_TOKEN_RE.test(withoutToken)) {
     return "";
   }
@@ -21140,8 +21140,8 @@ function conversationRichBlockCopyText(block) {
   }
 }
 function conversationRichBlocksToText(blocks) {
-  const text11 = (blocks || []).map((block) => conversationRichBlockCopyText(block)).filter(Boolean).join("\n\n");
-  return blocks?.some((block) => block.type === "markdown" || block.type === "tool-call") ? text11 : text11.trim();
+  const text12 = (blocks || []).map((block) => conversationRichBlockCopyText(block)).filter(Boolean).join("\n\n");
+  return blocks?.some((block) => block.type === "markdown" || block.type === "tool-call") ? text12 : text12.trim();
 }
 function parseStreamingConversationRichBlocks(content3, options) {
   const source = String(content3 || "").trimEnd();
@@ -21360,10 +21360,10 @@ function splitMixedProseSection(section) {
   let prose = [];
   let structural = false;
   const flushProse = () => {
-    const text11 = prose.join("\n").replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ").trim();
+    const text12 = prose.join("\n").replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ").trim();
     prose = [];
-    if (text11) {
-      blocks.push({ type: "paragraph", text: text11 });
+    if (text12) {
+      blocks.push({ type: "paragraph", text: text12 });
     }
   };
   for (let index2 = 0; index2 < lines.length; index2 += 1) {
@@ -21565,8 +21565,8 @@ function conversationEntryText(entry) {
       ...attentionLines
     ].filter(Boolean).join("\n");
   }
-  const text11 = String(entry.copyText ?? entry.text ?? conversationRichBlocksToText(entry.blocks));
-  return entry.blocks?.some((block) => block.type === "markdown") ? text11 : text11.trim();
+  const text12 = String(entry.copyText ?? entry.text ?? conversationRichBlocksToText(entry.blocks));
+  return entry.blocks?.some((block) => block.type === "markdown") ? text12 : text12.trim();
 }
 
 // ../packages/console-core/src/transcript-source.ts
@@ -24014,7 +24014,7 @@ function toolCompletionFromFrame(frame, toolCallId) {
 // ../packages/console-core/src/context-record.ts
 var MAX_CONSOLE_CONTEXTS = 8;
 var MAX_CONSOLE_CONTEXT_BYTES = 64 * 1024;
-var byteLength = (text11) => new TextEncoder().encode(text11).length;
+var byteLength = (text12) => new TextEncoder().encode(text12).length;
 function validateConsoleContexts(records) {
   if (records.length > MAX_CONSOLE_CONTEXTS) throw new Error("A message can include at most 8 quotes.");
   const ids = /* @__PURE__ */ new Set();
@@ -24224,8 +24224,8 @@ function legacyPeerNoticeTextCandidates(record10) {
   }
   return candidates;
 }
-function isLegacyPeerNoticeText(text11) {
-  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text11.trim());
+function isLegacyPeerNoticeText(text12) {
+  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text12.trim());
 }
 function canUseLegacyPeerNoticeText(record10) {
   const kind = textFromUnknown(record10.kind);
@@ -25800,6 +25800,166 @@ function createPendingApprovalResource(input) {
   return resource;
 }
 
+// ../packages/console-core/src/host-attention.ts
+var HOST_ATTENTION_LIMITS = {
+  itemsPerSource: 50,
+  detailsPerItem: 12,
+  textLength: 300,
+  /** A source answer larger than this fails that source. */
+  responseBytes: 256 * 1024,
+  /** A source that has not answered within this fails alone. */
+  timeoutMs: 1e4
+};
+var TONES = /* @__PURE__ */ new Set(["attention", "info", "warning", "critical"]);
+function isSameOriginPath(value) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) return false;
+  if (new TextEncoder().encode(value).length > 2048) return false;
+  if (/[\s\u0000-\u001f\u007f-\u009f\\\uFEFF]/.test(value)) return false;
+  const path2 = value.split(/[?#]/, 1)[0];
+  return !path2.split("/").some((segment) => {
+    const decoded = segment.toLowerCase().replace(/%2e/g, ".");
+    return decoded === "." || decoded === "..";
+  });
+}
+function text3(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > HOST_ATTENTION_LIMITS.textLength ? "".concat(trimmed.slice(0, HOST_ATTENTION_LIMITS.textLength - 1), "\u2026") : trimmed;
+}
+function normalizeHostAttention(source, body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.items)) return null;
+  const items = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of body.items) {
+    if (items.length >= HOST_ATTENTION_LIMITS.itemsPerSource) break;
+    if (!raw || typeof raw !== "object") continue;
+    const record10 = raw;
+    const id = text3(record10.id);
+    const title = text3(record10.title);
+    if (!id || !title || seen.has(id) || !isSameOriginPath(record10.href)) continue;
+    const details = [];
+    if (Array.isArray(record10.details)) {
+      for (const detail of record10.details) {
+        if (details.length >= HOST_ATTENTION_LIMITS.detailsPerItem) break;
+        if (!detail || typeof detail !== "object") continue;
+        const label = text3(detail.label);
+        const value = text3(detail.value);
+        if (label && value) details.push({ label, value });
+      }
+    }
+    const tone = typeof record10.tone === "string" && TONES.has(record10.tone) ? record10.tone : void 0;
+    seen.add(id);
+    items.push({ sourceId: source.id, sourceLabel: source.label, id, title, details, href: record10.href, tone });
+  }
+  return items;
+}
+async function readCapped(response, limit) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    void response.body?.cancel().catch(() => {
+    });
+    return null;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const text12 = await response.text();
+    return new TextEncoder().encode(text12).length > limit ? null : text12;
+  }
+  const chunks = [];
+  let size = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      void reader.cancel().catch(() => {
+      });
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+async function loadSource(source, fetchImpl, signal, timeoutMs) {
+  if (!isSameOriginPath(source.url)) return null;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) return null;
+  signal?.addEventListener("abort", abort, { once: true });
+  let timer2;
+  const timedOut = new Promise((resolve) => {
+    timer2 = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+  const read = (async () => {
+    try {
+      const response = await fetchImpl(source.url, {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {
+        });
+        return null;
+      }
+      const text12 = await readCapped(response, HOST_ATTENTION_LIMITS.responseBytes);
+      return text12 === null ? null : normalizeHostAttention(source, JSON.parse(text12));
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    return await Promise.race([read, timedOut]);
+  } finally {
+    clearTimeout(timer2);
+    signal?.removeEventListener("abort", abort);
+    controller.abort();
+  }
+}
+async function loadHostAttention(sources, fetchImpl, signal, timeoutMs = HOST_ATTENTION_LIMITS.timeoutMs) {
+  const results = await Promise.all(sources.map(async (source) => ({
+    source,
+    items: await loadSource(source, fetchImpl, signal, timeoutMs)
+  })));
+  return {
+    status: "ready",
+    items: results.flatMap((result) => result.items || []),
+    failedSources: results.filter((result) => result.items === null).map((result) => result.source.label)
+  };
+}
+function startHostAttentionPolling(sources, publish, environment, intervalMs = 3e4) {
+  let stopped = false;
+  let current = null;
+  const load = async () => {
+    if (stopped || !environment.visible()) return;
+    current?.abort();
+    const mine = new AbortController();
+    current = mine;
+    const snapshot = await loadHostAttention(sources, environment.fetch, mine.signal);
+    if (!stopped && current === mine) publish(snapshot);
+  };
+  void load();
+  const timer2 = environment.setInterval(() => void load(), intervalMs);
+  const stopVisible = environment.onVisible(() => void load());
+  return () => {
+    stopped = true;
+    current?.abort();
+    environment.clearInterval(timer2);
+    stopVisible();
+  };
+}
+
 // ../packages/console-core/src/send-attempt.ts
 var nonemptyString = (value) => typeof value === "string" && value.trim().length > 0;
 function createConsoleSendAttempt(input) {
@@ -26012,8 +26172,8 @@ var NEUTRAL_HOST = "the server";
 function hostOf(names) {
   return names.host?.trim() || NEUTRAL_HOST;
 }
-function capitalize(text11) {
-  return text11.charAt(0).toUpperCase() + text11.slice(1);
+function capitalize(text12) {
+  return text12.charAt(0).toUpperCase() + text12.slice(1);
 }
 function consoleCannotReachHost(names) {
   return "Couldn't reach ".concat(hostOf(names), " (offline or signed out).");
@@ -26218,12 +26378,12 @@ function clsx() {
 var clsx_default = clsx;
 
 // ../packages/console-components/src/shared.ts
-function fallbackCopyTextToClipboard(text11) {
+function fallbackCopyTextToClipboard(text12) {
   if (typeof document === "undefined" || !document.body || typeof document.execCommand !== "function") {
     return false;
   }
   const textarea = document.createElement("textarea");
-  textarea.value = text11;
+  textarea.value = text12;
   textarea.setAttribute("readonly", "true");
   textarea.style.position = "fixed";
   textarea.style.top = "0";
@@ -26249,18 +26409,18 @@ function fallbackCopyTextToClipboard(text11) {
   }
   return copied;
 }
-async function copyTextToClipboard(text11) {
-  if (!text11.trim()) {
+async function copyTextToClipboard(text12) {
+  if (!text12.trim()) {
     return false;
   }
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(text11);
+      await navigator.clipboard.writeText(text12);
       return true;
     } catch {
     }
   }
-  return fallbackCopyTextToClipboard(text11);
+  return fallbackCopyTextToClipboard(text12);
 }
 
 // ../packages/console-components/src/activity/console-activity-rail.tsx
@@ -26299,7 +26459,7 @@ function CopyGlyph({ state = "idle" }) {
 // ../packages/console-components/src/copy-button.tsx
 var import_jsx_runtime5 = require("react/jsx-runtime");
 function CopyButton({
-  text: text11,
+  text: text12,
   label,
   copiedLabel = "Copied",
   className,
@@ -26307,7 +26467,7 @@ function CopyButton({
 }) {
   const [copied, setCopied] = (0, import_react3.useState)(false);
   const resetTimerRef = (0, import_react3.useRef)(null);
-  const disabled = !text11.trim();
+  const disabled = !text12.trim();
   (0, import_react3.useEffect)(() => () => {
     if (resetTimerRef.current != null) {
       window.clearTimeout(resetTimerRef.current);
@@ -26317,7 +26477,7 @@ function CopyButton({
     if (disabled) {
       return;
     }
-    const wasCopied = await copyTextToClipboard(text11);
+    const wasCopied = await copyTextToClipboard(text12);
     if (!wasCopied) {
       return;
     }
@@ -26369,10 +26529,10 @@ function readConsoleQuoteSelection(root4, selection) {
   for (const node2 of excluded) {
     if (range.intersectsNode(node2)) return { kind: "rejected", message: "Select only the message text, without tool controls or metadata." };
   }
-  const text11 = selection.toString();
+  const text12 = selection.toString();
   const messageId = start2.dataset.quoteMessageId;
-  if (!text11.trim() || !messageId) return { kind: "empty" };
-  return { kind: "selected", quote: { text: text11, messageId, sourceText: start2.dataset.quoteSource } };
+  if (!text12.trim() || !messageId) return { kind: "empty" };
+  return { kind: "selected", quote: { text: text12, messageId, sourceText: start2.dataset.quoteSource } };
 }
 
 // ../packages/console-components/src/conversation/quote-selection-action.tsx
@@ -27090,7 +27250,7 @@ function RelativeTime({
   const shared = useNow();
   const ms = toEpochMs(value);
   if (ms === null) return null;
-  const text11 = formatRelativeTime2(ms, now ?? shared);
+  const text12 = formatRelativeTime2(ms, now ?? shared);
   return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
     "time",
     {
@@ -27098,7 +27258,7 @@ function RelativeTime({
       dateTime: new Date(ms).toISOString(),
       title: title ?? formatAbsoluteTime(ms),
       "data-testid": testId,
-      children: prefix ? "".concat(prefix, " ").concat(text11) : text11
+      children: prefix ? "".concat(prefix, " ").concat(text12) : text12
     }
   );
 }
@@ -27872,12 +28032,51 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, onD
     )) }) : null
   ] });
 }
-function ApprovalAttention({ snapshot, onOpen }) {
-  if (snapshot.status === "forbidden" || snapshot.status === "unsupported") return null;
-  const requests = snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled");
-  const ready = snapshot.status === "ready";
-  const status = ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot.status === "loading" ? "Checking approvals" : snapshot.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
-  return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("section", { className: "cc-approval-attention", "aria-label": "Needs you", "data-testid": "approval-attention", "data-state": snapshot.status, "data-pending": ready && requests.length > 0, children: [
+function HostAttentionCard({ item }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)(
+    "article",
+    {
+      className: "cc-approval cc-host-attention",
+      "data-kind": "host",
+      "data-tone": item.tone || "attention",
+      "data-testid": "host-attention:".concat(item.sourceId, ":").concat(item.id),
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("header", { className: "cc-approval__header", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("strong", { className: "cc-approval__title", children: item.title }) }),
+          item.sourceLabel ? /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(Chip, { className: "cc-host-attention__source", children: "From ".concat(item.sourceLabel) }) : null
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
+          KeyValueList,
+          {
+            className: "cc-approval__scope",
+            items: item.details.map((detail, index2) => ({ key: "".concat(detail.label, ":").concat(index2), label: detail.label, value: detail.value }))
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cc-approval__actions", children: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
+          "a",
+          {
+            className: "cc-btn cc-host-attention__open",
+            href: item.href,
+            target: "_top",
+            "aria-label": "Open: ".concat(item.title),
+            "data-testid": "host-attention-open:".concat(item.sourceId, ":").concat(item.id),
+            children: "Open"
+          }
+        ) })
+      ]
+    }
+  );
+}
+function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }) {
+  const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  if (!approvalsShown && hostItems === 0) return null;
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const ready = !approvalsShown || snapshot?.status === "ready";
+  const approvalStatus = !approvalsShown ? "" : ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
+  const hostStatus = hostItems ? "".concat(hostItems, " item").concat(hostItems === 1 ? "" : "s", " from the host") : "";
+  const status = [approvalStatus, hostStatus].filter(Boolean).join(", ");
+  const count2 = requests.length + hostItems;
+  return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("section", { className: "cc-approval-attention", "aria-label": "Needs you", "data-testid": "approval-attention", "data-state": approvalsShown ? snapshot?.status : "ready", "data-pending": ready && count2 > 0, children: [
     /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)(
       "button",
       {
@@ -27892,7 +28091,7 @@ function ApprovalAttention({ snapshot, onOpen }) {
             /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("path", { d: "M2 14h6l2 3h4l2-3h6" })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cc-approval-attention__label", children: "Needs you" }),
-          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cc-approval-attention__count", "aria-hidden": "true", children: ready ? requests.length : snapshot.status === "loading" ? "..." : "!" }),
+          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cc-approval-attention__count", "aria-hidden": "true", children: ready ? count2 : snapshot?.status === "loading" ? "..." : "!" }),
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("svg", { className: "cc-approval-attention__chevron", viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("path", { d: "m6 4 4 4-4 4" }) })
         ]
       }
@@ -29913,7 +30112,7 @@ function one(state, node2, key) {
     return root(state, node2, key);
   }
   if (node2.type === "text") {
-    return text3(state, node2);
+    return text4(state, node2);
   }
 }
 function element(state, node2, key) {
@@ -29981,7 +30180,7 @@ function root(state, node2, key) {
   addChildren(props, createChildren(state, node2));
   return state.create(node2, state.Fragment, props, key);
 }
-function text3(_2, node2) {
+function text4(_2, node2) {
   return node2.value;
 }
 function addNode(state, props, type, node2) {
@@ -30754,7 +30953,7 @@ function resolveAllAttention(events, context) {
   let index2 = -1;
   let open;
   let group;
-  let text11;
+  let text12;
   let openingSequence;
   let closingSequence;
   let use;
@@ -30792,7 +30991,7 @@ function resolveAllAttention(events, context) {
             },
             end
           };
-          text11 = {
+          text12 = {
             type: use > 1 ? "strongText" : "emphasisText",
             start: {
               ...events[open][1].end
@@ -30820,9 +31019,9 @@ function resolveAllAttention(events, context) {
           if (events[open][1].end.offset - events[open][1].start.offset) {
             nextEvents = push(nextEvents, [["enter", events[open][1], context], ["exit", events[open][1], context]]);
           }
-          nextEvents = push(nextEvents, [["enter", group, context], ["enter", openingSequence, context], ["exit", openingSequence, context], ["enter", text11, context]]);
+          nextEvents = push(nextEvents, [["enter", group, context], ["enter", openingSequence, context], ["exit", openingSequence, context], ["enter", text12, context]]);
           nextEvents = push(nextEvents, resolveAll(context.parser.constructs.insideSpan.null, events.slice(open + 1, index2), context));
-          nextEvents = push(nextEvents, [["exit", text11, context], ["enter", closingSequence, context], ["exit", closingSequence, context], ["exit", group, context]]);
+          nextEvents = push(nextEvents, [["exit", text12, context], ["enter", closingSequence, context], ["exit", closingSequence, context], ["exit", group, context]]);
           if (events[index2][1].end.offset - events[index2][1].start.offset) {
             offset = 2;
             nextEvents = push(nextEvents, [["enter", events[index2][1], context], ["exit", events[index2][1], context]]);
@@ -32270,7 +32469,7 @@ function resolveHeadingAtx(events, context) {
   let contentEnd = events.length - 2;
   let contentStart = 3;
   let content3;
-  let text11;
+  let text12;
   if (events[contentStart][1].type === "whitespace") {
     contentStart += 2;
   }
@@ -32286,13 +32485,13 @@ function resolveHeadingAtx(events, context) {
       start: events[contentStart][1].start,
       end: events[contentEnd][1].end
     };
-    text11 = {
+    text12 = {
       type: "chunkText",
       start: events[contentStart][1].start,
       end: events[contentEnd][1].end,
       contentType: "text"
     };
-    splice(events, contentStart, contentEnd - contentStart + 1, [["enter", content3, context], ["enter", text11, context], ["exit", text11, context], ["exit", content3, context]]);
+    splice(events, contentStart, contentEnd - contentStart + 1, [["enter", content3, context], ["enter", text12, context], ["exit", text12, context], ["exit", content3, context]]);
   }
   return events;
 }
@@ -33182,7 +33381,7 @@ function resolveToLabelEnd(events, context) {
       ...events[close][1].end
     }
   };
-  const text11 = {
+  const text12 = {
     type: "labelText",
     start: {
       ...events[open + offset + 2][1].end
@@ -33193,9 +33392,9 @@ function resolveToLabelEnd(events, context) {
   };
   media = [["enter", group, context], ["enter", label, context]];
   media = push(media, events.slice(open + 1, open + offset + 3));
-  media = push(media, [["enter", text11, context]]);
+  media = push(media, [["enter", text12, context]]);
   media = push(media, resolveAll(context.parser.constructs.insideSpan.null, events.slice(open + offset + 4, close - 3), context));
-  media = push(media, [["exit", text11, context], events[close - 2], events[close - 1], ["exit", label, context]]);
+  media = push(media, [["exit", text12, context], events[close - 2], events[close - 1], ["exit", label, context]]);
   media = push(media, events.slice(close + 1));
   media = push(media, [["exit", group, context]]);
   splice(events, open, events.length, media);
@@ -33575,7 +33774,7 @@ var setextUnderline = {
 function resolveToSetextUnderline(events, context) {
   let index2 = events.length;
   let content3;
-  let text11;
+  let text12;
   let definition3;
   while (index2--) {
     if (events[index2][0] === "enter") {
@@ -33584,7 +33783,7 @@ function resolveToSetextUnderline(events, context) {
         break;
       }
       if (events[index2][1].type === "paragraph") {
-        text11 = index2;
+        text12 = index2;
       }
     } else {
       if (events[index2][1].type === "content") {
@@ -33604,9 +33803,9 @@ function resolveToSetextUnderline(events, context) {
       ...events[events.length - 1][1].end
     }
   };
-  events[text11][1].type = "setextHeadingText";
+  events[text12][1].type = "setextHeadingText";
   if (definition3) {
-    events.splice(text11, 0, ["enter", heading3, context]);
+    events.splice(text12, 0, ["enter", heading3, context]);
     events.splice(definition3 + 1, 0, ["exit", events[content3][1], context]);
     events[content3][1].end = {
       ...events[definition3][1].end
@@ -33701,7 +33900,7 @@ var resolver = {
   resolveAll: createResolver()
 };
 var string5 = initializeFactory("string");
-var text4 = initializeFactory("text");
+var text5 = initializeFactory("text");
 function initializeFactory(field) {
   return {
     resolveAll: createResolver(field === "text" ? resolveAllLineSuffixes : void 0),
@@ -33710,10 +33909,10 @@ function initializeFactory(field) {
   function initializeText(effects) {
     const self2 = this;
     const constructs2 = this.parser.constructs[field];
-    const text11 = effects.attempt(constructs2, start2, notText);
+    const text12 = effects.attempt(constructs2, start2, notText);
     return start2;
     function start2(code4) {
-      return atBreak(code4) ? text11(code4) : notText(code4);
+      return atBreak(code4) ? text12(code4) : notText(code4);
     }
     function notText(code4) {
       if (code4 === null) {
@@ -33727,7 +33926,7 @@ function initializeFactory(field) {
     function data(code4) {
       if (atBreak(code4)) {
         effects.exit("data");
-        return text11(code4);
+        return text12(code4);
       }
       effects.consume(code4);
       return data;
@@ -33846,7 +34045,7 @@ __export(constructs_exports, {
   flowInitial: () => flowInitial,
   insideSpan: () => insideSpan,
   string: () => string6,
-  text: () => text5
+  text: () => text6
 });
 var document3 = {
   [42]: list,
@@ -33886,7 +34085,7 @@ var string6 = {
   [38]: characterReference,
   [92]: characterEscape
 };
-var text5 = {
+var text6 = {
   [-5]: lineEnding,
   [-4]: lineEnding,
   [-3]: lineEnding,
@@ -34248,7 +34447,7 @@ function parse4(options) {
     flow: create2(flow),
     lazy: {},
     string: create2(string5),
-    text: create2(text4)
+    text: create2(text5)
   };
   return parser;
   function create2(initial) {
@@ -34749,7 +34948,7 @@ function compiler(options) {
     const siblings = node2.children;
     let tail = siblings[siblings.length - 1];
     if (!tail || tail.type !== "text") {
-      tail = text11();
+      tail = text12();
       tail.position = {
         start: point3(token.start),
         // @ts-expect-error: we’ll add `end` later.
@@ -34994,7 +35193,7 @@ function compiler(options) {
       children: []
     };
   }
-  function text11() {
+  function text12() {
     return {
       type: "text",
       value: ""
@@ -35277,13 +35476,13 @@ function image(state, node2) {
 
 // node_modules/mdast-util-to-hast/lib/handlers/inline-code.js
 function inlineCode(state, node2) {
-  const text11 = { type: "text", value: node2.value.replace(/\r?\n|\r/g, " ") };
-  state.patch(node2, text11);
+  const text12 = { type: "text", value: node2.value.replace(/\r?\n|\r/g, " ") };
+  state.patch(node2, text12);
   const result = {
     type: "element",
     tagName: "code",
     properties: {},
-    children: [text11]
+    children: [text12]
   };
   state.patch(node2, result);
   return state.applyData(node2, result);
@@ -35570,7 +35769,7 @@ function trimLine(value, start2, end) {
 }
 
 // node_modules/mdast-util-to-hast/lib/handlers/text.js
-function text6(state, node2) {
+function text7(state, node2) {
   const result = { type: "text", value: trimLines(String(node2.value)) };
   state.patch(node2, result);
   return state.applyData(node2, result);
@@ -35612,7 +35811,7 @@ var handlers = {
   table,
   tableCell,
   tableRow,
-  text: text6,
+  text: text7,
   thematicBreak: thematicBreak2,
   toml: ignore,
   yaml: ignore,
@@ -39186,12 +39385,12 @@ function linkReference2(node2, _2, state, info) {
   let subexit = state.enter("label");
   const tracker = state.createTracker(info);
   let value = tracker.move("[");
-  const text11 = state.containerPhrasing(node2, {
+  const text12 = state.containerPhrasing(node2, {
     before: value,
     after: "]",
     ...tracker.current()
   });
-  value += tracker.move(text11 + "][");
+  value += tracker.move(text12 + "][");
   subexit();
   const stack = state.stack;
   state.stack = [];
@@ -39204,7 +39403,7 @@ function linkReference2(node2, _2, state, info) {
   subexit();
   state.stack = stack;
   exit3();
-  if (type === "full" || !text11 || text11 !== reference) {
+  if (type === "full" || !text12 || text12 !== reference) {
     value += tracker.move(reference + "]");
   } else if (type === "shortcut") {
     value = value.slice(0, -1);
@@ -39449,7 +39648,7 @@ function strongPeek(_2, _1, state) {
 }
 
 // node_modules/mdast-util-to-markdown/lib/handle/text.js
-function text7(node2, _2, state, info) {
+function text8(node2, _2, state, info) {
   return state.safe(node2.value, info);
 }
 
@@ -39490,7 +39689,7 @@ var handle = {
   paragraph: paragraph2,
   root: root3,
   strong: strong2,
-  text: text7,
+  text: text8,
   thematicBreak: thematicBreak3
 };
 
@@ -39778,27 +39977,27 @@ var emailAutolink = {
   tokenize: tokenizeEmailAutolink,
   previous: previousEmail
 };
-var text8 = {};
+var text9 = {};
 function gfmAutolinkLiteral() {
   return {
-    text: text8
+    text: text9
   };
 }
 var code3 = 48;
 while (code3 < 123) {
-  text8[code3] = emailAutolink;
+  text9[code3] = emailAutolink;
   code3++;
   if (code3 === 58) code3 = 65;
   else if (code3 === 91) code3 = 97;
 }
-text8[43] = emailAutolink;
-text8[45] = emailAutolink;
-text8[46] = emailAutolink;
-text8[95] = emailAutolink;
-text8[72] = [emailAutolink, protocolAutolink];
-text8[104] = [emailAutolink, protocolAutolink];
-text8[87] = [emailAutolink, wwwAutolink];
-text8[119] = [emailAutolink, wwwAutolink];
+text9[43] = emailAutolink;
+text9[45] = emailAutolink;
+text9[46] = emailAutolink;
+text9[95] = emailAutolink;
+text9[72] = [emailAutolink, protocolAutolink];
+text9[104] = [emailAutolink, protocolAutolink];
+text9[87] = [emailAutolink, wwwAutolink];
+text9[119] = [emailAutolink, wwwAutolink];
 function tokenizeEmailAutolink(effects, ok3, nok) {
   const self2 = this;
   let dot;
@@ -40397,17 +40596,17 @@ function gfmStrikethrough(options) {
               start: Object.assign({}, events[open][1].start),
               end: Object.assign({}, events[index2][1].end)
             };
-            const text11 = {
+            const text12 = {
               type: "strikethroughText",
               start: Object.assign({}, events[open][1].end),
               end: Object.assign({}, events[index2][1].start)
             };
-            const nextEvents = [["enter", strikethrough2, context], ["enter", events[open][1], context], ["exit", events[open][1], context], ["enter", text11, context]];
+            const nextEvents = [["enter", strikethrough2, context], ["enter", events[open][1], context], ["exit", events[open][1], context], ["enter", text12, context]];
             const insideSpan2 = context.parser.constructs.insideSpan.null;
             if (insideSpan2) {
               splice(nextEvents, nextEvents.length, 0, resolveAll(insideSpan2, events.slice(open + 1, index2), context));
             }
-            splice(nextEvents, nextEvents.length, 0, [["exit", text11, context], ["enter", events[index2][1], context], ["exit", events[index2][1], context], ["exit", strikethrough2, context]]);
+            splice(nextEvents, nextEvents.length, 0, [["exit", text12, context], ["enter", events[index2][1], context], ["exit", events[index2][1], context], ["exit", strikethrough2, context]]);
             splice(events, open - 1, index2 - open + 3, nextEvents);
             index2 = open + nextEvents.length - 2;
             break;
@@ -41282,8 +41481,8 @@ function ChangeStatPair({
 
 // ../packages/console-components/src/conversation/conversation-rich-content.tsx
 var import_jsx_runtime32 = require("react/jsx-runtime");
-function markdownHtml(text11, displayNormalization = true) {
-  return { __html: renderConversationInlineMarkdown(text11, { displayNormalization }) };
+function markdownHtml(text12, displayNormalization = true) {
+  return { __html: renderConversationInlineMarkdown(text12, { displayNormalization }) };
 }
 function commandCopyText(block) {
   return [block.title, block.body, block.output || "", block.footer || ""].filter(Boolean).join("\n").trim();
@@ -41522,17 +41721,17 @@ function renderBlock(block, index2, Icon2, displayNormalization = true, markdown
   return /* @__PURE__ */ (0, import_jsx_runtime32.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime32.jsx)(ThinkingBlock, { block, index: index2, displayNormalization }) }, "thinking-".concat(index2));
 }
 var PEER_TOOL_NAMES = /* @__PURE__ */ new Set(["send_request", "send_message", "send_response"]);
-function formatJsonIfPossible(text11) {
-  const trimmed = text11.trim();
-  if (!trimmed) return text11;
+function formatJsonIfPossible(text12) {
+  const trimmed = text12.trim();
+  if (!trimmed) return text12;
   if (!(trimmed.startsWith("{") && trimmed.endsWith("}") || trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-    return text11;
+    return text12;
   }
   try {
     const parsed = JSON.parse(trimmed);
     return JSON.stringify(parsed, null, 2);
   } catch {
-    return text11;
+    return text12;
   }
 }
 function toolBlockCopyText(block) {
@@ -41552,8 +41751,8 @@ function toolBlockCopyText(block) {
   if (block.result) parts.push("Result: ".concat(block.result));
   return parts.join("\n");
 }
-function parseObjectJson(text11) {
-  const trimmed = String(text11 || "").trim();
+function parseObjectJson(text12) {
+  const trimmed = String(text12 || "").trim();
   if (!trimmed || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
     return null;
   }
@@ -41574,11 +41773,11 @@ function textFromUnknown2(value) {
   return normalizeConversationDisplayText(JSON.stringify(value, null, 2));
 }
 function meaningfulPeerResult(value) {
-  const text11 = normalizeConversationDisplayText(String(value || "")).trim();
-  if (!text11 || /^(completed|delivered|ok|success)$/i.test(text11)) {
+  const text12 = normalizeConversationDisplayText(String(value || "")).trim();
+  if (!text12 || /^(completed|delivered|ok|success)$/i.test(text12)) {
     return "";
   }
-  return formatJsonIfPossible(text11);
+  return formatJsonIfPossible(text12);
 }
 function peerDetailRows(block) {
   const args = parseObjectJson(block.arguments) || {};
@@ -41597,7 +41796,7 @@ function peerDetailRows(block) {
     result ? { label: "Result", value: result } : null
   ].filter(Boolean);
 }
-function CopyBtn({ text: text11, label = "Copy" }) {
+function CopyBtn({ text: text12, label = "Copy" }) {
   const [outcome, setOutcome] = (0, import_react17.useState)("idle");
   const resetTimer = (0, import_react17.useRef)(null);
   (0, import_react17.useEffect)(
@@ -41617,7 +41816,7 @@ function CopyBtn({ text: text11, label = "Copy" }) {
       "data-copy-outcome": outcome === "idle" ? void 0 : outcome,
       onClick: (e) => {
         e.stopPropagation();
-        void copyTextToClipboard(text11).then((ok3) => {
+        void copyTextToClipboard(text12).then((ok3) => {
           setOutcome(ok3 ? "copied" : "failed");
           if (resetTimer.current) clearTimeout(resetTimer.current);
           resetTimer.current = setTimeout(() => setOutcome("idle"), 1500);
@@ -45551,14 +45750,14 @@ function exchangeRows(result) {
     const outcome = asRecord(row.outcome);
     const rawStatus = outcome ? asString(outcome.status) : void 0;
     const status = rawStatus === "completed" || rawStatus === "failed" ? rawStatus : "pending";
-    const text11 = outcome ? status === "failed" ? asString(outcome.detail) : asString(outcome.text) : void 0;
+    const text12 = outcome ? status === "failed" ? asString(outcome.detail) : asString(outcome.text) : void 0;
     return [{
       round,
       sequence,
       participantOrder: participantOrder ?? 0,
       targetIdentity: asString(row.target_identity) || "",
       status,
-      ...text11 ? { text: text11 } : {},
+      ...text12 ? { text: text12 } : {},
       ...outcome && outcome.truncated === true ? { truncated: true } : {}
     }];
   });
@@ -46140,11 +46339,11 @@ var HIDDEN_EVENTS2 = /* @__PURE__ */ new Set([
   "tool_scope_changed"
 ]);
 function appendDistinctText(parts, value) {
-  const text11 = value.trim();
-  if (!text11) return;
-  const comparable = normalizeComparableText(text11);
+  const text12 = value.trim();
+  if (!text12) return;
+  const comparable = normalizeComparableText(text12);
   if (parts.some((part) => normalizeComparableText(part) === comparable)) return;
-  parts.push(text11);
+  parts.push(text12);
 }
 function textFromReasoningValue(value) {
   if (typeof value === "string") return value.trim();
@@ -46379,8 +46578,8 @@ function parseToolResult(frame, blobBaseUrl) {
   const completionEvidence = toolCompletionFromFrame(frame, parseToolCallId(frame) || "");
   const status = completionEvidence.outcome === "success" ? "success" : completionEvidence.outcome === "error" ? "error" : "pending";
   const feedback = operationFeedbackFromFrame(frame);
-  const { text: text11, images } = toolResultTextAndImages(record10, blobBaseUrl);
-  const result = feedback ? feedback.detail : text11;
+  const { text: text12, images } = toolResultTextAndImages(record10, blobBaseUrl);
+  const result = feedback ? feedback.detail : text12;
   return {
     ...result !== void 0 ? { result } : {},
     ...images.length > 0 ? { images } : {},
@@ -47214,8 +47413,8 @@ function createWorkGraphHydrationGate() {
     }
   };
 }
-function parsePeerSummary(text11) {
-  const match = text11.match(/Peer\s+(response|request|message):\s*(.+?)(?:\s*Status:\s|$)/s);
+function parsePeerSummary(text12) {
+  const match = text12.match(/Peer\s+(response|request|message):\s*(.+?)(?:\s*Status:\s|$)/s);
   if (!match) return null;
   const [, verb, body] = match;
   let summary = body.trim();
@@ -47250,9 +47449,9 @@ function renderTerminalEntry(agent, frame, entryId, streamedText = "", textMode 
   if (frame.event === "interaction_complete" || frame.event === "run_completed" || frame.event === "text_complete") {
     if (isSteerDeliveryTerminalFrame(frame)) return null;
     const source = terminalFrameVisibleText(frame);
-    const text11 = textMode === "markdown" ? source : source.trim();
-    if (!text11) return null;
-    const peer = parsePeerSummary(text11);
+    const text12 = textMode === "markdown" ? source : source.trim();
+    if (!text12) return null;
+    const peer = parsePeerSummary(text12);
     if (peer) {
       return {
         kind: "message",
@@ -47263,30 +47462,30 @@ function renderTerminalEntry(agent, frame, entryId, streamedText = "", textMode 
         text: "\u21A9 ".concat(peer.verb, ": ").concat(peer.summary)
       };
     }
-    if (streamedTextMatchesTerminal(streamedText, text11)) {
+    if (streamedTextMatchesTerminal(streamedText, text12)) {
       return null;
     }
-    const blocks = messageTextBlocks(text11, textMode);
+    const blocks = messageTextBlocks(text12, textMode);
     return {
       kind: "message",
       id: entryId,
       identity: agentIdentity(agent),
       variant: blocks.length > 0 ? "rich" : "plain",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      ...blocks.length > 0 ? { blocks } : { text: text11 }
+      ...blocks.length > 0 ? { blocks } : { text: text12 }
     };
   }
   if (frame.event === "interaction_failed" || frame.event === "run_failed") {
     const runtimeEvent = runtimeEventFromFrame(frame.event, frame.data);
     const detail = describeFailure(frame.data, "");
-    const text11 = detail ? "".concat(humanizeRuntimeEventType(frame.event), ": ").concat(detail) : runtimeEventText(runtimeEvent);
+    const text12 = detail ? "".concat(humanizeRuntimeEventType(frame.event), ": ").concat(detail) : runtimeEventText(runtimeEvent);
     return {
       kind: "message",
       id: entryId,
       identity: SYSTEM_IDENTITY,
       variant: "meta",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      text: text11,
+      text: text12,
       runtimeEvent
     };
   }
@@ -47371,10 +47570,10 @@ function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
     const key = assistantOwnerKey(frame);
     if (frame.event === "reasoning_complete" && frame.runId?.trim()) {
       const byText = reasoningByOwner.get(key) || /* @__PURE__ */ new Map();
-      const text11 = reasoningFrameText(frame);
-      const completions = byText.get(text11) || [];
+      const text12 = reasoningFrameText(frame);
+      const completions = byText.get(text12) || [];
       completions.push(frame);
-      byText.set(text11, completions);
+      byText.set(text12, completions);
       reasoningByOwner.set(key, byText);
     }
     let current = active.get(key);
@@ -47411,31 +47610,31 @@ function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
   const deltaOverrides = /* @__PURE__ */ new Map();
   for (const history of frames) {
     if (history.sourceKind !== "session_history" || hasAssistantMessageIdCarrier(history) || isRealtimeHistoryMessage(history)) continue;
-    const text11 = historyAssistantSource(history);
-    if (!text11) continue;
+    const text12 = historyAssistantSource(history);
+    if (!text12) continue;
     const key = assistantOwnerKey(history);
     const candidates = byOwner.get(key) || [];
     const occurrence = candidates.find((candidate) => {
       if (consumed.has(candidate) || !candidate.text) return false;
-      if (key === "legacy") return !candidate.owner.runId?.trim() && candidate.text === text11;
+      if (key === "legacy") return !candidate.owner.runId?.trim() && candidate.text === text12;
       if (!sameAssistantRunOwner(history, candidate.owner)) return false;
       if (!history.runId?.trim()) return true;
-      return candidate.text === text11 || !candidate.complete && candidate.frames.length > 0 && text11.startsWith(candidate.text);
+      return candidate.text === text12 || !candidate.complete && candidate.frames.length > 0 && text12.startsWith(candidate.text);
     });
     if (!occurrence) continue;
     consumed.add(occurrence);
     consumedHistory.add(history.id);
-    if (occurrence.text !== text11 && !occurrence.complete && occurrence.frames.length > 0) {
+    if (occurrence.text !== text12 && !occurrence.complete && occurrence.frames.length > 0) {
       const last = occurrence.frames.length - 1;
-      deltaOverrides.set(occurrence.frames[last].id, occurrence.chunks[last] + text11.slice(occurrence.text.length));
+      deltaOverrides.set(occurrence.frames[last].id, occurrence.chunks[last] + text12.slice(occurrence.text.length));
     }
   }
   return {
     consumedHistory,
     deltaOverrides,
-    consumeReasoning: (history, text11) => {
+    consumeReasoning: (history, text12) => {
       if (hasAssistantMessageIdCarrier(history) || isRealtimeHistoryMessage(history)) return false;
-      const candidates = reasoningByOwner.get(assistantOwnerKey(history))?.get(text11) || [];
+      const candidates = reasoningByOwner.get(assistantOwnerKey(history))?.get(text12) || [];
       const completion = candidates.find((live) => !consumedReasoning.has(live.id) && sameAssistantRunOwner(history, live));
       if (!completion) return false;
       consumedReasoning.add(completion.id);
@@ -47631,8 +47830,8 @@ function renderHistoryUserEntry(frame, entryId, blobBaseUrl, textMode = "markdow
     };
   }
   const source = extractTextFromContentBlocks(content3);
-  const text11 = textMode === "markdown" ? source : source.trim();
-  if (!text11) return null;
+  const text12 = textMode === "markdown" ? source : source.trim();
+  if (!text12) return null;
   return {
     kind: "message",
     id: entryId,
@@ -47640,9 +47839,9 @@ function renderHistoryUserEntry(frame, entryId, blobBaseUrl, textMode = "markdow
     ...realtimeOrigin ? { realtimeOrigin } : {},
     ...frame.interactionId ? { interactionId: frame.interactionId } : {},
     variant: textMode === "markdown" ? "rich" : "plain",
-    ...textMode === "markdown" ? { blocks: messageTextBlocks(text11, textMode) } : {},
+    ...textMode === "markdown" ? { blocks: messageTextBlocks(text12, textMode) } : {},
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    text: text11,
+    text: text12,
     ...origin ? { origin } : {}
   };
 }
@@ -47787,8 +47986,8 @@ function contentToUserBlocks(content3, blobBaseUrl, textMode = "markdown") {
     const record10 = block;
     const type = typeof record10.type === "string" ? record10.type : "";
     if (type === "text") {
-      const text11 = typeof record10.text === "string" ? record10.text : typeof record10.content === "string" ? record10.content : "";
-      blocks.push(...messageTextBlocks(text11, textMode));
+      const text12 = typeof record10.text === "string" ? record10.text : typeof record10.content === "string" ? record10.content : "";
+      blocks.push(...messageTextBlocks(text12, textMode));
       continue;
     }
     if (type === "image" || type === "image_ref") {
@@ -47910,8 +48109,8 @@ function toolResultTextAndImages(record10, blobBaseUrl) {
   const split = splitToolResultImages(carrier2, blobBaseUrl);
   const images = split.images.length > 0 || carrier2 === record10?.content ? split.images : splitToolResultImages(record10?.content, blobBaseUrl).images;
   const residualEmpty = split.images.length > 0 && Array.isArray(split.residual) && split.residual.length === 0;
-  const text11 = residualEmpty ? void 0 : toolResultTextFromContent(split.residual);
-  return { ...text11 !== void 0 ? { text: text11 } : {}, images };
+  const text12 = residualEmpty ? void 0 : toolResultTextFromContent(split.residual);
+  return { ...text12 !== void 0 ? { text: text12 } : {}, images };
 }
 function toolResultTextFromContent(content3) {
   if (typeof content3 === "string") return content3;
@@ -47936,8 +48135,8 @@ function historyToolResults(frames, cardToolCallIds, includeLive = false, blobBa
     const toolCallId = typeof data?.tool_call_id === "string" && data.tool_call_id.trim() ? data.tool_call_id.trim() : typeof data?.id === "string" && data.id.trim() ? data.id.trim() : "";
     if (!toolCallId) continue;
     const feedback = operationFeedbackFromFrame(frame);
-    const { text: text11, images } = toolResultTextAndImages(data, blobBaseUrl);
-    const result = feedback ? feedback.detail : text11;
+    const { text: text12, images } = toolResultTextAndImages(data, blobBaseUrl);
+    const result = feedback ? feedback.detail : text12;
     const completionEvidence = toolCompletionFromFrame(frame, toolCallId);
     const status = completionEvidence.outcome === "success" ? "success" : completionEvidence.outcome === "error" ? "error" : "pending";
     const next = {
@@ -48002,13 +48201,13 @@ function blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode = 
     const blockType = typeof item.block_type === "string" ? item.block_type : typeof item.type === "string" ? item.type : "";
     const data = item.data && typeof item.data === "object" ? item.data : {};
     if (blockType === "reasoning") {
-      const text11 = reasoningBlockText(item);
-      if (text11) {
+      const text12 = reasoningBlockText(item);
+      if (text12) {
         hasNonTextBlock = true;
         actionAndTextBlocks.push({
           type: "thinking",
           label: "",
-          text: text11,
+          text: text12,
           final: true,
           persisted: true
         });
@@ -48050,13 +48249,13 @@ function blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode = 
       continue;
     }
     if (blockType === "text" || blockType === "transcript") {
-      const text11 = typeof data.text === "string" ? data.text : typeof item.text === "string" ? item.text : "";
-      if (textMode === "markdown" && text11) {
+      const text12 = typeof data.text === "string" ? data.text : typeof item.text === "string" ? item.text : "";
+      if (textMode === "markdown" && text12) {
         const previous3 = actionAndTextBlocks.at(-1);
-        if (previous3?.type === "markdown") previous3.source += text11;
-        else actionAndTextBlocks.push(...messageTextBlocks(text11, textMode));
-      } else if (textMode !== "markdown" && text11.trim()) {
-        actionAndTextBlocks.push(...messageTextBlocks(text11, textMode));
+        if (previous3?.type === "markdown") previous3.source += text12;
+        else actionAndTextBlocks.push(...messageTextBlocks(text12, textMode));
+      } else if (textMode !== "markdown" && text12.trim()) {
+        actionAndTextBlocks.push(...messageTextBlocks(text12, textMode));
       }
     }
   }
@@ -48086,17 +48285,17 @@ function typedCommsStableBodyText(block) {
   ].filter(Boolean);
   return parts.join("\n");
 }
-function stripCommsIntentBodyPrefix(text11, peerAliases = []) {
-  const match = text11.match(/^\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]\n]+)\]\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i) || text11.match(/^\s*Peer\s+(?:message|request|response)\s+from\s+(.+):\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
+function stripCommsIntentBodyPrefix(text12, peerAliases = []) {
+  const match = text12.match(/^\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]\n]+)\]\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i) || text12.match(/^\s*Peer\s+(?:message|request|response)\s+from\s+(.+):\s*\n\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
   if (match?.[1] && peerAliases.length > 0) {
     const peer = normalizePeerAlias(match[1]);
-    if (!peerAliases.includes(peer)) return text11.trim();
+    if (!peerAliases.includes(peer)) return text12.trim();
   }
-  return (match?.[2] || text11).trim();
+  return (match?.[2] || text12).trim();
 }
-function stripBareCommsIntentBodyPrefix(text11) {
-  const match = text11.match(/^\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
-  return (match?.[1] || text11).trim();
+function stripBareCommsIntentBodyPrefix(text12) {
+  const match = text12.match(/^\s*Intent:\s*[^\n]*\n\s*Body:\s*([\s\S]+)$/i);
+  return (match?.[1] || text12).trim();
 }
 function isExternalEventOnlySystemNotice2(message) {
   if (!message || typeof message !== "object") return false;
@@ -48166,19 +48365,19 @@ function legacyPeerNoticeTextCandidates2(record10) {
   }
   return candidates;
 }
-function isLegacyPeerNoticeText2(text11) {
-  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text11.trim());
+function isLegacyPeerNoticeText2(text12) {
+  return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text12.trim());
 }
-function isCommsLikeRunStartedPrompt(text11) {
-  const trimmed = text11.trim();
+function isCommsLikeRunStartedPrompt(text12) {
+  const trimmed = text12.trim();
   return /(^|\n)\s*Peer (?:message|request|response)(?:\s+from\b|$)/i.test(trimmed) || /(^|\n)\s*\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b/i.test(trimmed);
 }
 var PEER_ENVELOPE_LINE_RE = /^Peer\s+(?:message|request|response)\s+from\s+(.+):(.*)$/i;
 var PEER_TRANSPORT_SCAFFOLD_START_RE = /Peer\s+request\s+from\s+peer_id\s/i;
 var PEER_TRANSPORT_SCAFFOLD_SPAN_RE = /Peer\s+request\s+from\s+peer_id\s[\s\S]*?(?:Do not answer this request with send_message\.|Do not use send_message for this reply\.)/gi;
-function stripPeerTransportScaffold(text11) {
-  if (!text11 || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text11)) return text11;
-  let scrubbed = text11.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
+function stripPeerTransportScaffold(text12) {
+  if (!text12 || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text12)) return text12;
+  let scrubbed = text12.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
   const residualIndex = scrubbed.search(PEER_TRANSPORT_SCAFFOLD_START_RE);
   if (residualIndex >= 0) scrubbed = scrubbed.slice(0, residualIndex);
   return scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -48186,8 +48385,8 @@ function stripPeerTransportScaffold(text11) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function stripPeerEnvelopeByAlias(text11, peerAliases) {
-  const normalized = text11.replace(/\r/g, "\n").trim();
+function stripPeerEnvelopeByAlias(text12, peerAliases) {
+  const normalized = text12.replace(/\r/g, "\n").trim();
   const aliases = [...peerAliases].filter(Boolean).sort((a, b2) => b2.length - a.length);
   for (const alias of aliases) {
     const escaped = escapeRegExp(alias);
@@ -48235,12 +48434,12 @@ function isPeerEnvelopeScaffoldLine(line, peerAliases = [], allowStandaloneScaff
 function isImagePlaceholderLine(line) {
   return /^\[image:\s*[^\]]+\]$/i.test(line.trim());
 }
-function normalizePeerEnvelopeText(text11, peerAliases = []) {
+function normalizePeerEnvelopeText(text12, peerAliases = []) {
   const allowGenericEnvelopeStrip = peerAliases.length === 0;
-  const intentBodyStripped = stripCommsIntentBodyPrefix(text11, peerAliases);
-  const envelopeStripped = intentBodyStripped === text11.trim() ? stripPeerEnvelopeByAlias(text11, peerAliases) : null;
-  const aliasStripped = envelopeStripped ?? (intentBodyStripped === text11.trim() ? null : intentBodyStripped);
-  let normalized = (envelopeStripped !== null ? stripBareCommsIntentBodyPrefix(envelopeStripped) : aliasStripped ?? text11).replace(/\r/g, "\n").split("\n").map((line) => line.trim()).filter((line) => {
+  const intentBodyStripped = stripCommsIntentBodyPrefix(text12, peerAliases);
+  const envelopeStripped = intentBodyStripped === text12.trim() ? stripPeerEnvelopeByAlias(text12, peerAliases) : null;
+  const aliasStripped = envelopeStripped ?? (intentBodyStripped === text12.trim() ? null : intentBodyStripped);
+  let normalized = (envelopeStripped !== null ? stripBareCommsIntentBodyPrefix(envelopeStripped) : aliasStripped ?? text12).replace(/\r/g, "\n").split("\n").map((line) => line.trim()).filter((line) => {
     if (isPeerEnvelopeScaffoldLine(
       line,
       peerAliases,
@@ -48255,8 +48454,8 @@ function normalizePeerEnvelopeText(text11, peerAliases = []) {
   }
   return normalized.replace(/\s+/g, " ").trim();
 }
-function normalizeStructuredCommsBodyText(text11, peerAliases = []) {
-  const trimmed = text11.trim();
+function normalizeStructuredCommsBodyText(text12, peerAliases = []) {
+  const trimmed = text12.trim();
   if (trimmed) {
     const stripped = stripPeerEnvelopeByAlias(trimmed, peerAliases);
     if (stripped !== null) return stripped.replace(/\s+/g, " ").trim();
@@ -48266,8 +48465,8 @@ function normalizeStructuredCommsBodyText(text11, peerAliases = []) {
 function normalizePeerAlias(value) {
   return value.trim().toLowerCase();
 }
-function peerFromCommsText(text11) {
-  const trimmed = text11.trim();
+function peerFromCommsText(text12) {
+  const trimmed = text12.trim();
   const peerLine = trimmed.match(/(?:^|\n)\s*Peer\s+(?:message|request|response)\s+from\s+(.+):(?:[^\n]*)/i);
   if (peerLine?.[1]) return normalizePeerAlias(peerLine[1]);
   const bracketed = trimmed.match(/(?:^|\n)\s*\[COMMS\s+(?:MESSAGE|REQUEST|RESPONSE)\s+from\s+([^\]]+)\]/i);
@@ -48283,8 +48482,8 @@ function normalizedPeerAliases(...values) {
   }
   return aliases;
 }
-function commsKindFromText(text11) {
-  const match = text11.trim().match(/(?:^|\n)\s*Peer\s+(message|request|response)\s+from\s+/i) || text11.trim().match(/(?:^|\n)\s*\[COMMS\s+(MESSAGE|REQUEST|RESPONSE)\s+from\s+/i);
+function commsKindFromText(text12) {
+  const match = text12.trim().match(/(?:^|\n)\s*Peer\s+(message|request|response)\s+from\s+/i) || text12.trim().match(/(?:^|\n)\s*\[COMMS\s+(MESSAGE|REQUEST|RESPONSE)\s+from\s+/i);
   return match?.[1]?.toLowerCase() || "";
 }
 function systemNoticeCommsSignatures(frame) {
@@ -48673,8 +48872,8 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
     if (type === "tool_config" || type === "mcp") {
       const payload = record10.payload && typeof record10.payload === "object" ? record10.payload : record10;
       const label = type === "mcp" ? "MCP" : "Tool config";
-      const text11 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record10) || label;
-      rich.push({ type: "divider", text: text11 });
+      const text12 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record10) || label;
+      rich.push({ type: "divider", text: text12 });
       continue;
     }
     if (type === "background_job" && typeof record10.job_id === "string" && record10.job_id.trim() && typeof record10.status === "string" && record10.status.trim()) {
@@ -48689,8 +48888,8 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
       continue;
     }
     if (type === "background_job" || type === "auth" || type === "runtime_notice") {
-      const text11 = typedNoticeBlockText2(record10) || type.replace(/_/g, " ");
-      rich.push({ type: "paragraph", text: text11 });
+      const text12 = typedNoticeBlockText2(record10) || type.replace(/_/g, " ");
+      rich.push({ type: "paragraph", text: text12 });
       continue;
     }
     const contentBlocks = typedNoticeContentBlocks(record10.content, blobBaseUrl);
@@ -48713,8 +48912,8 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
   const role = typeof record10.role === "string" ? record10.role : null;
   switch (role) {
     case "user": {
-      const text11 = extractTextFromContentBlocks(record10.content);
-      return { role: "user", text: text11 };
+      const text12 = extractTextFromContentBlocks(record10.content);
+      return { role: "user", text: text12 };
     }
     case "system_notice": {
       const blocks = typedSystemNoticeBlocksToRich(
@@ -48732,15 +48931,15 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
           index2
         ).length > 0)
       );
-      const text11 = duplicateCommsConsumed ? "" : typeof record10.body === "string" ? record10.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
-      return { role: "meta", text: text11, ...blocks.length > 0 ? { blocks } : {} };
+      const text12 = duplicateCommsConsumed ? "" : typeof record10.body === "string" ? record10.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
+      return { role: "meta", text: text12, ...blocks.length > 0 ? { blocks } : {} };
     }
     case "assistant":
       return { role: "assistant", text: typeof record10.content === "string" ? record10.content : "" };
     case "block_assistant": {
       const blocks = Array.isArray(record10.blocks) ? record10.blocks : [];
       const richBlocks = blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode, blobBaseUrl);
-      const text11 = blocks.map((block) => {
+      const text12 = blocks.map((block) => {
         if (!block || typeof block !== "object") return "";
         const item = block;
         const blockType = typeof item.block_type === "string" ? item.block_type : typeof item.type === "string" ? item.type : "";
@@ -48751,7 +48950,7 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
         }
         return "";
       }).filter((value) => value.trim().length > 0).join("\n\n");
-      return { role: "assistant", text: text11, ...richBlocks.length > 0 ? { blocks: richBlocks } : {} };
+      return { role: "assistant", text: text12, ...richBlocks.length > 0 ? { blocks: richBlocks } : {} };
     }
     case "system":
       return { role: "system", text: typeof record10.content === "string" ? record10.content : "" };
@@ -48783,7 +48982,7 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
   const textMode = options.textMode ?? "markdown";
   const realtimeOrigin = realtimeMessageOrigin(frame);
   const canonicalText = textMode === "markdown" && !options.suppressAssistantText ? canonicalHistoryAssistantText(frame) : void 0;
-  const text11 = canonicalText ?? (textMode === "markdown" ? parsed.text : parsed.text.trim());
+  const text12 = canonicalText ?? (textMode === "markdown" ? parsed.text : parsed.text.trim());
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];
   if (!assistantMessageKey(frame) && !isRealtimeHistoryMessage(frame)) {
     parsedBlocks.sort((left, right) => Number(right.type === "thinking") - Number(left.type === "thinking"));
@@ -48793,27 +48992,27 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
       if (block.type !== "tool-call") return true;
       return !options.consumeDuplicateToolBlock?.(block);
     }) : parsedBlocks;
-    if (!text11 && filteredParsedBlocks2.length === 0) return null;
-    const blocks2 = filteredParsedBlocks2.length > 0 ? filteredParsedBlocks2 : messageTextBlocks(text11, textMode);
+    if (!text12 && filteredParsedBlocks2.length === 0) return null;
+    const blocks2 = filteredParsedBlocks2.length > 0 ? filteredParsedBlocks2 : messageTextBlocks(text12, textMode);
     return {
       kind: "message",
       id: entryId,
       identity: COMMS_IDENTITY,
       variant: blocks2.length > 0 ? "rich" : "meta",
       createdAt: isoFromTimestampMs(frame.timestampMs),
-      ...blocks2.length > 0 ? { blocks: blocks2 } : { text: text11 }
+      ...blocks2.length > 0 ? { blocks: blocks2 } : { text: text12 }
     };
   }
-  if (parsed.role !== "assistant" || !text11 && parsedBlocks.length === 0) return null;
-  if (/^I have acknowledged the addition of the following peers:/i.test(text11)) {
+  if (parsed.role !== "assistant" || !text12 && parsedBlocks.length === 0) return null;
+  if (/^I have acknowledged the addition of the following peers:/i.test(text12)) {
     return null;
   }
   const filteredParsedBlocks = options.consumeDuplicateToolBlock ? parsedBlocks.filter((block) => {
     if (block.type !== "tool-call") return true;
     return !options.consumeDuplicateToolBlock?.(block);
   }) : parsedBlocks;
-  if (!text11 && filteredParsedBlocks.length === 0) return null;
-  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : messageTextBlocks(text11, textMode);
+  if (!text12 && filteredParsedBlocks.length === 0) return null;
+  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : messageTextBlocks(text12, textMode);
   return {
     kind: "message",
     id: entryId,
@@ -48822,7 +49021,7 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
     ...canonicalText !== void 0 ? { copyText: canonicalText } : {},
     variant: blocks.length > 0 ? "rich" : "plain",
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    ...blocks.length > 0 ? { blocks } : { text: text11 }
+    ...blocks.length > 0 ? { blocks } : { text: text12 }
   };
 }
 function renderSystemNoticeEntry(frame, entryId, options = {}) {
@@ -48852,16 +49051,16 @@ function renderSystemNoticeEntry(frame, entryId, options = {}) {
     if (block.type !== "tool-call") return true;
     return !options.consumeDuplicateToolBlock?.(block);
   }) : parsedBlocks;
-  const text11 = parsed.text.trim();
-  if (!text11 && filteredParsedBlocks.length === 0) return null;
-  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : parseConversationRichBlocks(text11, { displayNormalization: false });
+  const text12 = parsed.text.trim();
+  if (!text12 && filteredParsedBlocks.length === 0) return null;
+  const blocks = filteredParsedBlocks.length > 0 ? filteredParsedBlocks : parseConversationRichBlocks(text12, { displayNormalization: false });
   return {
     kind: "message",
     id: entryId,
     identity: COMMS_IDENTITY,
     variant: blocks.length > 0 ? "rich" : "meta",
     createdAt: isoFromTimestampMs(frame.timestampMs),
-    ...blocks.length > 0 ? { blocks } : { text: text11 }
+    ...blocks.length > 0 ? { blocks } : { text: text12 }
   };
 }
 function runOwnerKey(frame) {
@@ -49165,12 +49364,12 @@ function createTimelineFold(agent, frames, options) {
     if (streams.length) completedTextByOwner.set(key, streams);
     else completedTextByOwner.delete(key);
   }
-  function completeOwnedStream(frame, text11 = ownedStream(frame)?.text || "") {
-    if (text11) {
+  function completeOwnedStream(frame, text12 = ownedStream(frame)?.text || "") {
+    if (text12) {
       forgetCompletedStream(frame);
       const key = assistantOwnerKey(frame);
       const streams = completedTextByOwner.get(key) || [];
-      streams.push({ owner: frame, text: text11 });
+      streams.push({ owner: frame, text: text12 });
       completedTextByOwner.set(key, streams);
     }
     forgetOwnedStream(frame);
@@ -49311,10 +49510,10 @@ function createTimelineFold(agent, frames, options) {
       const unfinished = openReasoning.get(scope);
       if (activeReasoning !== unfinished) flushPendingReasoning(true);
       flushPendingText();
-      const text11 = reasoningFrameText(frame);
-      if (unfinished || text11.trim()) {
+      const text12 = reasoningFrameText(frame);
+      if (unfinished || text12.trim()) {
         const state = unfinished || startReasoning(frame, entryId);
-        state.block.text = text11;
+        state.block.text = text12;
         state.block.final = true;
         openReasoning.delete(scope);
         if (activeReasoning === state) activeReasoning = void 0;
@@ -49508,7 +49707,7 @@ function createTimelineFold(agent, frames, options) {
       if (suppressAssistantText && !historyHasAssistantSiblings(frame)) return;
       const historyEntry = renderSessionHistoryTextCompleteEntry(agent, frame, entryId, {
         suppressAssistantText,
-        consumeDuplicateReasoningBlock: (text11) => assistantHistory.consumeReasoning(frame, text11),
+        consumeDuplicateReasoningBlock: (text12) => assistantHistory.consumeReasoning(frame, text12),
         textMode,
         peerRegistry,
         blobBaseUrl: options.blobBaseUrl,
@@ -49538,18 +49737,18 @@ function createTimelineFold(agent, frames, options) {
     if (!frame.runId?.trim() && frame.event === "text_complete") {
       flushPendingReasoning(true);
       if (frame.sourceKind !== "session_history") {
-        const text11 = terminalFrameVisibleText(frame).trim();
-        if (text11 && pendingText && sameTextStreamOwner(streamedOwner, frame) && normalizeComparableText(pendingText) === normalizeComparableText(text11)) {
+        const text12 = terminalFrameVisibleText(frame).trim();
+        if (text12 && pendingText && sameTextStreamOwner(streamedOwner, frame) && normalizeComparableText(pendingText) === normalizeComparableText(text12)) {
           return;
         }
-        const duplicateTerminalFollows = text11 && orderedFrames.slice(i2 + 1).some((later) => {
+        const duplicateTerminalFollows = text12 && orderedFrames.slice(i2 + 1).some((later) => {
           if (later.event !== "interaction_complete" && later.event !== "run_completed") {
             return false;
           }
           if (later.sourceKind === "session_history" || !sameTextStreamOwner(frame, later)) {
             return false;
           }
-          return normalizeComparableText(terminalFrameVisibleText(later)) === normalizeComparableText(text11);
+          return normalizeComparableText(terminalFrameVisibleText(later)) === normalizeComparableText(text12);
         });
         if (duplicateTerminalFollows) {
           return;
@@ -49819,12 +50018,12 @@ function forgetOwnSends() {
 function isOwnSend(key) {
   return typeof key === "string" && ownSendKeys.has(key.trim());
 }
-function text9(value) {
+function text10(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 function turnSender(data) {
-  const kind = text9(data?.origin_kind);
-  const origin = text9(data?.origin);
+  const kind = text10(data?.origin_kind);
+  const origin = text10(data?.origin);
   if (kind === "scheduler" || origin === "console:schedule") return "scheduler";
   if (kind === "connector") return "connector";
   if (kind === "operator_probe") return "probe";
@@ -50337,9 +50536,9 @@ async function fetchWithConsoleTimeout(input, init, label, timeoutMs = DEFAULT_C
     globalThis.clearTimeout(timer2);
   }
 }
-function jsonRpcErrorFromText(text11) {
+function jsonRpcErrorFromText(text12) {
   try {
-    const parsed = JSON.parse(text11);
+    const parsed = JSON.parse(text12);
     const error48 = parsed && typeof parsed === "object" ? parsed.error : void 0;
     return error48 && typeof error48 === "object" ? error48 : void 0;
   } catch {
@@ -50347,11 +50546,11 @@ function jsonRpcErrorFromText(text11) {
   }
 }
 async function consoleResponseFailure(label, response) {
-  const text11 = await response.text().catch(() => "");
-  const preview = responseTextErrorPreview(text11);
+  const text12 = await response.text().catch(() => "");
+  const preview = responseTextErrorPreview(text12);
   const failure = new Error("".concat(label, " ").concat(response.status).concat(preview ? ": ".concat(preview) : ""));
   failure.httpStatus = response.status;
-  const responseRpcError = jsonRpcErrorFromText(text11);
+  const responseRpcError = jsonRpcErrorFromText(text12);
   if (responseRpcError) failure.responseRpcError = responseRpcError;
   return failure;
 }
@@ -50369,11 +50568,11 @@ async function consoleResponseJson(label, response) {
   }
 }
 async function responseErrorPreview(response) {
-  const text11 = await response.text();
-  return responseTextErrorPreview(text11);
+  const text12 = await response.text();
+  return responseTextErrorPreview(text12);
 }
-function responseTextErrorPreview(text11) {
-  const trimmed = text11.trim();
+function responseTextErrorPreview(text12) {
+  const trimmed = text12.trim();
   if (!trimmed) {
     return "";
   }
@@ -50624,10 +50823,10 @@ function replayStreamError(frame) {
 }
 async function streamFramesFromResponse(response, options = {}, mode = "collect") {
   if (!response.ok) {
-    const text11 = await response.text();
+    const text12 = await response.text();
     let parsed;
     try {
-      parsed = JSON.parse(text11);
+      parsed = JSON.parse(text12);
     } catch {
       parsed = void 0;
     }
@@ -50636,7 +50835,7 @@ async function streamFramesFromResponse(response, options = {}, mode = "collect"
     if (response.status === 409 && (replayError || ownerFault?.error === "replay_unavailable")) {
       throw replayStreamError({ id: "", event: "replay_unavailable", data: replayError || parsed });
     }
-    const preview = responseTextErrorPreview(text11);
+    const preview = responseTextErrorPreview(text12);
     const error48 = new Error("interaction stream request failed ".concat(response.status).concat(preview ? ": ".concat(preview) : ""));
     error48.httpStatus = response.status;
     throw error48;
@@ -52867,7 +53066,7 @@ function resetIdentityLogCore(log) {
 var import_react37 = __toESM(require("react"));
 
 // src/lib/memory-event-words.ts
-function text10(data, key) {
+function text11(data, key) {
   const value = data[key];
   return typeof value === "string" ? value.trim() : "";
 }
@@ -52888,8 +53087,8 @@ function withDetail(line, detail) {
   return detail ? "".concat(line, " \xB7 ").concat(detail) : line;
 }
 function memoryScopeWords(data, names = {}) {
-  const kind = text10(data, "scope_kind");
-  const key = text10(data, "scope_key");
+  const kind = text11(data, "scope_kind");
+  const key = text11(data, "scope_key");
   const name2 = (identity) => names.agentName ? names.agentName(identity) : identity;
   switch (kind) {
     case "identity":
@@ -52916,7 +53115,7 @@ var VERDICT_WORDS = {
 };
 var OPEN_LOOP_NUDGE_VERDICT = "open_loop_escalated";
 function isOpenLoopNudge(event, data) {
-  return event === "memory.quarantine.verdict" && text10(data, "verdict") === OPEN_LOOP_NUDGE_VERDICT;
+  return event === "memory.quarantine.verdict" && text11(data, "verdict") === OPEN_LOOP_NUDGE_VERDICT;
 }
 function quarantineVerdictWords(verdict) {
   return VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
@@ -52932,10 +53131,10 @@ function describeMemoryEventForPeople(event, data, names = {}) {
       return "Dream started";
     case "memory.dream.completed": {
       const ops = count(data, "ops_committed");
-      return withDetail(ops === null ? "Dream finished" : "Dream finished \xB7 ".concat(plural3(ops, "change")), text10(data, "detail"));
+      return withDetail(ops === null ? "Dream finished" : "Dream finished \xB7 ".concat(plural3(ops, "change")), text11(data, "detail"));
     }
     case "memory.dream.skipped":
-      return withDetail("Dream skipped", text10(data, "reason"));
+      return withDetail("Dream skipped", text11(data, "reason"));
     case "memory.record.promoted": {
       const scope = memoryScopeWords(data, names);
       const line = scope ? "A record moved to ".concat(scope) : "A record was moved";
@@ -52943,35 +53142,35 @@ function describeMemoryEventForPeople(event, data, names = {}) {
     }
     case "memory.quarantine.verdict": {
       if (isOpenLoopNudge(event, data)) {
-        const title = names.recordTitle?.(text10(data, "record_id"));
+        const title = names.recordTitle?.(text11(data, "record_id"));
         return title ? "\u201C".concat(title, "\u201D needs follow-up") : "An open loop needs follow-up";
       }
-      return withDetail("Quarantine verdict: ".concat(quarantineVerdictWords(text10(data, "verdict"))), text10(data, "rationale"));
+      return withDetail("Quarantine verdict: ".concat(quarantineVerdictWords(text11(data, "verdict"))), text11(data, "rationale"));
     }
     case "memory.quarantine.release_blocked": {
-      const subject = record10(text10(data, "record_id"));
-      const line = text10(data, "verdict") === "promote_pending_gate" ? "Moving ".concat(subject, " was blocked") : "Release of ".concat(subject, " blocked");
-      return text10(data, "class") ? "".concat(line, " \xB7 it looks like a secret") : line;
+      const subject = record10(text11(data, "record_id"));
+      const line = text11(data, "verdict") === "promote_pending_gate" ? "Moving ".concat(subject, " was blocked") : "Release of ".concat(subject, " blocked");
+      return text11(data, "class") ? "".concat(line, " \xB7 it looks like a secret") : line;
     }
     case "memory.conflict.signal": {
-      const subject = [text10(data, "entity"), text10(data, "topic")].filter(Boolean).join(", ");
-      return withDetail(subject ? "Conflicting memories about ".concat(subject) : "Conflicting memories", text10(data, "reason"));
+      const subject = [text11(data, "entity"), text11(data, "topic")].filter(Boolean).join(", ");
+      return withDetail(subject ? "Conflicting memories about ".concat(subject) : "Conflicting memories", text11(data, "reason"));
     }
     case "memory.write.quarantined": {
-      const author = text10(data, "author");
+      const author = text11(data, "author");
       return withDetail(
         author ? "A memory write from ".concat(name2(author), " was quarantined") : "A memory write was quarantined",
-        text10(data, "reason")
+        text11(data, "reason")
       );
     }
     case "memory.taint.transition": {
-      const kind = text10(data, "kind");
+      const kind = text11(data, "kind");
       const line = kind === "tainted" ? "A session became untrusted" : kind === "reset_boundary" ? "Session trust was reset" : kind === "rotated_clean" ? "A session started clean" : "Session trust ".concat(kind ? words(kind) : "changed");
-      return withDetail(line, text10(data, "source"));
+      return withDetail(line, text11(data, "source"));
     }
     case "memory.budget.denied": {
-      const stage = text10(data, "stage");
-      return withDetail(stage ? "Memory budget reached during ".concat(words(stage)) : "Memory budget reached", text10(data, "reason"));
+      const stage = text11(data, "stage");
+      return withDetail(stage ? "Memory budget reached during ".concat(words(stage)) : "Memory budget reached", text11(data, "reason"));
     }
     case "memory.promotion.pending_gate": {
       const scope = memoryScopeWords(data, names);
@@ -52980,25 +53179,25 @@ function describeMemoryEventForPeople(event, data, names = {}) {
     case "memory.harvest.completed": {
       const kept = count(data, "promoted");
       const discarded = count(data, "tombstoned");
-      const identity = text10(data, "identity");
+      const identity = text11(data, "identity");
       const parts = [kept !== null ? "".concat(kept, " kept") : "", discarded !== null ? "".concat(discarded, " discarded") : ""].filter(Boolean);
       const line = identity ? "".concat(name2(identity), "'s memory was summarized") : "A retired agent's memory was summarized";
       return withDetail(line, parts.join(", "));
     }
     case "memory.distill.timed_out":
-      return withDetail("Summarizing a conversation timed out", text10(data, "cause"));
+      return withDetail("Summarizing a conversation timed out", text11(data, "cause"));
     case "memory.hygiene.proposed":
     case "memory.hygiene.applied":
     case "memory.hygiene.blocked":
     case "memory.hygiene.skipped": {
       const phase2 = event.slice("memory.hygiene.".length);
       const ops = count(data, "ops");
-      const detail = text10(data, "reason") || (ops !== null ? plural3(ops, "change") : "") || text10(data, "cause");
+      const detail = text11(data, "reason") || (ops !== null ? plural3(ops, "change") : "") || text11(data, "cause");
       return withDetail("Memory tidy-up ".concat(phase2), detail);
     }
     default: {
       const suffix = event.startsWith("memory.") ? event.slice("memory.".length) : event;
-      const detail = text10(data, "reason") || text10(data, "detail") || text10(data, "cause") || text10(data, "verdict");
+      const detail = text11(data, "reason") || text11(data, "detail") || text11(data, "cause") || text11(data, "verdict");
       return withDetail(sentence("memory ".concat(words(suffix)).trim()), detail);
     }
   }
@@ -53035,9 +53234,9 @@ function textOf(value) {
   return "";
 }
 function snippetOf(value) {
-  const text11 = stripPeerTransportScaffold(value).replace(/\s+/g, " ").trim();
-  if (!text11 || /^You have been spawned as\b/i.test(text11)) return void 0;
-  return text11.length > SNIPPET_MAX ? "".concat(text11.slice(0, SNIPPET_MAX - 3).trimEnd(), "...") : text11;
+  const text12 = stripPeerTransportScaffold(value).replace(/\s+/g, " ").trim();
+  if (!text12 || /^You have been spawned as\b/i.test(text12)) return void 0;
+  return text12.length > SNIPPET_MAX ? "".concat(text12.slice(0, SNIPPET_MAX - 3).trimEnd(), "...") : text12;
 }
 function lastPathSegment(value) {
   return value.split("/").pop() || value;
@@ -53383,7 +53582,8 @@ function GatingInboxPanel({
   onRefreshAudit,
   auditUpdatedAtMs,
   auditError,
-  selectedPendingId
+  selectedPendingId,
+  hostAttention
 }) {
   const [tab2, setTab] = import_react38.default.useState("pending");
   const tabIds = import_react38.default.useId();
@@ -53392,6 +53592,7 @@ function GatingInboxPanel({
   const listRef = import_react38.default.useRef(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
   const pendingKnown = !resource || resource.status === "ready";
+  const approvalsUnsupported = resource?.status === "unsupported";
   const pendingCount = pendingRequests ? pendingRequests.length : pending.length;
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
   import_react38.default.useEffect(() => {
@@ -53410,12 +53611,19 @@ function GatingInboxPanel({
   const automaticallyAllowed = auditEntries.filter((entry) => entry.record.automaticAllowance);
   const automaticCount = automaticallyAllowed.length;
   const toggle = (key) => setExpandedId((current) => current === key ? null : key);
+  const hostItems = tab2 === "pending" ? hostAttention?.items ?? [] : [];
+  const hostFailedSources = tab2 === "pending" ? hostAttention?.failedSources ?? [] : [];
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  const hostList = hostShown ? /* @__PURE__ */ (0, import_jsx_runtime60.jsxs)("div", { className: "gating-inbox__cards gating-inbox__host", "data-testid": "host-attention-list", children: [
+    hostItems.map((item) => /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(HostAttentionCard, { item }, "".concat(item.sourceId, ":").concat(item.id))),
+    hostFailedSources.length ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(Notice, { tone: "warn", role: "status", className: "gating-inbox__host-note", children: "Could not read: ".concat(hostFailedSources.join(", ")) }) : null
+  ] }) : null;
   let content3;
   if (tab2 === "pending" && resource) {
     const state = resource.status === "ready" ? null : RESOURCE_STATE[resource.status];
     content3 = /* @__PURE__ */ (0, import_jsx_runtime60.jsxs)(import_jsx_runtime60.Fragment, { children: [
-      state && resource.requests.length === 0 ? resource.status === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(LoadingState, { variant: "cards", rows: 2, label: state.text }) : /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { kind: state.empty, role: "status", title: state.text }) : state ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(Notice, { tone: state.tone, role: "status", children: state.text }) : null,
-      resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { title: "No pending approvals.", body: "Requests that need a decision appear here." }) : null,
+      state && resource.requests.length === 0 ? resource.status === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(LoadingState, { variant: "cards", rows: 2, label: state.text }) : /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { kind: state.empty, role: "status", title: state.text, inline: hostShown }) : state ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(Notice, { tone: state.tone, role: "status", children: state.text }) : null,
+      resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { title: "No pending approvals.", body: "Requests that need a decision appear here.", inline: hostShown }) : null,
       resource.requests.length ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)("div", { className: "gating-inbox__cards", children: resource.requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(
         "div",
         {
@@ -53435,7 +53643,8 @@ function GatingInboxPanel({
           )
         },
         request.pendingId
-      )) }) : null
+      )) }) : null,
+      hostList
     ] });
   } else if (tab2 === "policies") {
     content3 = /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { kind: "unavailable", role: "status", title: "Policy details are not available in this console." });
@@ -53444,7 +53653,7 @@ function GatingInboxPanel({
     const showActions = tab2 === "pending" && !readOnly;
     content3 = /* @__PURE__ */ (0, import_jsx_runtime60.jsxs)(import_jsx_runtime60.Fragment, { children: [
       tab2 !== "pending" ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(Notice, { className: "gating-inbox__note", children: "Approval records do not confirm execution." }) : null,
-      rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { title: "No ".concat(tab2, " items.") }) : /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(RowList, { children: rows.map(({ raw, record: record10 }, index2) => {
+      rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(EmptyState, { title: "No ".concat(tab2, " items."), inline: hostShown }) : /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(RowList, { children: rows.map(({ raw, record: record10 }, index2) => {
         const pid = (tab2 === "pending" ? record10.pendingId : record10.auditId) || "item-".concat(index2);
         const key = "".concat(tab2, ":").concat(pid);
         return /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(
@@ -53490,7 +53699,8 @@ function GatingInboxPanel({
           },
           pid
         );
-      }) })
+      }) }),
+      hostList
     ] });
   }
   const refreshShown = tab2 === "pending" ? onRefresh : tab2 === "policies" ? void 0 : onRefreshAudit;
@@ -53502,7 +53712,7 @@ function GatingInboxPanel({
       {
         className: "gating__head",
         title: "Approvals",
-        subtitle: pendingKnown ? "".concat(pendingCount, " pending \xB7 ").concat(automaticCount, " allowed automatically") : "".concat(automaticCount, " allowed automatically"),
+        subtitle: approvalsUnsupported ? "Not available on this connection" : pendingKnown ? "".concat(pendingCount, " pending \xB7 ").concat(automaticCount, " allowed automatically") : "".concat(automaticCount, " allowed automatically"),
         divider: false,
         actions: refreshShown ? /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(Button, { icon: /* @__PURE__ */ (0, import_jsx_runtime60.jsx)(KitGlyph, { name: "refresh" }), onClick: refreshShown, children: "Refresh approvals" }) : void 0
       }
@@ -54590,8 +54800,8 @@ var RELATIVE_UNITS = [
   [60 * 1e3, "m"],
   [1e3, "s"]
 ];
-function resolveRecordsSearchKey(text11, candidates) {
-  const typed = text11.trim();
+function resolveRecordsSearchKey(text12, candidates) {
+  const typed = text12.trim();
   if (!typed) return typed;
   if (candidates.some((candidate) => candidate.key === typed)) return typed;
   const needle = typed.toLowerCase();
@@ -55170,9 +55380,9 @@ function evidenceExcerptLines(entries, range, maxLines = 30) {
   const lines = [];
   for (const entry of window2) {
     if (entry.kind !== "message") continue;
-    const text11 = (entry.text || entry.copyText || "").trim();
-    if (!text11) continue;
-    lines.push({ id: entry.id, speaker: entry.identity.label, text: text11 });
+    const text12 = (entry.text || entry.copyText || "").trim();
+    if (!text12) continue;
+    lines.push({ id: entry.id, speaker: entry.identity.label, text: text12 });
     if (lines.length >= maxLines) break;
   }
   return lines;
@@ -56371,7 +56581,7 @@ function MemoryLiveStrip({
       shown.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No memory events yet." }) : shown.map((frame) => {
         const data = frame.data && typeof frame.data === "object" ? frame.data : {};
         const pivot = memoryFramePivot(frame);
-        const text11 = describeMemoryEventForPeople(frame.event, data, {
+        const text12 = describeMemoryEventForPeople(frame.event, data, {
           agentName: (key) => agentDisplayName(key, directory),
           recordTitle: (memoryId) => recordTitles?.get(memoryId)
         });
@@ -56381,7 +56591,7 @@ function MemoryLiveStrip({
             dense: true,
             className: "memory-live__row",
             testId: "memory-live-row:".concat(frame.id),
-            title: text11,
+            title: text12,
             titleAttr: describeMemoryTimelineEvent2(frame.event, data),
             meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
               pivot ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -56502,7 +56712,7 @@ function MemoryPanel({
       query: (params) => queryRecordsRef.current ? queryRecordsRef.current(params) : Promise.resolve(null),
       setPaged,
       setLoading: setPageLoading,
-      resolveKey: (text11) => resolveRecordsSearchKey(text11, searchCandidatesRef.current)
+      resolveKey: (text12) => resolveRecordsSearchKey(text12, searchCandidatesRef.current)
     });
   }
   const pager = pagerRef.current;
@@ -58553,7 +58763,8 @@ var Sidebar = import_react41.default.memo(function Sidebar2({
   onOpenControl,
   onOpenOperatorPanel,
   approvals,
-  onOpenApproval
+  onOpenApproval,
+  hostAttentionCount = 0
 }) {
   countRender("Sidebar");
   const [q2, setQ] = import_react41.default.useState("");
@@ -59061,7 +59272,7 @@ var Sidebar = import_react41.default.memo(function Sidebar2({
         children: orderAnnouncement
       }
     ),
-    approvals ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(ApprovalAttention, { snapshot: approvals, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
+    approvals || hostAttentionCount ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(ApprovalAttention, { snapshot: approvals, hostItems: hostAttentionCount, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("div", { className: "sidebar__mast", children: /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("div", { children: [
       /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("div", { className: "sidebar__mast-title", children: "Roster" }),
       /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("div", { className: "sidebar__mast-sub", children: [
@@ -60592,20 +60803,20 @@ var LABEL_RIGHT_PAD = 10;
 var TITLE_FONT = { size: 12, weight: 500, family: "--sans" };
 var META_FONT = { size: 10.5, weight: 400, family: "--sans" };
 var FIT_MIN_SCALE = 0.85;
-function truncate(text11, max) {
-  return text11.length > max ? "".concat(text11.slice(0, max - 1), "\u2026") : text11;
+function truncate(text12, max) {
+  return text12.length > max ? "".concat(text12.slice(0, max - 1), "\u2026") : text12;
 }
-function fitLabel(text11, maxWidth, measure, fallbackChars) {
-  if (!measure) return truncate(text11, fallbackChars);
-  if (measure(text11) <= maxWidth) return text11;
+function fitLabel(text12, maxWidth, measure, fallbackChars) {
+  if (!measure) return truncate(text12, fallbackChars);
+  if (measure(text12) <= maxWidth) return text12;
   let lo = 0;
-  let hi = text11.length;
+  let hi = text12.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (measure("".concat(text11.slice(0, mid).trimEnd(), "\u2026")) <= maxWidth) lo = mid;
+    if (measure("".concat(text12.slice(0, mid).trimEnd(), "\u2026")) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
-  return "".concat(text11.slice(0, lo).trimEnd(), "\u2026");
+  return "".concat(text12.slice(0, lo).trimEnd(), "\u2026");
 }
 function fitViewport(frameWidth, frameHeight, layoutWidth, layoutHeight) {
   if (frameWidth <= 0 || frameHeight <= 0 || layoutWidth <= 0 || layoutHeight <= 0) {
@@ -60670,12 +60881,12 @@ function useLabelMeasurers(ref, mounted) {
       const family = font.family === "--mono" ? families.mono : families.sans;
       const spec = "".concat(font.weight, " ").concat(font.size, "px ").concat(family);
       const cache = /* @__PURE__ */ new Map();
-      return (text11) => {
-        const hit = cache.get(text11);
+      return (text12) => {
+        const hit = cache.get(text12);
         if (hit !== void 0) return hit;
         ctx.font = spec;
-        const width = ctx.measureText(text11).width;
-        cache.set(text11, width);
+        const width = ctx.measureText(text12).width;
+        cache.set(text12, width);
         return width;
       };
     };
@@ -61863,9 +62074,9 @@ function RouteCaption({ route }) {
   ] });
 }
 function routeMatches(route, needle, recipientName) {
-  const text11 = needle.trim().toLowerCase();
-  if (!text11) return true;
-  return [route.route_key, route.recipient, recipientName, route.sink, route.target_module].some((value) => value.toLowerCase().includes(text11));
+  const text12 = needle.trim().toLowerCase();
+  if (!text12) return true;
+  return [route.route_key, route.recipient, recipientName, route.sink, route.target_module].some((value) => value.toLowerCase().includes(text12));
 }
 function deliveryTitle(delivery, at) {
   return joinMeta(formatAbsoluteTime(at), "Delivery ".concat(delivery.delivery_id));
@@ -62083,8 +62294,8 @@ function sanitizeLogFrameData(data) {
 }
 function textFromContentBlock(value) {
   if (typeof value === "string") {
-    const text11 = value.trim();
-    return text11 ? text11 : null;
+    const text12 = value.trim();
+    return text12 ? text12 : null;
   }
   if (!isRecord3(value)) return null;
   for (const key of ["text", "body", "content", "result", "summary"]) {
@@ -62101,15 +62312,15 @@ function textFromContentBlock(value) {
 }
 function textFromContent(value) {
   if (Array.isArray(value)) {
-    const text11 = value.map(textFromContentBlock).filter((part) => Boolean(part)).join(" ").replace(/\s+/g, " ").trim();
-    return text11 ? text11 : null;
+    const text12 = value.map(textFromContentBlock).filter((part) => Boolean(part)).join(" ").replace(/\s+/g, " ").trim();
+    return text12 ? text12 : null;
   }
   return textFromContentBlock(value);
 }
 function preferredLogSummary(frame, data) {
   if (frame.event === "user_input") {
-    const text11 = textFromContent(data.content ?? data.input ?? data.prompt);
-    return text11 ? "input=".concat(text11.slice(0, 120)) : null;
+    const text12 = textFromContent(data.content ?? data.input ?? data.prompt);
+    return text12 ? "input=".concat(text12.slice(0, 120)) : null;
   }
   for (const key of ["result", "text", "summary", "body", "message_text"]) {
     const value = data[key];
@@ -62526,8 +62737,8 @@ function textFromValue(value) {
   if (value && typeof value === "object") {
     const record10 = value;
     const direct = record10.summary ?? record10.message ?? record10.text ?? record10.body ?? record10.reply ?? record10.result ?? record10.content ?? record10.subject ?? record10.request_subject ?? record10.prompt ?? record10.description ?? record10.token;
-    const text11 = textFromValue(direct);
-    if (text11) return text11;
+    const text12 = textFromValue(direct);
+    if (text12) return text12;
   }
   return "";
 }
@@ -62561,14 +62772,14 @@ function sessionHistoryAssistantReply(frame, data) {
     return textFromValue(data.result ?? data.text ?? data.content);
   }
   const blocks = Array.isArray(message.blocks) ? message.blocks : [];
-  const text11 = blocks.map((block) => {
+  const text12 = blocks.map((block) => {
     const record10 = recordOf6(block);
     const blockType = typeof record10.block_type === "string" ? record10.block_type : typeof record10.type === "string" ? record10.type : "";
     if (blockType !== "text") return "";
     const blockData = recordOf6(record10.data);
     return textFromValue(blockData.text ?? record10.text);
   }).filter(Boolean).join(" ").trim();
-  return text11;
+  return text12;
 }
 function agentFor(frame) {
   return frame.identity?.trim() || "_system";
@@ -63777,16 +63988,16 @@ function chatTurnPreview(turn) {
   let title = "";
   let body = "";
   for (const message of turn.messages) {
-    const text11 = msgCopyText(message);
-    if (!text11) {
+    const text12 = msgCopyText(message);
+    if (!text12) {
       continue;
     }
     if (!title && message.kind === "user") {
-      title = text11;
+      title = text12;
       continue;
     }
     if (!body && message.kind !== "user") {
-      body = text11;
+      body = text12;
     }
   }
   if (!title) {
@@ -63802,8 +64013,8 @@ function transcriptFindMatches(messages, query) {
   if (!needle) return [];
   const rows = [];
   for (const message of messages) {
-    const text11 = message.kind === "event" || message.kind === "origin" ? "".concat(message.source?.sentence ?? "", " ").concat(msgCopyText(message)) : msgCopyText(message);
-    if (text11.toLocaleLowerCase().includes(needle)) rows.push(message.scrollRowId ?? message.id);
+    const text12 = message.kind === "event" || message.kind === "origin" ? "".concat(message.source?.sentence ?? "", " ").concat(msgCopyText(message)) : msgCopyText(message);
+    if (text12.toLocaleLowerCase().includes(needle)) rows.push(message.scrollRowId ?? message.id);
   }
   return rows;
 }
@@ -63818,8 +64029,8 @@ function highlightRow(body, rowId, query) {
   const ranges = [];
   const walker = body.ownerDocument.createTreeWalker(row, NodeFilter.SHOW_TEXT);
   for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) {
-    const text11 = (node2.textContent ?? "").toLocaleLowerCase();
-    for (let at = text11.indexOf(needle); needle && at >= 0; at = text11.indexOf(needle, at + needle.length)) {
+    const text12 = (node2.textContent ?? "").toLocaleLowerCase();
+    for (let at = text12.indexOf(needle); needle && at >= 0; at = text12.indexOf(needle, at + needle.length)) {
       const range = body.ownerDocument.createRange();
       range.setStart(node2, at);
       range.setEnd(node2, at + needle.length);
@@ -63898,13 +64109,13 @@ function TranscriptFindBar({
 }
 function transcriptCopyText(messages) {
   return messages.map((message) => {
-    const text11 = message.kind === "event" || message.kind === "origin" ? message.source?.sentence || msgCopyText(message) : msgCopyText(message);
-    if (!text11) return "";
+    const text12 = message.kind === "event" || message.kind === "origin" ? message.source?.sentence || msgCopyText(message) : msgCopyText(message);
+    if (!text12) return "";
     const label = message.kind === "tool" ? "Tool" : message.kind === "thought" ? "Thinking" : message.source ? [message.source.label, message.source.detail].filter(Boolean).join(" - ") : message.kind === "user" ? "User message" : message.who || "Assistant";
     const stamp = formatFullTimestamp(message.createdAt);
     const time4 = stamp ? "[".concat(stamp, "] ") : "";
     const worked = message.workedFor ? "\nWorked for ".concat(message.workedFor) : "";
-    const row = "".concat(time4).concat(label, ": ").concat(text11).concat(worked);
+    const row = "".concat(time4).concat(label, ": ").concat(text12).concat(worked);
     return message.blocks?.some((block) => block.type === "markdown") ? row : row.trim();
   }).filter(Boolean).join("\n\n");
 }
@@ -64187,7 +64398,7 @@ function collectImageTransferPayload(data) {
   return { files: selectImageTransferFiles(directFiles, itemFiles), textPayloads };
 }
 function imageTransferPayloadHasImage(payload) {
-  return payload.files.length > 0 || payload.textPayloads.some((text11) => imageDataUrlsFromText(text11).length > 0 || consoleBlobUrlsFromText(text11).length > 0);
+  return payload.files.length > 0 || payload.textPayloads.some((text12) => imageDataUrlsFromText(text12).length > 0 || consoleBlobUrlsFromText(text12).length > 0);
 }
 async function imageFilesFromTransferPayload(payload) {
   if (payload.files.length > 0) {
@@ -64195,14 +64406,14 @@ async function imageFilesFromTransferPayload(payload) {
   }
   const files = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const text11 of payload.textPayloads) {
-    for (const dataUrl of imageDataUrlsFromText(text11)) {
+  for (const text12 of payload.textPayloads) {
+    for (const dataUrl of imageDataUrlsFromText(text12)) {
       if (seen.has(dataUrl)) continue;
       seen.add(dataUrl);
       const file2 = fileFromImageDataUrl(dataUrl);
       if (file2) files.push(file2);
     }
-    for (const blobUrl of consoleBlobUrlsFromText(text11)) {
+    for (const blobUrl of consoleBlobUrlsFromText(text12)) {
       if (seen.has(blobUrl)) continue;
       seen.add(blobUrl);
       const file2 = await fileFromConsoleBlobUrl(blobUrl);
@@ -64246,7 +64457,7 @@ async function fileFromConsoleBlobUrl(url2) {
   }
 }
 function CopyInlineButton({
-  text: text11,
+  text: text12,
   getText,
   label,
   className = ""
@@ -64259,10 +64470,10 @@ function CopyInlineButton({
     },
     []
   );
-  const disabled = getText ? false : !(text11 ?? "").trim();
+  const disabled = getText ? false : !(text12 ?? "").trim();
   async function copy() {
     if (disabled) return;
-    const value = getText ? getText() : text11 ?? "";
+    const value = getText ? getText() : text12 ?? "";
     if (!value.trim()) return;
     const ok3 = await copyTextToClipboard(value);
     setOutcome(ok3 ? "copied" : "failed");
@@ -65428,9 +65639,9 @@ function ChatPane({
     if (readOnly || sendWithheld) {
       return;
     }
-    const text11 = liveDraftRef.current;
+    const text12 = liveDraftRef.current;
     const submittedRevision = liveDraftRevisionRef.current;
-    if (!text11.trim() && staged.length === 0) {
+    if (!text12.trim() && staged.length === 0) {
       return;
     }
     const files = staged.map((item) => item.file);
@@ -65447,10 +65658,10 @@ function ChatPane({
     const clearedEarly = files.length === 0;
     if (clearedEarly) setComposerText("");
     const restoreIfUntouched = () => {
-      if (clearedEarly && liveDraftRevisionRef.current === submittedRevision) setComposerText(text11);
+      if (clearedEarly && liveDraftRevisionRef.current === submittedRevision) setComposerText(text12);
     };
     try {
-      const sent = await onSend(files, text11);
+      const sent = await onSend(files, text12);
       if (sent) {
         setQuoteError(null);
         staged.forEach((item) => URL.revokeObjectURL(item.previewUrl));
@@ -67545,11 +67756,11 @@ function createVoiceSession(baseUrl, environment) {
     }
     publish({ liveSpeech: next });
   }
-  function finalizeLiveSpeech(itemId2, speaker, text11) {
+  function finalizeLiveSpeech(itemId2, speaker, text12) {
     if (!snapshot.liveSpeech.some((item) => item.itemId === itemId2 && item.speaker === speaker)) return;
     publish({
       liveSpeech: snapshot.liveSpeech.map(
-        (item) => item.itemId === itemId2 && item.speaker === speaker ? { ...item, final: true, text: text11 !== null && text11.length >= item.text.length ? text11 : item.text } : item
+        (item) => item.itemId === itemId2 && item.speaker === speaker ? { ...item, final: true, text: text12 !== null && text12.length >= item.text.length ? text12 : item.text } : item
       )
     });
   }
@@ -69492,16 +69703,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return loadedComposerDraftsRef.current[key];
   }
-  function persistComposerDraft(identity, panelKey, text11, contexts) {
+  function persistComposerDraft(identity, panelKey, text12, contexts) {
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
       if (namespace) {
         const storage = browserComposerStorage();
         if (!storage) throw new Error("Draft storage is unavailable.");
-        saveConsoleComposerDraft(storage, namespace, identity, { text: text11, contexts }, composerIdFor(panelKey));
+        saveConsoleComposerDraft(storage, namespace, identity, { text: text12, contexts }, composerIdFor(panelKey));
       }
-      loadedComposerDraftsRef.current["".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey))] = { text: text11, contexts };
+      loadedComposerDraftsRef.current["".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey))] = { text: text12, contexts };
       return true;
     } catch (error49) {
       setActionError("Draft remains visible but was not saved: ".concat(errorMessage(error49)));
@@ -70075,6 +70286,27 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
+  const hostAttentionSources = experience?.console_config?.attention?.sources;
+  const hostAttentionKey = JSON.stringify(hostAttentionSources || []);
+  const [hostAttention, setHostAttention] = import_react57.default.useState();
+  import_react57.default.useEffect(() => {
+    setHostAttention(void 0);
+    const sources = JSON.parse(hostAttentionKey);
+    if (!sources.length) return;
+    return startHostAttentionPolling(sources, setHostAttention, {
+      fetch: window.fetch.bind(window),
+      visible: () => document.visibilityState !== "hidden",
+      onVisible: (callback) => {
+        const listener = () => {
+          if (document.visibilityState === "visible") callback();
+        };
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      setInterval: (callback, ms) => window.setInterval(callback, ms),
+      clearInterval: (handle2) => window.clearInterval(handle2)
+    });
+  }, [hostAttentionKey]);
   function openApproval(pendingId) {
     setSelectedApprovalId(pendingId);
     dock.openTarget(buildControlTarget2("gating"), "replace_focused");
@@ -70959,7 +71191,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agents.find((c) => c.member_id === item.id);
     if (agent) openAgentChat(agent);
   }
-  async function submitMessageNow(panelId, target, text11, handlingMode, attachments = [], pendingAttempt, dispatchController = sendControllerRef.current) {
+  async function submitMessageNow(panelId, target, text12, handlingMode, attachments = [], pendingAttempt, dispatchController = sendControllerRef.current) {
     if (target.kind !== "agent-chat") return false;
     if (!lifetimeRef.current.active || consoleReadOnlyRef.current || dispatchController !== sendControllerRef.current) return false;
     const panelKey = buildPanelConversationKey2(panelId, target);
@@ -70970,7 +71202,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       (file2) => URL.createObjectURL(file2)
     );
     const userEntry = createUserEntry2(
-      text11,
+      text12,
       attachments.map((file2, index2) => ({
         src: optimisticObjectUrls[index2] || "",
         mediaType: file2.type || "application/octet-stream",
@@ -71012,7 +71244,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const result = (await dispatchController.commands.sendMessage(
         workbenchTarget,
         {
-          content: envelope?.content ?? text11,
+          content: envelope?.content ?? text12,
           origin: envelope?.origin ?? "console:".concat(panelId),
           idempotencyKey,
           handlingMode: envelope?.handling_mode ?? handlingMode,
@@ -71087,8 +71319,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const identity = target.identity || target.memberId;
     const draftKey = scopedDraftKey(panelKey);
     const rawDraft = composerText ?? (draftByKey[draftKey] || "");
-    const text11 = rawDraft;
-    if (!text11.trim() && attachments.length === 0) return false;
+    const text12 = rawDraft;
+    if (!text12.trim() && attachments.length === 0) return false;
     const stack = getPendingStack(identity);
     const visiblePhase = phaseValueByKey.current[panelKey] ?? phaseRef.current[panelKey] ?? null;
     const agentPhase = agentsRef.current.find(
@@ -71113,7 +71345,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         setActionError("Send quoted context separately from file attachments.");
         return false;
       }
-      const sent = await submitMessageNow(panelId, target, text11, "queue", attachments);
+      const sent = await submitMessageNow(panelId, target, text12, "queue", attachments);
       if (sent) clearSubmittedContexts();
       return sent;
     }
@@ -71125,7 +71357,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         destination: identity,
         origin: "console:".concat(panelId),
         idempotencyKey: createIdempotencyKey(),
-        text: text11,
+        text: text12,
         contexts,
         now: Date.now()
       });
@@ -71217,8 +71449,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const original = getPendingStack(identity).find((candidate) => candidate.id === id);
     if (!original) return;
     const names = pendingRowNames(identity, original.destination);
-    const answer = (text11) => {
-      if (active()) setPendingCheck(identity, id, { phase: "result", text: text11 });
+    const answer = (text12) => {
+      if (active()) setPendingCheck(identity, id, { phase: "result", text: text12 });
     };
     if (!original.envelopeJson) {
       answer("Couldn't check: this message was never sent.");
@@ -71295,9 +71527,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function onStackEdit(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => ({ ...item, editing: item.id === id && item.state === "draft" })));
   }
-  function onStackCommitEdit(identity, id, text11) {
-    if (!text11.trim()) return;
-    setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id && item.state === "draft" ? { ...item, text: text11, editing: false } : item));
+  function onStackCommitEdit(identity, id, text12) {
+    if (!text12.trim()) return;
+    setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id && item.state === "draft" ? { ...item, text: text12, editing: false } : item));
   }
   function onStackCancelEdit(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id ? { ...item, editing: false } : item));
@@ -72109,7 +72341,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           persistComposerDraft(identity, panelKey, value, storedComposerDraft(identity, panelKey).contexts);
         },
         onStagedChange: (action) => setStagedAttachmentsForIdentity(identity, action),
-        onSend: (attachments, text11) => sendScope === sendScopeRef.current ? onSendMessage(panel.id, target, attachments, text11) : false,
+        onSend: (attachments, text12) => sendScope === sendScopeRef.current ? onSendMessage(panel.id, target, attachments, text12) : false,
         onInspect: configuredActionVisibility.inspect ? () => {
           if (agent) handleShowRosterDetails(agent);
         } : void 0,
@@ -72245,6 +72477,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (target.kind === "identity-inspect") {
       return renderInspectPanel(target);
     }
+    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface && hostAttentionSources?.length) {
+      return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(
+        GatingInboxPanel,
+        {
+          pending: [],
+          resource: { scopeKey: approvalScope, status: "unsupported", requests: [], decisions: {}, readOnly: true },
+          audit: [],
+          onDecide: () => {
+          },
+          readOnly: true,
+          hostAttention: hostAttention || { status: "loading", items: [], failedSources: [] }
+        }
+      );
+    }
     if ((target.kind === "routing" || target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface) {
       return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(PanelShell, { children: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(
         EmptyState,
@@ -72270,7 +72516,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditError: gatingAuditError,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
-          readOnly: consoleReadOnly
+          readOnly: consoleReadOnly,
+          hostAttention
         }
       );
     if (target.kind === "topology") {
@@ -72335,7 +72582,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditError: gatingAuditError,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
-          readOnly: consoleReadOnly
+          readOnly: consoleReadOnly,
+          hostAttention
         }
       );
     if (target.kind === "logs")
@@ -72525,7 +72773,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                   onOpenControl: openSidebarControl,
                   onOpenOperatorPanel: openOperatorPanel,
                   approvals: activeApprovals,
-                  onOpenApproval: openApproval
+                  onOpenApproval: openApproval,
+                  hostAttentionCount: hostAttention?.items.length || 0
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(

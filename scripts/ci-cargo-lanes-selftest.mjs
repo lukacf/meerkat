@@ -2209,6 +2209,39 @@ for (const path of [
   }
 }
 
+// Format + governance ends with the Mintlify parse and link check of the docs
+// site (docs/) and of MobKit's source pages (meta/docs): Node.js 22, then the
+// mint version the MobKit mirror's publication pins, so an MDX error fails the
+// pull request rather than the publication after the merge. Each directory's
+// .mintignore keeps its internal records, which MDX cannot parse, out of it.
+{
+  const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  const publish = readFileSync(resolve(root, ".github/workflows/publish-mobkit-docs.yml"), "utf8");
+  const pin = publish.match(/npx --yes (mint@[0-9.]+) broken-links/);
+  assert.ok(pin, "the MobKit docs publication pins its mint version");
+  const mint = pin[1].replaceAll(".", "\\.");
+  const expected = [
+    /^      - name: Setup Node\.js for the Mintlify docs parse$/,
+    /^        uses: actions\/setup-node@[0-9a-f]{40} # v\d+$/,
+    /^        with:$/,
+    /^          node-version: "22"$/,
+    /^      - name: Mintlify parse and links \(docs\)$/,
+    /^        working-directory: docs$/,
+    new RegExp(`^        run: npx --yes ${mint} broken-links$`),
+    /^      - name: Mintlify parse and links \(meta\/docs\)$/,
+    /^        working-directory: meta\/docs$/,
+    new RegExp(`^        run: npx --yes ${mint} broken-links$`),
+  ];
+  const tail = jobLines(workflow, "fmt-governance").slice(-expected.length);
+  tail.forEach((line, index) =>
+    assert.match(line, expected[index], `Format + governance ends with the Mintlify docs parse (line ${index + 1} of ${expected.length})`),
+  );
+  for (const dir of ["docs", "meta/docs"]) {
+    const ignored = readFileSync(resolve(root, dir, ".mintignore"), "utf8").split("\n");
+    assert.ok(ignored.includes("internal/"), `${dir}/.mintignore keeps the internal records out of the parse`);
+  }
+}
+
 // Feature-gated unit suites: the default-feature unit lanes cannot run a
 // test behind a non-default feature, so every Rust-relevant push to main
 // carries every suite as an extra main unit row, and a pull request carries

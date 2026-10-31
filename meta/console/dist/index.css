@@ -6732,6 +6732,11 @@ button.topo-roletree__agent:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
 }
+.cc-host-attention .cc-kv dt {
+  max-width: 24ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .cc-approval-attention {
   padding: 7px 8px;
   border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555));

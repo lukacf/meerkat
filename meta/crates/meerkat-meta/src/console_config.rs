@@ -36,6 +36,8 @@ pub struct ConsoleUiConfig {
     pub agent_list: ConsoleAgentListConfig,
     #[serde(default, skip_serializing_if = "ConsoleActionsUiConfig::is_default")]
     pub actions: ConsoleActionsUiConfig,
+    #[serde(default, skip_serializing_if = "ConsoleAttentionUiConfig::is_default")]
+    pub attention: ConsoleAttentionUiConfig,
 }
 
 impl ConsoleUiConfig {
@@ -94,7 +96,64 @@ impl ConsoleUiConfig {
         self.sidebar = self.sidebar.normalized();
         self.agent_list = self.agent_list.normalized();
         self.actions = self.actions.normalized();
+        self.attention = self.attention.normalized();
         self
+    }
+}
+
+/// Host-provided attention items for the "Needs you" list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleAttentionUiConfig {
+    /// Same-origin JSON endpoints the console reads with the operator's
+    /// session. Each answers `{"items": [...]}`; the console shows the items
+    /// as link cards next to gating approvals and never decides anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ConsoleAttentionSourceConfig>,
+}
+
+impl ConsoleAttentionUiConfig {
+    pub fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+
+    fn normalized(mut self) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        self.sources = self
+            .sources
+            .into_iter()
+            .map(ConsoleAttentionSourceConfig::normalized)
+            .filter(|source| {
+                let valid = source.is_valid();
+                if !valid {
+                    tracing::warn!(source = %source.id, "console attention source dropped: it needs an id, a label and a same-origin path url");
+                }
+                valid
+            })
+            .filter(|source| seen.insert(source.id.clone()))
+            .collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleAttentionSourceConfig {
+    pub id: String,
+    /// Shown with each item and when the source cannot be read.
+    pub label: String,
+    /// A same-origin path (the operator panel path rules).
+    pub url: String,
+}
+
+impl ConsoleAttentionSourceConfig {
+    fn normalized(mut self) -> Self {
+        self.id = self.id.trim().to_string();
+        self.label = self.label.trim().to_string();
+        // Validated as written, like an operator panel path.
+        self
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.id.is_empty() && !self.label.is_empty() && valid_operator_panel_path(&self.url)
     }
 }
 
@@ -540,6 +599,8 @@ struct ConsoleUiConfigPatch {
     #[serde(default)]
     actions: Option<ConsoleActionsUiConfigPatch>,
     #[serde(default)]
+    attention: Option<ConsoleAttentionUiConfig>,
+    #[serde(default)]
     realms: BTreeMap<String, ConsoleUiConfigPatch>,
 }
 
@@ -577,6 +638,10 @@ impl ConsoleUiConfigPatch {
         }
         if let Some(actions) = &self.actions {
             actions.apply_to(&mut config.actions);
+        }
+        if let Some(attention) = &self.attention {
+            // The configured list replaces the inherited one.
+            config.attention = attention.clone().normalized();
         }
     }
 }
@@ -1176,6 +1241,113 @@ panel_modules = []
                 .get("panel_modules")
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn attention_sources_need_an_id_a_label_and_a_same_origin_path()
+    -> Result<(), ConsoleConfigError> {
+        let config = load_console_ui_config_from_toml(
+            r#"
+[[attention.sources]]
+id = "host-items"
+label = "Host"
+url = "/host/attention"
+
+[[attention.sources]]
+id = "remote"
+label = "Remote"
+url = "https://evil.example/attention"
+
+[[attention.sources]]
+id = "dots"
+label = "Dots"
+url = "/a/../attention"
+
+[[attention.sources]]
+id = ""
+label = "No id"
+url = "/host/other"
+
+[[attention.sources]]
+id = "host-items"
+label = "Duplicate"
+url = "/host/again"
+"#,
+        )?;
+        assert_eq!(
+            config.attention.sources,
+            vec![ConsoleAttentionSourceConfig {
+                id: "host-items".to_string(),
+                label: "Host".to_string(),
+                url: "/host/attention".to_string(),
+            }]
+        );
+        let json = serde_json::to_value(&config)
+            .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))?;
+        assert_eq!(json["attention"]["sources"][0]["url"], "/host/attention");
+        // Absent: nothing is serialized.
+        let empty = load_console_ui_config_from_toml("title = \"Ops\"\n")?;
+        assert!(
+            serde_json::to_value(&empty)
+                .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))?
+                .get("attention")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attention_source_keys_are_required_and_an_empty_label_drops_the_source()
+    -> Result<(), ConsoleConfigError> {
+        assert!(
+            load_console_ui_config_from_toml(
+                "[[attention.sources]]\nid = \"a\"\nurl = \"/host/attention\"\n"
+            )
+            .is_err(),
+            "a missing label fails the configuration"
+        );
+        let config = load_console_ui_config_from_toml(
+            "[[attention.sources]]\nid = \"a\"\nlabel = \"  \"\nurl = \"/host/attention\"\n",
+        )?;
+        assert!(config.attention.sources.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_realm_attention_list_clears_the_default_one() -> Result<(), ConsoleConfigError> {
+        let config = load_console_ui_config_from_toml_for_realm(
+            r#"
+[[attention.sources]]
+id = "default"
+label = "Default"
+url = "/default/attention"
+
+[realms.ops.attention]
+sources = []
+"#,
+            Some("ops"),
+        )?;
+        assert!(config.attention.sources.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_realm_attention_list_replaces_the_default_one() -> Result<(), ConsoleConfigError> {
+        let config = load_console_ui_config_from_toml_for_realm(
+            r#"
+[[attention.sources]]
+id = "default"
+label = "Default"
+url = "/default/attention"
+
+[realms.ops.attention]
+sources = [{ id = "ops", label = "Ops", url = "/ops/attention" }]
+"#,
+            Some("ops"),
+        )?;
+        assert_eq!(config.attention.sources.len(), 1);
+        assert_eq!(config.attention.sources[0].id, "ops");
         Ok(())
     }
 

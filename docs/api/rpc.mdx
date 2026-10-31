@@ -825,8 +825,9 @@ During execution, `session/event` notifications are emitted (see
   The session records its gate. A field the gate does not know is an invalid
   parameter, and a gate no grant could honour (an unknown or disabled family,
   a name nothing mounts) fails the session's build with invalid params whose
-  `data` is `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal":
-  {...}}`; a deferred create reports it at its first `turn/start`. With
+  `data` is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": {...}}`;
+  a deferred create reports it at its first `turn/start`. With
   `keep_alive: true`, `session/create` answers before its first turn builds
   the session, so it does not report the refusal.
 </ParamField>

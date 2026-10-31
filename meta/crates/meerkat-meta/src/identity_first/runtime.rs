@@ -781,12 +781,14 @@ impl FreshLife {
 
 /// What a fresh life's rotation that Core did not carry out leaves to settle
 /// ([`IdentityRuntime::refused_rotation`]): the rotation record an earlier
-/// call left, the retirement the call prepared, and the head of Core's
-/// journal the call read before it asked Core.
+/// call left, the retirement the call prepared, the head of Core's journal
+/// the call read before it asked Core, and the fact the rotation journals
+/// first.
 struct RefusedRotation {
     earlier: Option<crate::runtime::IdentityRotationIntent>,
     retiring: Option<lifecycle_projection::PreparedRetirement>,
     asked_after: Option<u64>,
+    first: lifecycle_projection::StepFirstFact,
 }
 
 /// Map the terminal edge of an admitted turn. Pre-admission outcomes are
@@ -14555,17 +14557,12 @@ impl IdentityRuntime {
         // made directly on the mob under the identity's member id, since
         // retired, is not the identity's, so its session is never captured
         // into the identity's memory.
-        let previous = self
-            .core_last_binding(identity)
-            .await?
+        let last = self.core_last_binding(identity).await?;
+        let previous = last
+            .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(
-            identity,
-            &mut foreground_shutdown,
-            FreshLife::Reset,
-            previous.clone(),
-        )
-        .await?;
+        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Reset, last)
+            .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14671,7 +14668,7 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
         life: FreshLife,
-        previous: Option<meerkat_mob::MemberBinding>,
+        last: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         // An identity a held pass did not publish owes its host a fresh held
@@ -14719,14 +14716,15 @@ impl IdentityRuntime {
             })?
             .remove(identity);
         // The head of Core's journal before Core is asked: after a failure,
-        // a fact of the identity's member past it says the rotation reached
-        // Core.
-        let asked_after = self.lifecycle_journal_head().await;
+        // the fact the rotation journals first, past it, says the rotation
+        // reached Core. A head that does not read refuses the step here.
+        let asked_after = self.lifecycle_journal_head(identity).await?;
+        let first = lifecycle_projection::StepFirstFact::of(last.as_ref());
         // The live incarnation the rotation retires, as the verb read it, or
         // the incarnation Core had already retired that the rotation's fresh
         // life follows; `None` when Core held none the identity spawned.
         let retiring = self
-            .prepare_lifecycle_retirement_of(identity, previous, life.effect_verb(), asked_after)
+            .prepare_lifecycle_retirement_of(identity, last, life.effect_verb(), asked_after)
             .await?;
         let from_generation = retiring
             .as_ref()
@@ -14754,6 +14752,7 @@ impl IdentityRuntime {
                             earlier: earlier_rotation,
                             retiring,
                             asked_after,
+                            first,
                         },
                         error,
                     )
@@ -14782,16 +14781,16 @@ impl IdentityRuntime {
 
     /// The answer to a rotation Core did not carry out, and what becomes of
     /// what the call recorded. Core's journal says whether any of the
-    /// rotation reached Core ([`Self::lifecycle_step_reach`]): when no fact
-    /// of the identity's member follows the head the call read before it
-    /// asked Core, nothing of it reached Core, so the rotation record this
-    /// call wrote is taken back, an earlier call's put back as it was, and
-    /// so is what the retirement it prepared would owe (`retiring`): no
-    /// later compile or restart carries the rotation out. Otherwise (a fact
-    /// follows, or the journal does not read) the rotation may have
-    /// started, so its records stay, and the identity's next roster compile
-    /// drives it to its end. The bridge's error picks only the answer's
-    /// type.
+    /// rotation reached Core ([`Self::lifecycle_step_reach`]): when the fact
+    /// the rotation journals first does not follow the head the call read
+    /// before it asked Core, nothing of it reached Core, so the rotation
+    /// record this call wrote is taken back, an earlier call's put back as
+    /// it was, and so is what the retirement it prepared would owe
+    /// (`retiring`): no later compile or restart carries the rotation out,
+    /// and the bridge's error picks the answer. Otherwise (the fact follows,
+    /// or the journal does not read) the rotation may have started, so its
+    /// records stay, the identity's next roster compile drives it to its
+    /// end, and the answer says so, whatever the error.
     async fn refused_rotation(
         &self,
         identity: &AgentIdentity,
@@ -14803,14 +14802,21 @@ impl IdentityRuntime {
             earlier,
             retiring,
             asked_after,
+            first,
         } = refused;
-        let may_have_started = self.lifecycle_step_reach(identity, asked_after).await
-            != lifecycle_projection::StepReach::NotReached;
-        if !may_have_started {
-            self.forget_lifecycle_build(identity);
-            self.abandon_lifecycle_retirement(retiring).await;
-            self.restore_rotation_intent(identity, earlier).await;
+        if self
+            .lifecycle_step_reach(identity, asked_after, first)
+            .await
+            != lifecycle_projection::StepReach::NotReached
+        {
+            return IdentityRuntimeError::Internal(format!(
+                "{operation} of identity {identity}: Core's rotation failed ({error}); it may \
+                 have started, and the identity's next roster compile drives it to its end"
+            ));
         }
+        self.forget_lifecycle_build(identity);
+        self.abandon_lifecycle_retirement(retiring).await;
+        self.restore_rotation_intent(identity, earlier).await;
         match error {
             BridgeError::RotationRefused { detail, .. } => {
                 IdentityRuntimeError::IdentityWakeRetryable {
@@ -14837,10 +14843,6 @@ impl IdentityRuntime {
                     ),
                 }
             }
-            error if may_have_started => IdentityRuntimeError::Internal(format!(
-                "{operation} of identity {identity}: Core's rotation failed: {error}; the \
-                 identity's next roster compile drives a rotation Core started to its end"
-            )),
             error => IdentityRuntimeError::Internal(format!(
                 "{operation} of identity {identity} was not started, and nothing was retired: \
                  {error}"
@@ -14961,9 +14963,9 @@ impl IdentityRuntime {
         // under the identity's member id, since retired, answers as an
         // identity Core never spawned: nothing of its session is distilled,
         // dropped or interviewed.
-        let Some(previous) = self
-            .core_last_binding(identity)
-            .await?
+        let last = self.core_last_binding(identity).await?;
+        let Some(previous) = last
+            .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity))
         else {
             return Ok(None);
@@ -14989,13 +14991,8 @@ impl IdentityRuntime {
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
         // The rotation's record reads the binding the delete read, live or
         // retired.
-        self.start_fresh_life_locked(
-            identity,
-            &mut foreground_shutdown,
-            FreshLife::Delete,
-            Some(previous),
-        )
-        .await?;
+        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
+            .await?;
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never

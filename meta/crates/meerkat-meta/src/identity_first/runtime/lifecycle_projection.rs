@@ -86,10 +86,11 @@
 //! has a key of its own, apart from the record of the step that ended the
 //! incarnation, so consuming one never removes the other. A rotation
 //! records the head of Core's journal it read before it asked Core: when it
-//! fails, a fact of the identity's member past that head says the rotation
-//! reached Core, and none says nothing of it did, so it takes its record
-//! back and puts back the one it replaced (a later verb's record replaces
-//! an earlier one's). Once the cursor past the fact that consumed a record
+//! fails, the fact it writes first (its retirement's start, or its seat),
+//! past that head, says the rotation reached Core, and its absence says
+//! nothing of it did, so it takes its record back and puts back the one it
+//! replaced (a later verb's record replaces an earlier one's). A head that
+//! does not read refuses the step before Core is asked. Once the cursor past the fact that consumed a record
 //! is recorded, the record goes. A roster pass that lists an identity again
 //! takes back an unlisting whose retirement Core's standing shows never
 //! started. Whether a member is the identity's is read from the marker or
@@ -688,16 +689,76 @@ struct IntentOf {
 /// ([`IdentityRuntime::lifecycle_step_reach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StepReach {
-    /// Core journaled a fact of the identity's member after the head the
-    /// step read before it asked Core: the step, or another step of the same
-    /// member, reached Core.
+    /// Core journaled the fact the step writes first after the head the
+    /// step read before it asked Core: the step reached Core.
     Reached,
-    /// Core journaled no fact of the identity's member after that head:
-    /// nothing of the step reached Core.
+    /// Core journaled no such fact after that head: nothing of the step
+    /// reached Core.
     NotReached,
-    /// The step read no head before it asked Core, or the journal does not
-    /// read now.
+    /// The step read no head before it asked Core (a bridge without the
+    /// journal reads), or the journal does not read now.
     Unknown,
+}
+
+/// The fact a rotation of an identity's member journals first, by what Core
+/// held of the member when the step read it ([`StepFirstFact::of`]): the
+/// one fact whose presence after the head the step read says the step
+/// reached Core. The end of another operation of the same member, which
+/// started before that head, is no such fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StepFirstFact {
+    /// Core held the live incarnation `generation`: the rotation starts its
+    /// retirement first, naming the rotation's target.
+    RetirementStart { generation: u64 },
+    /// Core had retired the incarnation `predecessor`: the rotation seats
+    /// the fresh life after it first.
+    FreshLifeAfter { predecessor: u64 },
+    /// Core held no incarnation of the member: the rotation seats one first.
+    Seat,
+}
+
+impl StepFirstFact {
+    /// The fact a rotation journals first, by `last`, Core's last binding of
+    /// the member as the step read it (whoever made the member).
+    pub(super) fn of(last: Option<&meerkat_mob::MemberBinding>) -> Self {
+        match last {
+            Some(binding) if binding.is_live() => Self::RetirementStart {
+                generation: binding.generation().get(),
+            },
+            Some(binding) => Self::FreshLifeAfter {
+                predecessor: binding.generation().get(),
+            },
+            None => Self::Seat,
+        }
+    }
+
+    /// Whether `fact` is this fact of `member`.
+    fn is(self, fact: &MemberLifecycleFact, member: &meerkat_mob::AgentIdentity) -> bool {
+        match (self, fact) {
+            (
+                Self::RetirementStart { generation },
+                MemberLifecycleFact::RetirementStarted {
+                    member: started,
+                    generation: retiring,
+                    rotation: Some(_),
+                    ..
+                },
+            ) => started == member && *retiring == generation,
+            (
+                Self::FreshLifeAfter { predecessor },
+                MemberLifecycleFact::Seated {
+                    member: seated,
+                    rotation:
+                        Some(meerkat_mob::SeatRotation::FreshLifeAfter {
+                            predecessor: after, ..
+                        }),
+                    ..
+                },
+            ) => seated == member && after.get() == predecessor,
+            (Self::Seat, MemberLifecycleFact::Seated { member: seated, .. }) => seated == member,
+            _ => false,
+        }
+    }
 }
 
 /// Where a side effect was owed: the mob incarnation whose journal owed
@@ -1979,36 +2040,45 @@ impl IdentityRuntime {
     }
 
     /// The cursor of the head of Core's member lifecycle journal, read
-    /// before a step asks Core for anything, so the step can read after a
-    /// failure whether any of it reached Core
+    /// before a step of `identity` asks Core for anything, so the step can
+    /// read after a failure whether any of it reached Core
     /// ([`Self::lifecycle_step_reach`]). `None` without a session bridge, or
-    /// when the head does not read.
-    pub(super) async fn lifecycle_journal_head(&self) -> Option<u64> {
-        let bridge = self.bridge.as_ref()?;
+    /// over a bridge without the journal reads. A head that does not read
+    /// otherwise refuses the step, retryable, before Core is asked: a
+    /// failure of the step could not be told apart from one that reached
+    /// Core.
+    pub(super) async fn lifecycle_journal_head(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<u64>, IdentityRuntimeError> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(None);
+        };
         match bridge.member_lifecycle_journal_head().await {
-            Ok(head) => Some(head.cursor),
-            Err(error) => {
-                tracing::debug!(
-                    runtime_instance_id = %self.runtime_instance_id,
-                    %error,
-                    "the head of Core's member lifecycle journal did not read before a step; a \
-                     failure of the step keeps what it recorded"
-                );
-                None
-            }
+            Ok(head) => Ok(Some(head.cursor)),
+            Err(BridgeError::Unsupported { .. }) => Ok(None),
+            Err(error) => Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: format!(
+                    "nothing was asked of Core: the head of Core's member lifecycle journal did \
+                     not read ({error})"
+                ),
+            }),
         }
     }
 
-    /// Whether any of a step of `identity` that failed reached Core: a fact
-    /// of the identity's member that Core journaled after `asked_after`, the
-    /// head the step read before it asked Core. Core journals a step's facts
-    /// before it answers the step, so the journal is read up to its head as
-    /// it stands now. A fact of the member another step journaled meanwhile
-    /// reads as reached too, which keeps what the step recorded.
+    /// Whether any of a step of `identity` that failed reached Core: the
+    /// fact the step writes first (`first`), which Core journaled after
+    /// `asked_after`, the head the step read before it asked Core. Core
+    /// journals a step's facts before it answers the step, so the journal
+    /// is read up to its head as it stands now. Another fact of the member,
+    /// the end of an operation that started before that head, says nothing
+    /// of the step.
     pub(super) async fn lifecycle_step_reach(
         &self,
         identity: &AgentIdentity,
         asked_after: Option<u64>,
+        first: StepFirstFact,
     ) -> StepReach {
         let (Some(bridge), Some(mut after)) = (self.bridge.as_ref(), asked_after) else {
             return StepReach::Unknown;
@@ -2043,7 +2113,7 @@ impl IdentityRuntime {
             if page
                 .records
                 .iter()
-                .any(|record| record.fact.member() == Some(&member))
+                .any(|record| first.is(&record.fact, &member))
             {
                 return StepReach::Reached;
             }

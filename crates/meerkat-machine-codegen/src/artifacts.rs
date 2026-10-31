@@ -5714,17 +5714,24 @@ mod tests {
         );
     }
 
-    /// SessionDocumentMachine's CI bound: the CI profile explores the four
-    /// instruction recovery samples it declares, under a step bound of 5; the
-    /// Deep profile keeps `0..2` for each of them and its step bound of 8.
+    /// SessionDocumentMachine's CI bound: under a step bound of 5 the CI
+    /// profile explores the samples it declares, in every Next disjunct of
+    /// the input's transitions; the Deep profile keeps `0..2` for each of
+    /// them and its step bound of 8.
     #[test]
-    fn session_document_narrows_its_recovery_samples_in_ci_only() {
+    fn session_document_narrows_its_ci_samples_only() {
         let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
         let model = render_machine_semantic_model(&schema).expect("render SessionDocumentMachine");
         let ci = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
         let deep = render_machine_ci_cfg(&schema, true).expect("valid Deep CFG");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
         for (input, field, ci_values) in [
-            ("RecoverSessionInstructionState", "target_generation", "{0}"),
+            ("ClassifyDurableTail", "dangling_tool_use_count", "{0, 1}"),
+            ("ClassifyDurableTail", "orphan_tool_result_count", "{0, 1}"),
+            ("RecoverSessionInstructionState", "target_generation", "{2}"),
             ("RecoverSessionInstructionState", "entry_sequence", "{0}"),
             ("RecoverSessionInstructionEffective", "generation", "{0}"),
             (
@@ -5732,13 +5739,20 @@ mod tests {
                 "last_entry_sequence",
                 "{0, 1}",
             ),
+            ("SetSessionInstruction", "body_bytes", "{1}"),
         ] {
             let constant = format!("InputSamples_{input}_{field}");
-            assert!(
-                next_disjunct_for(&model, input)
-                    .contains(&format!("\\E {field} \\in {constant} : ")),
-                "{input}.{field} ranges over {constant}"
-            );
+            let disjuncts = next
+                .lines()
+                .filter(|line| line.contains(&format!(": {input}")))
+                .collect::<Vec<_>>();
+            assert!(!disjuncts.is_empty(), "{input} has Next disjuncts");
+            for line in disjuncts {
+                assert!(
+                    line.contains(&format!("\\E {field} \\in {constant} : ")),
+                    "{input}.{field} ranges over {constant}: {line}"
+                );
+            }
             assert!(
                 ci.contains(&format!("\n  {constant} = {ci_values}\n")),
                 "the CI config samples {input}.{field} as {ci_values}:\n{ci}"

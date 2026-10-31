@@ -671,12 +671,12 @@ pub enum MobEventKind {
     },
     /// A committed operator-instruction write: the slot's record at its
     /// revision and the mob's generation after it. Stored at mob event
-    /// schema 10; replay feeds it to MobMachine through
-    /// `RecoverOperatorInstruction`.
+    /// schema [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`];
+    /// replay feeds it to MobMachine through `RecoverOperatorInstruction`.
     OperatorInstructionCommitted(crate::operator_instruction::OperatorInstructionCommittedEvent),
     /// The member targets one delivery wave recorded. Stored at mob event
-    /// schema 10; replay feeds it to MobMachine through
-    /// `RecordMemberInstructionTarget`.
+    /// schema [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`];
+    /// replay feeds it to MobMachine through `RecordMemberInstructionTarget`.
     MemberInstructionTargetsRecorded(
         crate::operator_instruction::MemberInstructionTargetsRecordedEvent,
     ),
@@ -1797,6 +1797,11 @@ impl MobEventKind {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde_json::Error> {
     let mut value = serde_json::to_value(event)?;
+    if let Some(body) = event.kind.operator_instruction_body()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("body".to_string(), Value::String(body.to_string()));
+    }
     if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(bridge_member_ref) = member_spawned.bridge_member_ref()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
@@ -2006,9 +2011,38 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert("session_archived".to_string(), Value::Bool(true));
     }
     serde_json::to_vec(&serde_json::json!({
-        "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
+        "schema_version": stored_mob_event_schema_version(&event.kind),
         "event": value,
     }))
+}
+
+/// The stored schema version of one event kind: the operator-instruction
+/// journal events are stored at
+/// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`], so a
+/// release before operator instructions refuses a journal that holds one,
+/// and every other kind at [`CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION`].
+#[cfg(not(target_arch = "wasm32"))]
+fn stored_mob_event_schema_version(kind: &MobEventKind) -> u32 {
+    if kind.journals_operator_instructions() {
+        meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION
+    } else {
+        CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION
+    }
+}
+
+/// The stored schema version a stored row's kind type tag requires (see
+/// [`stored_mob_event_schema_version`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn stored_mob_event_schema_version_for_type(kind_type: Option<&str>) -> u32 {
+    match kind_type {
+        Some(kind_type)
+            if crate::operator_instruction::OPERATOR_INSTRUCTION_EVENT_TYPES
+                .contains(&kind_type) =>
+        {
+            meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION
+        }
+        _ => CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
+    }
 }
 
 /// Decode a stored mob event, restoring internal replay-only fields that are
@@ -2027,14 +2061,33 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
                 "stored mob event missing schema_version; pre-0.6 mob event history is unsupported",
             )
         })?;
-    if schema_version != CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION as u64 {
+    let expected_schema_version = stored_mob_event_schema_version_for_type(
+        encoded_object
+            .get("event")
+            .and_then(|event| event.get("kind"))
+            .and_then(|kind| kind.get("type"))
+            .and_then(Value::as_str),
+    );
+    if schema_version != u64::from(expected_schema_version) {
         return Err(stored_mob_event_format_error(format!(
-            "unsupported stored mob event schema_version={schema_version}; expected {CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION}",
+            "unsupported stored mob event schema_version={schema_version}; expected {expected_schema_version}",
         )));
     }
     let mut value = encoded_object
         .remove("event")
         .ok_or_else(|| stored_mob_event_format_error("stored mob event missing event payload"))?;
+    let operator_instruction_body = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("operator_instruction_committed") {
+                kind.remove("body")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<String>)
+        .transpose()?;
     let bridge_member_ref = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2307,6 +2360,9 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .transpose()?
         .unwrap_or(false);
     let mut event: MobEvent = serde_json::from_value(value)?;
+    if let Some(body) = operator_instruction_body {
+        event.kind.set_operator_instruction_body(body);
+    }
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {

@@ -2364,6 +2364,48 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::record_member_instruction_target(
+            Arc::clone(&self.service),
+            delivery,
+        )
+        .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::release_member_instruction_target(
+            Arc::clone(&self.service),
+            release,
+        )
+        .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::read_member_instructions(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,

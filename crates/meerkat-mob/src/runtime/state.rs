@@ -1932,6 +1932,47 @@ pub(super) enum MobCommand {
         caller: crate::control_policy::MobControlPrincipal,
         reply_tx: oneshot::Sender<Result<Vec<crate::control_policy::OperatorGrant>, MobError>>,
     },
+    /// Commit one operator-instruction write: MobMachine decides it, a
+    /// committed record is journaled store-first, then the transition
+    /// commits. Host verb (`AdminHost`), never an agent tool. `digest` is the
+    /// body's, computed by the handle.
+    SetOperatorInstruction {
+        write: Box<crate::operator_instruction::OperatorInstructionWrite>,
+        digest: meerkat_core::InstructionContentDigest,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::operator_instruction::OperatorInstructionReceipt,
+                crate::operator_instruction::OperatorInstructionError,
+            >,
+        >,
+    },
+    /// Revoke one operator-instruction slot at a higher revision, as
+    /// [`Self::SetOperatorInstruction`].
+    RevokeOperatorInstruction {
+        slot: meerkat_core::InstructionSlot,
+        revision: meerkat_core::InstructionRevision,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::operator_instruction::OperatorInstructionReceipt,
+                crate::operator_instruction::OperatorInstructionError,
+            >,
+        >,
+    },
+    /// The mob's delivery owner asks MobMachine to prepare one owed member's
+    /// operator-instruction delivery (internal).
+    PrepareMemberInstructionDelivery {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<
+            Result<super::operator_instruction_delivery::MemberInstructionPreparation, MobError>,
+        >,
+    },
+    /// The mob's delivery owner reports what member sessions did with the
+    /// snapshots it delivered (internal); the recorded ones are journaled
+    /// store-first in one row.
+    SettleMemberInstructionDeliveries {
+        outcomes: Vec<super::operator_instruction_delivery::MemberInstructionDeliveryOutcome>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     PollEvents {
         after_cursor: u64,
         limit: usize,
@@ -2407,6 +2448,10 @@ impl MobCommand {
             Self::GrantScopes { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RevokeScopes { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SetOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RevokeOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReplayAllEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RecordOperatorActionProvenance { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2632,6 +2677,10 @@ impl MobCommand {
             Self::GrantScopes { .. } => "GrantScopes",
             Self::RevokeScopes { .. } => "RevokeScopes",
             Self::Grants { .. } => "Grants",
+            Self::SetOperatorInstruction { .. } => "SetOperatorInstruction",
+            Self::RevokeOperatorInstruction { .. } => "RevokeOperatorInstruction",
+            Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
+            Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",

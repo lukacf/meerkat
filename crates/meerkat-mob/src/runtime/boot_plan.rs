@@ -189,6 +189,10 @@ pub(crate) struct MemberResidencyConfig {
     /// the member's first run).
     #[cfg(feature = "runtime-adapter")]
     pub(crate) build_preparer: Option<Arc<dyn super::MemberBuildPreparer>>,
+    /// How many dormant members' operator-instruction snapshots the mob
+    /// records store-only at once
+    /// (`MobBuilder::with_member_instruction_delivery_concurrency`).
+    pub(crate) instruction_delivery_concurrency: usize,
 }
 
 impl Default for MemberResidencyConfig {
@@ -207,6 +211,8 @@ impl Default for MemberResidencyConfig {
             seat_endpoints: None,
             #[cfg(feature = "runtime-adapter")]
             build_preparer: None,
+            instruction_delivery_concurrency:
+                super::operator_instruction_delivery::DEFAULT_DORMANT_DELIVERY_CONCURRENCY,
         }
     }
 }
@@ -222,7 +228,11 @@ impl std::fmt::Debug for MemberResidencyConfig {
             .field("wake_timeout", &self.wake_timeout)
             .field("owed_wake_retry", &self.owed_wake_retry)
             .field("verify_concurrency", &self.verify_concurrency)
-            .field("seat_endpoints", &self.seat_endpoints);
+            .field("seat_endpoints", &self.seat_endpoints)
+            .field(
+                "instruction_delivery_concurrency",
+                &self.instruction_delivery_concurrency,
+            );
         #[cfg(feature = "runtime-adapter")]
         debug.field("build_preparer", &self.build_preparer.is_some());
         debug.finish()

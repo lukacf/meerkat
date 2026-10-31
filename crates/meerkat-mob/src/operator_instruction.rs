@@ -7,7 +7,8 @@
 //! records, the generation every committed write advances, and each member's
 //! delivery facts (owed, recorded, blocked). The mob journals a committed
 //! record and the targets its members' sessions recorded at mob event schema
-//! 10; every other mob event keeps the current version.
+//! [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`]; every
+//! other mob event keeps the current version.
 //!
 //! A member's session holds the member's whole snapshot as its recorded
 //! target: the mob delivers it through the member session's actor while the
@@ -53,12 +54,65 @@ impl OperatorInstructionTarget {
     /// `member_profile` (the machine's target predicate).
     #[must_use]
     pub fn selects(&self, agent_identity: &AgentIdentity, member_profile: &ProfileName) -> bool {
+        let (kind, profile, member) = self.machine_parts();
+        crate::machines::mob_machine::operator_instruction_target_applies(
+            kind,
+            &profile,
+            member.as_deref(),
+            Some(member_profile.as_str()),
+            agent_identity.as_str(),
+        )
+    }
+
+    /// The target as MobMachine holds it: the kind, the profile name of a
+    /// Profile target (empty otherwise) and the member of a Member target.
+    pub(crate) fn machine_parts(
+        &self,
+    ) -> (
+        crate::machines::mob_machine::InstructionTargetKind,
+        String,
+        Option<String>,
+    ) {
+        use crate::machines::mob_machine::InstructionTargetKind;
         match self {
-            Self::Mob => true,
-            Self::Profile { profile } => profile == member_profile,
-            Self::Member {
-                agent_identity: member,
-            } => member == agent_identity,
+            Self::Mob => (InstructionTargetKind::Mob, String::new(), None),
+            Self::Profile { profile } => (
+                InstructionTargetKind::Profile,
+                profile.as_str().to_owned(),
+                None,
+            ),
+            Self::Member { agent_identity } => (
+                InstructionTargetKind::Member,
+                String::new(),
+                Some(agent_identity.as_str().to_owned()),
+            ),
+        }
+    }
+
+    /// The target MobMachine holds for a record, back in the public
+    /// vocabulary.
+    pub(crate) fn from_machine_parts(
+        kind: crate::machines::mob_machine::InstructionTargetKind,
+        profile: &str,
+        member: Option<&str>,
+    ) -> Result<Self, MobError> {
+        use crate::machines::mob_machine::InstructionTargetKind;
+        match (kind, profile, member) {
+            (InstructionTargetKind::Mob, "", None) => Ok(Self::Mob),
+            (InstructionTargetKind::Profile, profile, None) if !profile.is_empty() => {
+                Ok(Self::Profile {
+                    profile: ProfileName::from(profile),
+                })
+            }
+            (InstructionTargetKind::Member, "", Some(member)) if !member.is_empty() => {
+                Ok(Self::Member {
+                    agent_identity: AgentIdentity::from(member),
+                })
+            }
+            (kind, profile, member) => Err(MobError::Internal(format!(
+                "MobMachine holds a malformed operator instruction target: kind {kind:?}, \
+                 profile {profile:?}, member {member:?}"
+            ))),
         }
     }
 
@@ -211,7 +265,8 @@ pub struct RecordedMemberInstructionTarget {
 
 impl MobEventKind {
     /// Whether this event is one of the operator-instruction journal events,
-    /// stored at mob event schema 10.
+    /// stored at mob event schema
+    /// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`].
     #[must_use]
     pub fn journals_operator_instructions(&self) -> bool {
         matches!(

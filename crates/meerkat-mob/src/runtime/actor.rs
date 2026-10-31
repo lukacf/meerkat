@@ -27,6 +27,7 @@ pub(super) mod member_status_lane;
 pub(super) mod member_wake;
 #[cfg(feature = "runtime-adapter")]
 pub(super) mod member_wake_turn;
+mod operator_instructions;
 mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
@@ -9146,6 +9147,12 @@ pub(super) struct MobActor {
     /// The host's member-residency inputs, the ones the start that built
     /// this actor planned with: the clean-stop lift plans with the same.
     pub(super) member_residency: super::boot_plan::MemberResidencyConfig,
+    /// The operator-instruction shell: the Active records' bodies (from the
+    /// journal), and the delivery bookkeeping the delivery owner and the
+    /// launched handle share. MobMachine holds every operator-instruction
+    /// fact.
+    pub(super) operator_instructions:
+        super::operator_instruction_delivery::OperatorInstructionShell,
     /// Whether the latest member plan could not observe recovery work,
     /// shared with the handles ([`super::MobHandle::boot_set_basis`]).
     pub(super) boot_set_basis: super::boot_plan::MobBootSetBasisCell,
@@ -16449,6 +16456,7 @@ impl MobActor {
             custody_deferrals: self.deferred_member_custody.view(),
             supervisor_bridge: self.supervisor_bridge.clone(),
             machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
+            operator_instruction_delivery: Arc::clone(&self.operator_instructions.delivery),
             reachability_observations: Arc::clone(&self.reachability_observations),
             phase_watch_rx: self.phase_watch_tx.subscribe(),
             // W2-E: the actor's internal handle-for-tools does not carry the
@@ -31217,6 +31225,33 @@ impl MobActor {
                 MobCommand::QueryMachineState { reply_tx } => {
                     let _ = reply_tx.send(self.dsl_authority.state().clone());
                 }
+                MobCommand::SetOperatorInstruction {
+                    write,
+                    digest,
+                    reply_tx,
+                } => {
+                    let result = self.set_operator_instruction(*write, digest).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RevokeOperatorInstruction {
+                    slot,
+                    revision,
+                    reply_tx,
+                } => {
+                    let result = self.revoke_operator_instruction(slot, revision).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::PrepareMemberInstructionDelivery {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = self.prepare_member_instruction_delivery(&agent_identity);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::SettleMemberInstructionDeliveries { outcomes, reply_tx } => {
+                    let result = self.settle_member_instruction_deliveries(outcomes).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::GrantScopes {
                     caller,
                     principal,
@@ -37254,6 +37289,19 @@ impl MobActor {
             );
         };
         let admitted_bridge_session_id = provision_input.admitted_bridge_session_id();
+        // A member minted on a new session is born with its operator
+        // instruction snapshot; one that continues a session receives it by
+        // delivery.
+        if matches!(provision_input.binding(), crate::RuntimeBinding::Session)
+            && let SpawnProvisionInput::Ready(request) = &mut provision_input
+            && let Err(error) = self.carry_member_instruction_birth(
+                &mut request.create_session,
+                &agent_identity,
+                profile_name.as_str(),
+            )
+        {
+            reject_spawn_before_custody!("operator_instruction_birth", error);
+        }
         let spawn_bridge_session_id = match provision_input.binding() {
             crate::RuntimeBinding::Session => Some(&admitted_bridge_session_id),
             crate::RuntimeBinding::External { .. }
@@ -40230,6 +40278,13 @@ impl MobActor {
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
+        if matches!(provision_request.binding, crate::RuntimeBinding::Session) {
+            self.carry_member_instruction_birth(
+                &mut provision_request.create_session,
+                agent_identity,
+                profile_name.as_str(),
+            )?;
+        }
 
         if matches!(
             provision_request.binding,
@@ -52045,6 +52100,13 @@ impl MobActor {
         let (mut report, archive_disposal) =
             boxed_arm_future(|| self.dispose_member_for_destroy_steps(ctx)).await;
         if let Some(disposal) = archive_disposal {
+            boxed_arm_future(|| {
+                self.release_member_instruction_target_for_destroy(
+                    &ctx.entry.agent_identity,
+                    disposal,
+                )
+            })
+            .await;
             if let Err(error) =
                 boxed_arm_future(|| self.record_destroy_member_retirement_archived(ctx, disposal))
                     .await
@@ -54684,6 +54746,11 @@ impl MobActor {
         // Terminal publication is deliberately last: replay may remove the
         // roster only after runtime cleanup and, for peer-only members,
         // supervisor revocation have reached typed terminal truth.
+        self.release_member_instruction_target_for_destroy(
+            &entry.agent_identity,
+            terminal_disposal,
+        )
+        .await;
         if let Err(error) = self
             .record_destroy_member_retirement_archived(&ctx, terminal_disposal)
             .await

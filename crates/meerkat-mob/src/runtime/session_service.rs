@@ -3623,6 +3623,42 @@ where
         .await
     }
 
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::operator_instruction::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let (session_id, record) = delivery.into_parts();
+        self.record_mob_instruction_target(&session_id, record)
+            .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::operator_instruction::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.release_mob_instruction_target(release.session_id(), release.mob_id().as_str())
+            .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        meerkat_core::service::SessionServiceInstructionExt::read_session_instructions(
+            self, session_id,
+        )
+        .await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,

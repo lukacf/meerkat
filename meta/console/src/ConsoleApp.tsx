@@ -242,6 +242,7 @@ import { MetaDock } from "./panels/MetaDock";
 import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type PendingItem } from "./panels/PendingStack";
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
+import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -3808,8 +3809,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const workGraphPanelDockedRef = React.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
   const workGraphRefreshTimerRef = React.useRef<number | null>(null);
+  // One timeline scope per console controller. Its accepted frame keys
+  // outlive the subscription, which starts again whenever the storage
+  // namespace changes (the experience names its runtime once it loads) or
+  // the operator reconnects: the new subscription's recent page then
+  // delivers only frames this console has not accepted, never the buffered
+  // ones a second time.
+  const timelineScopeRef = React.useRef<{ owner: object; dedupe: ConsoleTimelineDedupe } | null>(null);
 
   React.useEffect(() => {
+    let scope = timelineScopeRef.current;
+    if (!scope || scope.owner !== consoleController) {
+      // Another controller is another scope: its buffers start empty.
+      if (scope) {
+        activityRef.current = [];
+        commitLiveFrames([]);
+      }
+      scope = { owner: consoleController, dedupe: createConsoleTimelineDedupe() };
+      timelineScopeRef.current = scope;
+    }
     // Seed activity with recent history (only on mount) — apply same
     // filter as SSE. The activity rail is its own concern; it doesn't
     // share state with the per-identity logs.
@@ -3830,17 +3848,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const cause: RenderCause = frame.event === "text_delta" ? "text"
         : frame.event === "text_complete" || HISTORY_REFRESH_EVENTS.has(frame.event) || isTerminalTurnCompletedFrame(frame) ? "now"
         : "frame";
-      // Activity rail (independent buffer)
+      // Activity rail (independent buffer). Both buffers hold one copy of
+      // a frame: a copy delivered again replaces an older version of it in
+      // place, and is ignored otherwise.
       if (!ACTIVITY_SKIP_EVENTS.has(frame.event)) {
-        activityRef.current = [frame, ...activityRef.current].slice(0, 200);
+        activityRef.current = insertConsoleFrame(activityRef.current, frame, 200) ?? activityRef.current;
       }
 
       // Topology-class buffer keeps tool events (peer-comms etc.) which
       // the activity rail filters out. Capped at 300; older frames roll
       // off naturally as live pulses age past their lifetime.
       if (PANEL_ROUTABLE_EVENTS.has(frame.event)) {
+        const liveFrames = insertConsoleFrame(liveFramesRef.current, frame, 300);
         // A completion renders once, from forceRender below.
-        commitLiveFrames([frame, ...liveFramesRef.current].slice(0, 300), cause === "now" ? "frame" : cause);
+        if (liveFrames) commitLiveFrames(liveFrames, cause === "now" ? "frame" : cause);
       }
 
       // Identity log (single canonical store)
@@ -3895,13 +3916,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     let stopped = false;
     let unsubscribe: (() => void) | null = null;
     const subscriptionLifetime = new AbortController();
+    // The controller hands this input to subscribeTimelineWithRecovery as
+    // is, so the scope's dedupe reaches it; the transport never sees it.
+    const subscription: ConsoleTimelineRecoveryInput = {
+      limit: 200,
+      signal: subscriptionLifetime.signal,
+      onTransportState: (state) => { if (!stopped) setTransportState(state); },
+      dedupe: scope.dedupe,
+    };
 
     void consoleController.timeline.subscribeWithBackfill(
-      {
-        limit: 200,
-        signal: subscriptionLifetime.signal,
-        onTransportState: (state) => { if (!stopped) setTransportState(state); },
-      },
+      subscription,
       (frame) => {
         if (!stopped) handleLiveFrame(frame.value);
       },

@@ -5,6 +5,7 @@ import { TimelinePanel, describeTodayFrame } from "./TimelinePanel";
 import { __chatPaneTest } from "./ChatPane";
 import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
 import { rememberOwnSend } from "../lib/turn-origin";
+import { insertConsoleFrame } from "../../../packages/console-core/src/timeline-recovery";
 import type { ConsoleFrame } from "../types";
 
 // The sentence with each agent segment shown as its key.
@@ -55,14 +56,16 @@ describe("Today names memory events in plain words", () => {
 });
 
 describe("Today rows", () => {
-  it("renders a frame that arrives twice without colliding React keys", () => {
+  it("renders a frame that arrives twice once, without colliding React keys", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const frame: ConsoleFrame = { id: "twice", event: "interaction_complete", identity: "identity:coordinator", interactionId: "turn-1", timestampMs: Date.now(), data: { result: "Done." } };
-    const view = render(<TimelinePanel frames={[frame, { ...frame }]} />);
+    // The console's activity buffer keeps one copy of a frame however often it arrives.
+    const frames = [frame, { ...frame }].reduce<ConsoleFrame[]>((held, copy) => insertConsoleFrame(held, copy, 200) ?? held, []);
+    const view = render(<TimelinePanel frames={frames} />);
     const collisions = errors.mock.calls.filter((call) => /same key/.test(String(call[0])));
     errors.mockRestore();
     expect(collisions.length).toBe(0);
-    expect(view.container.querySelectorAll(".today__row").length).toBe(2);
+    expect(view.container.querySelectorAll(".today__row").length).toBe(1);
   });
 
   it("shows each event's time on the chat's 24-hour clock, in a 12-hour locale too", () => {

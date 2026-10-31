@@ -1418,6 +1418,59 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Record a mob member's operator-instruction snapshot in the member's
+    /// session, as MobMachine authorized it
+    /// ([`crate::MemberInstructionDelivery`], which only the mob runtime
+    /// mints): through the session's actor while it is live, store-only
+    /// under its hosting claim while it is dormant, never waking,
+    /// registering or materializing it. A generation the session already
+    /// recorded answers "already recorded" and writes nothing.
+    ///
+    /// The default is a typed refusal, never a silent success: a decorator
+    /// that does not forward it blocks its members' deliveries visibly
+    /// (`durability_unavailable`). Every production wrapper over a durable
+    /// owner forwards it.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::operator_instruction::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _ = delivery;
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Release a retiring member's session target on behalf of its mob, as
+    /// MobMachine authorized it ([`crate::MemberInstructionRelease`]): the
+    /// target empties and is unowned, so the session's host or a later owner
+    /// can own it. Never wakes the session. A target no owner holds answers
+    /// "already unowned"; another owner's target is refused.
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::operator_instruction::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _ = release;
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Read a member session's committed operator-instruction state (its
+    /// recorded target and the slots its own entry rows put in effect)
+    /// without materializing it.
+    async fn read_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _ = session_id;
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.

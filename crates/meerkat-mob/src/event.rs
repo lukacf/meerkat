@@ -669,6 +669,17 @@ pub enum MobEventKind {
         objective_id: meerkat_core::interaction::ObjectiveId,
         outcome: String,
     },
+    /// A committed operator-instruction write: the slot's record at its
+    /// revision and the mob's generation after it. Stored at mob event
+    /// schema 10; replay feeds it to MobMachine through
+    /// `RecoverOperatorInstruction`.
+    OperatorInstructionCommitted(crate::operator_instruction::OperatorInstructionCommittedEvent),
+    /// The member targets one delivery wave recorded. Stored at mob event
+    /// schema 10; replay feeds it to MobMachine through
+    /// `RecordMemberInstructionTarget`.
+    MemberInstructionTargetsRecorded(
+        crate::operator_instruction::MemberInstructionTargetsRecordedEvent,
+    ),
     /// Bidirectional wiring edge established between two local members.
     ///
     /// DSL-emit-driven observability: the shell records this variant on

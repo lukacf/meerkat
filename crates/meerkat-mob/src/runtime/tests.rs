@@ -2090,6 +2090,16 @@ impl PersistedSessionReadRefusal {
 
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
+    /// Every mob operator-instruction delivery this mock answered, in order:
+    /// the session, the snapshot's generation, and whether it wrote the
+    /// session's document (an already recorded generation writes nothing).
+    instruction_records: std::sync::Mutex<Vec<(SessionId, u64, bool)>>,
+    /// Deliveries in flight now, and the most at once.
+    instruction_records_in_flight: AtomicU64,
+    instruction_records_max_in_flight: AtomicU64,
+    /// When set, every delivery takes a permit here before it writes: a row
+    /// holds deliveries in flight and lets them through.
+    instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// The spawner restrictions handed to the build of each session this
     /// mock created, as a session owner records them.
     tool_restrictions: std::sync::Mutex<
@@ -2437,6 +2447,44 @@ struct MockSessionService {
 }
 
 impl MockSessionService {
+    /// The mob deliveries this mock answered, in order: (session,
+    /// generation, wrote).
+    fn instruction_records(&self) -> Vec<(SessionId, u64, bool)> {
+        self.instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The most deliveries this mock held in flight at once.
+    fn instruction_records_max_in_flight(&self) -> u64 {
+        self.instruction_records_max_in_flight
+            .load(Ordering::SeqCst)
+    }
+
+    /// Hold every later delivery until the returned gate lets it through.
+    fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// A session's committed operator-instruction target, as this mock's
+    /// store holds it.
+    async fn committed_instruction_target(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_core::SessionInstructionState> {
+        self.persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|session| session.instruction_target_state().ok().flatten())
+    }
+
     /// Drop this owner's record of a session's spawner restrictions, as a
     /// session whose evidence is missing or unknown.
     fn forget_tool_restrictions(&self, session_id: &SessionId) {
@@ -2449,6 +2497,10 @@ impl MockSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            instruction_records: std::sync::Mutex::new(Vec::new()),
+            instruction_records_in_flight: AtomicU64::new(0),
+            instruction_records_max_in_flight: AtomicU64::new(0),
+            instruction_record_gate: std::sync::Mutex::new(None),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             tool_restrictions: std::sync::Mutex::new(HashMap::new()),
@@ -5603,6 +5655,124 @@ impl MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    /// Records the snapshot in the session's committed document (and in its
+    /// live copy, when it has one), as the persistent owner does. It never
+    /// creates or materializes a session.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let in_flight = self
+            .instruction_records_in_flight
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.instruction_records_max_in_flight
+            .fetch_max(in_flight, Ordering::SeqCst);
+        let gate = self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            // One permit admits exactly one delivery.
+            gate.acquire_owned()
+                .await
+                .expect("instruction record gate open")
+                .forget();
+        }
+        let result = async {
+            let (session_id, record) = delivery.into_parts();
+            let generation = record.generation;
+            let _authority_guard = self.resume_authority_gate.lock().await;
+            let mut committed = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound {
+                    id: session_id.clone(),
+                })?;
+            let receipt = committed.record_instruction_target(record.clone())?;
+            let wrote = receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded;
+            if wrote {
+                if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                    let _ = live.record_instruction_target(record);
+                }
+                self.persisted_sessions
+                    .write()
+                    .await
+                    .insert(session_id.clone(), committed);
+            }
+            self.instruction_records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((session_id, generation, wrote));
+            Ok::<_, meerkat_core::service::SessionInstructionError>(receipt)
+        }
+        .await;
+        self.instruction_records_in_flight
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let session_id = release.session_id().clone();
+        let mut committed = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let disposition = committed.release_instruction_target(release.mob_id().as_str())?;
+        if disposition == meerkat_core::InstructionReleaseDisposition::Released {
+            if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                let _ = live.release_instruction_target(release.mob_id().as_str());
+            }
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session_id, committed);
+        }
+        Ok(disposition)
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        Ok(meerkat_core::service::SessionInstructionRead { target, effective })
+    }
+
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {
         *self
             .member_comms_identity_root
@@ -7094,6 +7264,8 @@ impl FaultInjectedMobEventStore {
                 "OrchestratorResumeNotificationFailed"
             }
             MobEventKind::OperatorActionRecorded { .. } => "OperatorActionRecorded",
+            MobEventKind::OperatorInstructionCommitted(_) => "OperatorInstructionCommitted",
+            MobEventKind::MemberInstructionTargetsRecorded(_) => "MemberInstructionTargetsRecorded",
         }
     }
 }
@@ -99164,6 +99336,10 @@ mod member_instruction_gates;
 /// host-store realm: recorded store-only, without a wake.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod operator_instruction_host_store;
+/// Operator instructions on a mob: records, targets, delivery to live,
+/// dormant and unborn members, retire, reset, restart and refusals.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_instruction_rows;
 /// #1390: stop and shutdown await interrupted members' end of turn as typed
 /// signals, concurrently and off the actor loop.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

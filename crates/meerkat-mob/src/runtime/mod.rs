@@ -347,6 +347,7 @@ pub mod member_upcall;
 mod mob_member_lifecycle_projection;
 mod mob_runtime_bridge_authority;
 mod mobpack_execution;
+pub(crate) mod operator_instruction_delivery;
 mod ops_adapter;
 mod panic_capture;
 pub mod path;

@@ -4951,7 +4951,11 @@ pub(crate) fn identity_generation_highwaters(
             | MobEventKind::SupervisorEscalation { .. }
             | MobEventKind::SupervisorEscalationFailed { .. }
             | MobEventKind::OrchestratorResumeNotificationFailed { .. }
-            | MobEventKind::OperatorActionRecorded { .. } => {}
+            | MobEventKind::OperatorActionRecorded { .. }
+            // Operator-instruction generations are their own counter
+            // (`operator_instruction_generation_highwater`).
+            | MobEventKind::OperatorInstructionCommitted(_)
+            | MobEventKind::MemberInstructionTargetsRecorded(_) => {}
         }
     }
     highwaters
@@ -8135,6 +8139,13 @@ impl MobBuilder {
         // The bound sizes semaphores, and a semaphore panics above its
         // maximum: a larger value (`usize::MAX` for "no limit") counts as it.
         self.resume_restore_concurrency = concurrency.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
+        self
+    }
+
+    /// How many dormant members' operator-instruction snapshots the mob
+    /// records at once (default 16).
+    pub fn with_member_instruction_delivery_concurrency(self, concurrency: usize) -> Self {
+        let _ = concurrency;
         self
     }
 

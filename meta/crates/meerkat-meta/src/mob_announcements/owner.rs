@@ -1226,17 +1226,27 @@ impl AnnouncementService {
         operation: &OperationId,
         request: PutSource,
     ) -> Result<AnnouncementSource, AnnouncementError> {
+        let source = self.put_source_record(operation, request).await?;
+        self.reconcile_runner(&source).await;
+        Ok(source)
+    }
+
+    /// [`Self::put_source`] without the reconcile of the source's runner
+    /// after it: the declarations reconciler marks the source in between.
+    async fn put_source_record(
+        &self,
+        operation: &OperationId,
+        request: PutSource,
+    ) -> Result<AnnouncementSource, AnnouncementError> {
         self.ensure_authoritative()?;
         self.ensure_hosted(&BTreeSet::from([request.mob_id.clone()]))
             .await?;
         let (operation, now) = (operation.clone(), self.now());
-        let source = self
+        Ok(self
             .stored("put_source", move |store| async move {
                 store.put_source(&operation, request, now).await
             })
-            .await?;
-        self.reconcile_runner(&source).await;
-        Ok(source)
+            .await?)
     }
 
     /// Pause, resume or end a source at its revision.
@@ -1511,8 +1521,21 @@ impl AnnouncementService {
     pub async fn put_subscription(
         &self,
         operation: &OperationId,
-        mut request: PutSubscription,
+        request: PutSubscription,
     ) -> Result<Subscription, AnnouncementError> {
+        let (subscription, mobs) = self.put_subscription_record(operation, request).await?;
+        self.after_subscription_put(&mobs).await;
+        Ok(subscription)
+    }
+
+    /// [`Self::put_subscription`] without the step after the put (see
+    /// [`Self::after_subscription_put`]), with the mobs the subscription
+    /// names: the declarations reconciler marks the subscription in between.
+    async fn put_subscription_record(
+        &self,
+        operation: &OperationId,
+        mut request: PutSubscription,
+    ) -> Result<(Subscription, BTreeSet<MobId>), AnnouncementError> {
         self.ensure_authoritative()?;
         let route = self.member_route(&request.member).await?;
         // A peer answers for its own runtime when a batch reaches it.
@@ -1552,15 +1575,19 @@ impl AnnouncementService {
                 }
                 other => AnnouncementError::Store(other),
             })?;
-        // A mob destroyed between the check and the commit would otherwise
-        // stay named until the mob set changes again.
-        if let Err(error) = self.drop_ended(&mobs).await
+        Ok((subscription, mobs))
+    }
+
+    /// The step after a subscription's put, naming `mobs`: a mob destroyed
+    /// between the check and the commit would otherwise stay named until the
+    /// mob set changes again. Wakes the dispatcher.
+    async fn after_subscription_put(&self, mobs: &BTreeSet<MobId>) {
+        if let Err(error) = self.drop_ended(mobs).await
             && !holder_stopped()
         {
             tracing::warn!(%error, "destroyed mobs not reconciled after a subscription change");
         }
         self.wake();
-        Ok(subscription)
     }
 
     /// The route a put subscribes the member on: the route it is kept on,

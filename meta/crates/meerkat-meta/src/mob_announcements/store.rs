@@ -962,6 +962,16 @@ pub struct DeclarationMark {
     /// Whether the reconciler made the runtime record of this id: only such
     /// a record is ever replaced, ended or cancelled.
     pub managed: bool,
+    /// Whether the step after the record's put is still owed: the schedule
+    /// service's reconcile of a declared source's runner, or the drop of the
+    /// mobs a declared subscription names that ended meanwhile. The
+    /// reconciler marks a record it put applied with its step owed, takes
+    /// the step, and clears this once the step answers, so a reconcile
+    /// stopped in between leaves the record marked and managed, and the next
+    /// one takes the step. Absent, as in a mark written before it existed,
+    /// nothing is owed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub step_owed: bool,
 }
 
 /// Where a role child stands.

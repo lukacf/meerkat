@@ -3326,6 +3326,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_ready_walk_follows_priority_then_creation_then_id() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        // Nine ready items over three priorities; pairs share a creation
+        // time, so the id breaks those ties.
+        let base = Utc::now() - Duration::minutes(1);
+        let mut items = Vec::new();
+        for index in 0..9i64 {
+            let mut request = create_req(&format!("ready {index}"));
+            request.priority = match index % 3 {
+                0 => crate::WorkPriority::High,
+                1 => crate::WorkPriority::Medium,
+                _ => crate::WorkPriority::Low,
+            };
+            let (item, event) = crate::WorkGraphMachine::create_item(
+                request,
+                "realm".to_string(),
+                WorkNamespace::default(),
+                base + Duration::seconds(index / 2),
+            )
+            .expect("item");
+            items.push(store.insert_item(item, event).await.expect("insert"));
+        }
+        items.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let expected = ids(&items);
+
+        let mut seen = Vec::new();
+        let mut page = tool_page(&service, "workgraph_ready", json!({ "limit": 4 })).await;
+        loop {
+            seen.extend(page_ids(&page));
+            if page["truncated"] != json!(true) {
+                break;
+            }
+            assert!(seen.len() < expected.len(), "the walk ends: {page}");
+            page = tool_page(
+                &service,
+                "workgraph_ready",
+                json!({ "limit": 4, "cursor": next_cursor(&page) }),
+            )
+            .await;
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),

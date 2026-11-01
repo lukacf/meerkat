@@ -157,21 +157,32 @@ pub async fn handle_list(
         Ok(service) => service,
         Err(response) => return response,
     };
-    match service.list(filter).await {
-        Ok(items) => work_items_response(id, &items),
+    match service.list_page(filter).await {
+        Ok(page) => work_items_response(id, &page),
         Err(error) => map_workgraph_error(id, error),
     }
 }
 
-/// Serialize a typed work-item list into the contracts `WorkItemsResult`
+/// Serialize a typed work-item page into the contracts `WorkItemsResult`
 /// wire payload, failing closed on serialization (K17).
-fn work_items_response<T: serde::Serialize>(id: Option<RpcId>, items: &[T]) -> RpcResponse {
+fn work_items_response(id: Option<RpcId>, page: &meerkat::WorkGraphItemsResponse) -> RpcResponse {
     #[derive(serde::Serialize)]
-    struct WorkItemsResultRef<'a, T> {
-        items: &'a [T],
+    struct WorkItemsResultRef<'a> {
+        items: &'a [meerkat::WorkItem],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_items: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncated: Option<bool>,
     }
 
-    RpcResponse::success(id, WorkItemsResultRef { items })
+    RpcResponse::success(
+        id,
+        WorkItemsResultRef {
+            items: &page.items,
+            total_items: page.total_items,
+            truncated: page.truncated,
+        },
+    )
 }
 
 pub async fn handle_ready(
@@ -200,8 +211,8 @@ pub async fn handle_ready(
         Ok(service) => service,
         Err(response) => return response,
     };
-    match service.ready(filter).await {
-        Ok(items) => work_items_response(id, &items),
+    match service.ready_page(filter).await {
+        Ok(page) => work_items_response(id, &page),
         Err(error) => map_workgraph_error(id, error),
     }
 }

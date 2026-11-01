@@ -12,6 +12,16 @@ use serde_json::Value;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkItemsResult {
     pub items: Vec<Value>,
+    /// Items that matched the filter at this read (for `workgraph/ready`, the
+    /// ready items), before `limit` cut them. Absent only from a server that
+    /// predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+    /// Matching items exist after the last item returned. Absent only from a
+    /// server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 /// Result envelope for work-event list reads (`workgraph/events`).

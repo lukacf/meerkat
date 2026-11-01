@@ -26,6 +26,7 @@ const MAX_RUNS_PER_IDENTITY = 500;
 const MAX_TOOLS_PER_IDENTITY = 1_000;
 const MAX_SEEN_EVENTS = 50_000;
 const MAX_MESSAGES = 20_000;
+const MAX_LIFECYCLE_ENDS = 32;
 /** A call and a delivery that no id ties count as one message when this close on one pair. */
 const MESSAGE_FALLBACK_MS = 60_000;
 const DEFAULT_NOTIFY_MS = 250;
@@ -153,6 +154,8 @@ interface IdentityRecord {
   runByInteraction: Map<string, string>;
   tools: Map<string, LedgerToolSpan>;
   openModelCalls: Map<string, number>;
+  /** When the agent was retired, respawned, reset or deleted, oldest first. */
+  lifecycleEnds: number[];
 }
 
 /** One message between agents, as the ledger knows it so far. An end is a
@@ -457,7 +460,7 @@ class Ledger implements ActivityLedger {
     let record = this.identityRecords.get(identity);
     if (!record) {
       if (this.identityRecords.size >= MAX_IDENTITIES) this.evictOldestIdentity();
-      record = { buckets: new Map(), lastMs: atMs, runs: new Map(), runByInteraction: new Map(), tools: new Map(), openModelCalls: new Map() };
+      record = { buckets: new Map(), lastMs: atMs, runs: new Map(), runByInteraction: new Map(), tools: new Map(), openModelCalls: new Map(), lifecycleEnds: [] };
       this.identityRecords.set(identity, record);
     }
     if (atMs > record.lastMs) record.lastMs = atMs;
@@ -547,16 +550,29 @@ class Ledger implements ActivityLedger {
   private applySpan(classified: ClassifiedFrame, identity: string, atMs: number, event: string): boolean {
     if (!identity) return false;
     if (LIFECYCLE_ENDS.has(event)) {
-      // A retire, respawn, reset or delete ends every run still open.
-      const record = this.identityRecords.get(identity);
+      // A retire, respawn, reset or delete ends the runs and model calls that
+      // started before it and are still open. What started after it belongs
+      // to what came next: history can land after live frames, so an old
+      // lifecycle change never ends a live run.
+      const record = this.record(identity, atMs);
       let changed = false;
-      for (const run of record?.runs.values() ?? []) {
-        if (run.endMs !== undefined) continue;
+      if (!record.lifecycleEnds.includes(atMs)) {
+        record.lifecycleEnds.push(atMs);
+        record.lifecycleEnds.sort((a, b) => a - b);
+        if (record.lifecycleEnds.length > MAX_LIFECYCLE_ENDS) record.lifecycleEnds.shift();
+        changed = true;
+      }
+      for (const run of record.runs.values()) {
+        if (run.endMs !== undefined || run.startMs === undefined || run.startMs >= atMs) continue;
         run.endMs = atMs;
         run.outcome = "cancelled";
         changed = true;
       }
-      record?.openModelCalls.clear();
+      for (const [key, startMs] of record.openModelCalls) {
+        if (startMs >= atMs) continue;
+        record.openModelCalls.delete(key);
+        changed = true;
+      }
       return changed;
     }
     const span = classified.span;
@@ -579,6 +595,12 @@ class Ledger implements ActivityLedger {
       if (span.edge === "start") {
         if (run.startMs === atMs) return false;
         run.startMs = run.startMs === undefined ? atMs : Math.min(run.startMs, atMs);
+        // A lifecycle change the ledger already saw after this start ended it.
+        const ended = run.endMs === undefined ? this.lifecycleEndAfter(record, run.startMs) : undefined;
+        if (ended !== undefined) {
+          run.endMs = ended;
+          run.outcome = "cancelled";
+        }
       } else {
         const outcome: LedgerRunSpan["outcome"] = span.outcome === "timed_out" ? "failed" : span.outcome ?? "ok";
         if (run.endMs === atMs && run.outcome === outcome) return false;
@@ -608,13 +630,19 @@ class Ledger implements ActivityLedger {
       }
       return before !== `${tool.startMs}:${tool.endMs}:${tool.outcome}:${tool.durationMs}`;
     }
-    // A model call: open until its end.
+    // A model call: open until its end, or a lifecycle change after its start.
     if (span.edge === "start") {
       if (record.openModelCalls.get(span.key) === atMs) return false;
+      if (this.lifecycleEndAfter(record, atMs) !== undefined) return false;
       record.openModelCalls.set(span.key, atMs);
       return true;
     }
     return record.openModelCalls.delete(span.key);
+  }
+
+  /** The first retire, respawn, reset or delete of the agent after `startMs`. */
+  private lifecycleEndAfter(record: IdentityRecord, startMs: number): number | undefined {
+    return record.lifecycleEnds.find((endMs) => endMs > startMs);
   }
 
   /** Drop the oldest spans past `max`: ended ones first, then the oldest open ones. */

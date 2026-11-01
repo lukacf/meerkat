@@ -25,13 +25,22 @@ import {
   plural,
 } from "./kit";
 import { DREAMS_WITHHELD, normalizeDreamRunDetail } from "./model";
-import { MetaLine, RecordLink, useNameOf } from "./parts";
+import { MetaLine, RecordLink, useMeasuredWidth, useNameOf } from "./parts";
 import { DAY_MS, dreamTimeline, type DreamBar } from "./viz-model";
 import { dreamOpKindsDisplay, dreamVerdictChips, partitionName, realmSpaceName } from "./words";
 
 const WEEK = 7;
 
-function dayTicks(start: number, end: number): Array<{ x: number; label: string; key: string }> {
+/// A day label's width in the axis font, with its 4 px offset from the line,
+/// and the room the "now" label takes at the right edge.
+const DAY_LABEL_PX = 44;
+const NOW_LABEL_PX = 28;
+
+/// Midnights between `start` and `end`, as gridlines with day labels. A
+/// label is left off where it would run into "now" at the right edge, and
+/// every other (or third) label is left off where the days stand closer
+/// than a label is wide, counted from the newest; every day keeps its line.
+function dayTicks(start: number, end: number, width: number): Array<{ x: number; label: string; key: string }> {
   const ticks: Array<{ x: number; label: string; key: string }> = [];
   const first = new Date(start);
   first.setHours(0, 0, 0, 0);
@@ -40,18 +49,24 @@ function dayTicks(start: number, end: number): Array<{ x: number; label: string;
   const span = Math.max(1, end - start);
   while (cursor.getTime() <= end) {
     const at = cursor.getTime();
-    // The right edge reads "now"; a day line close to it keeps its line
-    // but not a label that would run into it.
-    if ((end - at) / span < 0.05) {
-      cursor.setDate(cursor.getDate() + 1);
-      continue;
-    }
     ticks.push({
       key: String(at),
       x: (at - start) / span,
       label: cursor.toLocaleDateString("en-GB", { weekday: "short", day: "numeric" }),
     });
     cursor.setDate(cursor.getDate() + 1);
+  }
+  const daySpacing = (DAY_MS / span) * width;
+  const every = daySpacing >= DAY_LABEL_PX + 6 ? 1 : daySpacing * 2 >= DAY_LABEL_PX + 6 ? 2 : 3;
+  let kept = 0;
+  for (let index = ticks.length - 1; index >= 0; index -= 1) {
+    const tick = ticks[index];
+    if ((1 - tick.x) * width < DAY_LABEL_PX + NOW_LABEL_PX) {
+      tick.label = "";
+      continue;
+    }
+    if (kept % every !== 0) tick.label = "";
+    kept += 1;
   }
   return ticks;
 }
@@ -75,7 +90,8 @@ function DreamsTimeline({
 }): React.JSX.Element {
   const nameOf = useNameOf();
   const timeline = React.useMemo(() => dreamTimeline(sheets, runs, now, WEEK), [sheets, runs, now]);
-  const ticks = React.useMemo(() => dayTicks(timeline.start, timeline.end), [timeline.start, timeline.end]);
+  const [axisRef, axisWidth] = useMeasuredWidth<HTMLSpanElement>(640);
+  const ticks = React.useMemo(() => dayTicks(timeline.start, timeline.end, axisWidth), [timeline.start, timeline.end, axisWidth]);
   const count = timeline.rows.reduce((sum, row) => sum + row.bars.length, 0);
   return (
     <section className="memory-block memory-dreams-timeline" data-testid="memory-dreams-timeline" aria-labelledby="memory-dreams-week-head">
@@ -93,12 +109,14 @@ function DreamsTimeline({
         <div className="memory-week">
           <div className="memory-week__axis" aria-hidden="true">
             <span className="memory-week__axis-label" />
-            <span className="memory-week__axis-days">
-              {ticks.map((tick) => (
-                <span key={tick.key} className="memory-week__day" style={{ left: `${tick.x * 100}%` }}>
-                  {tick.label}
-                </span>
-              ))}
+            <span className="memory-week__axis-days" ref={axisRef}>
+              {ticks.map((tick) =>
+                tick.label ? (
+                  <span key={tick.key} className="memory-week__day" style={{ left: `${tick.x * 100}%` }}>
+                    {tick.label}
+                  </span>
+                ) : null,
+              )}
               <span className="memory-week__now">now</span>
             </span>
           </div>

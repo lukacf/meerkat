@@ -257,7 +257,7 @@ export const gallerySections: GallerySection[] = [
           </div>
         </Specimen>
         <SpecimenRow>
-          <Specimen title="Narrow pane" note="420 px: the view switch folds into the menu, the strip is 2 x 2" bare width={460}>
+          <Specimen title="Narrow pane" note="420 px: the actions take a row of their own, the view switch shows its glyphs, the strip is 2 x 2" bare width={460}>
             <div className="kg-pane" style={{ height: 520, width: 420, margin: "0 auto 16px" }}>
               <TopologyFrame narrow />
             </div>

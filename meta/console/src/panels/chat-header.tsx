@@ -445,6 +445,8 @@ export const ChatHeader = React.memo(function ChatHeader({
           onConfirm={() => {
             setConfirm(null);
             confirmAction();
+            // Focus returns to the menu, which stays while the agent does.
+            frameRef.current?.querySelector<HTMLButtonElement>(".conv__menu")?.focus();
           }}
         />
       ) : null}

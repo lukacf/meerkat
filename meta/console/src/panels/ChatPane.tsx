@@ -2720,7 +2720,8 @@ export function ChatPane({
           {agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && (
             <FooterFact>{humanizeEnum(agent.role)}</FooterFact>
           )}
-          {state && <FooterFact tone={statusTone(state)}>{state}</FooterFact>}
+          {/* The member's state: a running member is up (ok), not "working now". */}
+          {state && <FooterFact tone={state === "running" ? "ok" : statusTone(state)}>{state}</FooterFact>}
           {/* What the agent is doing: its mark is the accent (happening now),
               its words stay in the footer's meta ink. */}
           {phase && <FooterFact tone="live">{responsePhaseWords(phase)}</FooterFact>}

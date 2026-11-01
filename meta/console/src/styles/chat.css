@@ -982,7 +982,12 @@
   gap: 5px;
   min-width: 0;
 }
-.composer__fact > .cc-mark { flex: none; }
+/* The footer's marks hold still: the header's live line is the one that
+   pulses, and a pulse here would repaint beside the composer every frame. */
+.composer__fact > .cc-mark { flex: none; animation: none; }
+.composer__fact > .cc-mark[data-tone="live"] {
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+}
 .composer__to b { font-weight: 600; color: var(--_cc-foreground-muted); }
 .composer__sep { color: var(--_cc-foreground-meta); }
 .composer__fact[data-tone="crit"] { color: var(--_cc-negative-ink); }

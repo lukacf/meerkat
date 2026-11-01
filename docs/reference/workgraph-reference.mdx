@@ -351,30 +351,29 @@ same everywhere:
 | `statuses` | list, snapshot | Keep items whose status is in the list. Checked before the terminality rule, so it does not by itself reveal terminal items |
 | `include_terminal` | list, snapshot | Default `false`: `completed`, `cancelled`, and `failed` items are dropped even when `statuses` names them, and a snapshot omits edges that touch them. `ready` has no such flag because a terminal item is never ready |
 | `labels` | list, ready, snapshot | Conjunction: an item must carry every listed label. Filter on one label to widen the result |
-| `limit` | list, ready, snapshot, events | Default 100, maximum 1,000; a larger value is `INVALID_PARAMS` before the store is read. Ready results are sorted by priority, then creation time, then id before the cut |
+| `limit` | list, ready, snapshot, events | Default 100, maximum 1,000; a larger value is `INVALID_PARAMS` before the store is read. List and snapshot results are sorted most recently updated first (`updated_at`, then `id`, both descending) before the cut, so a cut keeps the most recently updated items; ready results are sorted by priority, then creation time, then id |
 | `after_seq` | events | Only events with `seq` strictly greater than the value; page forward from the last `seq` seen or a snapshot's `event_high_water_mark` |
 | `realm_id`, `namespace` | all | Default to the granted realm and namespace; any other value is rejected |
 | `all_namespaces` | list, snapshot, events | Present on the wire, rejected by the standard single-grant services |
 
-**Atomic evaluation capacity is separate from the response limit.** `ready`
-and `snapshot` fail when the namespace holds more than 1,000 live
-(non-terminal) items. `snapshot` additionally rejects a namespace with more
-than 1,000 edges that touch a live item, or more than 1,000 attention bindings.
-These checks happen before labels, status filters, or output truncation:
-`limit: 1` does not bypass them. They are evaluation ceilings, not
-write/storage maxima.
+**Results report their cut.** The list, ready, and snapshot results of the
+tools, RPC methods, and REST routes carry `total_items`, the items that
+matched before `limit` cut them (for ready, the ready items), and `truncated`,
+true when matching items exist after the last one returned. A result without
+these fields comes from an older server and may still have been cut.
 
-Terminal items (`completed`, `cancelled`, `failed`) and edges between two
-terminal items do not count: a terminal item is never ready again, and such an
-edge can no longer change any item's readiness. Both are still read, still
-resolve blockers and child joins, and are still returned with
-`include_terminal`. Closing finished work therefore frees capacity, so a
-long-lived namespace stays usable as its history grows.
+`ready` and `snapshot` read one observation of the whole namespace and classify
+readiness against all of it, however many items, edges, and attention bindings
+it holds: an item a snapshot returns is not ready while a blocker the cut left
+out is unresolved. Terminal items (`completed`, `cancelled`, `failed`) are
+never ready again; they still resolve blockers and child joins, and are
+returned with `include_terminal`.
 
-Plan capacity for the live working set across deliberately scoped realms or
-namespaces issued by an embedding Rust host. A caller-supplied namespace string
-cannot widen the service's grant; there is no item-delete, namespace-rename, or
-graph-compaction API.
+Every list, ready, and snapshot call reads the whole namespace, closed history
+included, so its cost grows with the namespace. Scope long-lived work across
+deliberately scoped realms or namespaces issued by an embedding Rust host. A
+caller-supplied namespace string cannot widen the service's grant; there is no
+item-delete, namespace-rename, or graph-compaction API.
 
 Items and edges are never deleted. No tool, RPC method, REST route, or CLI
 command unlinks an edge or removes an item; only the trusted attention prune

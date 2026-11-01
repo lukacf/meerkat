@@ -2311,10 +2311,10 @@ construction and agent tool calls are scope-pinned to it.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?}` | `WorkGraphSnapshot` (`items`, `edges`, `attention`, `ready_item_ids`, `event_high_water_mark`, `captured_at`) |
-| `meta/workgraph/list` | same filter | `{items: WorkItem[]}` |
+| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?}` | `WorkGraphSnapshot` (`items`, `edges`, `attention`, `ready_item_ids`, `event_high_water_mark`, `captured_at`, `total_items`, `truncated`); items most recently updated first |
+| `meta/workgraph/list` | same filter | `{items: WorkItem[], total_items, truncated}`; items most recently updated first |
 | `meta/workgraph/get` | `{id, namespace?}` | `{item: WorkItem}` |
-| `meta/workgraph/ready` | `{namespace?, labels?, limit?}` | `{items: WorkItem[]}` |
+| `meta/workgraph/ready` | `{namespace?, labels?, limit?}` | `{items: WorkItem[], total_items, truncated}`; `total_items` counts the ready items |
 | `meta/workgraph/events` | `{namespace?, all_namespaces?, after_seq?, limit?}` | `{events: WorkGraphEvent[]}` |
 | `meta/workgraph/facts` | `{after_seq?, limit?}` (default 256, clamped to 1..=1000) | `{facts, next_after_seq?, more_may_be_pending, events_without_seq}`; the cursor-tail projection behind the SSE wake stream |
 | `meta/workgraph/attention/list` | `{namespace?, status?}`; `status` accepts `active`, `paused`, `superseded`, `stopped`, or the tagged `{state}` form | `{attention: WorkAttentionBinding[]}` |

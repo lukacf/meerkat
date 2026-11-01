@@ -1189,12 +1189,14 @@ present.
 `events/list_since`, `workgraph/list`, `workgraph/ready`,
 `workgraph/snapshot`, and `workgraph/events`.
 
-WorkGraph ready-set and snapshot projections are atomic only within explicit
-process bounds. A projection over more than 1,000 live (non-terminal) items,
-1,000 edges that touch a live item, or 1,000 attention bindings fails closed
-with `INVALID_PARAMS`; narrow the realm/namespace/filter and retry. Terminal
-items and edges between two terminal items do not count against these bounds,
-and an oversized graph is never truncated after the fact.
+WorkGraph `workgraph/ready` and `workgraph/snapshot` read one atomic
+observation of the whole namespace and classify readiness against all of it,
+however many items, edges and attention bindings the namespace holds. `limit`
+then cuts the result, and `workgraph/list`, `workgraph/ready` and
+`workgraph/snapshot` report the cut: `total_items` counts the items that
+matched before it (for `workgraph/ready`, the ready items), and `truncated` is
+true when matching items exist after the last one returned. A result without
+these fields comes from an older server and may still have been cut.
 
 ### session/read
 
@@ -2277,8 +2279,10 @@ entry lists its id (see
 
 ### workgraph/list
 
-List items in the granted realm and namespace. Params are a `WorkItemFilter`;
-all fields are optional and an empty object lists live work.
+List items in the granted realm and namespace, most recently updated first
+(`updated_at`, then `id`, both descending), so a cut keeps the most recently
+updated items. Params are a `WorkItemFilter`; all fields are optional and an
+empty object lists live work.
 
 <CodeGroup>
 ```json Request
@@ -2303,7 +2307,9 @@ all fields are optional and an empty object lists live work.
   "result": {
     "items": [
       {"id": "work_release_notes", "status": "completed", "labels": ["release", "docs"], "revision": 6}
-    ]
+    ],
+    "total_items": 1,
+    "truncated": false
   }
 }
 ```
@@ -2336,6 +2342,11 @@ all fields are optional and an empty object lists live work.
 <ParamField body="limit" type="integer" default="100">
   Maximum items returned. Omitted means 100; values above 1,000 fail with `INVALID_PARAMS` before the store is queried.
 </ParamField>
+
+The result is `{"items": [...], "total_items": N, "truncated": bool}`:
+`total_items` counts the items that matched the filter before `limit` cut
+them, and `truncated` is true when matching items exist after the last one
+returned.
 
 Items and edges are never deleted. There is no unlink or delete method on any
 surface and no tool for it; the graph is an append-only ledger. To take an item
@@ -2379,9 +2390,10 @@ are a `ReadyWorkFilter`.
 </ParamField>
 
 There is no `include_terminal` here because a terminal item is never ready.
-Readiness is evaluated atomically over the namespace; a namespace with more
-than 1,000 live (non-terminal) items fails with `INVALID_PARAMS` and must be
-narrowed rather than truncated. Terminal items do not count. The result is `{"items": [...]}`.
+Readiness is evaluated atomically over every live item of the namespace,
+however many it holds, and `limit` then cuts the sorted ready items. The
+result is `{"items": [...], "total_items": N, "truncated": bool}`, where
+`total_items` counts the ready items before the cut.
 
 ### workgraph/snapshot
 
@@ -2417,20 +2429,24 @@ Read one atomic observation of the namespace. Params are a
     "items": [],
     "edges": [],
     "attention": [],
-    "ready_item_ids": []
+    "ready_item_ids": [],
+    "total_items": 0,
+    "truncated": false
   }
 }
 ```
 </CodeGroup>
 
 `statuses`, `labels`, and `include_terminal` select the items exactly as in
-`workgraph/list`; `limit` then bounds them (default 100, maximum 1,000).
-`edges` contains only edges whose both endpoints are among the returned items,
-`attention` only bindings on those items, and `ready_item_ids` the subset of
-returned items that is ready at `captured_at`. A snapshot therefore omits an
-edge to a terminal item unless `include_terminal` is true. The atomic scan is
-bounded before filtering: a namespace with more than 1,000 items, 1,000 edges,
-or 1,000 attention bindings fails with `INVALID_PARAMS` and must be narrowed.
+`workgraph/list`; `limit` then keeps the most recently updated of them
+(default 100, maximum 1,000), and `total_items` and `truncated` report the
+cut as in `workgraph/list`. `edges` contains only edges whose both endpoints
+are among the returned items, `attention` only bindings on those items, and
+`ready_item_ids` the subset of returned items that is ready at `captured_at`.
+A snapshot therefore omits an edge to a terminal item unless
+`include_terminal` is true. Readiness is classified against the whole
+namespace, however many items, edges and attention bindings it holds: a
+returned item is not ready while a blocker the cut left out is unresolved.
 
 ### workgraph/events
 

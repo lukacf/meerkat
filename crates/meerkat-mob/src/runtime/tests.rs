@@ -27662,7 +27662,9 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
         ("Stop", "Stop"),
         ("ResumeLifecycle", "Resume"),
         ("Complete", "Complete"),
-        ("Reset", "Reset"),
+        // The reset's admission is its pure preflight input: `ResetToRunning`
+        // itself needs the empty roster its retirement batch leaves.
+        ("Reset", "AdmitReset"),
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [
@@ -27690,6 +27692,16 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
             assert!(
                 arm.contains(&format!("MobMachineInput::{input}")),
                 "MobCommand::{command} must submit MobMachineInput::{input} for command admission before shell mechanics"
+            );
+        }
+        if command == "Reset" {
+            let retirement = include_str!("actor/retirement_io.rs");
+            assert!(
+                arm.contains("self.begin_retirement_batch(")
+                    && retirement.contains("self.handle_reset(")
+                    && source
+                        .contains("prepare_dsl_input_transition(mob_dsl::MobMachineInput::Reset,"),
+                "MobCommand::Reset must commit through MobMachineInput::Reset after member retirement mechanics"
             );
         }
     }

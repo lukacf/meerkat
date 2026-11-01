@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   required method with no default: forward it to the service or builder it
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
+- `AccessConfigError` gains `PaddedApproverId`, for an approver id with
+  leading or trailing whitespace, which validation reported as
+  `EmptyApproverId` (see Fixed). A `match` over every variant adds an arm
+  for it.
 - `ConsoleUiConfig` has a new public field, `attention`
   (`console_config::ConsoleAttentionUiConfig`): the console's host attention
   sources (see Added). Code that builds the struct with a literal adds
@@ -392,13 +396,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cursor it was given is refused as a store failure.
 - An invalid access configuration is refused with what is wrong with it:
   the `-32602` `invalid_access_config` refusal of a `meta/access/*` write,
-  checked or not, carries `data.reason`, a stable `kind` (for example
-  `unknown_action`, `unknown_group` or `duplicate_rule_id`) and a `message`
-  that names the rule, action, group or approver at fault. A configuration
-  the owner cannot write as TOML is described without the writer's text.
-  The code and the fixed message are unchanged, and the list of kinds can
-  grow. Before, the refusal carried its kind alone, so a client such as the
-  Console's Access editor could not say what was wrong with a save.
+  checked or not, carries `data.reason`, a stable token (for example
+  `unknown_action`, `unknown_group` or `duplicate_rule_id`), and
+  `data.detail`, the text that names the rule, action, group or approver at
+  fault. A configuration the owner cannot write as TOML is described
+  without the writer's text. The code and the fixed message are unchanged,
+  and the list of tokens can grow. Before, the refusal carried its kind
+  alone, so a client such as the Console's Access editor could not say what
+  was wrong with a save. An approver id with leading or trailing whitespace
+  is now refused as `padded_approver_id`, with a text that names the id;
+  before, it was refused as an empty id (see Breaking).
 - On a shared Console the memory panel reads judge each identity under the
   name the Console gives it, `<namespace>/<identity>`, after recording the
   access attributes of its runtimes, as its send route does. Before, every

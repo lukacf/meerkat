@@ -243,6 +243,7 @@ pub enum AccessConfigError {
     Parse(String),
     Io(String),
     RevisionExhausted,
+    PaddedApproverId(String),
 }
 
 impl AccessConfigError {
@@ -258,6 +259,7 @@ impl AccessConfigError {
             Self::UnknownAction { .. } => "unknown_action",
             Self::UnknownGroup { .. } => "unknown_group",
             Self::EmptyApproverId => "empty_approver_id",
+            Self::PaddedApproverId(_) => "padded_approver_id",
             Self::ApproverWithoutHolders(_) => "approver_without_holders",
             Self::UnknownApproverGroup { .. } => "unknown_approver_group",
             Self::UnknownRule(_) => "unknown_rule",
@@ -277,6 +279,10 @@ impl std::fmt::Display for AccessConfigError {
             ),
             Self::EmptyRuleId => write!(f, "access rule id must not be empty"),
             Self::EmptyApproverId => write!(f, "approver id must not be empty"),
+            Self::PaddedApproverId(id) => write!(
+                f,
+                "approver {id:?}: id must not have leading or trailing whitespace"
+            ),
             Self::ApproverWithoutHolders(id) => {
                 write!(
                     f,
@@ -434,8 +440,11 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
         }
     }
     for (approver, holders) in &config.approvers {
-        if approver.trim().is_empty() || approver.trim() != approver {
+        if approver.trim().is_empty() {
             return Err(AccessConfigError::EmptyApproverId);
+        }
+        if approver.trim() != approver {
+            return Err(AccessConfigError::PaddedApproverId(approver.clone()));
         }
         if holders
             .subjects
@@ -678,7 +687,9 @@ mod tests {
         );
         assert_eq!(
             validate_access_config(&with(" person:alice", subject("alice@x"))),
-            Err(AccessConfigError::EmptyApproverId)
+            Err(AccessConfigError::PaddedApproverId(
+                " person:alice".to_string()
+            ))
         );
         assert_eq!(
             validate_access_config(&with("person:alice", AccessApprover::default())),

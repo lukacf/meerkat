@@ -6608,7 +6608,11 @@ fn access_edit_rpc_error(response_id: Value, error: crate::access::AccessEditErr
         AccessEditError::Config(invalid) => (
             -32602,
             "Invalid access configuration.",
-            json!({"kind":"invalid_access_config", "reason":invalid_access_config_reason(&invalid)}),
+            json!({
+                "kind": "invalid_access_config",
+                "reason": invalid.kind(),
+                "detail": invalid_access_config_detail(&invalid),
+            }),
         ),
     };
     response_value(
@@ -6622,22 +6626,32 @@ fn access_edit_rpc_error(response_id: Value, error: crate::access::AccessEditErr
     )
 }
 
-/// What is wrong with a configuration the owner refused, for the editor that
-/// saved it: a stable `kind` (`AccessConfigError::kind`) and a `message` that
-/// names the rule, action, group or approver at fault. Only an administrator
-/// is answered, since the owner checks administration before it validates.
-fn invalid_access_config_reason(error: &crate::access::AccessConfigError) -> Value {
+/// The `detail` of an invalid configuration's refusal, for the administrator
+/// who saved it (the owner checks administration before it validates): the
+/// error's text, which names the rule, action, group or approver at fault.
+/// The TOML writer's and the file system's own text stay on the server, so
+/// those failures get a fixed text. No arm is a catch-all: a new error says
+/// here what its text may show.
+fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> String {
     use crate::access::AccessConfigError;
-    let message = match error {
-        // The TOML writer's and the file system's own text stay on the
-        // server.
+    match error {
+        AccessConfigError::EnabledWithoutAdmins
+        | AccessConfigError::EmptyRuleId
+        | AccessConfigError::DuplicateRuleId(_)
+        | AccessConfigError::EmptyActions(_)
+        | AccessConfigError::UnknownAction { .. }
+        | AccessConfigError::UnknownGroup { .. }
+        | AccessConfigError::EmptyApproverId
+        | AccessConfigError::PaddedApproverId(_)
+        | AccessConfigError::ApproverWithoutHolders(_)
+        | AccessConfigError::UnknownApproverGroup { .. }
+        | AccessConfigError::UnknownRule(_)
+        | AccessConfigError::RevisionExhausted => error.to_string(),
         AccessConfigError::Parse(_) => {
             "access configuration could not be written as TOML".to_string()
         }
         AccessConfigError::Io(_) => "access configuration could not be saved".to_string(),
-        other => other.to_string(),
-    };
-    json!({"kind": error.kind(), "message": message})
+    }
 }
 
 /// Returns None only for a legacy payload with no checked-version key. Any

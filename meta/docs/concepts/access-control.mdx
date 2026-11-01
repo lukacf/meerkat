@@ -294,23 +294,27 @@ server messages:
 | `-32009`, `access_revision_conflict` | Retain the draft, refresh, review and explicitly reapply. `expected_revision` and `actual_revision` describe the mismatch. |
 | `-32009`, `access_owner_changed` | Read the replacement owner and explicitly review before another save. |
 | `-32004`, `access_mutation_unavailable` | Keep the draft; do not fall back to an unchecked write. Refresh after availability is restored. |
-| `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. An invalid configuration answers `invalid_access_config` with `reason`, which says what is wrong (below). |
+| `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. An invalid configuration answers `invalid_access_config` with `reason` and `detail`, which say what is wrong (below). |
 | `-32000`, `access_persistence_failed` | Report that persistence failed and refresh before an explicit retry. The new live revision was not published. |
 | `-32030`, `access_denied`, or the separate `read_only` error | Respect the current authorization or connection policy; changing the revision cannot authorize the write. |
 
-The `reason` of `invalid_access_config` is a stable `kind` and a `message`
-that names the rule, action, group or approver at fault, for example
-`{"kind": "unknown_group", "message": "access rule ops: unknown group \"ghosts\""}`.
-The kinds are `enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
+An `invalid_access_config` refusal carries `reason`, a stable token, and
+`detail`, the text that names the rule, action, group or approver at fault,
+for example `"reason": "unknown_group"` with
+`"detail": "access rule ops: unknown group \"ghosts\""`. The reasons are
+`enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
 `empty_actions`, `unknown_action`, `unknown_group`, `empty_approver_id`,
-`approver_without_holders`, `unknown_approver_group`, `unknown_rule` and
-`invalid_toml` (a configuration the owner could not write as TOML). The list
-can grow: show `message` for a kind you do not know. The message describes
-only the configuration that was saved, and only an administrator receives it.
+`padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
+`unknown_rule` and `invalid_toml` (a configuration the owner could not write
+as TOML), and the list can grow. Map the reasons you know to your own words.
+Only an administrator receives this refusal, and `detail` names only entries
+of the configuration that was saved, so an access editor may show it, also
+for a reason it does not know.
 
 A transport timeout is not proof of rejection. Read the current owner state
-before deciding whether to retry. UI error notices should remain finite and
-safe, without displaying arbitrary backend diagnostic text.
+before deciding whether to retry. Apart from that `detail`, UI error notices
+should remain finite and safe, without displaying arbitrary backend
+diagnostic text.
 
 ### Refusal feedback and audit limits
 

@@ -1058,10 +1058,12 @@ test("an invalid access save names the owner's reason in the Console's words, wi
     // Without a detail it has nothing more to say than the generic text.
     { data: { reason: "a_later_reason" }, expected: generic },
     { data: {}, expected: generic },
-    // Only text counts, and a name an object inherits is no reason.
+    // Only text counts, and a name an object inherits is no reason: it reads
+    // as a reason this Console does not know, detail and all.
     { data: { reason: { kind: "unknown_group" }, detail: 42 }, expected: generic },
     { data: { reason: "", detail: "  " }, expected: generic },
-    { data: { reason: "constructor" }, expected: generic },
+    { data: { reason: "constructor", detail: futureDetail },
+      expected: `Changes were not saved. The resulting access configuration is not valid (${futureDetail}); your draft is retained for correction.` },
   ];
   try {
     for (const row of cases) {

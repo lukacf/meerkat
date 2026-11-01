@@ -5290,6 +5290,294 @@ async fn handle_memory_panel_records(
     )
 }
 
+#[cfg(test)]
+mod memory_panel_records_paging_tests {
+    use super::*;
+    use crate::StagedMemoryStore as _;
+    use crate::memory::SqliteAgentMemoryStore;
+    use crate::memory::capabilities::MemoryPanelStore;
+    use crate::memory::records::MemoryAuthor;
+    use crate::memory::staged::StagedBatchKind;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Write each `(memory id, identity, updated at)` row into `realm` as a
+    /// fact in that identity's scope.
+    async fn seed(
+        store: &SqliteAgentMemoryStore,
+        realm: &str,
+        records: &[(&str, &str, u64)],
+    ) -> TestResult {
+        let ops = records
+            .iter()
+            .map(|&(id, identity, updated_at_ms)| crate::StagedOp::Create {
+                id: Some(id.to_string()),
+                scope: crate::MemoryScope::Identity {
+                    realm: realm.to_string(),
+                    identity: identity.to_string(),
+                },
+                record: crate::NewMemoryRecord {
+                    kind: crate::MemoryKind::Fact,
+                    title: format!("{id} title"),
+                    description: String::new(),
+                    body: format!("{id} body"),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                trust: crate::TrustTier::AgentObserved,
+                derived_from: Vec::new(),
+                rationale: None,
+                created_at_ms: Some(updated_at_ms),
+                updated_at_ms: Some(updated_at_ms),
+            })
+            .collect();
+        let token = store
+            .stage(crate::StagedMutationBatch {
+                realm: realm.to_string(),
+                author: MemoryAuthor::Operator,
+                kind: StagedBatchKind::FreshWrite,
+                ops,
+            })
+            .await?;
+        store.commit(token).await?;
+        Ok(())
+    }
+
+    /// An anonymous caller who may view router and read its memory, and
+    /// neither for delivery.
+    fn router_reader() -> TestResult<AccessView> {
+        let controller = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![AccessRule {
+                id: "read-router".to_string(),
+                actions: vec![
+                    ACTION_AGENT_VIEW.to_string(),
+                    ACTION_AGENT_MEMORY_READ.to_string(),
+                ],
+                agents: vec!["router".to_string()],
+                ..AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })?;
+        Ok(controller.view_for_subject(None))
+    }
+
+    /// One page of `meta/memory/panel/records`: its rows as
+    /// `<realm>/<memory id>`, and its `next_cursor`.
+    async fn page(
+        store: &dyn MemoryPanelStore,
+        view: Option<&AccessView>,
+        params: Value,
+    ) -> TestResult<(Vec<String>, Option<String>)> {
+        let response = handle_memory_panel_records(
+            Some(store),
+            MemoryPanelCaller::own(view),
+            &params,
+            json!("records-page"),
+        )
+        .await;
+        let result = &response["result"];
+        let listed = result["records"]
+            .as_array()
+            .ok_or_else(|| format!("no records in {response}"))?
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}/{}",
+                    row["scope"]["realm"].as_str().unwrap_or_default(),
+                    row["id"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        Ok((listed, result["next_cursor"].as_str().map(str::to_string)))
+    }
+
+    /// Every page of a listing, each read with the cursor the page before it
+    /// returned, until a page returns none. Bounded, so a cursor that never
+    /// ends shows up as extra pages.
+    async fn walk(
+        store: &dyn MemoryPanelStore,
+        view: Option<&AccessView>,
+        params: Value,
+    ) -> TestResult<Vec<Vec<String>>> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        while pages.len() < 16 {
+            let mut request = params.clone();
+            if let Some(cursor) = &cursor {
+                request["cursor"] = json!(cursor);
+            }
+            let (listed, next) = page(store, view, request).await?;
+            pages.push(listed);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(pages)
+    }
+
+    /// Expected rows, as [`page`] lists them.
+    fn rows(listed: &[&str]) -> Vec<String> {
+        listed.iter().map(ToString::to_string).collect()
+    }
+
+    /// A caller who may read only some rows is paged by those rows: each
+    /// page is cut from the rows it may read and carries a cursor exactly
+    /// when more of them follow. Here the four newest rows are delivery's,
+    /// which this caller may not read.
+    #[tokio::test]
+    async fn a_restricted_caller_is_paged_by_the_rows_it_may_read() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        seed(
+            &store,
+            "default",
+            &[
+                ("mem-router-1", "router", 10),
+                ("mem-router-2", "router", 20),
+                ("mem-router-3", "router", 30),
+                ("mem-delivery-1", "delivery", 40),
+                ("mem-delivery-2", "delivery", 50),
+                ("mem-delivery-3", "delivery", 60),
+                ("mem-delivery-4", "delivery", 70),
+            ],
+        )
+        .await?;
+        let reader = router_reader()?;
+
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 2 })).await?,
+            vec![
+                rows(&["default/mem-router-3", "default/mem-router-2"]),
+                rows(&["default/mem-router-1"]),
+            ]
+        );
+        // The rows it may read end at this page's cut: no cursor.
+        assert_eq!(
+            page(&store, Some(&reader), json!({ "limit": 3 })).await?,
+            (
+                rows(&[
+                    "default/mem-router-3",
+                    "default/mem-router-2",
+                    "default/mem-router-1",
+                ]),
+                None
+            )
+        );
+        // Without access control the same listing holds every row.
+        assert_eq!(
+            walk(&store, None, json!({ "limit": 4 })).await?,
+            vec![
+                rows(&[
+                    "default/mem-delivery-4",
+                    "default/mem-delivery-3",
+                    "default/mem-delivery-2",
+                    "default/mem-delivery-1",
+                ]),
+                rows(&[
+                    "default/mem-router-3",
+                    "default/mem-router-2",
+                    "default/mem-router-1",
+                ]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A read that names no realm lists every realm as one listing, newest
+    /// updated first. A page cut from it carries a cursor, and the cursor
+    /// resumes every realm, for every caller and for one who may read only
+    /// some rows.
+    #[tokio::test]
+    async fn a_read_across_realms_resumes_from_its_cursor() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        seed(
+            &store,
+            "alpha",
+            &[
+                ("mem-alpha-1", "router", 10),
+                ("mem-alpha-2", "router", 30),
+                ("mem-alpha-3", "router", 50),
+                ("mem-alpha-delivery", "delivery", 70),
+            ],
+        )
+        .await?;
+        seed(
+            &store,
+            "beta",
+            &[
+                ("mem-beta-1", "router", 20),
+                ("mem-beta-delivery", "delivery", 35),
+                ("mem-beta-2", "router", 40),
+                ("mem-beta-3", "router", 60),
+            ],
+        )
+        .await?;
+
+        assert_eq!(
+            walk(&store, None, json!({ "limit": 4 })).await?,
+            vec![
+                rows(&[
+                    "alpha/mem-alpha-delivery",
+                    "beta/mem-beta-3",
+                    "alpha/mem-alpha-3",
+                    "beta/mem-beta-2",
+                ]),
+                rows(&[
+                    "beta/mem-beta-delivery",
+                    "alpha/mem-alpha-2",
+                    "beta/mem-beta-1",
+                    "alpha/mem-alpha-1",
+                ]),
+            ]
+        );
+        let reader = router_reader()?;
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 2 })).await?,
+            vec![
+                rows(&["beta/mem-beta-3", "alpha/mem-alpha-3"]),
+                rows(&["beta/mem-beta-2", "alpha/mem-alpha-2"]),
+                rows(&["beta/mem-beta-1", "alpha/mem-alpha-1"]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// Two realms can hold one memory id at one update time. The cursor
+    /// names that position, not a realm, so a page never ends between such
+    /// rows: both are on the page, and the next one starts past them.
+    #[tokio::test]
+    async fn rows_two_realms_hold_at_one_position_share_a_page() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        seed(
+            &store,
+            "alpha",
+            &[("mem-old", "router", 10), ("mem-shared", "router", 50)],
+        )
+        .await?;
+        seed(
+            &store,
+            "beta",
+            &[("mem-shared", "router", 50), ("mem-new", "router", 90)],
+        )
+        .await?;
+
+        assert_eq!(
+            walk(&store, None, json!({ "limit": 2 })).await?,
+            vec![
+                rows(&["beta/mem-new", "alpha/mem-shared", "beta/mem-shared"]),
+                rows(&["alpha/mem-old"]),
+            ]
+        );
+        Ok(())
+    }
+}
+
 async fn handle_memory_panel_record(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
     caller: MemoryPanelCaller<'_>,

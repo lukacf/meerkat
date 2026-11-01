@@ -52,6 +52,30 @@ async function sidebarActivity() {
     else result.errors.push(detail);
   });
   const sidebar = () => page.getByTestId("sidebar-root");
+  // The Show filter lives in the roster view options popover (A5), opened
+  // from the mast's trigger. The scenario only acts on a settled popover,
+  // open or gone, never one that is closing, and closes it after each use,
+  // so every step starts from the same state.
+  const viewOptions = () => sidebar().getByTestId("sidebar-view-options");
+  async function viewSettled() {
+    await page.waitForFunction(() => {
+      const popover = document.querySelector('[data-testid="sidebar-view-options"]');
+      return !popover || popover.getAttribute("data-state") === "open";
+    }, null, { timeout: 5_000 });
+  }
+  async function openView() {
+    await viewSettled();
+    if (await viewOptions().count()) return;
+    await sidebar().getByTestId("sidebar-view-menu").click();
+    await viewOptions().waitFor();
+    await viewSettled();
+  }
+  async function closeView() {
+    await viewSettled();
+    if (!(await viewOptions().count())) return;
+    await viewOptions().press("Escape");
+    await viewOptions().waitFor({ state: "detached", timeout: 5_000 });
+  }
   const activity = () => sidebar().getByRole("group", { name: "Agent activity", exact: true });
   const rows = () => sidebar().locator('[data-testid^="sidebar-agent:"]');
   const search = () => page.getByTestId("sidebar-search");
@@ -67,6 +91,7 @@ async function sidebarActivity() {
     result.checks.push({ label, ids: actual, convergenceMs: Date.now() - started });
   }
   async function choose(name, expected, label = name) {
+    await openView();
     const button = activity().getByRole("button", { name, exact: true });
     await button.click();
     assert.equal(await button.getAttribute("aria-pressed"), "true");
@@ -75,8 +100,10 @@ async function sidebarActivity() {
     if (!expected.length && (name !== "All" || await search().inputValue())) {
       await sidebar().getByRole("status").filter({ hasText: "No matching agents." }).waitFor();
     }
+    await closeView();
   }
   async function capture(label) {
+    await openView();
     const geometry = await activity().evaluate(group => {
       const box = node => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
       return { viewport: { width: innerWidth, height: innerHeight }, sidebar: box(group.closest("aside")), group: box(group),
@@ -93,6 +120,7 @@ async function sidebarActivity() {
     result.geometry.push({ label, ...geometry });
     await fs.mkdir(evidence, { recursive: true });
     await page.screenshot({ path: path.join(evidence, `stock-sidebar-activity-${label}.png`), fullPage: true });
+    await closeView();
   }
   try {
     // Runtime startup readiness can precede the console's terminal phase projection.
@@ -102,6 +130,7 @@ async function sidebarActivity() {
     });
     await page.goto(`${fixture.baseUrl}/console`);
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
+    await openView();
     await activity().waitFor();
     await assertRows([delivery, router], "initial owner order");
     initializing = false;
@@ -181,11 +210,12 @@ async function sidebarActivity() {
       const agents = await ownerRoster(fixture);
       return assertActivityRecorded(agents, router);
     }, "owner records the router's activity");
-    const sort = sidebar().getByTestId("sidebar-view-sort");
-    await sort.selectOption("activity");
+    await openView();
+    await sidebar().getByTestId("sidebar-view-sort:activity").click();
     await assertRows(expectedActivityOrder(result.activityOwner), "last activity sort follows the owner's activity");
-    await sort.selectOption("manual");
+    await sidebar().getByTestId("sidebar-view-sort:manual").click();
     await assertRows(baselineOrder, "manual sort restores the roster order");
+    await closeView();
     await page.setViewportSize({ width: 1600, height: 1000 });
     await capture("completed-light-1600");
     assertSidebarCompletion(result.finalFrames, { toolId, answer });

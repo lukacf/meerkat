@@ -12,6 +12,10 @@ export interface PendingApproval {
   pendingId: string;
   actionId: string;
   action: string;
+  /** Whether the owner can escalate this request: "unknown" until it says
+   * (its `supported_actions`), "unavailable" when no escalation route is set
+   * up for it. */
+  escalation: "available" | "unavailable" | "unknown";
   actorId?: string;
   requestedApprover?: string;
   approvalRecipient?: string;
@@ -27,12 +31,23 @@ export interface PendingApproval {
   origin?: ApprovalOrigin;
   raw: Readonly<Record<string, unknown>>;
 }
+/** A decision the owner refused for a stated reason (a typed refusal): the
+ * request was not decided and stays as it was. */
+export interface ApprovalRefusal {
+  /** The owner's machine kind ("no_escalation_route"). */
+  kind: string;
+  /** The reason in words for the person deciding. */
+  words: string;
+}
 export interface ApprovalDecisionState {
-  /** Unavailable means a typed capability refusal before dispatch; failed retains outcome uncertainty. */
-  phase: "submitting" | "settled" | "failed" | "unavailable";
+  /** Unavailable means a typed capability refusal before dispatch; refused a
+   * typed refusal by the owner after dispatch (nothing was decided); failed
+   * retains outcome uncertainty. */
+  phase: "submitting" | "settled" | "failed" | "unavailable" | "refused";
   action: ApprovalAction;
   result?: GatingActionResult;
   error?: string;
+  refusal?: ApprovalRefusal;
 }
 export interface PendingApprovalSnapshot {
   scopeKey: string;
@@ -70,12 +85,12 @@ export function normalizePendingApproval(value: unknown): PendingApproval | null
   if (raw.status !== undefined && raw.status !== "pending" && raw.status !== "settled" && raw.status !== "expired") return null;
   const record = raw.origin && typeof raw.origin === "object" ? raw.origin as Record<string, unknown> : undefined;
   const identity = text(record?.identity);
-  const actions = Array.isArray(raw.supported_actions)
-    ? APPROVAL_ACTIONS.filter((action) => (raw.supported_actions as unknown[]).includes(action))
-    : APPROVAL_ACTIONS;
+  const supported = Array.isArray(raw.supported_actions) ? raw.supported_actions as unknown[] : null;
+  const actions = supported ? APPROVAL_ACTIONS.filter((action) => supported.includes(action)) : APPROVAL_ACTIONS;
   return {
     pendingId, actionId: text(raw.action_id) || "Unknown action scope",
     action: text(raw.action) || text(raw.summary) || text(raw.action_id) || "Approval requested",
+    escalation: !supported ? "unknown" : supported.includes("escalate") ? "available" : "unavailable",
     actorId: text(raw.actor_id), rationale: text(raw.rationale), riskTier: text(raw.risk_tier),
     requestedApprover: text(raw.requested_approver), approvalRecipient: text(raw.approval_recipient),
     approvalChannel: text(raw.approval_channel), approvalRouteId: text(raw.approval_route_id),
@@ -113,6 +128,32 @@ function browserEnvironment(): ApprovalResourceEnvironment {
   };
 }
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/** The owner's typed decision refusals, in words. A refusal names its kind
+ * in the error data (`data.kind`, or `data.error`); a refusal without a
+ * kind stays an uncertain failure. */
+const REFUSAL_WORDS: Readonly<Record<string, string>> = {
+  no_escalation_route: "No escalation route is set up for this request, so it can't be escalated. It is still waiting for a decision.",
+  self_approval_forbidden: "You can't decide a request you made yourself.",
+  approver_mismatch: "This request is waiting for another approver.",
+  unknown_pending_id: "This request was already decided or has expired.",
+  empty_principal: "Sign in to decide approvals.",
+  gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again.",
+};
+export function approvalRefusal(error: unknown): ApprovalRefusal | null {
+  const typed = error as { rpcError?: { code?: unknown; data?: unknown }; responseRpcError?: { code?: unknown; data?: unknown } } | null;
+  const rpc = typed?.rpcError ?? typed?.responseRpcError;
+  const data = rpc?.data;
+  const record = data && typeof data === "object" ? data as { kind?: unknown; error?: unknown } : null;
+  const kind = typeof record?.kind === "string" ? record.kind : typeof record?.error === "string" ? record.error : "";
+  const words = kind ? REFUSAL_WORDS[kind] : undefined;
+  if (words) return { kind, words };
+  // The owner answers every decision it will not apply with invalid params
+  // (-32602) and applies nothing: a refusal, not an uncertain outcome, even
+  // before it names its reason.
+  if (rpc?.code === -32602) return { kind: "refused", words: "The runtime refused this decision, so nothing was decided." };
+  return null;
+}
 function unavailableCapability(error: unknown): { method: string; availableMethods: readonly string[] } | null {
   const record = error as { kind?: unknown; method?: unknown; availableMethods?: unknown } | null;
   return record?.kind === "console-capability-unavailable" && typeof record.method === "string"
@@ -267,7 +308,12 @@ export function createPendingApprovalResource(input: {
             denied = true;
             publish({ requests: [], decisions: {}, status: isDenied(error) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error) });
             lifetime.abort();
-          } else setDecision(pendingId, { phase: "failed", action, error: errorText(error) });
+          } else {
+            const refusal = approvalRefusal(error);
+            setDecision(pendingId, refusal
+              ? { phase: "refused", action, refusal, error: refusal.words }
+              : { phase: "failed", action, error: errorText(error) });
+          }
         } finally {
           ++decisionGeneration;
           decisionJobs.delete(pendingId);

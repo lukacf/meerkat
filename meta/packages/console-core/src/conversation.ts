@@ -277,6 +277,16 @@ export interface ConversationWorkGraphAttentionRow {
   itemId?: string | null;
 }
 
+/// What a card's event line carries beyond its words. A failed call's line
+/// is a sentence in words ("Couldn't claim a work item: not found"); the
+/// call's tool name and the payload it failed with stay here, for the
+/// card's technical details, never in the line.
+export interface ConversationWorkGraphEventDetail {
+  failed?: boolean;
+  tool?: string;
+  technical?: string;
+}
+
 // One evolving in-conversation card per goal/root work item, aggregated from
 // the turn's workgraph tool-call frames. Rebuilt from scratch on every adapter
 // pass (same posture as tool blocks) with a stable `workgraph:{rootId}` id so
@@ -303,6 +313,11 @@ export interface ConversationWorkGraphEntry extends ConversationTimelineEntryBas
   itemOverflowCount?: number;
   attention: ConversationWorkGraphAttentionRow[];
   recentEvents?: string[];
+  // Per line of `recentEvents`, in the same order: a failed call's note is
+  // marked `failed`, with its tool name and raw failure payload (JSON or
+  // text) for the card's technical details. Absent when no line has a
+  // detail; null for a plain event line.
+  recentEventDetails?: Array<ConversationWorkGraphEventDetail | null>;
   // True when the most recent workgraph tool call folded into this card
   // failed — the card shows a subtle failure indicator (failures never
   // resurrect generic tool rows).

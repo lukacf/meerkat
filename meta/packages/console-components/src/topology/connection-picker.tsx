@@ -18,6 +18,8 @@ import {
   type TopologyOperationReceipt,
 } from "@console-core";
 
+import { KitGlyph } from "../panel-kit/glyphs";
+
 const DEFAULT_VISIBLE_LIMIT = 100;
 
 export interface TopologyBoundedAction {
@@ -397,7 +399,7 @@ export function ConnectionPicker({
         )}
 
         <label className="topo-edit__search">
-          <span aria-hidden="true">⌕</span>
+          <KitGlyph name="search" className="topo-edit__search-icon" />
           <input
             aria-label="Search endpoints"
             value={query}
@@ -405,7 +407,7 @@ export function ConnectionPicker({
             placeholder="Search endpoints, scopes, and labels"
           />
           {query ? (
-            <button type="button" aria-label="Clear connection search" onClick={() => setQuery("")}>×</button>
+            <button type="button" aria-label="Clear connection search" onClick={() => setQuery("")}><KitGlyph name="close" /></button>
           ) : null}
         </label>
 
@@ -540,7 +542,7 @@ export function ConnectionPicker({
           ))}
           {hiddenCount > 0 ? (
             <div className="topo-edit__overflow" role="status">
-              {hiddenCount} more endpoints — search to narrow the roster.
+              {hiddenCount} more endpoints. Search to narrow the roster.
             </div>
           ) : null}
         </div>

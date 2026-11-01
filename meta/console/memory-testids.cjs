@@ -1,22 +1,26 @@
-// Selector contract between the memory console UI (MemoryPanel.tsx) and the
-// memory e2e (memory-e2e.cjs). The panel's data-testids MUST match this
-// inventory: the e2e flows locate every element through it and nothing
-// else. Names extend the scheme MemoryPanel.tsx ships (memory-* prefix,
-// `:`-separated dynamic segments).
+// Selector contract between the memory console UI (MemoryPanel.tsx and the
+// panel's modules in panels/memory/) and the memory e2e (memory-e2e.cjs).
+// The panel's data-testids MUST match this inventory: the e2e flows locate
+// every element through it and nothing else. Names extend the scheme the
+// panel ships (memory-* prefix, `:`-separated dynamic segments).
 //
 // This file is the single source of truth: a flow that needs a new element
 // adds its name here and the panel ships it.
 
 module.exports = {
   // ── Navigation (Sidebar.tsx renders `nav:${kind}`) ──
-  // Rendered only when /console/experience reports memory.can_read.
+  // Rendered when /console/experience reports memory.can_read, and on a
+  // team runtime whose experience reports no memory store
+  // (memory.available === false), where the panel says memory is not set up.
   NAV_MEMORY: "nav:memory",
 
   // ── Panel chrome ──
   PANEL: "memory-panel",
   UNAVAILABLE: "memory-unavailable", // store not configured on the runtime
-  ERROR: "memory-error", // the status row's error, between the tabs and the body
-  REFRESH: "memory-refresh", // header button, next to the team picker
+  NOT_SET_UP: "memory-not-set-up", // the not-set-up explanation inside UNAVAILABLE (what memory shows, how to set it up)
+  ERROR: "memory-error", // the refresh failure toast over the panel body (retry inside)
+  REFRESH: "memory-refresh", // header icon button "Refresh memory"
+  MENU: "memory-menu", // the header's panel menu (density, technical IDs)
 
   // ── Tabs ──
   // `memory-tab:${id}` where id is holdings | records | knowledge |
@@ -48,15 +52,33 @@ module.exports = {
   MULTI_REALM_NOTE: "memory-multi-realm-note",
   RECORDS_EMPTY: "memory-records-empty", // says "no access" for denied queries, never "empty"
   RECORDS_DENIED_NOTE: "memory-records-denied-note", // denied load-more continuation
+  // Refining the loaded records in the browser (no server query): the text
+  // search over titles, descriptions and tags (hits highlighted), the Kind
+  // and Trust chips (aria-pressed), and their Clear.
+  RECORDS_SEARCH: "memory-records-search",
+  recordsKind: (kind) => `memory-records-kind:${kind}`,
+  recordsTrust: (level) => `memory-records-trust:${level}`, // level 1 (untrusted) to 5 (operator)
+  RECORDS_REFINE_CLEAR: "memory-records-refine-clear",
+  // The view switch: list (default; the grouping rule and row counts as
+  // before) | timeline (day groups; its cards carry memory-record:${id}
+  // only while it is shown) | clusters (one tile per kind,
+  // memory-cluster:${kind}; a tile's button filters the List to its kind).
+  recordsView: (view) => `memory-records-view:${view}`,
+  RECORDS_TIMELINE: "memory-records-timeline",
+  RECORDS_CLUSTERS: "memory-records-clusters",
+  cluster: (kind) => `memory-cluster:${kind}`,
 
   // ── Record detail / Biography ──
-  DETAIL: "memory-detail", // the Biography container
-  DETAIL_BACK: "memory-detail-back", // "All records"
+  DETAIL: "memory-detail", // the Biography drawer, beside the open tab
+  DETAIL_BACK: "memory-detail-back", // the drawer's close button ("All records" Back below the drawer's dock width)
   DETAIL_BODY: "memory-detail-body",
   // Biography sections:
   DETAIL_BORN: "memory-detail-born", // "Where it came from": author and evidence
-  DETAIL_LINEAGE: "memory-detail-lineage", // "History": the supersede lane, newest first
-  DETAIL_LIFE: "memory-detail-life", // "Usage": counters and injections
+  DETAIL_LINEAGE: "memory-detail-lineage", // "Versions": the versions graph and rows, oldest first
+  DETAIL_LIFE: "memory-detail-life", // "Use": memory given (counted from the listed ledger rows), recalls, useful verdicts
+  // One row per ledger row of the record: "Given to <agent> at startup" or
+  // "during a turn", with when. The agent's name is a link.
+  detailInjection: (index) => `memory-detail-injection:${index}`,
   DETAIL_DREAMS: "memory-detail-dreams", // lossy memory_ids join
   // `memory-chain:${memoryId}`: history rows (buttons; clicking a
   // non-current version loads that Biography in place; data-current /
@@ -73,10 +95,25 @@ module.exports = {
   EVIDENCE_EXCERPT: "memory-evidence-excerpt",
   EVIDENCE_DEGRADED: "memory-evidence-degraded",
   EVIDENCE_EMPTY: "memory-evidence-empty",
+  DETAIL_REPLACED: "memory-detail-replaced", // notice on a replaced version, linking the version that replaced it
+  // The versions graph (the kit's GraphView, layered): one node per version
+  // and per record merged into the open one; the open version is selected
+  // (aria-pressed, data-current). A click or Enter opens a version.
+  VERSIONS_GRAPH: "memory-biography-versions",
+  versionsNode: (memoryId) => `memory-versions-node:${memoryId}`,
 
   // ── Holdings tab ──
   HOLDINGS: "memory-holdings",
   HOLDINGS_DENIED: "memory-holdings-denied", // records -32030: "no access" note
+  // "Where memory lives": the 30-day landscape, one row per scope
+  // (memory-holdings-scope:${key} rows keep their ids). Each row's track,
+  // memory-landscape-scope:${key}, is a dot strip of the scope's records:
+  // one mark per record, memory-landscape-tick:${memoryId} (data-shape:
+  // tick, triangle for quarantined; aria-label starts with the title). The
+  // strip is one tab stop; focus a mark and press Enter to open the record.
+  LANDSCAPE: "memory-landscape",
+  landscapeScope: (scopeKey) => `memory-landscape-scope:${scopeKey}`,
+  landscapeTick: (memoryId) => `memory-landscape-tick:${memoryId}`,
   // `memory-holdings-scope:${scopeGroupKey}`: scope rows; click pivots to
   // Records pre-filtered to that scope. Rows render store TOTALS from
   // panel/overview when the surface answers (same key scheme); the
@@ -94,6 +131,12 @@ module.exports = {
   // denied scope is never indistinguishable from an empty one. Ids:
   // memory-holdings-scope-denied:operator / :mob.
   holdingsScopeDenied: (kind) => `memory-holdings-scope-denied:${kind}`,
+
+  // ── Glance strip (above the tabs) ──
+  // `memory-glance:${id}`: records (hero, records written per day),
+  // review (quarantined and waiting; opens Pipeline), given (memory given
+  // to agents, 24 hours), checks (checks holding of six).
+  glance: (id) => `memory-glance:${id}`,
 
   // ── Verdict strip (Holdings "Checks") ──
   VERDICT_STRIP: "memory-verdict-strip",
@@ -119,6 +162,7 @@ module.exports = {
 
   // ── Pipeline tab (quarantine folded in) ──
   PIPELINE: "memory-pipeline",
+  PIPELINE_FLOW: "memory-pipeline-flow", // the stage flow figure; PIPELINE_STAGES is its list
   PIPELINE_STAGES: "memory-pipeline-stages", // stepper: Proposed N, Waiting for approval N, Quarantined N ("no access" without the review grant)
   // The inbound proposals lane (panel/proposals): pending proposals with
   // propose-time taint chips. Row id: memory-proposal:${proposalId}; taint
@@ -184,6 +228,16 @@ module.exports = {
   KNOWLEDGE_BUDGET: "memory-knowledge-budget", // same footnote: session budgets are not shown here
 
   // ── Dreams tab ──
+  // The last 7 days of dream runs: one row per realm, a bar per run that
+  // opens its run sheet (or scrolls to its audit row).
+  DREAMS_TIMELINE: "memory-dreams-timeline",
+  dreamsBar: (runId) => `memory-dreams-bar:${runId}`,
+  // Dream history withheld by access (the reads' withheld_by_access): the
+  // calm withheld state, never "no dream yet". On the week, the runs and
+  // the audit log respectively.
+  DREAMS_WEEK_WITHHELD: "memory-dreams-week-withheld",
+  DREAM_RUNS_WITHHELD: "memory-dream-runs-withheld",
+  DREAMS_WITHHELD: "memory-dreams-withheld",
   dream: (runId) => `memory-dream:${runId}`, // "Earlier runs, from the audit log" rows
   // `memory-dream-record:${runId}:${memoryId}`: touched-record links to the Biography.
   dreamRecord: (runId, memoryId) => `memory-dream-record:${runId}:${memoryId}`,

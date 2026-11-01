@@ -1879,10 +1879,15 @@ async function runSidebarManualAgentOrderProof() {
     await page.waitForSelector('[data-testid="sidebar-agent:team-ada"]', { timeout: 30_000 });
     await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "default order is by name");
     assert.deepEqual((await sectionOrder()).slice(0, 2), ["Team", "Agents"], "configured category order");
-    assert.match(
+    assert.equal(
       await page.getByTestId("sidebar-agent-detail:team-ada").textContent(),
-      /^Reviewer · active (just now|\d+ (min|h|d) ago)$/,
+      "Reviewer · idle",
       "the row shows a human detail line",
+    );
+    assert.match(
+      await page.getByTestId("sidebar-agent:team-ada").locator(".agent__meta time").textContent(),
+      /^(just now|\d+[smhd] ago|[A-Z][a-z]{2} \d+)$/,
+      "the row's last activity sits at its right",
     );
     assert.equal((await page.getByTestId("sidebar-agent:team-ada").textContent()).includes("team-ada"), false,
       "the identity is not the row's text");
@@ -1944,15 +1949,30 @@ async function runSidebarManualAgentOrderProof() {
       "focus stays on the moved agent", 5_000);
     await copyClearOfActions("on keyboard focus");
 
-    // Sort by name and by last activity, then back to the manual order.
-    const sort = page.getByTestId("sidebar-view-sort");
-    await sort.selectOption("name");
+    // Sort by name and by last activity, then back to the manual order. The
+    // roster view lives in the mast's view options popover (A5); a change
+    // keeps it open, Escape closes it.
+    // Only a settled popover (open, or gone) decides whether to open it.
+    const viewSettled = () => page.waitForFunction(() => {
+      const popover = document.querySelector('[data-testid="sidebar-view-options"]');
+      return !popover || popover.getAttribute("data-state") === "open";
+    }, null, { timeout: 5_000 });
+    const chooseView = async (option) => {
+      await viewSettled();
+      if (!(await page.getByTestId("sidebar-view-options").count())) await page.getByTestId("sidebar-view-menu").click();
+      await viewSettled();
+      await page.getByTestId(option).click();
+      assert.equal(await page.getByTestId(option).getAttribute("aria-pressed"), "true", `${option} is pressed`);
+    };
+    await chooseView("sidebar-view-sort:name");
     await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "name sort");
     assert.equal(await page.locator('[data-testid^="sidebar-agent-grip:"]').count(), 0, "no grips outside Manual");
-    await sort.selectOption("activity");
+    await chooseView("sidebar-view-sort:activity");
     await expectOrder(teamOrder, ["team-dov", "team-cyd", "team-bea", "team-ada"], "last activity sort is newest first");
-    await sort.selectOption("manual");
+    await chooseView("sidebar-view-sort:manual");
     await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "manual sort restores the stored order");
+    await page.keyboard.press("Escape");
+    await page.getByTestId("sidebar-view-options").waitFor({ state: "detached", timeout: 5_000 });
 
     // Drag the Agents category above Team: the existing category drag.
     await drag(page.getByTestId("sidebar-section-toggle:Agents"), page.getByTestId("sidebar-section-toggle:Team"), "before");
@@ -1960,7 +1980,8 @@ async function runSidebarManualAgentOrderProof() {
     await expectOrder(async () => (await sectionOrder()).slice(0, 2), ["Agents", "Team"], "a category drag reorders categories");
 
     // Group: None lists one flat list in the same order, without category headers.
-    await page.getByTestId("sidebar-view-group").selectOption("none");
+    await chooseView("sidebar-view-group:none");
+    await page.keyboard.press("Escape");
     await expectOrder(sectionOrder, [], "no category headers in a flat list");
     await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "the flat list keeps the manual order");
     await sidebar.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-flat.png") });
@@ -2563,6 +2584,9 @@ async function runGlobalTimelineRecentSeedProof() {
   }
 }
 
+// Chat paging scenarios start from an empty first pane (see the module).
+const { startFromEmptyFirstPane } = require("./scenarios/empty-first-pane.cjs");
+
 async function runChatPaneRecentFirstPageProof() {
   const baseTs = Date.parse("2026-05-23T21:40:00.000Z");
   const frames = Array.from({ length: 1_500 }, (_, index) => ({
@@ -2587,6 +2611,8 @@ async function runChatPaneRecentFirstPageProof() {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Today's backfill pre-fills the agent's log when Today is open, so this starts from an empty first pane.
+    await startFromEmptyFirstPane(page, "chat-pane-recent-first-page");
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.waitForSelector('.agent[role="button"], .cc-sidebar-row', { timeout: 30_000 });
     await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
@@ -2640,6 +2666,8 @@ async function runChatPaneOlderHistoryDemandPagingProof() {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Today's backfill pre-fills the agent's log when Today is open, so this starts from an empty first pane.
+    await startFromEmptyFirstPane(page, "chat-pane-older-history-demand-paging");
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.waitForSelector('.agent[role="button"], .cc-sidebar-row', { timeout: 30_000 });
     await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
@@ -2677,6 +2705,94 @@ async function runChatPaneOlderHistoryDemandPagingProof() {
     );
 
     process.stdout.write("browser chat pane older history demand paging ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
+// The common path since a first load opens Today: Today's backfill fills the
+// agent's log first, then the chat opens on those frames, and "Load older
+// history" continues from the oldest loaded frame, with no duplicate and no gap.
+async function runChatPaneOlderHistoryAfterTodayPrefillProof() {
+  const { eventually } = require("./acceptance-runtime.cjs");
+  const identity = "person-worker-alpha";
+  const baseTs = Date.parse("2026-05-23T22:50:00.000Z");
+  const frames = Array.from({ length: 1_500 }, (_, index) => ({
+    id: `prefilled-line-${index + 1}`,
+    kind: "interaction_complete",
+    identity,
+    interaction_id: `prefilled-turn-${index + 1}`,
+    timestamp_ms: baseTs + index,
+    cursor: `console:${index + 1}`,
+    payload: {
+      text: `Prefilled worker line ${index + 1}`,
+    },
+  }));
+  const server = await startMockConsoleServer({
+    includeBusyWorker: true,
+    timelineFramesByIdentity: {
+      [identity]: frames,
+    },
+  });
+  const identityRequests = () => server.requests
+    .filter((request) => request.url === "/console/rpc" && request.body)
+    .map((request) => JSON.parse(request.body))
+    .filter((payload) => payload.method === "meta/console/query_timeline" && payload.params?.identity === identity);
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    const backfillAnswered = page.waitForResponse((response) => {
+      const body = response.request().postData() || "";
+      return response.url().endsWith("/console/rpc")
+        && body.includes("meta/console/query_timeline")
+        && body.includes(`"identity":"${identity}"`)
+        && body.includes('"limit":1000');
+    }, { timeout: 30_000 });
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    // A first load with no saved layout opens Today; its backfill loads the agent's newest 1000 frames.
+    await page.locator('[data-testid="timeline-panel"]').first().waitFor({ timeout: 30_000 });
+    await backfillAnswered;
+    await sleep(300);
+
+    await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
+    const pane = page.locator(`[data-testid="chat-pane:${identity}"]`);
+    await pane.getByText("Prefilled worker line 1500").waitFor({ timeout: 10_000 });
+    const countLine = (n) => pane.getByText(`Prefilled worker line ${n}`, { exact: true }).count();
+    const revealAll = async () => {
+      for (let step = 0; step < 40; step += 1) {
+        const reveal = pane.locator(`[data-testid="chat-reveal-earlier:${identity}"]`);
+        if (!(await reveal.count())) return;
+        await reveal.first().evaluate((node) => node.click());
+        await sleep(100);
+      }
+    };
+
+    // The chat shows the pre-filled frames: the oldest of them, and nothing older yet.
+    await eventually(async () => { await revealAll(); return (await countLine(501)) === 1; }, "the chat shows the oldest pre-filled frame", 20_000);
+    assert.equal(await countLine(500), 0, "no frame older than the pre-filled ones before Load older history");
+    assert.equal(identityRequests().filter((payload) => payload.params?.before !== undefined).length, 0, "no older page before Load older history");
+
+    await clickLoadOlderHistory(pane);
+    await eventually(async () => { await revealAll(); return (await countLine(500)) === 1; }, "the older page lands next to the pre-filled frames", 20_000);
+    const older = identityRequests().filter((payload) => payload.params?.before !== undefined);
+    assert(older.length >= 1, `expected an older page request; saw ${JSON.stringify(identityRequests())}`);
+    assert.equal(older[0].params.before, "console:501", "Load older history continues from the oldest loaded frame");
+    const pageLimit = Number(older[0].params.limit) || 0;
+    assert(pageLimit > 0, `the older page names its limit; saw ${JSON.stringify(older[0])}`);
+    const oldestExpected = Math.max(1, 501 - pageLimit);
+    for (const n of [oldestExpected, oldestExpected + 1, 499, 500, 501, 502, 1500]) {
+      assert.equal(await countLine(n), 1, `line ${n} shows exactly once (no duplicate, no gap)`);
+    }
+    if (oldestExpected > 1) {
+      assert.equal(await countLine(oldestExpected - 1), 0, "the older page holds exactly its limit");
+    }
+
+    process.stdout.write("browser chat pane older history after Today prefill ok\n");
   } finally {
     if (browser) {
       await browser.close();
@@ -3237,15 +3353,23 @@ async function runHeadlessControlSurfaceBrowserProof() {
     await waitForRpcMethod(server, "meta/gating/decide", 3);
 
     await openSidebarAgentChat(page, "Identity Example");
-    await page.getByTestId("conv-action:respawn").waitFor({ timeout: 10_000 });
-    await page.getByTestId("conv-action:respawn").click();
-    await waitForRpcMethod(server, "meta/respawn");
-    await page.getByTestId("conv-action:retire").waitFor({ timeout: 10_000 });
-    await page.getByTestId("conv-action:retire").click();
-    await waitForRpcMethod(server, "meta/retire");
+    // Respawn and Retire sit in the chat header's menu and ask first.
+    for (const action of ["respawn", "retire"]) {
+      await page.getByTestId("conv-menu").waitFor({ timeout: 10_000 });
+      await page.getByTestId("conv-menu").click();
+      await page.getByTestId(`conv-action:${action}`).click();
+      await page.getByTestId(`conv-confirm-accept:${action}`).click();
+      await waitForRpcMethod(server, `meta/${action}`);
+    }
     await page.getByTestId("conv-action:details").click();
+    // Agent details keep the lifecycle actions in the overflow menu, and a
+    // reset asks for confirmation first.
+    await page.getByTestId("inspect-menu:identity:luka").waitFor({ timeout: 10_000 });
+    await page.getByTestId("inspect-menu:identity:luka").click();
     await page.getByTestId("inspect-action:identity:luka:reset").waitFor({ timeout: 10_000 });
     await page.getByTestId("inspect-action:identity:luka:reset").click();
+    await page.getByTestId("inspect-confirm-yes:identity:luka:reset").waitFor({ timeout: 10_000 });
+    await page.getByTestId("inspect-confirm-yes:identity:luka:reset").click();
     await waitForRpcMethod(server, "meta/reset");
 
     process.stdout.write("browser headless control surface ok\n");
@@ -3290,11 +3414,15 @@ async function runTopologyUnavailableBrowserProof() {
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
     await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    // Edit connections lives in the panel's overflow menu.
+    await page.getByTestId("topology-menu").click();
+    await page.getByRole("menu").waitFor({ timeout: 10_000 });
     assert.equal(
       await page.getByTestId("topology-view:connections").count(),
       0,
       "a topology-unaware runtime must retain the passive graph without mutation controls",
     );
+    await page.keyboard.press("Escape");
     assert.equal(await page.getByText(/connect all/i).count(), 0);
     assert.equal(
       rpcMethodsFromRequests(server.requests).includes("meta/topology/query"),
@@ -3403,6 +3531,8 @@ async function runTopologyDeniedPairBrowserProof() {
     const page = await browser.newPage();
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
+    // Edit connections lives in the panel's overflow menu.
+    await page.getByTestId("topology-menu").click();
     await page.getByTestId("topology-view:connections").waitFor({ timeout: 10_000 });
     await page.getByTestId("topology-view:connections").click();
     const sourceId = stockTopologyEndpointId("mock-mob", "identity:luka");
@@ -3553,6 +3683,7 @@ async function runTopologyAmbiguousCommitBrowserProof() {
     const page = await browser.newPage();
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-menu").click();
     await page.getByTestId("topology-view:connections").click();
     const sourceId = stockTopologyEndpointId("mock-mob", "identity:luka");
     const targetId = stockTopologyEndpointId("mock-mob", "legacy-router");
@@ -4802,6 +4933,7 @@ const allScenarios = [
     { id: "sidebar-long-roster-order", family: "console", backend: "mock", run: runSidebarLongRosterOrderProof },
     { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
     { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
+    { id: "chat-pane-older-history-after-today-prefill", family: "presentation", backend: "mock", run: runChatPaneOlderHistoryAfterTodayPrefillProof },
   ];
 
 module.exports = { scenarios: allScenarios };

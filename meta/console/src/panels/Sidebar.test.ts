@@ -2008,26 +2008,70 @@ test("sidebar last activity counts only frames of the agent acting, as the serve
   assert.equal(__sidebarTest.agentLastActivity(teamAgent("b", "Bravo", { last_activity_ms: 10 }), times), 300);
 });
 
-test("sidebar row detail is a human line: role or group, then status in words or last activity", () => {
-  const now = 10 * 60 * 60 * 1000;
-  const minutes = (count: number) => count * 60 * 1000;
-  const detail = (agent: ConsoleAgent, lastActivity?: number) => __sidebarTest.agentDetailText(agent, lastActivity, now);
+test("sidebar row detail is a human line: role or group, then what the agent is doing", () => {
+  const detail = (agent: ConsoleAgent, openRun = false) => __sidebarTest.agentDetailText(agent, openRun);
+  const progress = (health: string, run_state: string, in_flight_work = 0) => ({
+    health, run_state, in_flight_work, last_progress_at_ms: 1_000, last_progress_event: "execution_advanced",
+  });
 
-  assert.equal(detail(teamAgent("w", "Worker", { role: "investigation-worker", response_phase: "generating" })), "Investigation worker · working");
-  assert.equal(detail(teamAgent("r", "Router", { role: "router", response_phase: null }), now - minutes(3)), "Router · active 3 min ago");
-  assert.equal(detail(teamAgent("r", "Router", { role: "router", response_phase: null })), "Router · idle");
-  assert.equal(detail(teamAgent("t", "Tool", { role: "router", response_phase: "tool-executing" })), "Router · using a tool");
+  // The roster's phase words; the last activity time sits at the row's right, not in this line.
+  assert.equal(detail(teamAgent("w", "Worker", { role: "investigation-worker", response_phase: "generating" })), "Investigation worker · writing a reply");
+  assert.equal(detail(teamAgent("t", "Tool", { role: "router", response_phase: "tool-executing" })), "Router · running a tool");
+  assert.equal(detail(teamAgent("s", "Start", { role: "router", response_phase: "waiting" })), "Router · starting a reply");
+  assert.equal(detail(teamAgent("r", "Router", { role: "router", response_phase: null, last_activity_ms: 5 })), "Router · idle");
+  assert.equal(detail(teamAgent("i", "Idle", { role: "router", progress: progress("healthy", "idle") })), "Router · idle");
   assert.equal(detail(teamAgent("x", "Gone", { role: undefined, group: "Delivery", state: "retired" })), "Delivery · retired");
   assert.equal(detail(teamAgent("q", "Quiet", { role: undefined, group: undefined })), "");
-  assert.equal(detail(teamAgent("u", "Unknown", { role: undefined, group: undefined }), now - minutes(125)), "Active 2 h ago");
+  assert.equal(detail(teamAgent("u", "Unknown", { role: undefined, group: undefined, last_activity_ms: 5 })), "");
   assert.equal(detail(teamAgent("n", "Raw", { identity: "agent:raw-identity" })).includes("agent:raw-identity"), false);
 
-  assert.equal(__sidebarTest.relativeActivityText(0), "just now");
-  assert.equal(__sidebarTest.relativeActivityText(59_000), "just now");
-  assert.equal(__sidebarTest.relativeActivityText(60_000), "1 min ago");
-  assert.equal(__sidebarTest.relativeActivityText(minutes(60 * 3)), "3 h ago");
-  assert.equal(__sidebarTest.relativeActivityText(minutes(60 * 49)), "2 d ago");
-  assert.equal(__sidebarTest.relativeActivityText(-5_000), "just now");
+  // A busy member's health reads unknown: it says what it does, never "unknown".
+  assert.equal(detail(teamAgent("b", "Busy", { role: "router", response_phase: "generating", progress: progress("unknown", "run_open") })), "Router · writing a reply");
+  assert.equal(detail(teamAgent("o", "Open", { role: "router", progress: progress("unknown", "run_open", 3) })), "Router · working on 3 tasks");
+  assert.equal(detail(teamAgent("l", "Ledger", { role: "router" }), true), "Router · working", "a run the console saw open counts with no owner report");
+  assert.equal(detail(teamAgent("v", "Unseen", { role: "router", response_phase: null, progress: progress("unknown", "idle") })), "Router · not observed");
+
+  // Health problems speak first, without a role the status stands alone.
+  assert.equal(detail(teamAgent("k", "Stuck", { role: "router", response_phase: "generating", progress: progress("wedged", "run_open") })), "Router · stalled");
+  assert.equal(detail(teamAgent("d", "Slow", { role: "router", labels: { console_degraded: "true" } })), "Router · degraded");
+  assert.equal(detail(teamAgent("z", "Broken", { role: undefined, group: undefined, state: "broken" })), "Broken");
+});
+
+test("sidebar Show filter reads the one working rule; owner facts only", () => {
+  const activity = (agent: ConsoleAgent, openRun = false) => __sidebarTest.sidebarActivity(agent, openRun);
+  const progress = (health: string, run_state: string) => ({
+    health, run_state, in_flight_work: 1, last_progress_at_ms: 1_000, last_progress_event: "became_busy",
+  });
+  assert.equal(activity(teamAgent("g", "Generating", { response_phase: "generating" })), "working");
+  assert.equal(activity(teamAgent("w", "Waiting", { response_phase: "waiting" })), "working");
+  assert.equal(activity(teamAgent("r", "Run open", { progress: progress("unknown", "run_open") })), "working");
+  assert.equal(activity(teamAgent("n", "Null", { response_phase: null })), "quiet");
+  assert.equal(activity(teamAgent("s", "Running state", { response_phase: null, state: "running" })), "quiet", "a member state is not activity");
+  assert.equal(activity(teamAgent("k", "Stalled", { response_phase: "generating", progress: progress("wedged", "run_open") })), "quiet", "a stalled agent is not working");
+  assert.equal(activity(teamAgent("x", "Retired", { response_phase: "generating", state: "retired" })), "quiet");
+  assert.equal(activity(teamAgent("u", "No report", {})), "unknown");
+  assert.equal(activity(teamAgent("o", "Seen open", {}), true), "working", "a run the console saw open, with no owner report");
+  assert.equal(activity(teamAgent("p", "Owner idle", { response_phase: null }), true), "quiet", "the owner's phase wins over the console's open run");
+});
+
+test("sidebar view summary lists only what differs from the default", () => {
+  const summary = __sidebarTest.sidebarViewSummary;
+  assert.deepEqual(summary("all", { groupBy: "category", sortBy: "manual" }), []);
+  assert.deepEqual(summary("working", { groupBy: "category", sortBy: "manual" }), ["Working"]);
+  assert.deepEqual(summary("unknown", { groupBy: "none", sortBy: "name" }), ["Status unknown", "By name", "Ungrouped"]);
+  assert.deepEqual(summary("all", { groupBy: "category", sortBy: "activity" }), ["By last activity"]);
+});
+
+test("sidebar Logs badge counts failures after the last visit, never plumbing", () => {
+  const frames = [
+    { id: "f1", event: "interaction_failed", identity: "agent:a", timestampMs: 2_000, data: { error: "boom" } },
+    { id: "f2", event: "interaction_failed", identity: "agent:a", timestampMs: 500, data: { error: "old" } },
+    { id: "ok", event: "interaction_complete", identity: "agent:a", timestampMs: 3_000, data: { result: "fine" } },
+    { id: "delta", event: "text_delta", identity: "agent:a", timestampMs: 4_000, data: { delta: "x" } },
+  ] satisfies ConsoleFrame[];
+  assert.equal(__sidebarTest.logsErrorCount(frames, 1_000), 1);
+  assert.equal(__sidebarTest.logsErrorCount(frames, 0), 2);
+  assert.equal(__sidebarTest.logsErrorCount(frames, 5_000), 0);
 });
 
 test("sidebar pins move to the per-user key and read the configuration key only while it is absent", () => {

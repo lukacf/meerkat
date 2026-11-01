@@ -94,7 +94,7 @@ function SelectionFixture({ disabled = false, onQuote = vi.fn(), onError = vi.fn
 }
 function announceSelection(start: Node, end = start) { select(start, end); fireEvent(document, new Event("selectionchange")); }
 describe("contextual transcript controls", () => {
-  it("keeps compact stock header actions named, target-specific and operable with custom labels", () => {
+  it("keeps compact stock header actions named, target-specific and operable with custom labels", async () => {
     const onInspect = vi.fn(), onRespawn = vi.fn(), onRetire = vi.fn();
     const agent = { agent_id: "router", member_id: "router", label: "Router", kind: "persistent", affordances: { can_respawn: true, can_retire: true } };
     const view = render(<ChatPane identity="router:main" agentLabel="Router" agent={agent} entries={[]} phase={null}
@@ -102,15 +102,37 @@ describe("contextual transcript controls", () => {
       headerVariant="compact" onInspect={onInspect} onRespawn={onRespawn} onRetire={onRetire}
       inspectLabel="Inspect agent" respawnLabel="Restart agent" retireLabel="Retire agent" />);
     expect(view.container.querySelector(".conv__title")).toHaveAttribute("title", "router:main");
-    for (const [label, icon, action] of [
-      ["Inspect agent", "i-info", onInspect], ["Restart agent", "i-refresh", onRespawn], ["Retire agent", "i-archive", onRetire],
-    ] as const) {
-      const button = screen.getByRole("button", { name: label, exact: true });
-      expect(button).toHaveAttribute("aria-label", label);
-      expect(button).toHaveAttribute("title", `${label} - router:main`);
-      expect(button).toHaveAttribute("type", "button");
-      expect(button.querySelector('[aria-hidden="true"] use')).toHaveAttribute("href", `#${icon}`);
-      button.focus(); expect(button).toHaveFocus(); fireEvent.click(button); expect(action).toHaveBeenCalledOnce();
+    // Details stays in view: a named button for this agent, with its icon.
+    const inspect = screen.getByRole("button", { name: "Inspect agent", exact: true });
+    expect(inspect).toHaveAttribute("aria-label", "Inspect agent");
+    expect(inspect).toHaveAttribute("title", "Inspect agent - router:main");
+    expect(inspect).toHaveAttribute("type", "button");
+    expect(inspect.querySelector('[aria-hidden="true"] use')).toHaveAttribute("href", "#i-info");
+    inspect.focus(); expect(inspect).toHaveFocus(); fireEvent.click(inspect); expect(onInspect).toHaveBeenCalledOnce();
+    // Respawn and Retire sit in the header's menu and ask before they act;
+    // Cancel (or Escape) leaves the agent alone and returns to the menu.
+    const menu = () => screen.getByRole("button", { name: "More actions for Router", exact: true });
+    expect(menu()).toHaveAttribute("aria-haspopup", "menu");
+    for (const [label, action, id] of [["Restart agent", onRespawn, "respawn"], ["Retire agent", onRetire, "retire"]] as const) {
+      fireEvent.click(menu());
+      const item = await screen.findByRole("menuitem", { name: `${label}…` });
+      expect(item).toHaveAttribute("data-testid", `conv-action:${id}`);
+      fireEvent.click(item);
+      expect(action).not.toHaveBeenCalled();
+      expect(screen.getByTestId(`conv-confirm:${id}`)).toHaveTextContent(`${label} Router?`);
+      expect(screen.getByTestId(`conv-confirm-accept:${id}`)).toHaveFocus();
+      fireEvent.click(screen.getByTestId(`conv-confirm-cancel:${id}`));
+      expect(screen.queryByTestId(`conv-confirm:${id}`)).toBeNull();
+      expect(menu()).toHaveFocus();
+      fireEvent.click(menu());
+      fireEvent.click(await screen.findByRole("menuitem", { name: `${label}…` }));
+      fireEvent.keyDown(screen.getByTestId(`conv-confirm-accept:${id}`), { key: "Escape" });
+      expect(screen.queryByTestId(`conv-confirm:${id}`)).toBeNull();
+      fireEvent.click(menu());
+      fireEvent.click(await screen.findByRole("menuitem", { name: `${label}…` }));
+      fireEvent.click(screen.getByTestId(`conv-confirm-accept:${id}`));
+      expect(action).toHaveBeenCalledOnce();
+      expect(screen.queryByTestId(`conv-confirm:${id}`)).toBeNull();
     }
     view.rerender(<ChatPane identity="router:main" agentLabel="Router" agent={{ ...agent, affordances: {} }} entries={[]} phase={null}
       draft="" sending={false} staged={[]} onDraftChange={vi.fn()} onStagedChange={vi.fn()} onSend={vi.fn()}
@@ -118,6 +140,8 @@ describe("contextual transcript controls", () => {
     expect(screen.getByRole("button", { name: "Details", exact: true })).toBeTruthy();
     expect(screen.queryByTestId("conv-action:respawn")).toBeNull();
     expect(screen.queryByTestId("conv-action:retire")).toBeNull();
+    // Nothing behind the menu: no menu trigger.
+    expect(screen.queryByTestId("conv-menu")).toBeNull();
   });
   it("keeps the stock turn rail clear of the latest control when the composer grows", () => {
     const previous = globalThis.ResizeObserver;

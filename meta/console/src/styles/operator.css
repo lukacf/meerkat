@@ -1,0 +1,15 @@
+/* Operator panel: a configured same-origin page under the kit header.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Operator panel: a configured same-origin page ─────────── */
+
+.console-operator-panel { padding: 0; overflow: hidden; }
+.console-operator-panel__frame {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  border: 0;
+  background: var(--_cc-surface-card);
+}

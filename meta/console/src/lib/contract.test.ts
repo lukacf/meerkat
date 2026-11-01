@@ -343,9 +343,13 @@ function parseAxumRoutes(source: string): Set<string> {
 
 function parseJsonRpcDispatchMethods(source: string): Set<string> {
   const methods = new Set<string>();
-  const armPattern = /^\s*"([^"]+)"\s*=>/gm;
+  // One literal per arm, or an alternation of literals
+  // (`"meta/mob_events/query" | "meta/mob_events/subscribe" =>`).
+  const armPattern = /^\s*("[^"]+"(?:\s*\|\s*"[^"]+")*)\s*=>/gm;
   for (const match of source.matchAll(armPattern)) {
-    methods.add(match[1]!);
+    for (const literal of match[1]!.matchAll(/"([^"]+)"/g)) {
+      methods.add(literal[1]!);
+    }
   }
   return methods;
 }

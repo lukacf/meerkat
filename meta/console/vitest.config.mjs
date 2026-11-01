@@ -68,6 +68,9 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     include: [
+      // New tests take the .vitest.test suffix and need no entry here.
+      "console/src/**/*.vitest.test.{ts,tsx}",
+      "packages/*/src/**/*.vitest.test.{ts,tsx}",
       "console/src/lib/custom-panels.test.tsx",
       "console/src/mcp-apps/host.test.tsx",
       "console/src/mcp-apps/native-host.test.ts",
@@ -132,7 +135,6 @@ export default defineConfig({
       "packages/console-components/src/conversation/work-graph-card.test.tsx",
       "packages/console-components/src/topology/data.test.ts",
       "packages/console-components/src/dock/browser-dock-target-host.test.tsx",
-      "packages/console-components/src/topology/dense-graph-map.test.ts",
       "packages/console-components/src/topology/connection-picker.test.tsx",
       "packages/console-components/src/topology/topology-panel.test.tsx",
     ],

@@ -208,7 +208,7 @@ describe("voice and text composer", () => {
     const alpha = props("Alpha");
     const view = render(<ChatPane {...alpha} onVoiceToggle={vi.fn()} voiceActive />);
     expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Message Alpha (background agent)…");
-    expect(screen.getByText("· text to background agent")).toBeInTheDocument();
+    expect(screen.getByText("text to background agent")).toBeInTheDocument();
     const beta = props("Beta");
     view.rerender(<ChatPane {...beta} onVoiceToggle={vi.fn()} />);
     expect(screen.getByRole("region", { name: "Voice with Alpha" })).toBeInTheDocument();
@@ -216,7 +216,7 @@ describe("voice and text composer", () => {
     const input = screen.getByRole("textbox");
     expect(input).toBeEnabled();
     expect(input).toHaveAttribute("placeholder", "Message Beta…");
-    expect(screen.queryByText("· text to background agent")).not.toBeInTheDocument();
+    expect(screen.queryByText("text to background agent")).not.toBeInTheDocument();
     expect(screen.getByTestId("voice-bar").compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(screen.getByTestId("chat-send:identity:beta"));
     expect(beta.onSend).toHaveBeenCalledWith([], "Keep working on the text task");

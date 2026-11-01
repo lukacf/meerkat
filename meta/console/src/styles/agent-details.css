@@ -1,0 +1,158 @@
+/* Agent details (Inspect; console v2 spec B9).
+   Split from console-host.css (imported there, in this order). Built from
+   the panel kit (PanelHeader v2, GlanceStrip, KeyValueList, ActivityBars,
+   GraphView's radial ego graph); only the entity header size, the
+   micro-label parts and the recent-turn rows are Agent details' own. */
+
+/* ── The entity header: the agent's name at the entity size ─── */
+.agent-details__head .cc-panel-head__title {
+  font-size: var(--_cc-fs-entity);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+.agent-details__head .cc-panel-head__lead { align-self: center; }
+.agent-details__confirm { padding: 12px var(--_cc-panel-pad-x) 0; }
+
+/* ── Micro-label parts inside a section (never headings) ───── */
+.agent-details__part { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.agent-details__part + .cc-kv,
+.cc-kv + .agent-details__part,
+.agent-details__part + .agent-details__part { margin-top: 16px; }
+.agent-details__part-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.agent-details__part-label {
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.agent-details__part-action {
+  margin-left: auto;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.agent-details__now {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--_cc-foreground);
+}
+.agent-details__now > .cc-mark { margin-top: 5px; }
+.agent-details__bars { max-width: 100%; }
+.agent-details__bars-box { height: 0; }
+.agent-details__muted { margin: 0; font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
+
+/* The ego graph: the agent at the centre of its peers, 240 px tall. */
+.agent-details__ego {
+  height: 240px;
+  overflow: hidden;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+}
+.agent-details__peers { gap: 6px; margin-top: 8px; }
+.agent-details__peer {
+  display: inline-flex; align-items: center; max-width: 100%;
+  height: 24px; padding: 0 8px 0 3px;
+  border: 1px solid var(--_cc-border-soft); border-radius: var(--_cc-radius-pill);
+  font-size: 12px;
+}
+.agent-details__peer .cc-agent--link { height: 22px; }
+
+/* ── Latest output ─────────────────────────────────────────── */
+.agent-details__preview {
+  margin: 0; padding: 10px 12px;
+  border-left: 2px solid var(--_cc-border-strong);
+  background: var(--_cc-surface-soft);
+  border-radius: 0 var(--_cc-radius-sm) var(--_cc-radius-sm) 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--_cc-foreground);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 240px; overflow-y: auto;
+}
+
+/* ── Recent turns: clock time, outcome mark, words ─────────── */
+.agent-details__turns { margin: 0; padding: 0; list-style: none; }
+.agent-details__turn {
+  display: grid;
+  grid-template-columns: 44px 12px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  min-height: 28px;
+  border-bottom: 1px solid var(--_cc-viz-grid);
+  font-size: 12.5px;
+  color: var(--_cc-foreground);
+}
+.agent-details__turn:last-child { border-bottom: 0; }
+.agent-details__turn-time {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono);
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.agent-details__turn[data-tone="crit"] .agent-details__turn-words { color: var(--_cc-negative-ink); }
+.agent-details__tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 0; }
+.agent-details__tool {
+  padding: 1px 6px;
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-soft);
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono);
+  color: var(--_cc-foreground-muted);
+}
+
+/* ── Work the agent owns or claimed ────────────────────────── */
+.agent-details__work { margin: 0 calc(-1 * var(--_cc-panel-pad-x)); }
+.agent-details__work-item .cc-link { font-weight: 500; }
+
+/* ── Session repair ────────────────────────────────────────── */
+.agent-details__repair { padding: 10px var(--_cc-panel-pad-x) 0; }
+.agent-details__repair p { margin: 0 0 8px; }
+.agent-details__command {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; padding: 6px 8px;
+  border: 1px solid var(--_cc-border-soft); border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-raised);
+  min-width: 0;
+}
+.agent-details__command code {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--_cc-font-mono); font-size: 11.5px; color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn {
+  flex: none; width: 22px; height: 22px;
+  background: transparent; box-shadow: none; border-radius: var(--_cc-radius-sm);
+  color: var(--_cc-foreground-meta);
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn:hover { background: var(--_cc-surface-hover); color: var(--_cc-foreground); }
+.agent-details__tech { padding: 4px var(--_cc-panel-pad-x) 0; }
+
+/* ── The lifecycle confirmation (Roster drawer, Agent details) ── */
+.lifecycle-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--_cc-negative) 45%, var(--_cc-border-soft));
+  border-radius: var(--_cc-radius-md);
+  background: color-mix(in srgb, var(--_cc-negative) 6%, var(--_cc-surface-card));
+}
+.lifecycle-confirm__question {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--_cc-fs-card);
+  font-weight: 600;
+  color: var(--_cc-foreground);
+}
+.lifecycle-confirm__consequence {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--_cc-foreground-muted);
+}
+.lifecycle-confirm__actions { margin-top: 4px; }

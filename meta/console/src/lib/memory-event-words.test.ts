@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeMemoryEventForPeople } from "./memory-event-words";
+import { describeMemoryEventForPeople, memoryAuthorWords, parseMemoryAuthor } from "./memory-event-words";
 
 const names = {
   agentName: (key: string) => (key === "identity:router" ? "Router" : key.replace(/^identity:/, "")),
@@ -25,6 +25,11 @@ describe("memory events in words", () => {
       ["memory.quarantine.release_blocked", { record_id: "rec-10", verdict: "promote_pending_gate" }, "Moving a quarantined record was blocked"],
       ["memory.conflict.signal", { entity: "user", topic: "time zone", reason: "mismatch" }, "Conflicting memories about user, time zone · mismatch"],
       ["memory.write.quarantined", { author: "identity:router", reason: "tainted session" }, "A memory write from Router was quarantined · tainted session"],
+      // The server sends the author as Rust Debug text until it sends the
+      // structured author; the sentence names the agent either way.
+      ["memory.write.quarantined", { author: "Agent { identity: \"identity:router\" }", reason: "tainted session" }, "A memory write from Router was quarantined · tainted session"],
+      ["memory.write.quarantined", { author: "Steward { run_id: \"run-1\" }" }, "A memory write from the memory steward was quarantined"],
+      ["memory.write.quarantined", { author: { author: "agent", identity: "identity:router" } }, "A memory write from Router was quarantined"],
       ["memory.taint.transition", { kind: "tainted", session_key: "sess-1", source: "a configured untrusted tool" }, "A session became untrusted · a configured untrusted tool"],
       ["memory.budget.denied", { stage: "harvest", reason: "over cap" }, "Memory budget reached during harvest · over cap"],
       ["memory.promotion.pending_gate", { scope_kind: "mob", scope_key: "main" }, "A record waits for approval to move to team memory"],
@@ -39,5 +44,26 @@ describe("memory events in words", () => {
       expect(line).toBe(expected);
       expect(/identity:|sess-|run-1|mob:|\u2014|\u2013/.test(line)).toBe(false);
     }
+  });
+
+  it("reads memory authors from the server's Debug text, structured authors and bare keys", () => {
+    expect(parseMemoryAuthor("Agent { identity: \"billing\" }")).toEqual({ author: "agent", identity: "billing" });
+    expect(parseMemoryAuthor("Agent { identity: \"say \\\"hi\\\" \\u{e9}\" }")).toEqual({ author: "agent", identity: "say \"hi\" \u00e9" });
+    expect(parseMemoryAuthor("Steward { run_id: \"dream-7\" }")).toEqual({ author: "steward", run_id: "dream-7" });
+    expect(parseMemoryAuthor("Distiller { run_id: \"\" }")).toEqual({ author: "distiller" });
+    expect(parseMemoryAuthor("Operator")).toEqual({ author: "operator" });
+    expect(parseMemoryAuthor(" Application ")).toEqual({ author: "application" });
+    expect(parseMemoryAuthor("identity:router")).toEqual({ author: "agent", identity: "identity:router" });
+    expect(parseMemoryAuthor({ author: "steward", run_id: "dream-7" })).toEqual({ author: "steward", run_id: "dream-7" });
+    expect(parseMemoryAuthor("Agent { name: \"x\" }")).toBe(null);
+    expect(parseMemoryAuthor("")).toBe(null);
+    expect(parseMemoryAuthor(42)).toBe(null);
+    const words = (value: unknown) => {
+      const author = parseMemoryAuthor(value);
+      return author ? memoryAuthorWords(author, names) : "";
+    };
+    expect(words("Agent { identity: \"identity:router\" }")).toBe("Router");
+    expect(words("Steward { run_id: \"dream-7\" }")).toBe("the memory steward");
+    expect(words("Operator")).toBe("an operator");
   });
 });

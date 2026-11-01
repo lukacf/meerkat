@@ -5,6 +5,7 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 const { randomUUID } = require("node:crypto");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
+const { startFromEmptyFirstPane } = require("./empty-first-pane.cjs");
 
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const prose = index => `## Investigation ${index}\n\nThe reviewer checks the **candidate workgraph** and records the exact evidence. Repeated phrase, repeated phrase. Unicode: A\u030A, \u00e5 and \ud83d\ude80.\n\n- [x] Source inspected\n- [ ] Peer review pending\n\n| Check | Result |\n| --- | --- |\n| Runtime | Healthy |\n| Delivery | Confirmed |\n\n\`\`\`ts\nconst check = ${index};\n\`\`\`\n\n[Reference](https://example.com) and ![remote tracking image](https://example.com/tracker.png).\n\n`;
@@ -274,31 +275,50 @@ async function inspectStockHeader(pane, label) {
   const result = await pane.locator(".conv__head").evaluate(head => {
     const box = node => node.getBoundingClientRect().toJSON();
     const title = head.querySelector(".conv__title");
+    const control = button => {
+      const bounds = box(button), hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      return { name: button.getAttribute("aria-label") || button.textContent.trim(), tooltip: button.title, bounds,
+        visible: getComputedStyle(button).visibility !== "hidden", unobstructed: button === hit || button.contains(hit),
+        icon: button.querySelector("use")?.getAttribute("href"), textDisplay: button.querySelector(".conv__action-label") && getComputedStyle(button.querySelector(".conv__action-label")).display };
+    };
+    const menu = head.querySelector(".conv__menu");
     return { agentLabel: title.textContent, identity: title.title, head: box(head), title: box(title), actions: box(head.querySelector(".conv__actions")),
-      buttons: [...head.querySelectorAll(".conv__action")].map(button => {
-        const bounds = box(button), hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-        return { name: button.getAttribute("aria-label") || button.textContent.trim(), tooltip: button.title, bounds,
-          visible: getComputedStyle(button).visibility !== "hidden", unobstructed: button === hit || button.contains(hit),
-          icon: button.querySelector("use")?.getAttribute("href"), textDisplay: button.querySelector(".conv__action-label") && getComputedStyle(button.querySelector(".conv__action-label")).display };
-      }) };
+      buttons: [...head.querySelectorAll(".conv__action")].map(control), menu: menu ? control(menu) : null };
   });
   assert(result.agentLabel && result.identity && result.title.width > 24, `${label} retains the agent target: ${JSON.stringify(result)}`);
   assert(result.title.right <= result.actions.left - 4, `${label} target does not overlap actions: ${JSON.stringify(result)}`);
-  assert.equal(result.buttons.length, 3, `${label} retains all three permitted actions`);
-  for (const button of result.buttons) {
+  // Respawn and Retire sit in the header's overflow menu (they ask before
+  // they act): the permitted actions are the buttons in view and the menu's
+  // commands.
+  let menuItems = [];
+  if (result.menu) {
+    await pane.locator(".conv__head .conv__menu").click();
+    const menu = pane.page().getByRole("menu", { name: `More actions for ${result.agentLabel}`, exact: true });
+    await menu.waitFor();
+    menuItems = await menu.getByRole("menuitem").evaluateAll(items => items.map(item => item.getAttribute("data-testid")));
+    await pane.page().keyboard.press("Escape");
+    await menu.waitFor({ state: "detached" });
+  }
+  result.menuItems = menuItems;
+  assert.equal(result.buttons.length + menuItems.length, 3, `${label} retains all three permitted actions: ${JSON.stringify({ buttons: result.buttons.map(button => button.name), menuItems })}`);
+  for (const button of [...result.buttons, ...(result.menu ? [result.menu] : [])]) {
     assert(button.visible && button.unobstructed, `${label} ${button.name} is unobstructed: ${JSON.stringify(result)}`);
     assert(button.bounds.left >= result.head.left + 2 && button.bounds.right <= result.head.right - 2
       && button.bounds.top >= result.head.top + 2 && button.bounds.bottom <= result.head.bottom - 2,
     `${label} ${button.name} stays inside the header: ${JSON.stringify(result)}`);
     assert(button.bounds.width >= 28 && button.bounds.height >= 28, `${label} ${button.name} remains a usable control`);
+  }
+  for (const button of result.buttons) {
     assert(button.icon && button.tooltip.includes(result.identity), `${label} ${button.name} has an icon and explicit target tooltip`);
     if (result.head.width <= 440) assert.equal(button.textDisplay, "none", `${label} switches to compact icon actions`);
   }
-  const buttons = pane.locator(".conv__head .conv__action");
-  await buttons.first().focus();
-  for (let index = 0; index < result.buttons.length; index += 1) {
-    assert(await buttons.nth(index).evaluate(button => document.activeElement === button), `${label} keyboard reaches ${result.buttons[index].name} in order`);
-    if (index + 1 < result.buttons.length) await pane.page().keyboard.press("Tab");
+  if (result.menu) assert.equal(result.menu.name, `More actions for ${result.agentLabel}`, `${label} names the menu for its agent`);
+  const controls = pane.locator(".conv__head .conv__action, .conv__head .conv__menu");
+  const order = [...result.buttons, ...(result.menu ? [result.menu] : [])];
+  await controls.first().focus();
+  for (let index = 0; index < order.length; index += 1) {
+    assert(await controls.nth(index).evaluate(button => document.activeElement === button), `${label} keyboard reaches ${order[index].name} in order`);
+    if (index + 1 < order.length) await pane.page().keyboard.press("Tab");
   }
   return { label, ...result };
 }
@@ -1098,6 +1118,8 @@ async function olderHistory(host) {
     const history = await timeline(fixture);
     assert(history.frames.length >= 1000 && Number(history.latest_cursor.split(":").at(-1)) > 1000,
       "actual owner history crosses both the recent-page and raw-scan boundaries");
+    // Today's backfill pre-fills the agent's log when Today is open, so the stock console starts from an empty first pane.
+    if (host === "stock") await startFromEmptyFirstPane(page, "real-stock-history-prepend");
     await open(page, fixture, host, monitor);
     const viewport = transcript(page, host);
     const ownerPages = () => fixture.observations.flatMap(item => {

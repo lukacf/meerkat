@@ -53,8 +53,19 @@ export type {
 export type {
   ConsoleAgent,
   ConsoleFrame,
+  ConsoleTopologyAgentStatus,
+  ConsoleTopologyGrouping,
+  ConsoleTopologyLineage,
+  ConsoleTopologyLineageKind,
+  ConsoleTopologyLink,
+  ConsoleTopologyMemoryScope,
+  ConsoleTopologyMessage,
   ConsoleTopologyNodePresentation,
   ConsoleTopologyNode,
+  ConsoleTopologyRoute,
+  ConsoleTopologyRoutesAccess,
+  ConsoleTopologyStore,
+  ConsoleTopologyTraffic,
   TopologyActionCapability,
   TopologyAuthorityRevisionTransition,
   TopologyCanonicalEdge,
@@ -110,3 +121,6 @@ export * from "./conversation/presentation-policy";
 
 // The panel kit: shared building blocks for console panels.
 export * from "./panel-kit";
+
+// The graph kit and visualisation tokens (GraphView, layouts, list twin).
+export * from "./viz";

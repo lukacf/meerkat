@@ -1,0 +1,480 @@
+/* Routing panel (spec B12).
+   Split from console-host.css (imported there, in this order).
+
+   The body is a flow in the route grammar (A3.9): channel sources (hollow
+   squares) feed route keys, which deliver to recipients along dashed edges
+   with a chevron at the recipient; a route whose deliveries fail draws its
+   edge in the negative tone with a crit diamond at the middle. Beside each
+   recipient, its recent deliveries as marks (delivered circle, failed
+   diamond) and the route's status in words. A selected route opens the
+   detail drawer (A3.10). */
+
+.routing__body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.routing__body > .cc-panel-empty,
+.routing__body > .cc-skeleton { margin-top: 8px; }
+
+/* ── The flow ───────────────────────────────────────────────────── */
+.routing-flow {
+  container-type: inline-size;
+  container-name: routing-flow;
+  --rf-channel: 136px;
+  --rf-cols: 18px minmax(96px, 1fr) minmax(36px, 0.5fr) minmax(136px, 1.25fr) 136px minmax(112px, 0.8fr);
+  --rf-row: calc(var(--_cc-panel-row-h, 40px) + 4px);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 4px 0 24px;
+}
+
+.routing-flow__head {
+  display: grid;
+  grid-template-columns: var(--rf-channel) 18px minmax(96px, 1fr) minmax(36px, 0.5fr) minmax(136px, 1.25fr) 136px minmax(112px, 0.8fr);
+  align-items: end;
+  padding: 8px var(--_cc-panel-pad-x) 6px;
+  border-bottom: 1px solid var(--_cc-viz-grid);
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.routing-flow__head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-flow__head-channel { grid-column: 1; }
+.routing-flow__head-route { grid-column: 3; }
+.routing-flow__head-recipient { grid-column: 5; }
+.routing-flow__head-dots { grid-column: 6; }
+.routing-flow__head-status { grid-column: 7; }
+
+.routing-flow__group {
+  display: grid;
+  grid-template-columns: var(--rf-channel) minmax(0, 1fr);
+  padding: 6px var(--_cc-panel-pad-x);
+  border-bottom: 1px solid var(--_cc-viz-grid);
+}
+
+/* The channel: its square and name, centred on its routes, joined to them
+   by a dashed edge. */
+.routing-flow__channel {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--_cc-viz-mid);
+}
+.routing-flow__channel-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--_cc-panel-fs-body);
+  font-weight: 500;
+  color: var(--_cc-foreground);
+}
+.routing-flow__channel-edge {
+  flex: 1 1 auto;
+  min-width: 8px;
+  height: 1px;
+  background-image: linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px);
+  background-size: 7px 1px;
+  background-repeat: repeat-x;
+}
+.routing-flow__channel-mark {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+}
+.routing-flow__channel-mark rect {
+  fill: var(--_cc-surface-card);
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 1.2;
+}
+.routing-flow__channel-mark.is-active rect {
+  fill: var(--_cc-viz-live-soft);
+  stroke: var(--_cc-viz-live);
+}
+
+/* A channel's routes; with more than one, a dashed trunk joins them. */
+.routing-flow__routes {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--_cc-viz-mid);
+}
+.routing-flow__group.is-fan .routing-flow__routes::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: calc(var(--rf-row) / 2);
+  bottom: calc(var(--rf-row) / 2);
+  width: 1px;
+  background-image: linear-gradient(180deg, currentColor 0 4px, transparent 4px 7px);
+  background-size: 1px 7px;
+  background-repeat: repeat-y;
+}
+
+.routing-flow__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--rf-cols);
+  align-items: center;
+  min-width: 0;
+  min-height: var(--rf-row);
+  border-radius: var(--_cc-radius-sm);
+  color: var(--_cc-viz-mid);
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.routing-flow__row:hover { background: var(--_cc-surface-hover); }
+.routing-flow__row.is-selected {
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.routing-flow__row--folded { cursor: default; }
+
+/* Edges: dashed 4 3 in the mid ink; strong on hover and selection; the
+   negative tone with a crit diamond while deliveries fail. */
+.routing-flow__edge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  min-width: 0;
+  color: var(--_cc-viz-mid);
+  transition: color var(--_cc-dur-fast) ease;
+}
+.routing-flow__edge-line {
+  flex: 1 1 auto;
+  height: 1px;
+  background-image: linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px);
+  background-size: 7px 1px;
+  background-repeat: repeat-x;
+}
+.routing-flow__edge-head {
+  flex: none;
+  width: 8px;
+  height: 10px;
+  margin-left: -2px;
+  overflow: visible;
+}
+.routing-flow__edge-head path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.routing-flow__edge-mark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px var(--_cc-surface-card);
+}
+.routing-flow__row:hover .routing-flow__edge,
+.routing-flow__row.is-selected .routing-flow__edge { color: var(--_cc-viz-edge-strong); }
+.routing-flow__edge.is-failing,
+.routing-flow__row:hover .routing-flow__edge.is-failing,
+.routing-flow__row.is-selected .routing-flow__edge.is-failing { color: var(--_cc-negative); }
+.routing-flow__edge--out { margin: 0 6px; }
+
+/* The route's name: the row's button. */
+.routing-flow__route {
+  display: flex;
+  min-width: 0;
+}
+.routing-flow__route-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground);
+  font: inherit;
+  font-size: var(--_cc-panel-fs-body);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color var(--_cc-dur-fast) ease;
+}
+.routing-flow__route-button:hover { border-color: var(--_cc-border-strong); }
+.routing-flow__route-button:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+.routing-flow__row.is-selected .routing-flow__route-button {
+  border-color: var(--_cc-member-accent);
+  box-shadow: 0 0 0 1px var(--_cc-member-accent);
+}
+.routing-flow__fold-button {
+  border-style: dashed;
+  color: var(--_cc-foreground-muted);
+}
+.routing-flow__fold-glyph { width: 12px; height: 12px; flex: none; }
+
+/* The recipient: an agent by name, anyone else by address. */
+.routing-flow__recipient {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--_cc-foreground);
+}
+.routing-flow__recipient .cc-agent { min-width: 0; }
+.routing-flow__address {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.routing-flow__address-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--_cc-panel-fs-body);
+}
+.routing-flow__recipient-mark {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+}
+.routing-flow__mark-ring {
+  fill: var(--_cc-surface-card);
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 1.2;
+}
+.routing-flow__mark-ring--dashed { stroke-dasharray: 2.5 2; }
+.routing-flow__mark-dot { fill: var(--_cc-viz-mid); }
+.routing-flow__recipient--many { gap: 8px; }
+.routing-flow__avatars { display: inline-flex; flex: none; }
+.routing-flow__avatars .cc-agent__avatar + .cc-agent__avatar { margin-left: -5px; box-shadow: 0 0 0 1.5px var(--_cc-surface-card); }
+.routing-flow__many-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-muted);
+}
+
+/* Recent deliveries as marks, and the route's status in words. */
+.routing-flow__dots { justify-self: start; margin-left: 4px; }
+.routing-flow__dots--empty {
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.routing-flow__status {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding-left: 8px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.3;
+}
+.routing-flow__status-words {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--_cc-foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+.routing-flow__status[data-tone="crit"] .routing-flow__status-words { color: var(--_cc-negative-ink); }
+.routing-flow__status[data-tone="ok"] .routing-flow__status-words { color: var(--_cc-foreground); }
+.routing-flow__time {
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.routing-flow__fold-row {
+  grid-column: 2;
+  grid-row: 2;
+  padding: 2px 0 2px 18px;
+}
+.routing-flow__unmatched {
+  padding: 10px var(--_cc-panel-pad-x);
+  border-bottom: 1px solid var(--_cc-viz-grid);
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-muted);
+}
+.routing-flow__unmatched-words { display: inline-flex; align-items: center; gap: 6px; }
+.routing-flow__foot {
+  margin: 10px var(--_cc-panel-pad-x) 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+
+/* A narrower flow (a drawer beside it, a half pane) drops the long edge,
+   then the column heads and the time; under 480 px each route stacks. */
+@container routing-flow (max-width: 760px) {
+  .routing-flow__head,
+  .routing-flow__group { --rf-channel: 100px; --rf-cols: 10px minmax(112px, 1fr) 20px minmax(112px, 1fr) 132px minmax(88px, 0.6fr); }
+  .routing-flow__head { grid-template-columns: var(--rf-channel) 10px minmax(112px, 1fr) 20px minmax(112px, 1fr) 132px minmax(88px, 0.6fr); }
+  .routing-flow__edge--out { margin: 0 2px; }
+  .routing-flow__edge--out .routing-flow__edge-mark { display: none; }
+  .routing-flow__route-button { padding: 0 6px; }
+}
+@container routing-flow (max-width: 600px) {
+  .routing-flow__head { display: none; }
+  .routing-flow__group { --rf-cols: 10px minmax(80px, 1fr) 18px minmax(96px, 1.2fr) 132px; }
+  .routing-flow__status .routing-flow__time { display: none; }
+  .routing-flow__status { grid-column: 2 / -1; padding: 0 0 4px 8px; }
+  .routing-flow__row { row-gap: 2px; }
+}
+@container routing-flow (max-width: 479px) {
+  .routing-flow__group { grid-template-columns: minmax(0, 1fr); }
+  .routing-flow__channel { grid-row: 1; padding: 4px 0; }
+  .routing-flow__channel-edge { display: none; }
+  .routing-flow__routes { grid-column: 1; grid-row: 2; }
+  .routing-flow__group.is-fan .routing-flow__routes::before { display: none; }
+  .routing-flow__group { --rf-cols: 0 minmax(0, 1fr) 14px minmax(0, 1fr); }
+  .routing-flow__edge--in { display: none; }
+  .routing-flow__dots { grid-column: 2 / -1; margin: 2px 0 0 8px; }
+  .routing-flow__fold-row { grid-column: 1; grid-row: 3; padding-left: 0; }
+}
+
+/* ── The drawer ─────────────────────────────────────────────────── */
+.routing-drawer__mark { width: 18px; height: 18px; color: var(--_cc-viz-mid); }
+.routing__quiet {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
+}
+.routing__note {
+  margin: 0 0 8px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.45;
+  color: var(--_cc-foreground-muted);
+}
+.routing__clock-note { margin-top: 16px; }
+.routing__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.routing__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding-left: 16px;
+}
+/* A dot per step and a dashed edge joining them. */
+.routing__step::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-viz-mid);
+}
+.routing__step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: calc(50% + 6px);
+  height: calc(100% + 0px);
+  width: 1px;
+  background-image: linear-gradient(180deg, var(--_cc-viz-mid) 0 4px, transparent 4px 7px);
+  background-size: 1px 7px;
+  background-repeat: repeat-y;
+}
+.routing__step-label {
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
+}
+.routing__step-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.routing__deliveries {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.routing__delivery {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--_cc-viz-grid);
+}
+.routing__delivery:first-child { border-top: 0; }
+.routing__delivery-mark { margin-top: 5px; }
+.routing__delivery-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.routing__delivery-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--_cc-panel-fs-body);
+  color: var(--_cc-foreground);
+}
+.routing__delivery-why {
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-negative-ink);
+}
+.routing__delivery-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: var(--_cc-panel-fs-meta);
+}
+.routing-flow__agent-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.routing-flow__agent-wrap .cc-agent__avatar { flex: none; }

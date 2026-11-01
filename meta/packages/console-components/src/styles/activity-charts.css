@@ -1,0 +1,231 @@
+/* Activity charts (console v2 spec B4, B5): the Today swimlanes and the
+   Logs severity strip. Colours come only from the A2.3 visualisation tokens
+   and the kit's inks; every chart svg sets its own fill and stroke (the
+   console resets svg to a 16 px stroked icon). */
+
+/* ── Swimlanes ─────────────────────────────────────────────────────── */
+
+.cc-lanes {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  font-family: var(--_cc-font-display);
+}
+.cc-lanes__svg,
+.cc-sevstrip__svg {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cc-lanes__labels {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--_cc-lanes-label-w, 136px);
+}
+.cc-lanes__label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 10px 0 var(--_cc-panel-pad-x, 20px);
+  box-sizing: border-box;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--_cc-foreground);
+}
+.cc-lanes__label--problems,
+.cc-lanes__label--folded {
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-lane, 10px);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-lanes__label--folded {
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.cc-lanes__label-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-lanes__label-btn {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.cc-lanes__label-btn:hover .cc-lanes__label-text { text-decoration: underline; text-underline-offset: 2px; }
+.cc-lanes__label-btn:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-lanes__live { flex: none; }
+.cc-lanes__svg {
+  position: absolute;
+  top: 0;
+  left: var(--_cc-lanes-label-w, 136px);
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+  outline: none;
+  touch-action: pan-y;
+}
+.cc-lanes.is-selectable .cc-lanes__svg { cursor: pointer; }
+.cc-lanes__rule { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-lanes__grid { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-lanes__now line { stroke: var(--_cc-viz-live); stroke-width: 1; }
+
+.cc-lanes__item { outline: none; }
+.cc-lanes__span {
+  fill: var(--_cc-viz-ink);
+  stroke: none;
+  transition: fill var(--_cc-dur-fast, 120ms) ease;
+}
+.cc-lanes__item[data-state="live"] .cc-lanes__span { fill: var(--_cc-viz-live); }
+.cc-lanes__item[data-state="failed"] .cc-lanes__span { fill: var(--_cc-negative); }
+.cc-lanes__item[data-state="cancelled"] .cc-lanes__span { fill: var(--_cc-viz-edge); }
+.cc-lanes__tick { stroke: var(--_cc-viz-plate); stroke-width: 1; }
+.cc-lanes__live-end {
+  fill: var(--_cc-viz-live);
+  stroke: var(--_cc-viz-plate);
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: cc-lanes-pulse var(--_cc-dur-pulse, 1600ms) ease-in-out infinite;
+}
+@keyframes cc-lanes-pulse {
+  0%, 100% { stroke-width: 1.5; }
+  50% { stroke-width: 4; stroke: var(--_cc-viz-live-soft); }
+}
+.cc-lanes__fold-tick { fill: var(--_cc-viz-mid); stroke: none; }
+.cc-lanes__fold-tick[data-state="live"] { fill: var(--_cc-viz-live); }
+.cc-lanes__fold-tick[data-state="failed"] { fill: var(--_cc-negative); }
+
+.cc-lanes__link { stroke: var(--_cc-viz-edge-strong); stroke-width: 1; }
+.cc-lanes__link-hit { stroke: transparent; stroke-width: 7; }
+.cc-lanes__link-end { fill: var(--_cc-viz-edge-strong); stroke: none; }
+.cc-lanes__count {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-fs-tick, 9.5px);
+  fill: var(--_cc-foreground-muted);
+  stroke: var(--_cc-viz-plate);
+  stroke-width: 3px;
+  paint-order: stroke;
+  font-variant-numeric: tabular-nums;
+}
+.cc-lanes__chevron {
+  fill: none;
+  stroke: var(--_cc-viz-edge-strong);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cc-lanes__mark {
+  --_cc-lanes-ink: var(--_cc-viz-ink);
+  fill: var(--_cc-lanes-ink);
+  stroke: var(--_cc-viz-plate);
+  stroke-width: 1.25;
+  paint-order: stroke;
+}
+.cc-lanes__mark[data-tone="ok"] { --_cc-lanes-ink: var(--_cc-positive); }
+.cc-lanes__mark[data-tone="info"] { --_cc-lanes-ink: var(--_cc-link); }
+.cc-lanes__mark[data-tone="warn"] { --_cc-lanes-ink: var(--_cc-warning); }
+.cc-lanes__mark[data-tone="crit"] { --_cc-lanes-ink: var(--_cc-negative); }
+.cc-lanes__mark[data-tone="neutral"],
+.cc-lanes__mark[data-tone="locked"] { --_cc-lanes-ink: var(--_cc-viz-mid); }
+.cc-lanes__mark[data-tone="live"] { --_cc-lanes-ink: var(--_cc-viz-live); }
+.cc-lanes__mark[data-shape="hollow-diamond"] {
+  fill: var(--_cc-viz-plate);
+  stroke: var(--_cc-lanes-ink);
+  stroke-width: 1.5;
+}
+
+/* Hover, keyboard focus and selection: the focus ring for the active mark,
+   the accent for the selected one. */
+.cc-lanes__item.is-active .cc-lanes__span,
+.cc-lanes__item.is-active.cc-lanes__fold-tick {
+  stroke: var(--_cc-focus-ring);
+  stroke-width: 2;
+  paint-order: stroke;
+}
+.cc-lanes__mark.is-active { stroke: var(--_cc-focus-ring); stroke-width: 2.5; }
+.cc-lanes__item.is-active .cc-lanes__link,
+.cc-lanes__item.is-active .cc-lanes__chevron { stroke: var(--_cc-foreground); stroke-width: 1.5; }
+.cc-lanes__item.is-selected .cc-lanes__span {
+  stroke: var(--_cc-viz-live);
+  stroke-width: 2;
+  paint-order: stroke;
+}
+.cc-lanes__mark.is-selected { stroke: var(--_cc-viz-live); stroke-width: 2.5; }
+.cc-lanes__item.is-selected .cc-lanes__link,
+.cc-lanes__item.is-selected .cc-lanes__chevron { stroke: var(--_cc-viz-live); stroke-width: 1.5; }
+
+/* ── Severity strip ────────────────────────────────────────────────── */
+
+.cc-sevstrip {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cc-sevstrip__svg {
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+  cursor: crosshair;
+  touch-action: pan-y;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-sevstrip__svg:focus { outline: none; }
+.cc-sevstrip__svg:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+.cc-sevstrip__base { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-sevstrip__hit { fill: transparent; }
+.cc-sevstrip__zero { fill: var(--_cc-viz-faint); }
+.cc-sevstrip__seg--info { fill: var(--_cc-viz-faint); }
+.cc-sevstrip__seg--warn { fill: var(--_cc-warning); }
+.cc-sevstrip__seg--crit { fill: var(--_cc-negative); }
+.cc-sevstrip__bin.is-active .cc-sevstrip__seg--info { fill: var(--_cc-viz-edge-strong); }
+.cc-sevstrip__bin.is-active .cc-sevstrip__hit { fill: var(--_cc-viz-grid); }
+.cc-sevstrip__svg:focus-visible .cc-sevstrip__bin.is-focus .cc-sevstrip__hit {
+  fill: none;
+  stroke: var(--_cc-focus-ring);
+  stroke-width: 1.5;
+}
+.cc-sevstrip__band {
+  fill: color-mix(in srgb, var(--_cc-viz-live) 12%, transparent);
+  stroke: var(--_cc-viz-live);
+  stroke-width: 1;
+}
+.cc-sevstrip__now { stroke: var(--_cc-viz-live); stroke-width: 1; }
+
+/* ── Motion ────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-lanes__live-end { animation: none; stroke: var(--_cc-viz-live-soft); stroke-width: 3; }
+}
+.reduced-motion .cc-lanes__live-end { animation: none; stroke: var(--_cc-viz-live-soft); stroke-width: 3; }

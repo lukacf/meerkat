@@ -1,0 +1,411 @@
+import { fireEvent, render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  ActivityBars,
+  BarcodeLegend,
+  BarcodeMeter,
+  DotStrip,
+  FigureTile,
+  GlanceStrip,
+  HeatStrip,
+  Meter,
+  MiniBar,
+  ProgressRing,
+  placeAxisLabel,
+  placeTickLabels,
+  Sparkline,
+  barcodeUnitsPerSegment,
+  binCounts,
+  binIndex,
+  brushRange,
+  createTimeScale,
+  deltaTone,
+  formatDelta,
+  formatFigure,
+  formatTimeRange,
+  heatLevels,
+  timeTicks,
+} from "../../panel-kit";
+
+// Micro charts and the time axis (console v2 spec A3.3, A3.8). DOM
+// assertions compare booleans and strings, never elements.
+
+const HOUR = 3_600_000;
+const DAY_START = new Date(2026, 9, 30, 0, 0, 0).getTime();
+
+describe("time axis", () => {
+  it("maps time to x and back", () => {
+    const scale = createTimeScale({ start: 1000, end: 2000, range: [10, 110] });
+    expect(scale.x(1500)).toBe(60);
+    expect(scale.t(60)).toBe(1500);
+    expect(createTimeScale({ start: 5, end: 5, range: [10, 20] }).x(5)).toBe(10);
+  });
+
+  it("puts 6 h ticks on the local clock's 00, 06, 12 and 18", () => {
+    const ticks = timeTicks(DAY_START + 1.5 * HOUR, DAY_START + 25 * HOUR, { step: 6 * HOUR, format: "hour" });
+    expect(ticks.map((tick) => tick.label)).toEqual(["06", "12", "18", "00"]);
+    expect(ticks.every((tick) => new Date(tick.t).getMinutes() === 0 && new Date(tick.t).getHours() % 6 === 0)).toBe(true);
+    expect(ticks[3].major).toBe(true);
+  });
+
+  it("keeps tick labels inside the chart, sliding the edge ones inward", () => {
+    const tick = (x: number, label: string) => ({ t: x, label, major: false, x });
+    // "Sat 3" is about 30 px wide at 9.5 px: centred at x 4 it would start at -11.
+    const placed = placeTickLabels([tick(4, "Sat 3"), tick(80, "Sat 10"), tick(156, "Sat 17"), tick(318, "Sat 31")], 320, { endReserve: 24 });
+    expect(placed.map((label) => label.label)).toEqual(["Sat 3", "Sat 10", "Sat 17", "Sat 31"]);
+    for (const label of placed) {
+      const half = (label.label.length * 9.5 * 0.66) / 2;
+      expect([label.label, label.labelX - half >= 0, label.labelX + half <= 320 - 24]).toEqual([label.label, true, true]);
+    }
+    expect(placed[1].labelX).toBe(80);
+    // A label that would meet the one before it is left out.
+    expect(placeTickLabels([tick(10, "06:00"), tick(20, "12:00")], 200).map((label) => label.label)).toEqual(["06:00"]);
+  });
+
+  it("draws a DotStrip's first and last tick labels inside the strip", () => {
+    // The first midnight tick lands about 10 px in, where a centred
+    // "Fri 30" (about 34 px wide) would lose its start to the edge.
+    const start = DAY_START - 14 * HOUR;
+    const end = start + 30 * 24 * HOUR;
+    const view = render(<DotStrip items={[{ id: "a", t: start + HOUR, label: "First" }]} start={start} end={end} width={320} height={18} axis now={end} label="1 record" testId="strip" />);
+    const labels = Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick"));
+    expect(labels.length > 2).toBe(true);
+    for (const label of labels) {
+      const text = label.textContent ?? "";
+      const x = Number(label.getAttribute("x"));
+      const anchor = label.getAttribute("text-anchor");
+      const half = (text.length * 9.5 * 0.66) / 2;
+      const left = anchor === "end" ? x - 2 * half : anchor === "middle" ? x - half : x;
+      const right = anchor === "end" ? x : anchor === "middle" ? x + half : x + 2 * half;
+      expect([text, left >= 0, right <= 320]).toEqual([text, true, true]);
+    }
+  });
+
+  it("puts the now label at its marker, inside the strip, with no tick label on it", () => {
+    const start = DAY_START + 9 * HOUR;
+    const spans = (view: ReturnType<typeof render>) =>
+      Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick")).map((text) => {
+        const label = text.textContent ?? "";
+        const x = Number(text.getAttribute("x"));
+        const half = (label.length * 9.5 * 0.66) / 2;
+        return { label, left: x - half, right: x + half, now: text.classList.contains("cc-dots__now-label") };
+      });
+    const check = (now: number, expectNear: (x: number) => boolean) => {
+      const view = render(<DotStrip items={[]} start={start} end={start + 24 * HOUR} width={320} height={18} axis now={now} label="no records" testId="strip" />);
+      const labels = spans(view);
+      const nowLabel = labels.find((label) => label.now);
+      expect(Boolean(nowLabel && expectNear((nowLabel.left + nowLabel.right) / 2))).toBe(true);
+      for (const label of labels) {
+        expect([label.label, label.left >= 0, label.right <= 320]).toEqual([label.label, true, true]);
+        if (!label.now && nowLabel) expect([label.label, label.right <= nowLabel.left || label.left >= nowLabel.right]).toEqual([label.label, true]);
+      }
+      view.unmount();
+    };
+    // A window that starts at now: the label sits at the left end, not the right.
+    check(start, (x) => x < 20);
+    // Now in the middle: the label centres on the marker.
+    check(start + 12 * HOUR, (x) => Math.abs(x - 160) < 2);
+    // A window that ends at now: the right end, as before.
+    check(start + 24 * HOUR, (x) => x > 300);
+    expect(placeAxisLabel(2, "now", 320).labelX > 2).toBe(true);
+    expect(placeAxisLabel(160, "now", 320).labelX).toBe(160);
+  });
+
+  it("says now at the end of the activity bars only when the window ends now", () => {
+    const nowText = (view: ReturnType<typeof render>) =>
+      Array.from(view.container.querySelectorAll("text.cc-viz-tick")).some((text) => text.textContent === "now");
+    const current = render(<ActivityBars values={[1, 2, 3, 4]} label="10 turns" />);
+    expect(nowText(current)).toBe(true);
+    const past = render(<ActivityBars values={[1, 2, 3, 4]} end={Date.now() - 3 * 24 * HOUR} label="10 turns three days ago" />);
+    expect(nowText(past)).toBe(false);
+    // An hour label next to the end never runs into "now": at 01:36 the 00
+    // tick falls 20 px from the right end of a 300 px chart, under "now".
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(DAY_START + 1.6 * HOUR);
+      const late = render(<ActivityBars values={Array.from({ length: 24 }, () => 1)} width={300} label="24 turns" testId="late" />);
+      const labels = Array.from(late.getByTestId("late").querySelectorAll("text.cc-viz-tick"))
+        .map((text) => {
+          const label = text.textContent ?? "";
+          const x = Number(text.getAttribute("x"));
+          const half = (label.length * 9.5 * 0.66) / 2;
+          return { label, left: x - half, right: x + half };
+        })
+        .sort((a, b) => a.left - b.left);
+      expect(labels.map((label) => label.label)).toEqual(["06", "12", "18", "now"]);
+      for (const label of labels) expect([label.label, label.left >= 0, label.right <= 300]).toEqual([label.label, true, true]);
+      for (let index = 1; index < labels.length; index += 1) {
+        expect([labels[index].label, labels[index].left >= labels[index - 1].right]).toEqual([labels[index].label, true]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the day at midnight on an automatic clock axis", () => {
+    const ticks = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR });
+    expect(ticks.map((tick) => tick.label)).toEqual(["18:00", "Sat 31", "06:00", "12:00"]);
+    const literal = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR, format: "clock" });
+    expect(literal[1].label).toBe("00:00");
+  });
+
+  it("counts times into bins and orders a brushed range", () => {
+    expect(binCounts([0, 1, 9, 10, 25, 31], 0, 30, 3)).toEqual([3, 1, 1]);
+    expect(binIndex(30, 0, 30, 3)).toBe(2);
+    expect(binIndex(31, 0, 30, 3)).toBe(-1);
+    const scale = createTimeScale({ start: 0, end: 100, range: [0, 100] });
+    expect(brushRange(scale, 80, -20)).toEqual({ start: 0, end: 80 });
+    expect(formatTimeRange({ start: DAY_START + 17 * HOUR + 2 * 60_000, end: DAY_START + 17 * HOUR + 9 * 60_000 })).toBe("17:02-17:09");
+  });
+});
+
+describe("figures", () => {
+  it("compacts values and words the change", () => {
+    expect([formatFigure(999), formatFigure(1284), formatFigure(12_900), formatFigure(3_400_000), formatFigure(10_000)]).toEqual(["999", "1,284", "12.9K", "3.4M", "10K"]);
+    expect(formatDelta({ value: 2, period: "1h ago" })).toBe("+2 vs 1h ago");
+    expect(formatDelta({ value: -3, period: "the hour before" })).toBe("-3 vs the hour before");
+    expect(formatDelta({ value: 0, period: "1h ago" })).toBe("No change vs 1h ago");
+    expect(deltaTone({ value: 2, period: "", goodWhen: "up" })).toBe("ok");
+    expect(deltaTone({ value: 2, period: "", goodWhen: "down" })).toBe("crit");
+    expect(deltaTone({ value: 2, period: "" })).toBe(undefined);
+  });
+
+  it("shows a figure with its label, whole, mark and trend in a strip", () => {
+    const view = render(
+      <GlanceStrip ariaLabel="Topology at a glance" testId="glance">
+        <FigureTile label="Active now" value={2} of={7} live trend={[1, 2, 0, 3]} trendLive testId="tile" />
+        <FigureTile label="Problems" value={1} tone="warn" delta={{ value: 1, period: "1h ago", goodWhen: "down" }} testId="problems" />
+      </GlanceStrip>,
+    );
+    expect(view.getByRole("group", { name: "Topology at a glance" }) !== null).toBe(true);
+    const tile = view.getByTestId("tile");
+    expect(tile.textContent?.startsWith("Active now 2 of 7")).toBe(true);
+    expect(tile.querySelector('.cc-mark[data-tone="live"]') !== null).toBe(true);
+    expect(tile.querySelector('svg[role="img"]')?.getAttribute("aria-label")).toBe("Active now trend");
+    expect(view.getByTestId("problems").querySelector(".cc-figure__delta")?.getAttribute("data-tone")).toBe("crit");
+  });
+
+  it("keeps a figure apart from its unit and its foot in the tile's text", () => {
+    // "1" and "1 agent on them" once read "11" to anything reading the text.
+    const view = render(
+      <GlanceStrip>
+        <FigureTile label="In progress" value={1} foot="1 agent on them" testId="live" />
+        <FigureTile label="To finish" value={3} unit="steps" delta={{ value: 1, period: "1h ago" }} foot="Critical path" testId="steps" />
+      </GlanceStrip>,
+    );
+    expect(view.getByTestId("live").textContent).toBe("In progress 1 1 agent on them");
+    expect(view.getByTestId("steps").textContent).toBe("To finish 3 steps +1 vs 1h ago Critical path");
+  });
+
+  it("draws a responsive meter at the room beside the figure, below it when short, never wider", () => {
+    // jsdom lays nothing out: these boxes stand in for a tile's figure row
+    // and its figure group (a hero "17" in a 166 px tile has 142 px of row).
+    const layout = (row: number, group: number, run: () => void) => {
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.getBoundingClientRect = function boxes(this: HTMLElement) {
+        const rect = (right: number) => ({ left: 0, right, width: right, top: 0, bottom: 20, height: 20, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+        if (this.classList.contains("cc-figure__fig")) return rect(row);
+        if (this.classList.contains("cc-figure__group")) return rect(group);
+        return rect(0);
+      };
+      try {
+        run();
+      } finally {
+        HTMLElement.prototype.getBoundingClientRect = original;
+      }
+    };
+    const meter = ({ width }: { width: number }) => <span data-testid="meter" data-width={width} />;
+    layout(142, 34, () => {
+      const view = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+      const slot = view.getByTestId("meter");
+      expect(slot.getAttribute("data-width")).toBe(String(142 - 34 - 12));
+      expect(slot.closest(".cc-figure__fig") !== null).toBe(true);
+      view.unmount();
+    });
+    layout(142, 120, () => {
+      const view = render(<FigureTile hero label="Records" value={1284} unit="active" meter={meter} testId="tile" />);
+      const slot = view.getByTestId("meter");
+      expect(slot.getAttribute("data-width")).toBe("142");
+      expect(slot.closest(".cc-figure__fig") === null).toBe(true);
+      expect(slot.parentElement?.classList.contains("is-below")).toBe(true);
+      view.unmount();
+    });
+    layout(40, 30, () => {
+      const view = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+      expect(view.queryByTestId("meter") === null).toBe(true);
+      view.unmount();
+    });
+    // The trend shrinks to the room, and hides under 32 px.
+    layout(142, 80, () => {
+      const view = render(<FigureTile label="Given" value={12} trend={[1, 2, 3]} testId="tile" />);
+      expect(view.getByTestId("tile").querySelector(".cc-figure__trend svg")?.getAttribute("width")).toBe(String(142 - 80 - 12));
+      view.unmount();
+    });
+    layout(142, 110, () => {
+      const view = render(<FigureTile label="Given" value={12} trend={[1, 2, 3]} testId="tile" />);
+      expect(view.getByTestId("tile").querySelector(".cc-figure__trend") === null).toBe(true);
+      view.unmount();
+    });
+    // Unmeasured (no layout at all): the meter is drawn at 96 px.
+    const plain = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+    expect(plain.getByTestId("meter").getAttribute("data-width")).toBe("96");
+  });
+
+  it("makes a filtering figure a pressed button, and holds a skeleton while loading", () => {
+    const onActivate = vi.fn();
+    const view = render(<FigureTile label="Blocked" value={1} onActivate={onActivate} pressed testId="tile" />);
+    const button = view.getByTestId("tile");
+    expect(button.tagName).toBe("BUTTON");
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(button);
+    expect(onActivate).toHaveBeenCalledTimes(1);
+    view.rerender(<FigureTile label="Blocked" value={1} loading testId="tile" />);
+    const loading = view.getByTestId("tile");
+    expect(loading.getAttribute("aria-busy")).toBe("true");
+    // The value keeps its box around a non-breaking space; no figure shows.
+    expect(loading.querySelector(".cc-figure__value .cc-figure__skeleton") !== null).toBe(true);
+    expect(loading.querySelector(".cc-figure__value")?.textContent).toBe("\u00a0");
+  });
+
+  it("keeps every box of the loaded tile while loading, for each kind of tile", () => {
+    // jsdom has no layout, so this compares the boxes the two tiles lay out:
+    // the same elements in the same order, the loading one hiding its
+    // contents (the stylesheet test pins how), never dropping a box. The
+    // gallery's browser check measures the heights.
+    const ring = <ProgressRing done={1} inProgress={1} total={5} size={24} />;
+    const kinds: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+      ["plain", { label: "Ready", value: 2 }],
+      ["foot", { label: "Ready", value: 2, foot: "can start now" }],
+      ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+      ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+      ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+      ["trend", { label: "Given", value: 1284, trend: [1, 3, 2, 5], trendLive: true, foot: "to 3 agents" }],
+      ["meter", { label: "Checks", value: 3, of: 4, meter: ring, foot: "holding" }],
+      ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: ring, foot: "+9 written this week" }],
+      ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+    ];
+    const LAYOUT = [
+      "cc-figure__label",
+      "cc-mark",
+      "cc-figure__label-text",
+      "cc-figure__fig",
+      "cc-figure__value",
+      "cc-figure__of",
+      "cc-figure__trend",
+      "cc-figure__meter",
+      "cc-figure__foot",
+      "cc-figure__delta",
+      "cc-figure__foot-text",
+    ];
+    const boxes = (tile: Element): string[] =>
+      Array.from(tile.querySelectorAll("*"))
+        .map((element) => LAYOUT.find((name) => element.classList.contains(name)))
+        .filter((name): name is string => Boolean(name));
+    for (const [kind, props] of kinds) {
+      const loaded = render(<FigureTile {...props} testId={`loaded-${kind}`} />).getByTestId(`loaded-${kind}`);
+      const loading = render(<FigureTile {...props} loading testId={`loading-${kind}`} />).getByTestId(`loading-${kind}`);
+      expect([kind, boxes(loading)]).toEqual([kind, boxes(loaded)]);
+      expect(loading.tagName).toBe(loaded.tagName);
+      expect(loaded.querySelector(".cc-figure__foot") !== null).toBe(true);
+    }
+  });
+});
+
+describe("micro charts", () => {
+  it("draws sparkline bars with faint zero bins and the live last bin", () => {
+    const view = render(<Sparkline values={[2, 0, 5]} kind="bars" live label="7 messages" testId="spark" />);
+    expect(view.getByRole("img", { name: "7 messages" }) !== null).toBe(true);
+    const root = view.getByTestId("spark");
+    expect(root.querySelectorAll(".cc-spark__bar").length).toBe(2);
+    expect(root.querySelectorAll(".cc-spark__zero").length).toBe(1);
+    expect(root.querySelectorAll(".cc-spark__bar.is-live").length).toBe(1);
+  });
+
+  it("ends a line with a dot, in the accent when live", () => {
+    const view = render(<Sparkline values={[1, 3, 2]} label="trend" testId="spark" />);
+    expect(view.getByTestId("spark").querySelector(".cc-spark__dot.is-live") === null).toBe(true);
+    view.rerender(<Sparkline values={[1, 3, 2]} live label="trend" testId="spark" />);
+    expect(view.getByTestId("spark").querySelector(".cc-spark__dot.is-live") !== null).toBe(true);
+  });
+
+  it("says a progress ring's numbers in words", () => {
+    const view = render(<ProgressRing done={3} inProgress={1} blocked={1} total={5} />);
+    expect(view.getByRole("img").getAttribute("aria-label")).toBe("3 of 5 done, 1 in progress, 1 blocked");
+    expect(view.container.querySelectorAll(".cc-ring__arc").length).toBe(3);
+  });
+
+  it("lights the barcode in ink, accent and outline, and states the unit when one segment holds more", () => {
+    const view = render(<BarcodeMeter filled={7} live={1} outlined={1} label="8 agents" segments={24} />);
+    const kinds = Array.from(view.container.querySelectorAll(".cc-barcode__seg")).map((seg) => seg.getAttribute("data-kind"));
+    expect(kinds.filter((kind) => kind === "filled").length).toBe(6);
+    expect(kinds.filter((kind) => kind === "live").length).toBe(1);
+    expect(kinds.filter((kind) => kind === "outlined").length).toBe(1);
+    expect(kinds.filter((kind) => kind === "unlit").length).toBe(16);
+    expect(barcodeUnitsPerSegment(300, 40)).toBe(10);
+    const big = render(<BarcodeMeter filled={300} label="300 agents" segments={40} testId="big" />);
+    expect(big.getByTestId("big").querySelector("svg")?.getAttribute("aria-label")).toBe("300 agents (1 segment = 10 agents)");
+  });
+
+  it("agrees the legend's helper word with its number unless the caller names it", () => {
+    const one = render(<BarcodeMeter filled={7} live={1} outlined={1} label="8 agents" segments={24} legend testId="one" />);
+    expect(one.getByTestId("one").querySelector(".cc-barcode-legend")?.textContent).toBe("7 long-lived1 helper1 active now");
+    const two = render(<BarcodeLegend filled={5} outlined={2} />);
+    expect(two.container.textContent).toBe("5 long-lived2 helpers");
+    const named = render(<BarcodeLegend filled={5} outlined={1} labels={{ outlined: "workers" }} />);
+    expect(named.container.textContent).toBe("5 long-lived1 workers");
+  });
+
+  it("ranks heat cells by quantile, zero apart, with a table twin", () => {
+    const level = heatLevels([0, 1, 1, 1, 1]);
+    expect(level(0)).toBe(0);
+    expect(level(1)).toBe(4);
+    const spread = heatLevels([1, 2, 3, 4, 5, 6, 7]);
+    expect(spread(1)).toBe(1);
+    expect(spread(7)).toBe(7);
+    const view = render(<HeatStrip label="Activity by hour" rows={[{ key: "a", label: "Triage", values: [0, 3, 1] }]} columns={["00:00", "01:00", "02:00"]} />);
+    expect(view.container.querySelectorAll(".cc-heat__cell").length).toBe(3);
+    expect(view.container.querySelector("table caption")?.textContent).toBe("Activity by hour");
+    expect(view.container.querySelector("tbody th")?.textContent).toBe("Triage");
+  });
+
+  it("gives a dot strip one tab stop, ids per mark and selection by key", () => {
+    const onSelect = vi.fn();
+    const view = render(
+      <DotStrip
+        start={0}
+        end={100}
+        label="3 records"
+        testIdPrefix="memory-landscape-tick"
+        onSelect={onSelect}
+        items={[
+          { id: "b", t: 60, shape: "triangle", tone: "warn", label: "Quarantined record" },
+          { id: "a", t: 10, shape: "tick", label: "First record" },
+          { id: "c", t: 90, faint: true, label: "Replaced record" },
+        ]}
+      />,
+    );
+    expect(view.getByRole("group", { name: "3 records" }) !== null).toBe(true);
+    const first = view.getByTestId("memory-landscape-tick:a");
+    expect(first.getAttribute("tabindex")).toBe("0");
+    expect(view.getByTestId("memory-landscape-tick:b").getAttribute("tabindex")).toBe("-1");
+    expect(view.container.querySelector("title") === null).toBe(true);
+    expect(first.getAttribute("aria-label")).toBe("First record");
+    fireEvent.keyDown(first, { key: "ArrowRight" });
+    fireEvent.keyDown(view.getByTestId("memory-landscape-tick:b"), { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "b" }));
+  });
+
+  it("fills a mini bar to its ratio and names it", () => {
+    const view = render(<MiniBar value={2.2} max={8} label="2.2 KB of 8 KB used" valueLabel="2.2 KB of 8 KB" />);
+    expect(view.getByRole("img", { name: "2.2 KB of 8 KB used" }) !== null).toBe(true);
+    expect((view.container.querySelector(".cc-minibar__fill") as HTMLElement | null)?.style.width).toBe("27.500000000000004%");
+  });
+
+  it("marks the meter segment before an unfilled rest", () => {
+    const view = render(<Meter label="1 of 5 done" total={5} segments={[{ value: 1, tone: "ok" }]} testId="meter" />);
+    expect(view.getByTestId("meter").querySelector(".cc-meter__seg")?.getAttribute("data-rest")).toBe("true");
+    view.rerender(<Meter label="all done" total={2} segments={[{ value: 2, tone: "ok" }]} testId="meter" />);
+    expect(view.getByTestId("meter").querySelector(".cc-meter__seg")?.hasAttribute("data-rest")).toBe(false);
+  });
+});

@@ -7937,9 +7937,9 @@ test("workgraph failed calls fold a failure note into recent events and flag the
   const card = cards[0];
   if (card.kind !== "workgraph") return;
   assert.equal(card.lastActionFailed, true, "latest action failed → card carries the flag");
-  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed:"));
+  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item:"));
   assert.equal(failureLines.length, 1, `expected a failure note, got ${JSON.stringify(card.recentEvents)}`);
-  assert.ok(failureLines[0].length <= "✗ workgraph_claim failed: ".length + 80, "message truncates to ~80 chars");
+  assert.ok(failureLines[0].length <= "Couldn't claim a work item: ".length + 80, "message truncates to ~80 chars");
   assert.match(failureLines[0], /revision conflict/);
   // Failures still never resurrect generic tool rows.
   const toolBlockNames = entries.flatMap((entry) => (
@@ -8101,7 +8101,7 @@ test("workgraph operator failures fold a failure note and flag through the same 
   if (card.kind !== "workgraph") return;
   assert.equal(card.lastActionFailed, true);
   assert.equal(card.items[0].revision, 1, "a failed mutation never moves the revision");
-  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed:"));
+  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item:"));
   assert.equal(failureLines.length, 1, `expected a failure note, got ${JSON.stringify(card.recentEvents)}`);
   assert.match(failureLines[0], /stale revision/);
 });
@@ -8135,7 +8135,7 @@ test("workgraph unroutable failures land on the interaction's catch-all card ins
   assert.equal(card.title, "WorkGraph activity");
   assert.deepEqual(card.items, []);
   assert.equal(card.lastActionFailed, true);
-  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed:"));
+  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item:"));
   assert.equal(failureLines.length, 1, `expected the failure note, got ${JSON.stringify(card.recentEvents)}`);
   assert.match(failureLines[0], /not found/);
 });
@@ -8173,7 +8173,7 @@ test("workgraph unroutable failures join an existing catch-all card for the same
   assert.deepEqual(card.items.map((item) => item.itemId), ["item-known"]);
   assert.equal(card.lastActionFailed, true);
   assert.equal(
-    (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_close failed:")).length,
+    (card.recentEvents || []).filter((line) => line.startsWith("Couldn't close a work item:")).length,
     1,
   );
 });
@@ -8195,7 +8195,7 @@ test("workgraph unroutable operator failures fold to the unscoped catch-all card
   assert.equal(card.title, "WorkGraph activity");
   assert.equal(card.lastActionFailed, true);
   assert.equal(
-    (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_attention_pause failed:")).length,
+    (card.recentEvents || []).filter((line) => line.startsWith("Couldn't pause the attention binding:")).length,
     1,
   );
 });
@@ -8412,7 +8412,7 @@ test("workgraph post-conflict refresh echoes heal the folded revision without cl
   assert.equal(card.items[0].status, "in_progress", "the refresh echo carries the live status too");
   assert.equal(card.lastActionFailed, true, "a refresh is a read, not an action: the failure flag stays");
   assert.equal(
-    (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed:")).length,
+    (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item:")).length,
     1,
     "the conflict note stays visible alongside the healed state",
   );
@@ -8846,7 +8846,7 @@ test("workgraph failure notes dedupe by tool-call id across live and history twi
   if (card.kind !== "workgraph") return;
   assert.equal(card.lastActionFailed, true);
   assert.equal(
-    (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed:")).length,
+    (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item:")).length,
     1,
     `twin frames of one failed call must fold ONE note, got ${JSON.stringify(card.recentEvents)}`,
   );
@@ -8908,7 +8908,7 @@ test("workgraph cards fold the result event and take failure detail from it, not
   if (card.kind !== "workgraph") return;
   assert.match(JSON.stringify(card), /Split target/, "the created item is folded from the result event");
   assert.equal(card.lastActionFailed, true);
-  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("✗ workgraph_claim failed"));
+  const failureLines = (card.recentEvents || []).filter((line) => line.startsWith("Couldn't claim a work item"));
   assert.equal(failureLines.length, 1, `one note per failed call, got ${JSON.stringify(card.recentEvents)}`);
   assert.match(failureLines[0], /revision conflict/);
 });

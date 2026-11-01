@@ -634,6 +634,10 @@ export interface MemoryPanelQuarantineResult {
 export interface MemoryPanelDreamsResult {
   runs: MemoryDreamRun[];
   realms: string[];
+  /// Access withheld at least one realm's runs (the caller lacks a memory
+  /// scope of the realm, or the quarantine review grant while the realm
+  /// holds quarantined records). Missing on older servers: read as false.
+  withheld_by_access?: boolean;
 }
 
 // ── Memory panel Phase-2 read surfaces ────────────────────────────────────
@@ -733,6 +737,8 @@ export interface MemoryDreamRunSheet {
 export interface MemoryPanelDreamRunsResult {
   runs: MemoryDreamRunSheet[];
   realms: string[];
+  /// As MemoryPanelDreamsResult.withheld_by_access.
+  withheld_by_access?: boolean;
 }
 
 /// An open usage-audit verdict: a dead-weight/correction call awaiting
@@ -766,6 +772,15 @@ export interface WorkGraphWireOwner {
   display_name?: string;
 }
 
+/// How an item's completion is accepted (`WorkCompletionPolicy`, tagged by
+/// `kind`): self_attest, host_confirmed, principal_confirmed, supervisor
+/// (with `owner_key`) or reviewer_quorum (with `threshold`).
+export interface WorkGraphWireCompletionPolicy {
+  kind?: string;
+  owner_key?: WorkGraphWireOwnerKey;
+  threshold?: number;
+}
+
 export interface WorkGraphWireItem {
   id?: string;
   realm_id?: string;
@@ -778,7 +793,16 @@ export interface WorkGraphWireItem {
   owner?: WorkGraphWireOwner;
   claim?: { owner?: WorkGraphWireOwner; claimed_at?: string; lease_expires_at?: string };
   revision?: number;
+  /// When the item becomes due: an open item is not ready before it.
   due_at?: string;
+  not_before?: string;
+  snoozed_until?: string;
+  completion_policy?: WorkGraphWireCompletionPolicy;
+  /// The item's stored machine state. Only `unresolved_blocker_count` is
+  /// read, and only as a cross-check: the server refreshes it when it
+  /// observes readiness, so it can lag the edges (the snapshot's
+  /// `ready_item_ids` and its blocks edges are the current truth).
+  machine_state?: { unresolved_blocker_count?: number };
   created_at?: string;
   updated_at?: string;
   terminal_at?: string;
@@ -794,6 +818,8 @@ export interface WorkGraphWireEdge {
 export interface WorkGraphWireBinding {
   binding_id?: string;
   work_ref?: { realm_id?: string; namespace?: string; item_id?: string };
+  /// `kind` is "session" (with `session_id`) or "lowered_owner" (with
+  /// `owner_key`; the server lowers an identity target to its owner key).
   target?: { kind?: string; session_id?: string; owner_key?: WorkGraphWireOwnerKey };
   mode?: string;
   status?: { state?: string; until?: string };
@@ -821,6 +847,10 @@ export interface WorkGraphSnapshotResult {
   edges?: WorkGraphWireEdge[];
   attention?: WorkGraphWireBinding[];
   ready_item_ids?: string[];
+  /// How many items match before the limit, and whether the limit cut them
+  /// (server change S4; absent on today's runtimes).
+  total_items?: number;
+  truncated?: boolean;
 }
 
 export interface WorkGraphEventsResult {

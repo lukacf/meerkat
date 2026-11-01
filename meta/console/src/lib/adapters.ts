@@ -31,6 +31,7 @@ import type {
   ConversationViewState,
   ConversationWorkGraphAttentionRow,
   ConversationWorkGraphEntry,
+  ConversationWorkGraphEventDetail,
   ConversationWorkGraphItemRow,
   RoutingSectionView,
   WorkGraphCardStatus,
@@ -77,6 +78,7 @@ export type MetaDockTarget =
   | AccessPanelTarget
   | MemoryPanelTarget
   | WorkGraphPanelTarget
+  | SchedulesPanelTarget
   | OperatorPanelTarget
   | import("@console-core").ConsoleCustomPanelTarget;
 
@@ -168,6 +170,11 @@ export interface WorkGraphPanelTarget extends ConsoleDockTarget {
   kind: "workgraph";
 }
 
+/** The Schedules workbench panel: what runs automatically, and when. */
+export interface SchedulesPanelTarget extends ConsoleDockTarget {
+  kind: "schedules";
+}
+
 export function buildPanelConversationKey(
   panelId: string,
   target: Pick<ConsoleDockTarget, "kind" | "id"> & Partial<Pick<AgentChatTarget, "identity" | "memberId" | "addressingMode">> | null,
@@ -236,7 +243,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
 
 export type ControlTargetKind =
   | "routing" | "gating" | "topology" | "health"
-  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph";
+  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph" | "schedules";
 
 export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
   switch (kind) {
@@ -262,6 +269,8 @@ export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
       return { id: "memory", kind, title: "Memory", subtitle: "Records, quarantine, dreams", iconName: "i-archive" };
     case "workgraph":
       return { id: "workgraph", kind, title: "WorkGraph", subtitle: "Goals, work items, and attention", iconName: "i-cube" };
+    case "schedules":
+      return { id: "schedules", kind, title: "Schedules", subtitle: "What runs automatically, and when", iconName: "i-clock" };
     default:
       return { id: "health", kind: "health", title: "Health" };
   }
@@ -1543,6 +1552,12 @@ interface WorkGraphEventDraft {
   // item still surface on its interaction's catch-all card.
   interactionId?: string;
   text: string;
+  // Failure notes only: the line is a sentence in words; the tool name and
+  // the raw payload the call failed with travel beside it for the card's
+  // technical details.
+  failed?: boolean;
+  tool?: string;
+  technical?: string;
 }
 
 interface WorkGraphFoldState {
@@ -1774,30 +1789,112 @@ function foldWorkGraphEvent(state: WorkGraphFoldState, value: unknown): void {
 
 const WORKGRAPH_FAILURE_MESSAGE_LIMIT = 80;
 
-/// Compact one-line note for a failed workgraph call — folded into the card's
-/// recent events so failures stay visible without generic tool rows.
-function workGraphFailureLine(name: string, raw: unknown): string {
-  let message = "";
-  if (typeof raw === "string") {
-    message = raw.trim();
-  } else if (raw && typeof raw === "object") {
-    const record = raw as Record<string, unknown>;
-    message = workGraphString(record.message)
-      || workGraphString(record.detail)
-      || workGraphString(record.error)
-      || "";
-    if (!message) {
+/// What each WorkGraph call does, as the rest of "Couldn't ...": the tools
+/// an agent calls and the console's own operator actions (their method
+/// names in the same underscored vocabulary), in the card's own words.
+const WORKGRAPH_FAILURE_ACTIONS: Readonly<Record<string, string>> = {
+  workgraph_create: "create a work item",
+  workgraph_get: "read a work item",
+  workgraph_list: "list work items",
+  workgraph_ready: "list ready work items",
+  workgraph_snapshot: "read the work graph",
+  workgraph_events: "read the work graph history",
+  workgraph_claim: "claim a work item",
+  workgraph_release: "release a work item",
+  workgraph_update: "update a work item",
+  workgraph_policy_escalate: "tighten the completion policy",
+  workgraph_block: "mark a work item blocked",
+  workgraph_close: "close a work item",
+  workgraph_link: "link work items",
+  workgraph_add_evidence: "add evidence to a work item",
+  workgraph_attention_reassign: "reassign the attention binding",
+  workgraph_attention_pause: "pause the attention binding",
+  workgraph_attention_resume: "resume the attention binding",
+  workgraph_goal_confirm: "confirm goal completion",
+  workgraph_goal_request_close: "request goal closure",
+  workgraph_goal_status: "read the goal status",
+};
+
+/// The typed error kinds a WorkGraph call fails with, in words: the WorkGraph
+/// tool error codes plus the tool gate's and the transport's refusals.
+const WORKGRAPH_ERROR_WORDS: Readonly<Record<string, string>> = {
+  access_denied: "access denied",
+  invalid_arguments: "invalid request",
+  not_found: "not found",
+  capability_unavailable: "not available here",
+  conflict: "conflict with another change",
+  invalid_transition: "not allowed in its current state",
+  store_error: "storage error",
+  internal_error: "internal error",
+  timeout: "timed out",
+  timed_out: "timed out",
+};
+
+/// A failed WorkGraph call's note on its card.
+export interface WorkGraphFailureNote {
+  /** A sentence in words: "Couldn't list ready work items: access denied". */
+  text: string;
+  /** The raw payload, for the card's technical details only. */
+  technical?: string;
+}
+
+function workGraphFailureAction(name: string): string {
+  const known = WORKGRAPH_FAILURE_ACTIONS[name];
+  if (known) return known;
+  const rest = name.replace(/^workgraph_?/, "").replace(/_/g, " ").trim();
+  return rest ? `run WorkGraph ${rest}` : "complete the WorkGraph action";
+}
+
+/// The kind a failure payload names in `code`, `error` or `kind` (or one
+/// level down, under `error`), when it is a kind token and not a sentence.
+function workGraphErrorKind(record: Record<string, unknown>): string | undefined {
+  for (const key of ["code", "error", "kind"]) {
+    const value = record[key];
+    if (typeof value === "string" && /^[a-z][a-z0-9_]*$/.test(value.trim())) return value.trim();
+  }
+  const nested = record.error;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return workGraphErrorKind(nested as Record<string, unknown>);
+  }
+  return undefined;
+}
+
+/// The note for a failed WorkGraph call, folded into the card's recent
+/// events so failures stay visible without generic tool rows. A typed
+/// payload (an object, or JSON text) reads as the call's action and its
+/// error kind in words, with the payload itself only in the technical
+/// detail; an unknown kind reads as the action alone ("Couldn't claim a work
+/// item"). A plain text message is already words and follows the action,
+/// cut to a line (the full text in the technical detail).
+export function workGraphFailureNote(name: string, raw: unknown): WorkGraphFailureNote {
+  const sentence = `Couldn't ${workGraphFailureAction(name)}`;
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const looksLikeJson = (text.startsWith("{") && text.endsWith("}"))
+    || (text.startsWith("[") && text.endsWith("]"));
+  const parsed = typeof raw === "string" ? (looksLikeJson ? parseJsonPayload(text) : null) : raw;
+  if (parsed && typeof parsed === "object") {
+    let technical = text;
+    if (!technical) {
       try {
-        message = JSON.stringify(raw);
+        technical = JSON.stringify(parsed);
       } catch {
-        message = "";
+        technical = "";
       }
     }
+    const kind = Array.isArray(parsed) ? undefined : workGraphErrorKind(parsed as Record<string, unknown>);
+    const words = kind ? WORKGRAPH_ERROR_WORDS[kind] : undefined;
+    return {
+      text: words ? `${sentence}: ${words}` : sentence,
+      ...(technical ? { technical } : {}),
+    };
   }
-  if (message.length > WORKGRAPH_FAILURE_MESSAGE_LIMIT) {
-    message = `${message.slice(0, WORKGRAPH_FAILURE_MESSAGE_LIMIT - 1)}…`;
+  if (text) {
+    const short = text.length > WORKGRAPH_FAILURE_MESSAGE_LIMIT
+      ? `${text.slice(0, WORKGRAPH_FAILURE_MESSAGE_LIMIT - 1)}…`
+      : text;
+    return { text: `${sentence}: ${short}`, ...(short !== text ? { technical: text } : {}) };
   }
-  return message ? `✗ ${name} failed: ${message}` : `✗ ${name} failed`;
+  return { text: sentence };
 }
 
 // A workgraph_snapshot/list result can be a very large JSON string, and the
@@ -2072,16 +2169,18 @@ function buildWorkGraphEntries(
       const bodilessExecutionFact = frame.event === "tool_execution_completed" && failureDetail === undefined;
       if (failed && !bodilessExecutionFact && (!toolCallId || !failureNotedCallIds.has(toolCallId))) {
         if (toolCallId) failureNotedCallIds.add(toolCallId);
+        const tool = isOperatorResult
+          ? workGraphOperatorDisplayName(record?.method)
+          : workGraphToolNameOf(frame, namesByCallId);
+        const note = workGraphFailureNote(tool, failureDetail);
         state.events.push({
           at: frameIso,
           itemId: argItemId || (argBindingId ? state.bindings.get(argBindingId)?.itemId : undefined),
           interactionId: contribution.interactionId,
-          text: workGraphFailureLine(
-            isOperatorResult
-              ? workGraphOperatorDisplayName(record?.method)
-              : workGraphToolNameOf(frame, namesByCallId),
-            failureDetail,
-          ),
+          text: note.text,
+          failed: true,
+          ...(tool ? { tool } : {}),
+          ...(note.technical ? { technical: note.technical } : {}),
         });
       }
       const result = parseWorkGraphResult(frame);
@@ -2269,7 +2368,7 @@ function buildWorkGraphEntries(
   const eventsForMembers = (
     memberSet: Set<string>,
     catchAllInteractionId?: string,
-  ): string[] | undefined => {
+  ): Pick<ConversationWorkGraphEntry, "recentEvents" | "recentEventDetails"> | undefined => {
     const matched = state.events.filter((event) => {
       if (event.itemId && (memberSet.has(rootForItem(event.itemId)) || memberSet.has(event.itemId))) {
         return true;
@@ -2283,7 +2382,20 @@ function buildWorkGraphEntries(
       return !routable;
     });
     if (matched.length === 0) return undefined;
-    return matched.slice(-WORKGRAPH_RECENT_EVENT_LIMIT).map((event) => event.text);
+    const recent = matched.slice(-WORKGRAPH_RECENT_EVENT_LIMIT);
+    const details = recent.map((event): ConversationWorkGraphEventDetail | null => (
+      event.failed
+        ? {
+          failed: true,
+          ...(event.tool ? { tool: event.tool } : {}),
+          ...(event.technical ? { technical: event.technical } : {}),
+        }
+        : null
+    ));
+    return {
+      recentEvents: recent.map((event) => event.text),
+      ...(details.some(Boolean) ? { recentEventDetails: details } : {}),
+    };
   };
 
   const pushEntry = (entry: ConversationWorkGraphEntry, anchorIndex: number) => {
@@ -2319,7 +2431,7 @@ function buildWorkGraphEntries(
     const rootItem = state.items.get(root);
     const completed = items.filter((item) => item.status === "completed").length;
     const memberSet = new Set([root, ...(rootMembers.get(root) || [])]);
-    const recentEvents = eventsForMembers(memberSet);
+    const eventLines = eventsForMembers(memberSet);
     const lastUpdatedAt = latestIso(items.flatMap((item) => [item.updatedAt, item.lastEventAt]));
     // A root referenced only through parent edges (created in an earlier
     // conversation or trimmed from history) has no folded draft — render a
@@ -2343,7 +2455,7 @@ function buildWorkGraphEntries(
       items: capped.rows,
       ...(capped.overflow > 0 ? { itemOverflowCount: capped.overflow } : {}),
       attention,
-      ...(recentEvents ? { recentEvents } : {}),
+      ...eventLines,
       ...(lastOutcomeByCard.get(entryId) === "error" ? { lastActionFailed: true } : {}),
       ...(lastUpdatedAt ? { lastUpdatedAt } : {}),
     }, anchor.frameIndex);
@@ -2355,10 +2467,10 @@ function buildWorkGraphEntries(
     // Members are root ids; a member renders its whole known tree (bulk
     // snapshot folds can park multi-item non-goal trees here).
     const memberIds = [...members].filter((id) => (rootMembers.get(id)?.length || 0) > 0);
-    const recentEvents = eventsForMembers(members, anchor.interactionId);
+    const eventLines = eventsForMembers(members, anchor.interactionId);
     // A memberless catch-all exists only to host unroutable failure notes;
     // with nothing to show it is skipped entirely.
-    if (memberIds.length === 0 && !recentEvents) continue;
+    if (memberIds.length === 0 && !eventLines) continue;
     const rows = memberIds
       .flatMap((id) => workGraphItemRows(id, rootMembers.get(id) || [id], state));
     const completed = rows.filter((item) => item.status === "completed").length;
@@ -2382,7 +2494,7 @@ function buildWorkGraphEntries(
       items: capped.rows,
       ...(capped.overflow > 0 ? { itemOverflowCount: capped.overflow } : {}),
       attention: [],
-      ...(recentEvents ? { recentEvents } : {}),
+      ...eventLines,
       ...(lastOutcomeByCard.get(entryId) === "error" ? { lastActionFailed: true } : {}),
       ...(lastUpdatedAt ? { lastUpdatedAt } : {}),
     }, anchor.frameIndex);
@@ -3848,15 +3960,36 @@ const PEER_TRANSPORT_SCAFFOLD_SPAN_RE =
 
 /// Remove canonical peer transport scaffold spans, keeping any human-authored
 /// remainder (e.g. an appended request body). Returns "" when the text is
-/// pure transport scaffold.
-export function stripPeerTransportScaffold(text: string): string {
-  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return text;
+/// pure transport scaffold. Given the names of the peer a comms notice came
+/// from (its display name, its id), it also drops the envelope line that
+/// opens the notice's text ("Peer message from <name>:"); without them,
+/// ordinary text that merely starts that way is kept.
+export function stripPeerTransportScaffold(text: string, peerAliases: readonly string[] = []): string {
+  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return stripLeadingPeerEnvelope(text, peerAliases);
   let scrubbed = text.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
   // Defensive: a projection without its coaching terminator (e.g. truncated
   // upstream) must still never render; cut from the marker onward.
   const residualIndex = scrubbed.search(PEER_TRANSPORT_SCAFFOLD_START_RE);
   if (residualIndex >= 0) scrubbed = scrubbed.slice(0, residualIndex);
-  return scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return stripLeadingPeerEnvelope(scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), peerAliases);
+}
+
+/// The text after an opening envelope line that names one of the peer's
+/// names: "Peer message from <name>:" (request, response) or
+/// "[COMMS MESSAGE from <name>]". Text without one is returned as it is.
+function stripLeadingPeerEnvelope(text: string, peerAliases: readonly string[]): string {
+  if (!text || peerAliases.length === 0) return text;
+  const opening = text.replace(/^\s+/, "");
+  const aliases = peerAliases.map((alias) => alias.trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const alias of aliases) {
+    const escaped = escapeRegExp(alias);
+    const envelope = new RegExp(
+      `^(?:Peer\\s+(?:message|request|response)\\s+from\\s+${escaped}:|\\[COMMS\\s+(?:MESSAGE|REQUEST|RESPONSE)\\s+from\\s+${escaped}\\])[ \\t]*(?:\\r?\\n)?`,
+      "i",
+    );
+    if (envelope.test(opening)) return opening.replace(envelope, "").trim();
+  }
+  return text;
 }
 
 function escapeRegExp(value: string): string {
@@ -4426,6 +4559,13 @@ export function systemNoticeClearsBusyState(frame: ConsoleFrame): boolean {
   return legacyPeerNoticeTextCandidates(record).some(isLegacyPeerNoticeText);
 }
 
+/** A typed comms notice without a request id: named by the frame it came
+ * in (its id, else its cursor) and the block's place in it, so every plain
+ * message from one peer gets its own id. */
+function typedCommsFallbackId(peerLabel: string, kind: string, frameKey: string | undefined, index: number): string {
+  return `typed-comms:${peerLabel}:${kind}:${frameKey || "frame"}:${index}`;
+}
+
 function typedSystemNoticeBlocksToRich(
   blocks: unknown,
   body: unknown,
@@ -4433,6 +4573,7 @@ function typedSystemNoticeBlocksToRich(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "legacy",
+  frameKey?: string,
 ): ConversationRichBlock[] {
   const rich: ConversationRichBlock[] = [];
   const bodyText = textFromUnknown(body);
@@ -4479,7 +4620,7 @@ function typedSystemNoticeBlocksToRich(
       const kind = textFromUnknown(record.kind) || "message";
       const direction = textFromUnknown(record.direction);
       const intent = textFromUnknown(record.intent);
-      const requestId = textFromUnknown(record.request_id) || `typed-comms:${peerLabel}:${kind}`;
+      const requestId = textFromUnknown(record.request_id) || typedCommsFallbackId(peerLabel, kind, frameKey, index);
       const contentBlocks = typedNoticeContentBlocks(record.content, blobBaseUrl);
       const contentText = contentBlocks
         .map((item) => item.type === "paragraph" ? item.text : "")
@@ -4599,6 +4740,8 @@ function historyMessageText(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "markdown",
+  /** The frame's id (else its cursor): names typed comms notices without a request id. */
+  frameKey?: string,
 ): { role: "user" | "assistant" | "system" | "meta" | null; text: string; blocks?: ConversationRichBlock[] } {
   if (!message || typeof message !== "object") {
     return { role: null, text: "" };
@@ -4618,6 +4761,7 @@ function historyMessageText(
         sourceKind,
         consumeDuplicateCommsBlock,
         textMode,
+        frameKey,
       );
       const duplicateCommsConsumed = Boolean(
         consumeDuplicateCommsBlock
@@ -4710,6 +4854,7 @@ function renderSessionHistoryTextCompleteEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode,
+    frame.id || frame.cursor,
   );
   const textMode = options.textMode ?? "markdown";
   const realtimeOrigin = realtimeMessageOrigin(frame);
@@ -4802,6 +4947,7 @@ function renderSystemNoticeEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode ?? "legacy",
+    frame.id || frame.cursor,
   );
   if (parsed.role !== "meta") return null;
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];

@@ -71,6 +71,8 @@ describe("owner activity refresh", () => {
     await screen.findByTestId(`sidebar-agent:${identity}`);
     await waitFor(() => expect(receive).toBeTypeOf("function"));
     expect(fake.loadExperience).toHaveBeenCalledTimes(1);
+    // The Show filter lives in the roster view options popover (A5).
+    fireEvent.click(screen.getByTestId("sidebar-view-menu"));
     fireEvent.click(screen.getByRole("button", { name: "Working", exact: true }));
     expect(screen.queryByTestId(`sidebar-agent:${identity}`)).toBeNull();
     await act(async () => {

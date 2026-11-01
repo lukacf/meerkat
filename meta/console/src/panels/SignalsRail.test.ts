@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSignalGroupsForTest, signalNameResolver } from "./SignalsRail";
+// The rail's model (pure): this node test bundle cannot resolve React.
+import { buildSignalGroupsForTest, signalNameResolver } from "./activity/signals-model";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 import { MEERKAT_1608_KICKOFF_NOTICES } from "../lib/fixtures/meerkat-1608-kickoff-notices";
@@ -395,4 +396,36 @@ test("signals rail calls the steward's open-loop nudge a follow-up, not a quaran
   assert.equal(group?.title, "Open loop needs follow-up");
   assert.equal(group?.detail, "An open loop needs follow-up");
   assert.equal(/quarantin|verdict|escalated/i.test(`${group?.title} ${group?.detail}`), false);
+});
+
+test("signals rail folds a burst of one kind of signal and lists an input once", () => {
+  const now = Date.now();
+  const notice = (index: number): ConsoleFrame => ({
+    id: `notice-${index}`,
+    event: "system_notice",
+    identity: "billing",
+    timestampMs: now - index * 1_000,
+    sourceKind: "session_history",
+    data: {
+      blocks: [{
+        type: "comms", kind: "message", direction: "incoming", delivery_id: `env-${index}`,
+        peer: { id: "peer-intake", display_name: "team/coordinator/intake" },
+        content: [{ type: "text", text: `Peer message from team/coordinator/intake:\nTicket 8810${index} for Billing.` }],
+      }],
+    },
+  });
+  const frames: ConsoleFrame[] = [
+    notice(0), notice(1), notice(2),
+    // The saved copy of an operator's input, and the send that made it.
+    { id: "saved", event: "user_input", identity: "billing", interactionId: "turn-9", timestampMs: now - 5_000, sourceKind: "session_history", data: { content: "Any new disputes?" } },
+    { id: "sent", event: "user_input", identity: "billing", interactionId: "turn-9", timestampMs: now - 6_000, sourceKind: "send", data: { content: "Any new disputes?", origin: "console:pane-1", origin_kind: "operator" } },
+  ];
+  const groups = buildSignalGroupsForTest(frames);
+  const burst = groups.find((group) => group.title === "Received from Billing" || group.title.startsWith("Received from"));
+  assert.ok(burst, JSON.stringify(groups.map((group) => group.title)));
+  assert.equal(burst?.items.length, 3);
+  assert.equal(burst?.id, "burst:comms:notice-2");
+  assert.equal(burst?.detail, "Ticket 88100 for Billing.");
+  const inputs = groups.flatMap((group) => group.items).filter((item) => item.raw.event === "user_input");
+  assert.deepEqual(inputs.map((item) => item.label), ["An operator asked Billing"]);
 });

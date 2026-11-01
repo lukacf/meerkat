@@ -1,0 +1,309 @@
+/* Signals rail and the activity rail tweaks.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Activity rail ───────────────────────────────────────────── */
+
+.cc-activity-rail__controls { display: none; }
+.cc-activity-rail__pulse-status { display: none; }
+.cc-activity-rail { padding-top: 0; }
+
+.cc-activity-rail__rail {
+  background: var(--bg-sunken);
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+/* Activity / Signals rail: severity-bar left edge, cleaner rows */
+.cc-activity-rail__rail,
+.cc-activity-rail {
+  font-family: var(--sans);
+}
+.cc-activity-rail__title,
+.cc-activity-rail__heading {
+  font-family: var(--disp);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Signals rail
+   ══════════════════════════════════════════════════════════════ */
+
+.rail {
+  background: var(--bg-sunken);
+  border-left: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+/* Collapsed signals rail - same grip pattern as the sidebar. */
+.rail--collapsed {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rail__grip {
+  width: 2px;
+  height: 28px;
+  background: var(--line-strong);
+  border-radius: 1px;
+  opacity: 0.7;
+  display: block;
+}
+
+.rail__head {
+  padding: 14px 16px 6px;
+  display: flex; align-items: baseline; gap: 10px;
+  min-height: 0;
+  flex: none;
+}
+.rail__title {
+  font-size: var(--_cc-panel-fs-label, 10.5px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+  font-weight: 600;
+  font-family: var(--_cc-font-display);
+}
+.rail__sub {
+  margin-left: auto;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+/* The 15-minute pulse: one bar a minute, the live minute in the accent. */
+.rail__pulse {
+  flex: none;
+  padding: 2px 16px 10px;
+  line-height: 0;
+}
+.rail__pulse .cc-spark { display: block; width: 100%; }
+.rail__pulse .cc-spark__svg { width: 100%; height: 22px; }
+
+/* Presets: a segmented control across the rail. */
+.rail__filters.cc-seg {
+  display: flex;
+  flex: none;
+  margin: 0 12px 8px;
+}
+.rail__filters.cc-seg .cc-seg__btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+  justify-content: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0 12px;
+  min-height: 0;
+  border-top: 1px solid var(--_cc-border-soft);
+}
+.rail__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  color: var(--_cc-foreground-meta);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ── A signal ───────────────────────────────────────────────────
+   The tone's 4 px rule, then the mark, the label (the row's button) and
+   the time; the detail; the agent and the row's actions. */
+.signal {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3px minmax(0, 1fr);
+  column-gap: 11px;
+  padding: 10px 14px 10px 0;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast, 120ms) ease;
+}
+.signal:hover { background: var(--_cc-surface-hover); }
+.signal__bar {
+  align-self: stretch;
+  border-radius: 0 1px 1px 0;
+  background: transparent;
+}
+.signal[data-sev="critical"] .signal__bar { background: var(--_cc-negative); }
+.signal[data-sev="warning"] .signal__bar { background: var(--_cc-warning); }
+.signal[data-tone="live"] .signal__bar { background: var(--_cc-viz-live); }
+
+.signal__body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.signal__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.signal__mark { flex: none; }
+/* The label is the row's button: it reads as the plain label, and the row
+   draws its focus ring. */
+.signal__hit {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.signal__hit:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+@supports selector(:has(*)) {
+  .signal__hit:focus-visible { outline: none; }
+  .signal:has(> .signal__body .signal__hit:focus-visible) {
+    outline: 2px solid var(--_cc-focus-ring);
+    outline-offset: -2px;
+  }
+}
+.signal__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--_cc-foreground);
+  letter-spacing: -0.003em;
+}
+.signal__label > :not(.signal__chevron):not(.signal__count) { min-width: 0; }
+/* A grouped row's disclosure mark, turned down while the group is open. */
+.signal__chevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  border-left: 5px solid var(--_cc-foreground-meta);
+  transition: transform var(--_cc-dur-fast, 120ms) ease;
+}
+.signal[data-expanded="true"] .signal__chevron { transform: rotate(90deg); }
+.signal__count {
+  flex: none;
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--_cc-foreground-meta);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  padding: 0 5px;
+}
+.signal__time {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.signal__detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  padding-left: 15px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+}
+.signal__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  padding-left: 15px;
+}
+/* The agent's display name (the raw key is in its tooltip). */
+.signal__agent {
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--_cc-foreground-muted);
+}
+.signal__agent .cc-agent__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.signal__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+.signal__review { height: 22px; }
+/* "Open in Memory" pivot on live memory signals: opens the Memory panel at the
+   record the frame names. */
+.signal__memory-pivot {
+  height: 22px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--_cc-foreground);
+  background: transparent;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  padding: 0 8px;
+  cursor: pointer;
+}
+.signal__memory-pivot:hover { border-color: var(--_cc-border-strong); background: var(--_cc-surface-card); }
+.signal__memory-pivot:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+.signal__events {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0 15px;
+  padding-left: 10px;
+  border-left: 1px solid var(--_cc-border-soft);
+}
+.signal__event {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--_cc-radius-sm);
+  color: inherit;
+  font-family: var(--_cc-font-display);
+  cursor: pointer;
+}
+.signal__event:hover { background: var(--_cc-surface-card); }
+.signal__event:hover .signal__event-label { color: var(--_cc-foreground); }
+.signal__event:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.signal__event-label {
+  color: var(--_cc-foreground-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.signal__event-detail {
+  color: var(--_cc-foreground-meta);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

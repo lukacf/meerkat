@@ -30,7 +30,7 @@ import {
   useConsoleDockController,
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
-import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
+import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
 import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
@@ -127,6 +127,16 @@ import {
   topologyNodeAgent,
   topologyTeamKey,
 } from "./lib/topology";
+import {
+  backfillTopologyLedger,
+  EMPTY_TOPOLOGY_RELATIONS,
+  readTopologyRelations,
+  TOPOLOGY_BACKFILL_WINDOW_MS,
+  topologyAgentStatus,
+  topologyGrouping,
+  topologyWiringRoles,
+  type ConsoleTopologyRelationsState,
+} from "./lib/topology-relations";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
 import {
@@ -205,43 +215,59 @@ import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
   memoryFramePivot,
+  memoryListingOutcome,
+  memoryNotSetUp,
   memorySectionOutcome,
   teamName,
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
-import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
+import { AgentDetailsPanel, type AgentWorkItem } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
+import type { ConsoleHealthSnapshot, WorkGraphWireItem } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
+import { SchedulesPanel } from "./panels/SchedulesPanel";
+import { topologyLineage } from "./lib/agent-lineage";
 import {
+  WORKGRAPH_EVENTS_LIMIT,
+  WORKGRAPH_SNAPSHOT_LIMIT,
   WorkGraphPanel,
   createWorkGraphRefreshSequencer,
   workGraphEventsNewestFirst,
   workGraphEventsParams,
   type WorkGraphPanelData,
 } from "./panels/WorkGraphPanel";
-import { RoutingPanel } from "./panels/RoutingPanel";
+import { RoutingPanel, deliverySummaries } from "./panels/RoutingPanel";
 import { LogsPanel } from "./panels/LogsPanel";
 import { Topbar } from "./panels/Topbar";
-import { useConsoleVariant, type ConsoleTheme } from "./panels/Tweaks";
+import { useConsoleDisplay, type ConsoleTheme } from "./panels/Tweaks";
 import {
   Sidebar as DesignSidebar,
   normalizeNavKind,
   pruneStaleSidebarStorage,
   readSidebarPins,
   sidebarAgentPinId,
+  sidebarAgentsWithLineage,
   sidebarPinnedFamilyPinIds,
   sidebarStorageKey,
   writeSidebarStringSet,
   SIDEBAR_PINS_STORAGE_PREFIX,
   type NavKind,
+  type SidebarNavAttention,
 } from "./panels/Sidebar";
 import { SignalsRail } from "./panels/SignalsRail";
+import { feedHistoryToLedger, historyFramesOf } from "./panels/activity/history-frames";
+import { railPresetsFromActivityFeed } from "./panels/activity/signals-model";
 import { ChatPane, type StagedAttachment } from "./panels/ChatPane";
 import { MetaDock } from "./panels/MetaDock";
 import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type PendingItem } from "./panels/PendingStack";
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
+import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
+import { ActivityLedgerProvider, createActivityLedger, createAgentResolver, type ActivityLedger } from "./lib/activity-ledger";
+import { consoleNavControls } from "./lib/nav-controls";
+import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-components";
+import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -274,6 +300,20 @@ export interface ConsoleAppProps {
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
 type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
+/** The recorded approvals the Approvals panel reads: the newest 50. */
+const GATING_AUDIT_LIMIT = 50;
+type RoutingReadState = {
+  scope: string;
+  loading: boolean;
+  denied: boolean;
+  unavailable: boolean;
+  error: string | null;
+  updatedAtMs: number | null;
+  summaries: Record<string, string>;
+};
+const emptyRoutingRead = (): RoutingReadState => ({
+  scope: "", loading: false, denied: false, unavailable: false, error: null, updatedAtMs: null, summaries: {},
+});
 type AccessPanelData = {
   scope: string;
   loading: boolean;
@@ -300,6 +340,9 @@ type MemoryPanelData = {
   /// (never green) instead of an indistinguishable empty section.
   recordsDenied: boolean;
   dreamsDenied: boolean;
+  /// Access withheld some realm's dream runs (the reads' withheld_by_access).
+  dreamsWithheld: boolean;
+  dreamRunsWithheld: boolean;
   /// One-row scope-probe outcomes: the scope exists behind a grant this
   /// principal lacks (the unfiltered listing row-filters them silently).
   operatorScopeDenied: boolean;
@@ -426,14 +469,24 @@ function normalizeConsoleInspectResult(
       ? (record.identity as Record<string, unknown>)
       : null;
   if (!identityRecord) return null;
-  return normalizeIdentityInspectViewState({
+  // The newer inspect answer (`identity{health, visibility, runtime_key,
+  // runtime_member_id, ...}`, `peers`): its `health` is the record's
+  // availability ("ready", "hidden_by_policy", "retired"), not a member
+  // state, so it never becomes the state the status words read ("Ready"):
+  // a retired record reads retired, any other is a live member whose health
+  // words come from its progress. The runtime key and visibility stay for
+  // Technical details.
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  const availability = text(identityRecord.health);
+  const normalized = normalizeIdentityInspectViewState({
     identity: identityRecord.identity,
     display_name: identityRecord.display_name,
     role:
       identityRecord.labels && typeof identityRecord.labels === "object"
         ? (identityRecord.labels as Record<string, unknown>).role
         : undefined,
-    state: identityRecord.health,
+    state: availability === "retired" ? "retired" : text(identityRecord.state) ?? "active",
+    progress: identityRecord.progress,
     addressability:
       identityRecord.addressable === true ? "addressable" : "internal_only",
     session_id: identityRecord.session_id,
@@ -444,6 +497,41 @@ function normalizeConsoleInspectResult(
     },
     topology_peers: Array.isArray(record.peers) ? record.peers : [],
   });
+  if (!normalized) return null;
+  const runtimeKey = text(identityRecord.runtime_key);
+  const visibility = text(identityRecord.visibility);
+  return {
+    ...normalized,
+    ...(runtimeKey ? { runtime_key: runtimeKey } : {}),
+    ...(visibility ? { visibility } : {}),
+  } as IdentityInspectViewState;
+}
+
+/** The open work items an agent owns or has claimed, from the WorkGraph
+ * snapshot the console last read (empty until WorkGraph is read): owner keys
+ * name the agent by identity or end in it ("mob/<mob>/agent/<identity>"). */
+function agentWorkItems(
+  items: readonly WorkGraphWireItem[] | undefined,
+  identity: string,
+  agent: ConsoleAgent | undefined,
+): AgentWorkItem[] {
+  const keys = new Set([identity, agent?.identity, agent?.member_id].filter((key): key is string => Boolean(key)));
+  const names = (key: { id?: string } | undefined) => {
+    const id = key?.id?.trim();
+    return Boolean(id) && (keys.has(id!) || keys.has(id!.split("/").filter(Boolean).pop() || ""));
+  };
+  const open = new Set(["open", "ready", "in_progress", "blocked"]);
+  return (items || [])
+    .filter((item) => item.id && open.has(item.status || "") && (names(item.claim?.owner?.key) || names(item.owner?.key)))
+    .sort((left, right) => (left.status === "in_progress" ? 0 : 1) - (right.status === "in_progress" ? 0 : 1))
+    .slice(0, 8)
+    .map((item) => ({
+      id: item.id!,
+      title: item.title || item.id!,
+      status: item.status || "open",
+      claimedAt: item.claim?.claimed_at ?? null,
+      priority: item.priority ?? null,
+    }));
 }
 
 const DEFAULT_APPROVER_ID = "console-ops-lead";
@@ -778,6 +866,8 @@ function emptyMemoryPanelData(): MemoryPanelData {
     nextCursor: null,
     recordsDenied: false,
     dreamsDenied: false,
+    dreamsWithheld: false,
+    dreamRunsWithheld: false,
     operatorScopeDenied: false,
     mobScopeDenied: false,
     overview: null,
@@ -939,10 +1029,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
-  // Display names for every key an agent is known by (identity, member,
-  // agent and session ids): panels show names, with the key in a tooltip.
-  // Panels name agents the way the sidebar does.
-  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
@@ -978,6 +1064,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     routes: [],
     deliveries: [],
   });
+  // How the routing reads went, for the scope (principal and runtime) they
+  // were made under: the panel shows no access, a failure or freshness.
+  const [routingRead, setRoutingRead] = React.useState<RoutingReadState>(emptyRoutingRead);
   const [gatingData, setGatingData] = React.useState<GatingPanelData>({
     pending: [],
     audit: [],
@@ -1035,17 +1124,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     phase: "connecting", stale: true, freshness: "unknown",
   });
   const [transportRetry, setTransportRetry] = React.useState(0);
-  const [theme, setTheme] = React.useState<ConsoleTheme>(() => {
-    try {
-      return (
-        (localStorage.getItem("meta-console-theme") as ConsoleTheme) ||
-        "light"
-      );
-    } catch {
-      return "light";
-    }
+  // Display settings (B21): the user's own choices, else the configured
+  // appearance defaults (applied while the user has made no choice, never
+  // written), else the console's defaults.
+  const display = useConsoleDisplay({
+    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
+    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
   });
-  const [variant, setVariant] = useConsoleVariant();
+  const theme = display.settings.theme;
+  const variant = display.settings.variant;
   const sidebarStorageScope = React.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience],
@@ -1717,6 +1804,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   ): boolean {
     const log = getOrCreateLog(identity);
     log.hasServerLog = available;
+    // History reaches the activity ledger too (Today's turns, the 24 h
+    // charts): each frame version once, by its row key, however often its
+    // page loads; the ledger counts an event once across its copies.
+    if (timelineScopeRef.current) feedHistoryToLedger(timelineScopeRef.current.ledger, identity, frames);
     let changed = false;
     let appended = false;
     for (const frame of frames) {
@@ -1889,6 +1980,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       forceRender();
     }
   }
+
+  // Today's backfill (spec B4): one agent's recent history, up to 1000
+  // frames, into its identity log and from there the activity ledger. Today
+  // asks for the most active agents, four at a time.
+  const loadDayHistoryRef = React.useRef<(identity: string) => Promise<void>>(() => Promise.resolve());
+  loadDayHistoryRef.current = async (identity: string) => {
+    const normalized = identity.trim();
+    if (!normalized) return;
+    const { page, metadataChanged } = await queryIdentityTimelinePage(normalized, { mode: "recent", limit: 1000 });
+    if (reconcileServerLog(normalized, page.frames, page.available) || metadataChanged) forceRender();
+  };
+  const loadDayHistory = React.useCallback((identity: string) => loadDayHistoryRef.current(identity), []);
 
   /// Render-time chat view: transcript time is the primary order. Aggregate
   /// cursor order is useful for replay paging, but it can arrive out of
@@ -2660,30 +2763,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return () => window.clearInterval(timer);
   }, [loadExperience]);
 
-  React.useEffect(() => {
-    const appearance = experience?.console_config?.appearance;
-    if (!appearance) return;
-    const configuredTheme = normalizeConsoleTheme(appearance.default_theme);
-    if (configuredTheme) {
-      try {
-        if (!localStorage.getItem("meta-console-theme"))
-          setTheme(configuredTheme);
-      } catch {
-        setTheme(configuredTheme);
-      }
-    }
-    const configuredVariant = normalizeConsoleVariant(
-      appearance.default_variant,
-    );
-    if (configuredVariant) {
-      try {
-        if (!localStorage.getItem("meta-console-variant"))
-          setVariant(configuredVariant);
-      } catch {
-        setVariant(configuredVariant);
-      }
-    }
-  }, [experience?.console_config?.appearance, setVariant]);
+  // The configured appearance applies through useConsoleDisplay: a default
+  // the user has not overridden, never written to storage.
 
   React.useEffect(() => {
     const configured = experience?.console_config?.layout?.sidebar_collapsed;
@@ -2874,60 +2955,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       topologyQueryResult,
     ],
   );
-  const visibleControls = React.useMemo<NavKind[]>(() => {
-    const runtimeControls: NavKind[] = hasMobControlSurface
-      ? [
-          "topology",
-          "timeline",
-          "gating",
-          "roster",
-          "routing",
-          "logs",
-          "health",
-        ]
-      : ["topology", "timeline", "roster", "logs", "health"];
-    const sidebarConfig = experience?.console_config?.sidebar;
-    const allowedByRuntime = new Set(runtimeControls);
-    const configuredVisible = (sidebarConfig?.visible_controls || [])
-      .map(normalizeNavKind)
-      .filter(
-        (kind): kind is NavKind => Boolean(kind) && allowedByRuntime.has(kind),
-      );
-    if (configuredVisible.length > 0) {
-      const extra: NavKind[] = [];
-      if (experience?.access?.can_administer === true) extra.push("access");
-      // An empty shared registry offers a setup explanation only. Configured
-      // services still require the server-projected read/view grants.
-      if (emptyPanelRegistry || experience?.memory?.can_read === true) extra.push("memory");
-      if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-        extra.push("workgraph");
-      }
-      return extra.length > 0 ? [...configuredVisible, ...extra] : configuredVisible;
-    }
-    const hidden = new Set(
-      (sidebarConfig?.hidden_controls || [])
-        .map(normalizeNavKind)
-        .filter((kind): kind is NavKind => Boolean(kind)),
-    );
-    const controls = runtimeControls.filter((kind) => !hidden.has(kind));
-    // The Access admin surface is gated server-side per principal, never by
-    // view config: administrators always get it, nobody else ever does.
-    if (experience?.access?.can_administer === true) controls.push("access");
-    // Empty shared registries keep these destinations discoverable without
-    // making store requests or replacing configured-service access checks.
-    if (emptyPanelRegistry || experience?.memory?.can_read === true) controls.push("memory");
-    if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-      controls.push("workgraph");
-    }
-    return controls;
-  }, [
+  // The views the console offers (lib/nav-controls.ts): Access for
+  // administrators only, Memory when readable and, on a team runtime with
+  // no memory store, as a "not set up" entry, WorkGraph when viewable, and
+  // Schedules when the gateway lists them.
+  const visibleControls = React.useMemo<NavKind[]>(() => consoleNavControls({
+    hasMobControlSurface,
+    sidebar: experience?.console_config?.sidebar,
+    access: experience?.access,
+    memory: experience?.memory,
+    workgraph: experience?.workgraph,
+    emptyPanelRegistry,
+    schedulesListed: scheduleOffer.list,
+  }), [
     experience?.console_config?.sidebar,
-    experience?.access?.can_administer,
-    experience?.memory?.can_read,
-    experience?.workgraph?.available,
-    experience?.workgraph?.can_view,
+    experience?.access,
+    experience?.memory,
+    experience?.workgraph,
     emptyPanelRegistry,
     hasMobControlSurface,
+    scheduleOffer.list,
   ]);
 
   // =========================================================================
@@ -2964,6 +3011,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
       if (match) target = buildDockTarget(match);
     }
+    // With no saved layout and no first view the config names (or one this
+    // viewer cannot open), the first pane opens Today, so a first load never
+    // starts on an empty pane. A tab the user opens later keeps its picker.
+    if (!target && visibleControls.includes("timeline")) target = buildControlTarget("timeline");
     initialTargetOpened.current = true;
     if (!target) return;
     const preset = normalizeDockPreset(layoutConfig?.initial_preset);
@@ -3085,6 +3136,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   const refreshMemoryData = React.useCallback(() => panelRefreshFlight(`memory:${panelRuntimeKey}`, async () => {
     if (emptyPanelRegistry) return;
+    // A runtime without a memory store says so in its experience: the panel
+    // shows "not set up" and reads nothing.
+    if (memoryNotSetUp(experience?.memory)) {
+      if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
+      setMemoryDataRuntimeKey(panelRuntimeKey);
+      setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
+      return;
+    }
     const memoryTarget = controlWorkbenchTarget("memory");
     try {
       let records: MemoryPanelRecord[] = [];
@@ -3101,8 +3160,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor = recordsResult?.next_cursor ?? null;
       } catch (err) {
         // Access denied to records leaves the section empty but flagged, so
-        // the panel renders "no access" instead of an empty store.
-        if (memorySectionOutcome(err) !== "denied") throw err;
+        // the panel renders "no access" instead of an empty store. A runtime
+        // that advertises no records method and reports no store has no
+        // memory set up: that is not a denial.
+        const outcome = memoryListingOutcome(err, experience?.memory?.available);
+        if (outcome === "unavailable") {
+          if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
+          setMemoryDataRuntimeKey(panelRuntimeKey);
+          setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
+          return;
+        }
+        if (outcome !== "denied") throw err;
         recordsDenied = true;
       }
 
@@ -3153,20 +3221,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           quarantineRecords = quarantineResult?.records || [];
           pendingPromotions = quarantineResult?.pending_promotions || [];
         } catch (err) {
-          // Access denied to the quarantine queue leaves it empty rather than
-          // failing the whole panel.
-          if (jsonRpcErrorCode(err) !== -32030) throw err;
+          // Access denied to the quarantine queue (a -32030, or the method
+          // intersected away for this principal) leaves it empty rather than
+          // failing the whole panel, as the other sections do.
+          if (memorySectionOutcome(err) !== "denied") throw err;
         }
       }
 
       let dreams: MemoryDreamRun[] = [];
       let dreamsDenied = false;
+      let dreamsWithheld = false;
       try {
         const dreamsResult = (await executeHeadlessCommand(
           CONSOLE_COMMAND_NAMES.listMemoryDreams,
           memoryTarget,
         )) as MemoryPanelDreamsResult | null;
         dreams = dreamsResult?.runs || [];
+        dreamsWithheld = dreamsResult?.withheld_by_access === true;
       } catch (err) {
         // Tolerate access-denied for dreams: leave the list empty but flagged.
         if (memorySectionOutcome(err) !== "denied") throw err;
@@ -3211,10 +3282,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             [],
             (result) => (result as MemoryPanelHarvestsResult | null)?.harvests || [],
           ),
-          section<MemoryDreamRunSheet[]>(
+          section<{ runs: MemoryDreamRunSheet[]; withheld: boolean }>(
             CONSOLE_COMMAND_NAMES.listMemoryDreamRuns,
-            [],
-            (result) => (result as MemoryPanelDreamRunsResult | null)?.runs || [],
+            { runs: [], withheld: false },
+            (result) => ({
+              runs: (result as MemoryPanelDreamRunsResult | null)?.runs || [],
+              withheld: (result as MemoryPanelDreamRunsResult | null)?.withheld_by_access === true,
+            }),
           ),
           section<MemoryAuditVerdictEntry[]>(
             CONSOLE_COMMAND_NAMES.listMemoryAuditVerdicts,
@@ -3235,6 +3309,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor,
         recordsDenied,
         dreamsDenied,
+        dreamsWithheld,
+        dreamRunsWithheld: dreamRuns.value.withheld,
         operatorScopeDenied,
         mobScopeDenied,
         overview: overview.value,
@@ -3245,7 +3321,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         injectionsDenied: injections.denied,
         harvests: harvests.value,
         harvestsDenied: harvests.denied,
-        dreamRuns: dreamRuns.value,
+        dreamRuns: dreamRuns.value.runs,
         dreamRunsDenied: dreamRuns.denied,
         auditVerdicts: auditVerdicts.value,
         auditVerdictsDenied: auditVerdicts.denied,
@@ -3259,13 +3335,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
       setMemoryDataRuntimeKey(panelRuntimeKey);
       if (jsonRpcErrorCode(err) === -32601) {
-        setMemoryData((current) => ({ ...current, unavailable: true, error: null }));
+        setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
         return;
       }
       setMemoryData((current) => ({ ...current, error: errorMessage(err) }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine]);
+  }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine, experience?.memory?.available]);
 
   // Overlapping refreshes (debounced live signals, manual refresh, post-
   // mutation re-reads) can resolve out of order — sequence them so a stale
@@ -3280,13 +3356,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       let denied = false;
       try {
         // The panel is the operator inspection surface: completed/cancelled/
-        // failed items must stay visible (tree status column, graph status
+        // failed items must stay visible (outline rows, graph status
         // classes), so opt into terminal rows - the default snapshot is the
-        // live working set and would drop them on the first refresh.
+        // live working set and would drop them on the first refresh. Ask for
+        // the server's maximum: the default of 100 kept only the 100 least
+        // recently updated items, silently.
         snapshot = (await executeHeadlessCommand(
           CONSOLE_COMMAND_NAMES.workgraphSnapshot,
           workGraphTarget,
-          { include_terminal: true },
+          { include_terminal: true, limit: WORKGRAPH_SNAPSHOT_LIMIT },
         )) as WorkGraphSnapshotResult | null;
       } catch (err) {
         // Access denied renders as "no access", never an empty graph.
@@ -3302,7 +3380,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           const eventsResult = (await executeHeadlessCommand(
             CONSOLE_COMMAND_NAMES.workgraphEvents,
             workGraphTarget,
-            workGraphEventsParams(snapshot?.event_high_water_mark, 50),
+            workGraphEventsParams(snapshot?.event_high_water_mark, WORKGRAPH_EVENTS_LIMIT),
           )) as WorkGraphEventsResult | null;
           events = workGraphEventsNewestFirst(eventsResult?.events || []);
         } catch (err) {
@@ -3312,12 +3390,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       if (!isCurrent() || panelRuntimeKeyRef.current !== panelRuntimeKey) return;
       setWorkGraphDataRuntimeKey(panelRuntimeKey);
+      const items = snapshot?.items || [];
       setWorkGraphData({
-        items: snapshot?.items || [],
+        items,
         edges: snapshot?.edges || [],
         attention: snapshot?.attention || [],
         events,
         capturedAt: snapshot?.captured_at || null,
+        // The server's readiness (open, unblocked, children done, time
+        // window open); absent on older runtimes, where the panel derives it.
+        readyItemIds: Array.isArray(snapshot?.ready_item_ids) ? snapshot.ready_item_ids : null,
+        // Today's snapshot carries no total, so a full page may have more
+        // behind it; a runtime that reports the total (S4) says so exactly.
+        truncated: snapshot?.truncated === true || items.length >= WORKGRAPH_SNAPSHOT_LIMIT,
+        total: typeof snapshot?.total_items === "number" ? snapshot.total_items : null,
         unavailable: false,
         denied,
         error: null,
@@ -3503,31 +3589,66 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [baseUrl, refreshAccessData, loadExperience, accessData, accessScope, experience?.access?.can_administer, frontendReadOnly, experience?.console_policy?.read_only],
   );
 
+  // What the topology reads beside its query: routes from channels (when
+  // the caller may read routing), the typed lineage of helpers (mob events)
+  // and the agents' memory scopes. Each read is optional; one that is not
+  // advertised or fails leaves only its own relation out.
+  const [topologyRelations, setTopologyRelations] =
+    React.useState<ConsoleTopologyRelationsState>(EMPTY_TOPOLOGY_RELATIONS);
+  // Only a refresh someone asked for shows "Updating"; the background
+  // refreshes keep the map still.
+  const [topologyRefreshing, setTopologyRefreshing] = React.useState(false);
+  const topologyMemoryReadable = experience?.memory?.available === true && experience?.memory?.can_read === true;
+  // The map counts messages from the activity ledger, which holds what the
+  // console saw since it opened. The first map read of a timeline scope
+  // also reads the recent history once, back to the map's longest window,
+  // so "messages in the last hour" is not only what arrived since the page
+  // loaded (and a message's two ends meet in one batch).
+  const topologyBackfilledLedgerRef = React.useRef<object | null>(null);
   const refreshTopologyData = React.useCallback(() => panelRefreshFlight("topology", async () => {
+    const ledger = timelineScopeRef.current?.ledger;
+    if (ledger && topologyBackfilledLedgerRef.current !== ledger) {
+      topologyBackfilledLedgerRef.current = ledger;
+      void backfillTopologyLedger({
+        query: async (before) => (await consoleController.timeline.query({ mode: "recent", limit: 1000, before })).value,
+        ingest: (frames) => { ledger.ingestMany(frames); },
+        sinceMs: Date.now() - TOPOLOGY_BACKFILL_WINDOW_MS,
+      }).catch(() => { topologyBackfilledLedgerRef.current = null; });
+    }
     try {
       const capabilities = await consoleTransport.capabilities();
       setTopologyCapabilities(capabilities.topologyControl || null);
+      const relations = readTopologyRelations({
+        methods: capabilities.methods,
+        methodOf: consoleCommandMethod,
+        execute: (command, kind, params) => executeHeadlessCommand(command, controlWorkbenchTarget(kind), params),
+        memoryAvailable: topologyMemoryReadable,
+      }, (partial) => setTopologyRelations((current) => ({ ...current, ...partial })));
       const queryMethod = consoleCommandMethod(CONSOLE_COMMAND_NAMES.topologyQuery);
       if (!capabilities.methods.includes(queryMethod)) {
         // Older and topology-unaware runtimes retain the passive graph/roles
         // console. Mutation UI is never inferred from generic wiring support.
         setTopologyQueryResult(null);
-        return;
+      } else {
+        const result = await executeHeadlessCommand(
+          CONSOLE_COMMAND_NAMES.topologyQuery,
+          controlWorkbenchTarget("topology"),
+        );
+        setTopologyQueryResult(result);
       }
-      const result = await executeHeadlessCommand(
-        CONSOLE_COMMAND_NAMES.topologyQuery,
-        controlWorkbenchTarget("topology"),
-      );
-      setTopologyQueryResult(result);
+      setTopologyRelations({ ...(await relations), updatedAtMs: Date.now(), error: null });
     } catch (error) {
       // Capability loss, an authorization change, or a failed refresh must
       // revoke stale edit affordances immediately. The passive topology view
       // remains available from the experience snapshot.
       setTopologyCapabilities(null);
       setTopologyQueryResult(null);
+      setTopologyRelations((current) => ({ ...current, error: errorMessage(error) }));
       throw error;
     }
-  }), [panelRefreshFlight, consoleTransport]);
+    // The timeline scope's ledger is a ref, read when the refresh runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [panelRefreshFlight, consoleTransport, consoleController, topologyMemoryReadable]);
 
   // Access is read when its panel opens or its scope changes, on Refresh and
   // after a save, and when the owner signals a newer access revision
@@ -3536,7 +3657,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
   const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
-      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[] };
       setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
       setGatingAuditError(null);
     } catch (error) {
@@ -3545,6 +3666,43 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error;
     }
   }), [baseUrl, panelRefreshFlight]);
+
+  // Routing reads need routing access (runtime.admin): a refusal shows the
+  // no-access state, never "no routes". The data belongs to the principal
+  // and runtime it was read under and is cleared when either changes.
+  const refreshRoutingData = React.useCallback(() => panelRefreshFlight("routing", async () => {
+    const scope = accessScopeRef.current;
+    setRoutingRead((current) => (current.scope === scope ? { ...current, loading: true } : { ...emptyRoutingRead(), scope, loading: true }));
+    const routingTarget = controlWorkbenchTarget("routing");
+    try {
+      const [routes, history] = await Promise.all([
+        executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listRoutingRoutes, routingTarget),
+        executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDeliveryHistory, routingTarget),
+      ]);
+      if (scope !== accessScopeRef.current) return;
+      setRoutingData(buildRoutingSectionView({ routesResponse: routes, historyResponse: history }));
+      setRoutingRead({ ...emptyRoutingRead(), scope, updatedAtMs: Date.now(), summaries: deliverySummaries(history) });
+    } catch (error) {
+      if (scope !== accessScopeRef.current) return;
+      const capability = (error as { kind?: unknown } | null)?.kind === "console-capability-unavailable";
+      const failure = classifyConsoleSendFailure(error);
+      // An enforced console leaves a refused method out of its capabilities.
+      const denied = failure.kind === "access_denied" || failure.kind === "unauthenticated"
+        || (capability && accessEnforcing);
+      const unavailable = capability && !denied;
+      if (denied || unavailable) setRoutingData({ routes: [], deliveries: [] });
+      setRoutingRead((current) => ({
+        ...current, scope, loading: false, denied, unavailable,
+        error: denied || unavailable ? null : errorMessage(error),
+        ...(denied || unavailable ? { updatedAtMs: null, summaries: {} } : {}),
+      }));
+      throw error;
+    }
+  }), [baseUrl, panelRefreshFlight, accessEnforcing]);
+  React.useEffect(() => {
+    setRoutingData({ routes: [], deliveries: [] });
+    setRoutingRead({ ...emptyRoutingRead(), scope: accessScope });
+  }, [accessScope]);
 
   const refreshPanelData = React.useCallback(async ({ access = true }: { access?: boolean } = {}) => {
     const openPanels = visiblePanelTargets;
@@ -3560,19 +3718,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setInspectByIdentity((c) => ({ ...c, [t.identity]: result }));
     }));
     if (hasMobControlSurface && openPanels.some((t) => t.kind === "routing")) {
-      refreshes.push(panelRefreshFlight("routing", async () => {
-        const routingTarget = controlWorkbenchTarget("routing");
-        const [routes, history] = await Promise.all([
-          executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listRoutingRoutes, routingTarget),
-          executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDeliveryHistory, routingTarget),
-        ]);
-        setRoutingData(
-          buildRoutingSectionView({
-            routesResponse: routes,
-            historyResponse: history,
-          }),
-        );
-      }));
+      refreshes.push(refreshRoutingData());
     }
     if (access && openPanels.some((t) => t.kind === "access")) refreshes.push(refreshAccessData("background"));
     if (openPanels.some((t) => t.kind === "memory")) refreshes.push(refreshMemoryData());
@@ -3585,7 +3731,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       refreshes.push(refreshGatingAudit());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -3817,8 +3963,52 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const workGraphPanelDockedRef = React.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
   const workGraphRefreshTimerRef = React.useRef<number | null>(null);
+  // One timeline scope per console controller: the frame keys this console
+  // has accepted and the activity ledger its frames feed. The keys outlive
+  // the subscription, which starts again whenever the storage namespace
+  // changes (the experience names its runtime once it loads) or the
+  // operator reconnects: the new subscription's recent page then delivers
+  // only frames this console has not accepted, never the buffered ones a
+  // second time.
+  const timelineScopeRef = React.useRef<{ owner: object; dedupe: ConsoleTimelineDedupe; ledger: ActivityLedger } | null>(null);
+  if (timelineScopeRef.current?.owner !== consoleController) {
+    timelineScopeRef.current = { owner: consoleController, dedupe: createConsoleTimelineDedupe(), ledger: createActivityLedger() };
+  }
+  const timelineScope = timelineScopeRef.current;
+  const bufferScopeRef = React.useRef(timelineScope);
+  // The ledger names peers the way the roster does, and links open the agent a name resolves to.
+  const agentResolver = React.useMemo(() => createAgentResolver(agents), [agents]);
+  React.useEffect(() => {
+    timelineScope.ledger.setResolver(agentResolver);
+  }, [agentResolver, timelineScope]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids, and the comms peer ids the ledger has seen: a
+  // send names its recipient by peer id only): panels show names, with the
+  // key in a tooltip. Panels name agents the way the sidebar does.
+  const ledgerPeersVersion = React.useSyncExternalStore(
+    timelineScope.ledger.subscribe,
+    timelineScope.ledger.getPeersVersion,
+    timelineScope.ledger.getPeersVersion,
+  );
+  const agentDirectory = React.useMemo(() => {
+    const peerIds = timelineScope.ledger.peerIds();
+    return createAgentDirectory(agents.map((agent) => {
+      const entry = agentDirectoryEntry(agent);
+      const ids = peerIds.get(agent.identity || agent.member_id || agent.agent_id) ?? [];
+      return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
+    }));
+    // Read again whenever the ledger learns a peer id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, timelineScope, ledgerPeersVersion]);
 
   React.useEffect(() => {
+    const scope = timelineScope;
+    if (bufferScopeRef.current !== scope) {
+      // Another controller is another scope: its buffers start empty.
+      bufferScopeRef.current = scope;
+      activityRef.current = [];
+      commitLiveFrames([]);
+    }
     // Seed activity with recent history (only on mount) — apply same
     // filter as SSE. The activity rail is its own concern; it doesn't
     // share state with the per-identity logs.
@@ -3839,17 +4029,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const cause: RenderCause = frame.event === "text_delta" ? "text"
         : frame.event === "text_complete" || HISTORY_REFRESH_EVENTS.has(frame.event) || isTerminalTurnCompletedFrame(frame) ? "now"
         : "frame";
-      // Activity rail (independent buffer)
+      // The activity ledger counts every frame, before any buffer filters it.
+      scope.ledger.ingest(frame);
+      // Activity rail (independent buffer). Both buffers hold one copy of
+      // a frame: a copy delivered again replaces an older version of it in
+      // place, and is ignored otherwise.
       if (!ACTIVITY_SKIP_EVENTS.has(frame.event)) {
-        activityRef.current = [frame, ...activityRef.current].slice(0, 200);
+        activityRef.current = insertConsoleFrame(activityRef.current, frame, 200) ?? activityRef.current;
       }
 
       // Topology-class buffer keeps tool events (peer-comms etc.) which
       // the activity rail filters out. Capped at 300; older frames roll
       // off naturally as live pulses age past their lifetime.
       if (PANEL_ROUTABLE_EVENTS.has(frame.event)) {
+        const liveFrames = insertConsoleFrame(liveFramesRef.current, frame, 300);
         // A completion renders once, from forceRender below.
-        commitLiveFrames([frame, ...liveFramesRef.current].slice(0, 300), cause === "now" ? "frame" : cause);
+        if (liveFrames) commitLiveFrames(liveFrames, cause === "now" ? "frame" : cause);
       }
 
       // Identity log (single canonical store)
@@ -3904,13 +4099,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     let stopped = false;
     let unsubscribe: (() => void) | null = null;
     const subscriptionLifetime = new AbortController();
+    // The controller hands this input to subscribeTimelineWithRecovery as
+    // is, so the scope's dedupe reaches it; the transport never sees it.
+    const subscription: ConsoleTimelineRecoveryInput = {
+      limit: 200,
+      signal: subscriptionLifetime.signal,
+      onTransportState: (state) => { if (!stopped) setTransportState(state); },
+      dedupe: scope.dedupe,
+    };
 
     void consoleController.timeline.subscribeWithBackfill(
-      {
-        limit: 200,
-        signal: subscriptionLifetime.signal,
-        onTransportState: (state) => { if (!stopped) setTransportState(state); },
-      },
+      subscription,
       (frame) => {
         if (!stopped) handleLiveFrame(frame.value);
       },
@@ -5147,6 +5346,42 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const pivot = memoryFramePivot(frame);
     if (pivot) void loadMemoryRecordDetailRef.current(pivot.realm, pivot.recordId);
   }, []);
+  // Cross-panel navigation (spec A4.7): an entity's name in any panel opens
+  // the entity. The openers read the console through a ref, so they stay one
+  // object until the offered views change.
+  const navigationFocus = useNavigationFocusSource();
+  const navigationHostRef = React.useRef<ConsoleNavigationHost<MetaDockTarget> | null>(null);
+  navigationHostRef.current = {
+    dockState: () => dockRef.current.state,
+    dispatch: (action) => dockRef.current.dispatch(action),
+    findAgent: (reference) => {
+      const identity = agentResolver(reference);
+      return identity
+        ? agents.find((agent) => (agent.identity || agent.member_id || agent.agent_id) === identity) ?? null
+        : null;
+    },
+    chatTarget: buildDockTarget,
+    detailsTarget: buildInspectTarget,
+    viewTarget: (kind) => buildControlTarget(kind),
+    onAgentDetails: (agent) => {
+      setSelectedRosterMemberId(agent.member_id);
+      void refreshInspectIdentity(buildInspectTarget(agent).identity).catch(() => {});
+    },
+    onAgentChat: (agent) => {
+      const target = buildDockTarget(agent);
+      void refreshIdentityTimelineNow(target.identity || target.memberId).catch(() => {});
+    },
+    selectApproval: (id) => {
+      setSelectedApprovalId(id);
+      setApprovalOpens((count) => count + 1);
+    },
+    loadMemoryRecord: (realm, id) => void loadMemoryRecordDetailRef.current(realm, id),
+    focus: navigationFocus.focus,
+  };
+  const consoleNavigation = React.useMemo(
+    () => buildConsoleNavigation(() => navigationHostRef.current!, visibleControls),
+    [visibleControls],
+  );
   const watchedIdentities = React.useMemo(
     () =>
       new Set(
@@ -5156,6 +5391,50 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           .filter((value): value is string => Boolean(value)),
       ),
     [agents],
+  );
+  // The sidebar's inputs (B14). Lineage: the live snapshot drops
+  // `labels.spawned_by` and the topology read keeps it, so the roster takes
+  // it from the latest topology read when there is one. The sidebar never
+  // reads the topology itself: a hidden Topology panel costs no query.
+  const sidebarAgents = React.useMemo(
+    () => sidebarAgentsWithLineage(agents, topologyQueryResult),
+    [agents, topologyQueryResult],
+  );
+  // The views the active workspace shows, and the focused pane's: the nav's
+  // accent rule and the Logs badge's "last visit".
+  const sidebarOpenControls = React.useMemo(
+    () => visiblePanelTargets
+      .map((target) => normalizeNavKind(target.kind))
+      .filter((kind): kind is NavKind => kind !== null),
+    [visiblePanelTargets],
+  );
+  const sidebarActiveControl = normalizeNavKind(dock.focusedTarget?.kind);
+  // What WorkGraph and Memory count for their nav entries, once their data
+  // has loaded (no count before: no zero, no spinner).
+  const sidebarNavAttention = React.useMemo(() => {
+    const attention: Partial<Record<NavKind, SidebarNavAttention>> = {};
+    if (!workGraphData.unavailable && !workGraphData.denied) {
+      const blocked = workGraphData.items.filter((item) => item.status === "blocked").length;
+      if (blocked > 0) {
+        attention.workgraph = { count: blocked, tone: "warn", description: `${blocked} blocked work ${blocked === 1 ? "item" : "items"}` };
+      }
+    }
+    if (memoryData.loaded && !memoryData.unavailable) {
+      const review = memoryData.quarantineRecords.length + memoryData.pendingPromotions.length;
+      if (review > 0) {
+        attention.memory = { count: review, tone: "warn", description: `${review} memory ${review === 1 ? "record waits" : "records wait"} for review` };
+      }
+    }
+    return attention;
+  }, [memoryData, workGraphData]);
+  // The rail's presets: the console config's, else the experience's
+  // activity feed presets (spec B6), else the rail's own.
+  const activityFeedPresets = experience?.activity_feed?.filter_presets;
+  const railFilterPresets = React.useMemo(
+    () => (experience?.console_config?.rail?.filter_presets?.length
+      ? experience.console_config.rail.filter_presets
+      : railPresetsFromActivityFeed(activityFeedPresets)),
+    [experience?.console_config?.rail?.filter_presets, activityFeedPresets],
   );
 
   if (loading)
@@ -5326,9 +5605,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         });
     const canCloseSideChat =
       sideChatOf !== null && !consoleReadOnly && agent?.affordances?.can_retire === true;
+    // The queue's slot: an older queue to import, the queue, then where it is
+    // kept (a caption under the queue) and any storage failure.
     const stackSlot = <>
-      {stackItems.length > 0 ? <small className="queue-storage-note" role="status">{persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload"}</small> : null}
-      {pendingStorageErrorRef.current[identity] && <p role="alert">{pendingStorageErrorRef.current[identity]}</p>}
       {hasLegacyQueue && (
         <div className="queue-import" role="group" aria-label="Older queued messages" data-testid="legacy-queue-import">
           <span className="queue-import__icon" aria-hidden="true"><Icon name="i-clock" /></span>
@@ -5376,6 +5655,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onToggleExpand={(itemId) => onStackToggleExpand(identity, itemId)}
         />
       ) : null}
+      {stackItems.length > 0 ? <small className="queue-storage-note" role="status">{persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload"}</small> : null}
+      {pendingStorageErrorRef.current[identity] && <p className="queue-storage-error" role="alert">{pendingStorageErrorRef.current[identity]}</p>}
     </>;
     const submittedRowId = submittedFrames[draftKey];
     const addQuote = (quote: ConsoleQuoteSelection) => {
@@ -5553,7 +5834,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         identity={target.identity}
         inspect={inspect}
         agent={agent}
+        agents={agents}
+        work={agentWorkItems(workGraphData.items, target.identity, agent)}
+        spawnedBy={topologyLineage(topologyQueryResult)[target.identity]}
         stateLabel={inspect ? identityStateLabel(inspect) : null}
+        onOpenChat={
+          configuredActionVisibility.chat !== false && agent
+            ? () => consoleNavigation.openAgent?.(target.identity, "chat")
+            : undefined
+        }
+        openChatLabel={configuredActionLabels.chat}
+        onRefresh={() => void refreshInspectIdentity(target.identity).catch(() => {})}
         actions={{
           respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
           reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
@@ -5578,15 +5869,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     );
   }
 
-  function renderHealthPanel(identities: IdentityStatusRow[]) {
+  function renderHealthPanel(snapshot: ConsoleHealthSnapshot | null | undefined) {
     return (
       <HealthPanel
-        identities={identities}
+        identities={snapshot?.identities || []}
         stateLabel={identityStateLabel}
+        agents={agents}
+        team={snapshot ? {
+          running: snapshot.running,
+          loadedModules: snapshot.loaded_modules,
+          loadedModuleCount: snapshot.loaded_module_count,
+          unobserved: snapshot.unobserved,
+        } : null}
         canOpen={(identity) => agents.some((candidate) => candidate.identity === identity || candidate.member_id === identity)}
         onOpen={(identity) => {
-          const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
-          if (agent) handleShowRosterDetails(agent);
+          // Beside Health, not in its place (spec B11).
+          consoleNavigation.openAgent?.(identity, "details");
         }}
       />
     );
@@ -5624,12 +5922,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   function toggleTheme() {
     const next: ConsoleTheme = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    try {
-      localStorage.setItem("meta-console-theme", next);
-    } catch {
-      /* ignore */
-    }
+    display.choose("theme", next);
   }
 
   function renderPanelBody(panel: {
@@ -5682,7 +5975,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         </PanelShell>
       );
     }
-    if (target.kind === "routing") return <RoutingPanel data={routingData} />;
+    if (target.kind === "routing") {
+      const read = routingRead.scope === accessScope ? routingRead : null;
+      return (
+        <RoutingPanel
+          data={read ? routingData : { routes: [], deliveries: [] }}
+          loading={!read || read.loading || (read.updatedAtMs === null && !read.denied && !read.unavailable && !read.error)}
+          denied={read?.denied}
+          unavailable={read?.unavailable}
+          error={read?.error ?? null}
+          updatedAtMs={read?.updatedAtMs ?? null}
+          deliverySummaries={read?.summaries}
+          onRefresh={() => void refreshRoutingData().catch(() => {})}
+        />
+      );
+    }
     if (target.kind === "gating")
       return (
         <GatingInboxPanel
@@ -5693,6 +6000,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
+          auditLimit={GATING_AUDIT_LIMIT}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5712,6 +6020,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           nodes={normalizedTopology?.nodes || experience?.topology?.live_snapshot?.nodes || []}
           agents={agents}
           activity={liveFrames}
+          activitySource={timelineScope.ledger}
+          links={normalizedTopology?.links ?? null}
+          routes={topologyRelations.routes}
+          routesAccess={topologyRelations.routesAccess}
+          lineage={topologyRelations.lineage}
+          memoryScopes={topologyRelations.memoryScopes}
+          stores={topologyRelations.stores}
+          grouping={topologyGrouping(experience?.console_config?.agent_list)}
+          wiringRoles={topologyWiringRoles(experience?.runtime_capabilities?.profile_capabilities)}
+          statusOf={topologyAgentStatus}
           management={normalizedTopology?.management || null}
           connectionSourceId={topologyConnectionSourceId}
           onConnectionSourceChange={setTopologyConnectionSourceId}
@@ -5721,21 +6039,49 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
           }}
+          onOpenAgentDetails={(id) => {
+            const agent = topologyNodeAgent(agents, id);
+            if (!agent) return;
+            const inspect = buildInspectTarget(agent);
+            dock.openTarget(inspect, "split_right");
+            void refreshInspectIdentity(inspect.identity).catch(() => {});
+          }}
+          onOpenMemory={visibleControls.includes("memory")
+            ? () => dock.openTarget(buildControlTarget("memory"), "split_right")
+            : undefined}
+          updatedAtMs={topologyRelations.updatedAtMs}
+          refreshing={topologyRefreshing}
+          loading={topologyRelations.updatedAtMs === null && agents.length === 0}
+          error={topologyRelations.error}
+          onRefresh={() => {
+            setTopologyRefreshing(true);
+            void refreshTopologyData()
+              .catch(() => {})
+              .finally(() => setTopologyRefreshing(false));
+          }}
+          canWireMembers={experience?.runtime_capabilities?.can_wire_members === true}
           teamName={teamKey ? teamName(teamKey) : undefined}
           teamKey={teamKey}
         />
       );
     }
     if (target.kind === "health")
-      return renderHealthPanel(
-        experience?.health_overview?.live_snapshot?.identities || [],
-      );
+      return renderHealthPanel(experience?.health_overview?.live_snapshot);
     if (target.kind === "timeline")
-      return <TimelinePanel frames={activityRef.current} />;
+      return (
+        <TimelinePanel
+          frames={activityRef.current}
+          historyFrames={historyFramesOf(identityLogRef.current)}
+          agents={agents}
+          approvals={activeApprovals?.requests}
+          loadHistory={loadDayHistory}
+        />
+      );
     if (target.kind === "roster")
       return (
         <RosterPanel
           agents={agents}
+          lineage={topologyLineage(topologyQueryResult)}
           selectedMemberId={selectedRosterMemberId}
           onSelect={(a) => setSelectedRosterMemberId(a.member_id)}
           onChat={(a) => openAgentChat(a)}
@@ -5763,6 +6109,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
+          auditLimit={GATING_AUDIT_LIMIT}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5772,7 +6119,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "logs")
-      return <LogsPanel frames={activityRef.current} agentDirectory={agentDirectory} />;
+      return (
+        <LogsPanel
+          frames={activityRef.current}
+          historyFrames={historyFramesOf(identityLogRef.current)}
+          agentDirectory={agentDirectory}
+          agents={agents}
+          loadHistory={loadDayHistory}
+        />
+      );
     if (target.kind === "access")
       return (
         <AccessPanel
@@ -5809,7 +6164,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             ((await executeHeadlessCommand(
               CONSOLE_COMMAND_NAMES.previewAccess,
               controlWorkbenchTarget("access"),
-              identity ? { subject, action, identity } : { subject, action },
+              // No subject asks as someone who is not signed in.
+              { ...(subject ? { subject } : {}), action, ...(identity ? { identity } : {}) },
             )) as AccessPreviewResult | null) || null
           }
         />
@@ -5832,6 +6188,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           nextCursor={memoryData.nextCursor}
           recordsDenied={memoryData.recordsDenied}
           dreamsDenied={memoryData.dreamsDenied}
+          dreamsWithheld={memoryData.dreamsWithheld}
+          dreamRunsWithheld={memoryData.dreamRunsWithheld}
           operatorScopeDenied={memoryData.operatorScopeDenied}
           mobScopeDenied={memoryData.mobScopeDenied}
           overview={memoryData.overview}
@@ -5888,6 +6246,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
+          onRelease={({ itemId, revision }) => {
+            // Same CAS rule as the other item actions: an unobserved
+            // revision is resolved live, never guessed.
+            void (async () => {
+              let expectedRevision = revision;
+              if (expectedRevision === undefined) {
+                try {
+                  expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId);
+                } catch (err) {
+                  setActionError(errorMessage(err));
+                  return;
+                }
+              }
+              await runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
+                id: itemId,
+                expected_revision: expectedRevision,
+              });
+            })();
+          }}
           onGoalConfirm={workGraphPanelHandlers.onGoalConfirm}
           onGoalRequestClose={workGraphPanelHandlers.onGoalRequestClose}
           onAttentionPause={workGraphPanelHandlers.onAttentionPause}
@@ -5896,6 +6273,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     }
+    if (target.kind === "schedules")
+      return (
+        <SchedulesPanel
+          agents={agents}
+          offer={scheduleOffer}
+          readOnly={consoleReadOnly}
+          accessEnforcing={accessEnforcing}
+          run={runScheduleCommand}
+          // Lists older than 15 s are read again at most once a minute while
+          // the console renders (the panel's Refresh reads them at once).
+          refreshToken={Math.floor(Date.now() / 60_000)}
+        />
+      );
     return (
       <PanelShell>
         <EmptyState kind="unavailable" title="This panel isn't available in this console" />
@@ -5907,10 +6297,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
     <AgentDirectoryProvider directory={agentDirectory}>
+    <ActivityLedgerProvider ledger={timelineScope.ledger}>
+    <ConsoleNavigationProvider value={consoleNavigation}>
+    <NavigationFocusProvider value={navigationFocus.value}>
+    <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
-      className="cc-theme-scope meta-shell"
+      className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
       data-cc-theme={theme}
+      data-cc-density={display.settings.density}
       data-cc-variant={variant}
       data-testid="meerkat-console"
     >
@@ -5941,6 +6336,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         environment={environmentLabel}
         theme={theme}
         onToggleTheme={toggleTheme}
+        display={display.settings}
+        displayChosen={Object.keys(display.chosen).length > 0}
+        onChooseDisplay={display.choose}
+        onResetDisplay={display.reset}
         sidebarCollapsed={sidebarCollapsed}
         railCollapsed={railCollapsed}
         railVisible={railVisible}
@@ -5954,7 +6353,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         data-rail-collapsed={railCollapsed ? "true" : "false"}
       >
         <DesignSidebar
-          agents={agents}
+          agents={sidebarAgents}
           selectedMemberId={focusedMemberId}
           recentActivity={activityRef.current}
           collapsed={sidebarCollapsed}
@@ -5973,6 +6372,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           approvals={activeApprovals}
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
+          density={display.settings.density}
+          activeControl={sidebarActiveControl}
+          openControls={sidebarOpenControls}
+          navAttention={sidebarNavAttention}
         />
         <div
           className="pane-resizer"
@@ -5981,6 +6384,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onPointerDown={handleSidebarResize}
         />
         <div className="main">
+          {/* Panels without a density of their own follow the Display density (B21). */}
+          <PanelDensityDefaultProvider density={display.settings.density}>
           <MetaDock
             viewState={dock.viewState}
             agents={agents}
@@ -5989,7 +6394,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             visibleControls={visibleControls}
             onSelectTab={(id) => dock.selectTab(id)}
             onCloseTab={(id) => dock.closeTab(id)}
-            onCreateTab={() => dock.createTab()}
+            onCreateTab={() => dock.createTab({ blank: true })}
             onFocusPanel={(id) => dock.focusPanel(id)}
             onSplitPanel={(id, dir) => dock.splitPanel(id, dir)}
             onClosePanel={(id) => dock.closePanel(id)}
@@ -6004,6 +6409,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               } else openDockTarget(target);
             }}
           />
+          </PanelDensityDefaultProvider>
           {dock.focusedTarget?.kind !== "agent-chat" ? voiceBar : null}
         </div>
         {railVisible ? (
@@ -6017,7 +6423,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             <SignalsRail
               frames={activityRef.current}
               collapsed={railCollapsed}
-              filterPresets={railConfig?.filter_presets}
+              filterPresets={railFilterPresets}
+              approvals={activeApprovals?.requests}
               activePresetId={
                 activeActivityPresetId || railConfig?.active_preset_id
               }
@@ -6032,6 +6439,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       </div>
     </div>
     </HostDecideSourcesProvider>
+    </PanelPreferencesProvider>
+    </NavigationFocusProvider>
+    </ConsoleNavigationProvider>
+    </ActivityLedgerProvider>
     </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>

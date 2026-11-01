@@ -1,0 +1,965 @@
+/* Sidebar: nav buttons, roster sections and agent rows.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Workbench (spec B14): a vertical list of views, 28 px rows with a
+   16 px icon, the label and an attention badge (a mark and a count). The
+   focused pane's view wears the accent rule. The list folds away. ── */
+.sidebar__section.sidebar__section--nav {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar__sec-head.sidebar__nav-head {
+  height: 28px;
+  padding: 0 10px 0 14px;
+  align-items: center;
+}
+.sidebar__navlist {
+  display: flex;
+  flex-direction: column;
+}
+.sidebar__navitem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 12px 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease, color var(--_cc-dur-fast) ease;
+}
+.sidebar__navitem:hover {
+  background: var(--_cc-surface-hover);
+  color: var(--_cc-foreground);
+}
+.sidebar__navitem:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.sidebar__navitem.is-active {
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground);
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.sidebar__navicon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--_cc-foreground-meta);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sidebar__navitem.is-active .sidebar__navicon,
+.sidebar__navitem:hover .sidebar__navicon { color: var(--_cc-foreground-muted); }
+.sidebar__navlabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* An attention badge: the tone's mark and a count in a soft pill. */
+.sidebar__navbadge {
+  --_cc-tone: var(--_cc-warning);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--_cc-radius-pill);
+  background: color-mix(in srgb, var(--_cc-warning) 16%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.sidebar__navbadge[data-tone="crit"] {
+  --_cc-tone: var(--_cc-negative);
+  background: color-mix(in srgb, var(--_cc-negative) 12%, var(--_cc-surface-card));
+  color: var(--_cc-negative-ink);
+}
+.sidebar__navbadge .cc-mark { --_cc-mark-size: 7px; }
+.sidebar__nav-head .sidebar__navbadge { margin-left: 4px; }
+
+/* ══════════════════════════════════════════════════════════════
+   Component tweaks for existing ConsoleSidebar / ConsoleActivityRail
+   so they pick up the Rams look cleanly.
+   ══════════════════════════════════════════════════════════════ */
+
+/* Sidebar rows: tighter density, mono ids, no giant border radius */
+.cc-console-sidebar { gap: 10px; }
+.cc-sidebar-block { gap: 4px; }
+.cc-sidebar-block__title {
+  color: var(--ink-dim);
+  font-family: var(--disp);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+.cc-sidebar-section__header-title { font-weight: 550; }
+.cc-sidebar-section__header-subtitle,
+.cc-sidebar-row__subtitle {
+  font-family: var(--mono);
+  color: var(--ink-dim);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+.cc-sidebar-row,
+.cc-sidebar-section__header { border-radius: var(--r-sm); }
+.cc-sidebar-row.is-selected {
+  background: var(--bg-elev-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.cc-sidebar-row:hover { background: var(--bg-elev-1); }
+.cc-sidebar-action-strip__button {
+  border-radius: var(--r-sm);
+  font-family: var(--disp);
+}
+.cc-sidebar-action-strip__button:hover {
+  background: var(--bg-elev-1);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Sidebar (agents, sections, rows)
+   ══════════════════════════════════════════════════════════════ */
+
+.sidebar {
+  background: var(--_cc-surface-soft);
+  border-right: 1px solid var(--_cc-border-soft);
+  overflow: hidden;
+  font-family: var(--_cc-font-display);
+  padding-bottom: 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* ── The roster mast (spec A5): "Roster", the count and, when the view
+   is not the default, its summary and a reset; the view options trigger
+   at the right shows on hover or focus of the mast or the search, and
+   always while the view is customised (it then wears the accent dot). ── */
+.sidebar__head {
+  flex: none;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar__mast {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 10px 4px 14px;
+}
+.sidebar__mast-text { flex: 1 1 auto; min-width: 0; }
+.sidebar__mast-title {
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+}
+.sidebar__mast-sub {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-top: 1px;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sidebar__mast-count { flex: none; }
+.sidebar__view-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: var(--_cc-radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: pre;
+  cursor: pointer;
+}
+.sidebar__view-summary:hover { color: var(--_cc-foreground-muted); text-decoration: underline; text-underline-offset: 2px; }
+.sidebar__view-summary:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+/* The reset: a small x after the summary, a 24 px target that does not
+   grow the line. */
+.sidebar__view-reset.cc-btn--icon.cc-btn--sm {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -1px -4px -1px 0;
+}
+.sidebar__view-reset .cc-btn__icon .cc-glyph { width: 11px; height: 11px; }
+.sidebar__view-trigger { flex: none; margin-top: -2px; }
+.sidebar__view-trigger .cc-btn__badge { box-shadow: 0 0 0 1.5px var(--_cc-surface-soft); }
+
+/* Collapsed sidebar - content is fully replaced by a thin vertical
+   "grip" bar centered in the rail. The actual collapse toggle lives
+   in the topbar; this is just a visual signal that the column has
+   content waiting behind it. */
+.sidebar--collapsed {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar__grip {
+  width: 2px;
+  height: 28px;
+  background: var(--_cc-border-strong);
+  border-radius: 1px;
+  opacity: 0.7;
+  display: block;
+}
+
+.sidebar__search {
+  padding: 6px 10px 10px 12px;
+}
+.sidebar__search .cc-search,
+.sidebar__search .cc-search__box { display: flex; width: 100%; }
+.sidebar__search .cc-search__input {
+  width: 100%;
+  height: 28px;
+  background: var(--_cc-surface-card);
+  font-size: var(--_cc-fs-control);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.sidebar__section {
+  padding: 12px 0 6px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar__section:last-child { border-bottom: none; }
+.sidebar__sec-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px 6px 14px;
+}
+.sidebar__sec-head--button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar__order-target {
+  position: relative;
+}
+.sidebar__order-target[data-reorderable="true"] {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.sidebar__order-target[data-reorderable="true"]:active {
+  cursor: grabbing;
+}
+.sidebar__order-target[data-drag-over="before"]::before,
+.sidebar__order-target[data-drag-over="after"]::after,
+.sidebar__section[data-drag-over="before"] .sidebar__order-target::before,
+.sidebar__section[data-drag-over="after"] .sidebar__order-target::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--_cc-member-accent);
+  border-radius: 1px;
+}
+.sidebar__order-target[data-drag-over="before"]::before,
+.sidebar__section[data-drag-over="before"] .sidebar__order-target::before {
+  top: 1px;
+}
+.sidebar__order-target[data-drag-over="after"]::after,
+.sidebar__section[data-drag-over="after"] .sidebar__order-target::after {
+  bottom: 1px;
+}
+
+.sidebar__drag-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  pointer-events: none;
+  max-height: min(420px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid var(--_cc-border-strong);
+  background: color-mix(in srgb, var(--_cc-surface-soft) 92%, transparent);
+  box-shadow: var(--_cc-shadow-lg);
+  opacity: 0.62;
+  transform-origin: top left;
+}
+
+.sidebar__drag-preview-section,
+.sidebar__drag-preview-subgroup,
+.sidebar__drag-preview-empty,
+.sidebar__drag-preview-agent {
+  box-sizing: border-box;
+}
+
+.sidebar__drag-preview-section {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 36px;
+  padding: 12px 14px 7px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+
+.sidebar__drag-preview-section[data-pinned="true"] {
+  background: color-mix(in srgb, var(--_cc-member-accent) 9%, var(--_cc-surface-card));
+}
+
+.sidebar__drag-preview-subgroup {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 8px 14px 3px;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar__drag-preview-empty {
+  min-height: 44px;
+  padding: 10px 14px;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+}
+
+.sidebar__drag-preview-agent {
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 8px 12px;
+  color: var(--_cc-foreground);
+}
+
+.sidebar__drag-preview-agent--child {
+  grid-template-columns: 24px 7px 1fr;
+  padding-left: 20px;
+}
+
+.sidebar__drag-preview-agent--child::before {
+  content: "";
+  width: 12px;
+  height: 18px;
+  border-left: 1px solid var(--_cc-border-strong);
+  border-bottom: 1px solid var(--_cc-border-strong);
+  justify-self: end;
+  align-self: start;
+  opacity: 0.75;
+}
+
+.sidebar__drag-preview-agent--child[data-depth="2"] {
+  grid-template-columns: 42px 7px 1fr;
+  padding-left: 30px;
+}
+
+.sidebar__drag-preview-agent--child[data-depth="3"] {
+  grid-template-columns: 64px 7px 1fr;
+  padding-left: 40px;
+}
+
+.sidebar__drag-preview-agent--child .agent__mark {
+  grid-column: 2;
+}
+
+.sidebar__drag-preview-agent-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar__drag-preview-agent--child .sidebar__drag-preview-agent-body {
+  grid-column: 3;
+}
+
+.sidebar__sec-head--button:hover .sidebar__sec-label { color: var(--_cc-foreground-muted); }
+.sidebar__sec-head--button:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.sidebar__sec-label {
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.sidebar__sec-count {
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--_cc-foreground-meta);
+}
+.sidebar__sec-spacer { flex: 1; }
+/* The collapse chevron: shown on hover or focus, and always while folded. */
+.sidebar__sec-chevron {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--_cc-foreground-meta);
+}
+.sidebar__sec-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform var(--_cc-dur-base) var(--_cc-ease-out);
+}
+[aria-expanded="false"] > .sidebar__sec-chevron { opacity: 1; }
+[aria-expanded="false"] > .sidebar__sec-chevron svg { transform: rotate(-90deg); }
+.reduced-motion .sidebar__sec-chevron svg { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar__sec-chevron svg { transition: none; }
+}
+
+.sidebar__virtual-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  contain: strict;
+}
+
+.sidebar__virtual-space {
+  position: relative;
+  min-height: 100%;
+}
+
+.sidebar__virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.sidebar__virtual-row--section {
+  border-top: 1px solid var(--_cc-border-soft);
+}
+
+.sidebar__virtual-row--section .sidebar__section {
+  padding: 10px 0 0;
+  border-bottom: none;
+}
+.sidebar__virtual-row--section .sidebar__section[data-pinned="true"] {
+  background: color-mix(in srgb, var(--_cc-member-accent) 5%, transparent);
+}
+
+/* Row heights: SIDEBAR_ROW_HEIGHT in Sidebar.tsx lays the virtual list
+   out with the same numbers (44 px, 32 px in compact density). */
+.sidebar__virtual-row--agent .agent {
+  height: 44px;
+}
+.sidebar[data-density="compact"] .sidebar__virtual-row--agent .agent {
+  height: 32px;
+}
+
+.sidebar__virtual-row--agent .agent__badges {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar__virtual-row--agent .agent__badge {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.sidebar__virtual-row--agent .agent__badge span,
+.sidebar__virtual-row--agent .agent__badge strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__subgroup {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  width: 100%;
+  padding: 8px 14px 3px;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-align: left;
+}
+.sidebar__subgroup--button {
+  cursor: pointer;
+}
+.sidebar__subgroup--button:hover {
+  color: var(--_cc-foreground-muted);
+}
+
+.sidebar__empty {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px 10px;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.sidebar__empty-title {
+  color: var(--_cc-foreground-muted);
+  font-size: var(--_cc-fs-control);
+  font-weight: 600;
+}
+.sidebar__empty--filtered {
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+.sidebar__empty-clear {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-link-ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sidebar__empty-clear:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sidebar__empty-clear:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; border-radius: var(--_cc-radius-xs); }
+
+/* A roster row: the agent's button and, beside it, its pin and copy actions.
+   The button shares the row's columns (a subgrid), so the actions keep their
+   own column without sitting inside the button. The first column includes
+   the button's left padding. */
+.agent-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  column-gap: 9px;
+  align-items: center;
+  position: relative;
+}
+.agent-row--child { grid-template-columns: 30px 8px 1fr auto auto; }
+.agent-row--child[data-depth="2"] { grid-template-columns: 54px 8px 1fr auto auto; }
+.agent-row--child[data-depth="3"] { grid-template-columns: 78px 8px 1fr auto auto; }
+.agent-row > .agent__actions { grid-row: 1; grid-column: -3; }
+.agent {
+  display: grid;
+  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  column-gap: 9px;
+  box-sizing: border-box;
+  padding: 0 12px 0 12px;
+  cursor: pointer;
+  border: none;
+  width: 100%;
+  text-align: left;
+  position: relative;
+  min-height: 32px;
+  background: transparent;
+  color: var(--_cc-foreground);
+  transition: background var(--_cc-dur-fast) ease;
+}
+.agent:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.agent-row:hover > .agent { background: var(--_cc-surface-hover); }
+.agent.is-active,
+.agent-row:hover > .agent.is-active {
+  background: var(--_cc-surface-card);
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.agent--child { padding-left: 14px; }
+.agent--child[data-depth="2"] { padding-left: 22px; }
+.agent--child[data-depth="3"] { padding-left: 30px; }
+/* A spawned helper or side chat hangs from its parent by a hairline. */
+.agent--child::before {
+  content: "";
+  width: 10px;
+  height: 50%;
+  border-left: 1px solid var(--_cc-border-strong);
+  border-bottom: 1px solid var(--_cc-border-strong);
+  border-bottom-left-radius: var(--_cc-radius-xs);
+  justify-self: end;
+  align-self: start;
+}
+.agent--child[data-depth="2"]::before,
+.agent--child[data-depth="3"]::before {
+  width: 24px;
+}
+.agent--child .agent__mark,
+.agent--child .agent__dot { grid-column: 2; }
+.agent--child .agent__body { grid-column: 3; }
+/* The status mark (A2.4 shape and tone; live pulses), from the shared
+   agent-status rule. The words are the detail line's. */
+.agent__mark { justify-self: center; }
+.agent__dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--_cc-viz-mid);
+  justify-self: center;
+}
+[data-cc-variant="terminal"] .agent__dot { border-radius: 0; width: 6px; height: 6px; }
+
+.agent__body {
+  display: flex; flex-direction: column; min-width: 0;
+  gap: 1px;
+}
+.agent__title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.agent__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--_cc-font-display);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--_cc-foreground);
+  letter-spacing: -0.003em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent[data-state="retired"] .agent__name { color: var(--_cc-foreground-muted); }
+.agent__detail {
+  display: flex;
+  min-width: 0;
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.agent__detail-kind { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.agent__detail-separator { flex: none; white-space: pre; }
+.agent__detail-status { flex: none; }
+/* Manual order: a grip on hover or focus, and a line where the row lands. */
+/* The 6-dot grip (A5): two columns of three dots in the row's left gutter,
+   on a 12 x 24 hit area. */
+.agent__grip {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  box-sizing: border-box;
+  width: 12px;
+  height: 24px;
+  padding: 6px 2px;
+  transform: translateY(-50%);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  color: var(--_cc-foreground-meta);
+  background-image: radial-gradient(currentColor 1px, transparent 1.4px);
+  background-size: 4px 4px;
+  background-origin: content-box;
+  background-clip: content-box;
+  transition: opacity var(--_cc-dur-fast) ease;
+}
+.agent-row:hover .agent__grip,
+.agent:focus-visible .agent__grip { opacity: 1; }
+/* Without hover (touch screens) the grip always shows. */
+@media (hover: none) {
+  .agent__grip { opacity: 1; }
+}
+.agent__grip:hover { color: var(--_cc-foreground-muted); }
+.agent__grip:active { cursor: grabbing; }
+/* A dragged row fades with its pin and copy actions, which sit beside it. */
+.agent[data-dragging="true"],
+.agent[data-dragging="true"] + .agent__actions { opacity: 0.5; }
+.agent__drop-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--_cc-member-accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.agent__drop-line[data-where="before"] { top: 1px; }
+.agent__drop-line[data-where="after"] { bottom: 1px; }
+/* Badges ride the name's line; the name truncates first, then the badges
+   give way past half the line. */
+.agent__badges {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
+}
+.agent__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground-meta);
+  border-radius: var(--_cc-radius-pill);
+  padding: 0 6px;
+  font-family: var(--_cc-font-display);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.agent__badge--icon { padding: 0 4px; }
+.agent__badge-icon {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.agent__badge strong {
+  color: var(--_cc-foreground-muted);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent__badge[data-tone="warning"] { border-color: color-mix(in srgb, var(--_cc-warning) 45%, var(--_cc-border-soft)); }
+.agent__badge[data-tone="critical"] { border-color: color-mix(in srgb, var(--_cc-negative) 45%, var(--_cc-border-soft)); }
+.agent__badge[data-tone="success"] { border-color: color-mix(in srgb, var(--_cc-positive) 45%, var(--_cc-border-soft)); }
+[data-cc-variant="terminal"] .agent__badge { border-radius: 0; }
+
+/* The right of a row: a 15-minute activity sparkline over the last
+   activity time. */
+.agent__meta {
+  grid-column: -2;
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
+  gap: 3px;
+  min-width: 42px;
+  color: var(--_cc-foreground-meta);
+}
+.agent__spark { display: block; line-height: 0; }
+.agent__spark svg { display: block; }
+.agent__meta-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 13px;
+}
+.agent__time {
+  font-family: var(--_cc-font-display);
+  font-size: 10.5px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.agent__actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.agent__pin {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--_cc-foreground-meta);
+  border-radius: var(--_cc-radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.agent-row:hover .agent__pin,
+.agent__pin:focus-visible {
+  opacity: 1;
+}
+.agent__pin:hover,
+.agent__pin[data-active="true"] {
+  color: var(--_cc-foreground-muted);
+  border-color: var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+.agent__pin[data-active="true"] {
+  color: var(--_cc-member-accent);
+}
+.agent__pin:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 0;
+}
+.agent__pin-icon {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+}
+/* The copy action shows just left of the pin while the pointer is on the
+   row's actions (the pin, or the copy action itself) or the row has keyboard
+   focus. It sits over the end of the name, so it moves nothing and covers
+   neither the pin nor the pulse and inbox count, and a click on the row's
+   name, even in a narrow roster, never lands on it. */
+.agent__copy {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
+}
+.agent__actions:hover .agent__copy,
+.agent:focus-visible + .agent__actions .agent__copy,
+.agent__copy:focus-within { display: inline-flex; }
+.agent__copy .cc-copy-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--_cc-foreground-meta);
+  cursor: pointer;
+}
+.agent__copy .cc-copy-btn:hover,
+.agent__copy .cc-copy-btn:focus-visible {
+  color: var(--_cc-foreground-muted);
+  border-color: var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+.agent__copy .cc-copy-btn[data-copied="true"] {
+  color: var(--_cc-positive-ink);
+  background: transparent;
+  box-shadow: none;
+}
+.agent__inbox {
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-member-accent);
+  color: var(--_cc-surface-canvas);
+  font-weight: 600;
+  line-height: 14px;
+}
+
+/* Compact density (B4): one 32 px line, the name then what the agent
+   does; the role and the sparkline step aside. */
+.sidebar[data-density="compact"] .agent__body {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+.sidebar[data-density="compact"] .agent__title-line { flex: 0 1 auto; }
+.sidebar[data-density="compact"] .agent__detail { flex: 1 1 0; }
+.sidebar[data-density="compact"] .agent__detail-kind,
+.sidebar[data-density="compact"] .agent__detail-separator { display: none; }
+.sidebar[data-density="compact"] .agent__detail-status { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sidebar[data-density="compact"] .agent__spark,
+.sidebar[data-density="compact"] .agent__badges { display: none; }
+[data-cc-variant="terminal"] .agent__inbox { border-radius: 0; }
+
+
+/* ── Needs you (B14), restyled here: the kit's attention row, quiet until
+   something waits; then its count is a warn pill with the triangle mark
+   and the number. Names and roles are the component's own. ── */
+.sidebar .cc-approval-attention {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar .cc-approval-attention__open {
+  min-height: 32px;
+  padding: 6px 8px;
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--_cc-foreground-muted);
+}
+.sidebar .cc-approval-attention__open:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.sidebar .cc-approval-attention__icon { width: 16px; height: 16px; color: var(--_cc-foreground-meta); }
+.sidebar .cc-approval-attention__count {
+  gap: 4px;
+  min-width: 0;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--_cc-radius-pill);
+  background: color-mix(in srgb, var(--_cc-foreground) 7%, var(--_cc-surface-card));
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__open { color: var(--_cc-foreground); }
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__icon { color: var(--_cc-foreground-muted); }
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__count {
+  background: color-mix(in srgb, var(--_cc-warning) 16%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
+}
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__count::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 6px;
+  background: var(--_cc-warning);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.sidebar .cc-approval-attention:is([data-state="stale"], [data-state="unavailable"]) .cc-approval-attention__count {
+  color: var(--_cc-warning-ink);
+}

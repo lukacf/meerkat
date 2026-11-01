@@ -1,5 +1,5 @@
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { identityStateLabel, type IdentityInspectViewState, type IdentityStatusRow } from "@console-core";
 import type { ConsoleAgent } from "../types";
@@ -31,6 +31,10 @@ function inspect(overrides: Partial<IdentityInspectViewState> = {}): IdentityIns
   } as IdentityInspectViewState;
 }
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 const agent = { member_id: "identity:coordinator", identity: "identity:coordinator", agent_id: "identity:coordinator", label: "Coordinator", kind: "identity", role: "coordinator", group: "Leads" } as ConsoleAgent;
 
 describe("status words", () => {
@@ -41,6 +45,11 @@ describe("status words", () => {
     expect(agentStatusChip("active", "healthy")).toEqual({ label: "Healthy", tone: "ok" });
     expect(agentStatusChip("retired", "unknown")).toEqual({ label: "Retired", tone: "neutral" });
     expect(agentStatusChip("active", undefined)).toEqual({ label: "Active", tone: "ok" });
+    // A busy agent's health cannot be judged: it reads Working, never Unknown.
+    expect(agentStatusChip("ready", "unknown", true)).toEqual({ label: "Working", tone: "live" });
+    expect(agentStatusChip("ready", "unknown", false)).toEqual({ label: "Not observed", tone: "locked" });
+    expect(agentStatusChip("ready", "healthy", true)).toEqual({ label: "Working", tone: "live" });
+    expect(agentStatusChip("active", "wedged", true)).toEqual({ label: "Stalled", tone: "crit" });
     expect(reachabilityWords("addressable")).toBe("Can receive messages");
     expect(reachabilityWords("internal_only")).toBe("Internal only");
   });
@@ -62,7 +71,7 @@ describe("AgentDetailsPanel", () => {
     );
     const panel = view.getByTestId("inspect-panel:identity:coordinator");
     expect(within(panel).getByRole("heading", { level: 2 }).textContent).toBe("Coordinator");
-    expect(panel.querySelector(".cc-panel-head__sub")?.textContent).toBe("Coordinator · Leads");
+    expect(panel.querySelector(".cc-panel-head__sub")?.textContent?.startsWith("Coordinator · Leads")).toBe(true);
     expect(view.getByTestId("inspect-state:identity:coordinator").textContent).toBe("Active");
     expect(panel.textContent?.includes("Can receive messages")).toBe(true);
     expect(panel.textContent?.includes("Research Analyst")).toBe(true);
@@ -72,11 +81,122 @@ describe("AgentDetailsPanel", () => {
     for (const id of ["identity:coordinator", "session-01JBX4N0Q3T9K2W8Y6ZR5M7C1D", "rt-01JBX4N0Q3T9"]) {
       expect(tech?.textContent?.includes(id)).toBe(true);
     }
+    // Lifecycle actions live in the overflow menu; Retire asks first.
+    expect(view.queryByTestId("inspect-action:identity:coordinator:retire") === null).toBe(true);
+    fireEvent.click(view.getByTestId("inspect-menu:identity:coordinator"));
     const action = view.getByTestId("inspect-action:identity:coordinator:retire");
-    expect(action.classList.contains("cc-btn--danger")).toBe(true);
-    fireEvent.click(action);
-    expect(retire.mock.calls.length).toBe(1);
+    expect(action.getAttribute("role")).toBe("menuitem");
+    expect(action.classList.contains("is-destructive")).toBe(true);
     expect(view.queryByTestId("inspect-action:identity:coordinator:respawn") === null).toBe(true);
+    fireEvent.click(action);
+    expect(retire.mock.calls.length).toBe(0);
+    const confirm = view.getByTestId("inspect-confirm:identity:coordinator:retire");
+    expect(confirm.getAttribute("role")).toBe("alertdialog");
+    expect(confirm.textContent?.includes("Retire Coordinator?")).toBe(true);
+    expect(confirm.textContent?.includes("It stops and leaves the team.")).toBe(true);
+    fireEvent.click(view.getByTestId("inspect-confirm-yes:identity:coordinator:retire"));
+    expect(retire.mock.calls.length).toBe(1);
+    expect(view.queryByTestId("inspect-confirm:identity:coordinator:retire") === null).toBe(true);
+  });
+
+  it("asks before a reset and cancels on Escape, and respawns at once", () => {
+    const reset = vi.fn();
+    const respawn = vi.fn();
+    const view = render(
+      <AgentDetailsPanel
+        identity="identity:coordinator"
+        inspect={inspect()}
+        agent={agent}
+        stateLabel="active"
+        actions={{ respawn: { label: "Respawn", onClick: respawn }, reset: { label: "Reset", onClick: reset } }}
+      />,
+    );
+    fireEvent.click(view.getByTestId("inspect-menu:identity:coordinator"));
+    fireEvent.click(view.getByTestId("inspect-action:identity:coordinator:respawn"));
+    expect(respawn.mock.calls.length).toBe(1);
+    fireEvent.click(view.getByTestId("inspect-menu:identity:coordinator"));
+    fireEvent.click(view.getByTestId("inspect-action:identity:coordinator:reset"));
+    const confirm = view.getByTestId("inspect-confirm:identity:coordinator:reset");
+    expect(document.activeElement === view.getByTestId("inspect-confirm-cancel:identity:coordinator:reset")).toBe(true);
+    fireEvent.keyDown(confirm, { key: "Escape" });
+    expect(view.queryByTestId("inspect-confirm:identity:coordinator:reset") === null).toBe(true);
+    expect(reset.mock.calls.length).toBe(0);
+  });
+
+  it("reads a busy agent as Working with the live mark, never Unknown or Ready", () => {
+    const busy = {
+      ...agent,
+      state: "active",
+      response_phase: "tool-executing",
+      progress: { run_state: "run_open", in_flight_work: 1, last_progress_at_ms: NOW - 30_000, last_progress_event: "became_busy", health: "unknown" },
+    } as ConsoleAgent;
+    const view = render(
+      <AgentDetailsPanel identity="identity:coordinator" inspect={inspect({ state: "ready" })} agent={busy} stateLabel="ready" actions={{}} />,
+    );
+    expect(view.getByTestId("inspect-state:identity:coordinator").textContent).toBe("Working");
+    const pill = view.getByTestId("inspect-status:identity:coordinator");
+    expect(pill.getAttribute("data-tone")).toBe("live");
+    expect(view.getByTestId("inspect-now:identity:coordinator").querySelector(".agent-details__now")?.textContent?.startsWith("Running a tool")).toBe(true);
+    expect(view.getByTestId("inspect-panel:identity:coordinator").querySelector(".cc-panel-head .cc-agent__avatar.is-live") !== null).toBe(true);
+  });
+
+  it("shows a glance at the day, the recent turns part and the ego graph of its peers", () => {
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <AgentDetailsPanel identity="identity:coordinator" inspect={inspect()} agent={agent} stateLabel="active" actions={{}} />
+      </AgentDirectoryProvider>,
+    );
+    expect(view.getByTestId("inspect-glance:turns").textContent?.includes("Turns today")).toBe(true);
+    expect(view.getByTestId("inspect-glance:failures").textContent?.includes("none today")).toBe(true);
+    expect(view.getByTestId("inspect-recent-turns").textContent?.includes("No turns in the last 24 hours")).toBe(true);
+    const ego = view.getByTestId("inspect-ego-graph");
+    expect(ego.getAttribute("aria-roledescription")).toBe("graph");
+    expect(ego.getAttribute("aria-label")).toBe("Coordinator and 1 connection");
+  });
+
+  it("lists the work it owns or claimed, the item in progress live, ids in tooltips", () => {
+    const view = render(
+      <AgentDetailsPanel
+        identity="identity:coordinator"
+        inspect={inspect()}
+        agent={agent}
+        stateLabel="active"
+        actions={{}}
+        work={[
+          { id: "wi-41", title: "Collect vendor scorecards", status: "in_progress", claimedAt: new Date(NOW - 2 * 3_600_000).toISOString() },
+          { id: "wi-44", title: "Summarize the scorecards", status: "ready" },
+        ]}
+      />,
+    );
+    const work = view.getByTestId("inspect-work:identity:coordinator");
+    const first = view.getByTestId("inspect-work-item:wi-41");
+    expect(first.classList.contains("is-live")).toBe(true);
+    expect(first.textContent?.includes("Collect vendor scorecards")).toBe(true);
+    expect(first.textContent?.includes("claimed 2h ago")).toBe(true);
+    expect(first.querySelector('[title="wi-41"]') !== null).toBe(true);
+    expect(work.textContent?.includes("wi-44")).toBe(false);
+    expect(view.getByTestId("inspect-work-item:wi-44").textContent?.includes("Ready")).toBe(true);
+  });
+
+  it("names the agent that started a helper and draws the lineage in the ego graph", () => {
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <AgentDetailsPanel identity="identity:coordinator" inspect={inspect()} agent={agent} stateLabel="active" actions={{}} spawnedBy="identity:analyst" />
+      </AgentDirectoryProvider>,
+    );
+    const panel = view.getByTestId("inspect-panel:identity:coordinator");
+    expect(panel.textContent?.includes("Started by")).toBe(true);
+    expect(view.queryByTestId("inspect-ego-edge:identity:analyst:identity:coordinator:lineage") !== null).toBe(true);
+  });
+
+  it("explains an inspect answer it could not read, with Retry", () => {
+    const refresh = vi.fn();
+    const view = render(
+      <AgentDetailsPanel identity="identity:coordinator" inspect={null} agent={agent} stateLabel={null} actions={{}} onRefresh={refresh} />,
+    );
+    expect(view.getByText("Couldn't load this agent's details").className).toBe("cc-panel-empty__title");
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    expect(refresh.mock.calls.length).toBe(1);
   });
 
   it("names an agent without a display name the way the sidebar does", () => {
@@ -200,11 +320,15 @@ describe("HealthPanel", () => {
     const onOpen = vi.fn();
     const view = render(<HealthPanel identities={rows} stateLabel={identityStateLabel} onOpen={onOpen} />);
     expect(view.getByRole("heading", { level: 2 }).textContent).toBe("Health");
-    expect(view.getByText("3 agents · 1 healthy · 1 stalled").className).toBe("cc-panel-head__sub");
+    const summary = view.getByTestId("health-summary");
+    expect(summary.classList.contains("cc-panel-head__sub")).toBe(true);
+    expect(summary.textContent).toBe("3 agents · 1 healthy · 1 stalled");
+    expect(summary.querySelector('[data-tone="crit"]')?.textContent?.includes("1 stalled")).toBe(true);
     const writer = view.getByTestId("health-identity:identity:writer");
     expect(writer.textContent?.includes("Docs Writer")).toBe(true);
     expect(writer.querySelector('.cc-chip[data-tone="crit"]')?.textContent).toBe("Stalled");
-    expect(writer.textContent?.includes("47m ago")).toBe(true);
+    // Since when, in words: the reason carries the age.
+    expect(writer.textContent?.includes("stalled 47m")).toBe(true);
     const monitor = view.getByTestId("health-identity:identity:monitor");
     expect(monitor.textContent?.includes("Internal only")).toBe(true);
     expect(monitor.textContent?.includes("internal_only")).toBe(false);
@@ -216,8 +340,8 @@ describe("HealthPanel", () => {
     const nameless = { identity: "router:main", state: "active", addressability: "addressable" } as IdentityStatusRow;
     const view = render(<HealthPanel identities={[nameless]} stateLabel={identityStateLabel} />);
     const row = view.getByTestId("health-identity:router:main");
-    expect(row.querySelector(".cc-row__title")?.textContent).toBe("Router main");
-    expect(row.querySelector(".cc-row__title")?.getAttribute("title")).toBe("router:main");
+    expect(row.querySelector(".cc-entity__title")?.textContent).toBe("Router main");
+    expect(row.querySelector(".cc-entity__title [title]")?.getAttribute("title")).toBe("router:main");
   });
 
   it("makes a row a button only when its agent's details can open", () => {
@@ -229,12 +353,48 @@ describe("HealthPanel", () => {
         canOpen={(identity) => identity !== "identity:monitor"}
       />,
     );
-    expect(view.getByTestId("health-identity:identity:writer").tagName).toBe("BUTTON");
-    expect(view.getByTestId("health-identity:identity:monitor").tagName).toBe("DIV");
+    expect(view.getByTestId("health-identity:identity:writer").querySelector("button.cc-entity__hit") !== null).toBe(true);
+    expect(view.getByTestId("health-identity:identity:monitor").querySelector("button.cc-entity__hit") === null).toBe(true);
   });
 
   it("has a designed empty state", () => {
     const view = render(<HealthPanel identities={[]} stateLabel={identityStateLabel} />);
     expect(view.getByText("No agents to report on yet").className).toBe("cc-panel-empty__title");
+  });
+
+  it("puts the worst first, counts each health at a glance and filters by a figure", () => {
+    const degraded: IdentityStatusRow = { identity: "identity:release", display_name: "Release", state: "active", addressability: "addressable", labels: {}, progress: { run_state: "idle", in_flight_work: 1, last_progress_at_ms: NOW - 18 * 60_000, last_progress_event: "became_idle", health: "degraded" } };
+    const view = render(<HealthPanel identities={[...rows, degraded]} stateLabel={identityStateLabel} onOpen={() => {}} />);
+    const order = Array.from(view.getByTestId("health-tiles").querySelectorAll("[data-testid^='health-tile:']")).map((tile) => tile.getAttribute("data-testid"));
+    expect(order).toEqual(["health-tile:identity:writer", "health-tile:identity:release", "health-tile:identity:coordinator", "health-tile:identity:monitor"]);
+    expect(view.getByTestId("health-identity:identity:writer").textContent?.includes("stalled 47m · run open · 1 in flight")).toBe(true);
+    expect(view.getByTestId("health-identity:identity:release").textContent?.includes("idle 18m · 1 in flight")).toBe(true);
+    expect(view.getByTestId("health-glance:degraded").textContent?.includes("1")).toBe(true);
+    fireEvent.click(view.getByTestId("health-glance:degraded"));
+    expect(view.getByTestId("health-glance:degraded").getAttribute("aria-pressed")).toBe("true");
+    expect(view.queryByTestId("health-tile:identity:writer") === null).toBe(true);
+    expect(view.queryByTestId("health-tile:identity:release") !== null).toBe(true);
+    expect(view.getByTestId("health-heat").querySelector("svg[role='img']") !== null).toBe(true);
+  });
+
+  it("reads a busy agent whose health the team cannot judge as Working, never Unknown", () => {
+    const busy: IdentityStatusRow = { identity: "identity:orders", display_name: "Orders", state: "active", addressability: "addressable", labels: {}, progress: { run_state: "run_open", in_flight_work: 0, last_progress_at_ms: NOW - 60_000, last_progress_event: "became_busy", health: "unknown" } };
+    const agents = [{ member_id: "identity:orders", identity: "identity:orders", agent_id: "identity:orders", label: "Orders", kind: "identity", response_phase: "tool-executing", progress: busy.progress } as ConsoleAgent];
+    const view = render(<HealthPanel identities={[busy]} agents={agents} stateLabel={identityStateLabel} />);
+    const tile = view.getByTestId("health-identity:identity:orders");
+    expect(tile.querySelector('.cc-chip[data-tone="live"]')?.textContent).toBe("Working");
+    expect(/unknown/i.test(tile.textContent || "")).toBe(false);
+    expect(view.getByTestId("health-summary").textContent?.includes("1 working")).toBe(true);
+  });
+
+  it("says whether the team runs and which modules it loaded", () => {
+    const view = render(
+      <HealthPanel identities={rows} stateLabel={identityStateLabel} team={{ running: true, loadedModules: ["router", "delivery"], loadedModuleCount: 2 }} />,
+    );
+    expect(view.getByTestId("health-summary").textContent?.endsWith("team running · 2 modules")).toBe(true);
+    const team = view.getByTestId("health-team");
+    expect(team.textContent?.includes("Running")).toBe(true);
+    expect(team.textContent?.includes("router")).toBe(true);
+    expect(team.textContent?.includes("delivery")).toBe(true);
   });
 });

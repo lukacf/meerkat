@@ -442,6 +442,63 @@ test("observed remote edges remain visible but fail closed without a remote node
   assert.equal(edge?.actions.disconnect?.state, "denied");
 });
 
+test("topology query keeps every reported pair with its flags, not only the wired ones", () => {
+  const flags = { actual: false, declared: false, operator_added: false, suppressed: false, desired: false };
+  const pair = (a: string, b: string, set: Partial<typeof flags>, authority?: string) => ({
+    edge: { a: { identity: a }, b: authority ? { authority, identity: b } : { identity: b } },
+    ...flags,
+    ...set,
+  });
+  const normalized = normalizeConsoleTopologyQuery(query({
+    edges: [
+      pair("incident-commander", "payments-sre", { actual: true, declared: true, desired: true }),
+      // Declared and wanted, but the members do not list each other: a degraded wiring.
+      pair("incident-commander", "api-investigator", { declared: true, desired: true }),
+      // Declared, then disconnected by an operator.
+      pair("payments-sre", "api-investigator", { declared: true, suppressed: true }),
+      // Added by an operator across teams: one runtime never attests the other half.
+      pair("incident-commander", "billing", { operator_added: true, desired: true }, "billing-team"),
+      // A reported pair without any flag says nothing.
+      pair("payments-sre", "scribe", {}),
+    ],
+  }), { capabilities: editableCapabilities });
+  assert.ok(normalized);
+  assert.equal(normalized.authority, AUTHORITY);
+  const link = (a: string, b: string, authority?: string) => normalized.links.find((candidate) => {
+    const ends = [candidate.from, candidate.to];
+    return ends.includes(endpointId(a)) && ends.includes(endpointId(b, authority));
+  });
+  assert.deepEqual(link("incident-commander", "payments-sre"), {
+    from: endpointId("incident-commander"),
+    to: endpointId("payments-sre"),
+    actual: true,
+    declared: true,
+    desired: true,
+    suppressed: false,
+    operatorAdded: false,
+    cross: false,
+  });
+  assert.equal(link("incident-commander", "api-investigator")?.actual, false);
+  assert.equal(link("incident-commander", "api-investigator")?.desired, true);
+  assert.equal(link("payments-sre", "api-investigator")?.suppressed, true);
+  assert.equal(link("payments-sre", "api-investigator")?.desired, false);
+  const cross = link("incident-commander", "billing", "billing-team");
+  assert.equal(cross?.cross, true);
+  assert.equal(cross?.operatorAdded, true);
+  assert.equal(link("payments-sre", "scribe"), undefined);
+  assert.equal(normalized.links.length, 4);
+  // Only actual peers are wired.
+  assert.deepEqual(
+    normalized.nodes.find((node) => node.ref?.identity === "incident-commander")?.wired_to,
+    [endpointId("payments-sre")],
+  );
+  // The other team's agent is a node of its own scope.
+  const remote = normalized.nodes.find((node) => node.ref?.identity === "billing");
+  assert.equal(remote?.presentation?.crossScope, true);
+  assert.equal(remote?.presentation?.scopeLabel, "billing-team");
+  assert.equal(normalized.nodes.find((node) => node.ref?.identity === "payments-sre")?.presentation, undefined);
+});
+
 test("terminal server receipts replace optimistic edge blockers", () => {
   const intent = {
     action: "connect" as const,

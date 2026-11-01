@@ -1,0 +1,120 @@
+/* Roster panel (console v2 spec B8).
+   Split from console-host.css (imported there, in this order). Built from
+   the panel kit (PanelHeader v2, GlanceStrip, FilterBar, EntityCard and
+   EntityRow, DrawerLayout and DetailDrawer); only the grid, the group
+   heads and the drawer's own rows are roster-specific. */
+
+/* ── Frame ──────────────────────────────────────────────────── */
+.roster__measure { height: 0; flex: none; }
+.roster__filters { flex: none; }
+.roster__groups .cc-count { color: var(--_cc-foreground-meta); }
+/* In a narrow pane the group pills scroll sideways instead of overflowing. */
+.roster__groups { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.roster__groups::-webkit-scrollbar { display: none; }
+.roster__groups .cc-seg__btn { flex: none; }
+.roster__layout { flex: 1 1 auto; min-height: 0; }
+.roster__main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.roster__main > .cc-panel-empty { margin: auto 0; }
+
+/* ── Cards (720 px and up) ─────────────────────────────────── */
+.roster__cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--_cc-sp-7);
+  padding: var(--_cc-sp-6) var(--_cc-panel-pad-x) var(--_cc-sp-8);
+}
+.roster__group { display: flex; flex-direction: column; gap: var(--_cc-sp-4); min-width: 0; }
+.roster__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.roster__group-head .cc-count { letter-spacing: 0; text-transform: none; }
+.roster__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--_cc-sp-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.roster__cell { display: flex; min-width: 0; }
+.roster__cell > .cc-entity { flex: 1 1 auto; }
+.roster__card .cc-entity__now { min-height: 1.4em; }
+.roster__card .cc-entity__now-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.roster__card.is-retired,
+.roster__row.is-retired { opacity: 0.62; }
+.roster__card.is-retired:hover,
+.roster__card.is-retired:focus-within { opacity: 1; }
+.roster__more {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-link-ink, var(--_cc-link));
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.roster__more:hover { text-decoration: underline; }
+.roster__more:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; border-radius: var(--_cc-radius-xs); }
+
+/* Wired peers on a card: names that open the agent, then "+N". */
+.roster__relations { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.roster__relations-mark { width: 12px; height: 12px; color: var(--_cc-foreground-meta); }
+.roster__relation { font-size: var(--_cc-panel-fs-meta); }
+.roster__relation .cc-agent__name { color: var(--_cc-foreground-muted); }
+.roster__relation-more { color: var(--_cc-foreground-meta); font-variant-numeric: tabular-nums; }
+
+/* The attention figure's foot: one mark and word per kind. */
+.roster__attention-foot { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
+.roster__attention-foot > span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ── List (under 720 px, or chosen) ────────────────────────── */
+.roster__list { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.roster__list[data-windowed="true"] .roster__row { height: 48px; }
+.roster__id {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono);
+  color: var(--_cc-foreground-meta);
+}
+
+/* ── Drawer ─────────────────────────────────────────────────── */
+.roster__actions { display: flex; flex-direction: column; gap: 8px; }
+.roster__now {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--_cc-foreground);
+}
+.roster__now > .cc-mark { margin-top: 4.5px; }
+.roster__peers { gap: 6px; }
+.roster__peer {
+  display: inline-flex; align-items: center;
+  max-width: 100%; min-width: 0;
+  height: 24px; padding: 0 8px 0 3px;
+  border: 1px solid var(--_cc-border-soft); border-radius: var(--_cc-radius-pill);
+  background: transparent; color: var(--_cc-foreground);
+  font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.roster__peer:hover { border-color: var(--_cc-border-strong); background: var(--_cc-surface-hover); }
+.roster__peer:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+.roster__peer.is-static { padding-left: 8px; color: var(--_cc-foreground-muted); cursor: default; }
+.roster__peer.is-static:hover { border-color: var(--_cc-border-soft); background: transparent; }
+.roster__drawer .cc-heat { max-width: 100%; overflow-x: auto; }
+/* Four short rows in the drawer: labels a step smaller than the cells' pitch. */
+.roster__drawer .cc-heat__label { font-size: 9.5px; }

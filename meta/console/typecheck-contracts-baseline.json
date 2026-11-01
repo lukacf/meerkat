@@ -5,12 +5,6 @@
   "sourceHead": "0071edb7abd21d57573c7cb02560f0af7bbfba1d",
   "diagnostics": [
     {
-      "file": "console/src/ConsoleApp.tsx",
-      "code": 2353,
-      "message": "Object literal may only specify known properties, and 'version' does not exist in type 'WorkGraphPanelData | (() => WorkGraphPanelData)'.",
-      "count": 1
-    },
-    {
       "file": "console/src/lib/adapters.ts",
       "code": 2352,
       "message": "Conversion of type 'ConversationRichBlock' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type 'ConversationRichThinkingBlock' is not comparable to type 'Record<string, unknown>'.\n    Index signature for type 'string' is missing in type 'ConversationRichThinkingBlock'.",
@@ -83,12 +77,6 @@
       "count": 5
     },
     {
-      "file": "console/src/panels/MetaDock.tsx",
-      "code": 2339,
-      "message": "Property 'id' does not exist on type 'ConsoleDockNode'.\n  Property 'id' does not exist on type 'ConsoleDockPanelNode'.",
-      "count": 1
-    },
-    {
       "file": "console/src/panels/Sidebar.tsx",
       "code": 2677,
       "message": "A type predicate's type must be assignable to its parameter's type.\n  Type '{ id: string; label: string; value: string; tone?: string; }' is not assignable to type '{ id: string; label: string; value: string; tone: string; }'.\n    Property 'tone' is optional in type '{ id: string; label: string; value: string; tone?: string; }' but required in type '{ id: string; label: string; value: string; tone: string; }'.",
@@ -105,12 +93,6 @@
       "code": 2300,
       "message": "Duplicate identifier 'session_id'.",
       "count": 2
-    },
-    {
-      "file": "packages/console-components/src/topology/dense-graph-map.tsx",
-      "code": 2339,
-      "message": "Property 'name' does not exist on type '{ name: string; x: number; y: number; count: number; colour: string; } | { x: number; y: number; count: number; }'.\n  Property 'name' does not exist on type '{ x: number; y: number; count: number; }'.",
-      "count": 1
     },
     {
       "file": "packages/console-core/src/control-plane.ts",

@@ -22,11 +22,24 @@ import {
   type ConsoleScheduleTimingKind,
 } from "../lib/schedules";
 import {
+  SCHEDULE_RUN_WINDOW_MS,
+  formatRunTime,
+  nextPlannedRun,
+  planScheduleRuns,
+  type ScheduleKind,
+  type ScheduleRunPlan,
+} from "../lib/schedule-runs";
+import {
   Chip,
+  Countdown,
+  DotStrip,
   EmptyState,
+  KitGlyph,
   LoadingState,
   Notice,
   useAgentDirectory,
+  type DotShape,
+  type DotStripItem,
 } from "../../../packages/console-components/src/panel-kit";
 
 /// The least time between two list reads the pane's refreshes cause: the
@@ -42,6 +55,274 @@ const WEEKDAYS: Array<{ day: number; label: string }> = [
   { day: 6, label: "Sat" },
   { day: 0, label: "Sun" },
 ];
+
+/** The mark of each schedule kind on a time strip (spec B10): once = a
+ * filled square, a repeat = a tick, a calendar = a diamond. */
+export const SCHEDULE_KIND_SHAPE: Record<ScheduleKind, DotShape> = {
+  once: "square",
+  interval: "tick",
+  calendar: "diamond",
+  unknown: "dot",
+};
+
+/** A form draft with one weekday toggled. */
+export function toggleDraftWeekday(draft: ConsoleScheduleDraft, day: number): ConsoleScheduleDraft {
+  const weekdays = draft.weekdays.includes(day)
+    ? draft.weekdays.filter((entry) => entry !== day)
+    : [...draft.weekdays, day];
+  return { ...draft, weekdays };
+}
+
+export interface ScheduleFormProps {
+  /** The agent the schedule sends to (its id names the form's test id). */
+  identity: string;
+  /** The agent's name for the hint; the id otherwise. */
+  agentName?: string;
+  /** The schedule being edited; null for a new one. */
+  schedule: ConsoleSchedule | null;
+  draft: ConsoleScheduleDraft;
+  error: string | null;
+  /** A write is running: the save button waits. */
+  busy: boolean;
+  /** This form's save is the running write. */
+  saving: boolean;
+  onChange: (patch: Partial<ConsoleScheduleDraft>) => void;
+  onToggleWeekday: (day: number) => void;
+  onSubmit: (event: React.FormEvent) => void;
+  onCancel: () => void;
+  formatTime?: (iso: string) => string;
+  /** Fields before the message (the Schedules panel's agent choice). */
+  lead?: React.ReactNode;
+  className?: string;
+}
+
+/**
+ * The schedule form (create and edit): name, message, when (keep, once,
+ * repeating, daily with weekdays and a time zone), the refusal of the form
+ * itself, and Save or Cancel. Agent details shows it inline; the Schedules
+ * panel shows it in its drawer.
+ */
+export function ScheduleForm({
+  identity,
+  agentName,
+  schedule,
+  draft,
+  error,
+  busy,
+  saving,
+  onChange: change,
+  onToggleWeekday,
+  onSubmit,
+  onCancel,
+  formatTime = formatScheduleTime,
+  lead,
+  className,
+}: ScheduleFormProps): React.JSX.Element {
+  return (
+    <form
+      className={["console-schedules__form", className].filter(Boolean).join(" ")}
+      data-testid={`schedule-form:${identity}`}
+      aria-label={schedule ? "Edit schedule" : "New schedule"}
+      onSubmit={onSubmit}
+    >
+      {lead}
+      <label className="console-schedules__field">
+        Name (optional)
+        <input
+          className="cc-input"
+          data-testid="schedule-form-name"
+          value={draft.name}
+          onChange={(event) => change({ name: event.target.value })}
+        />
+      </label>
+      <label className="console-schedules__field">
+        Message
+        <textarea
+          className="cc-input"
+          data-testid="schedule-form-content"
+          rows={3}
+          value={draft.content}
+          onChange={(event) => change({ content: event.target.value })}
+        />
+      </label>
+      <label className="console-schedules__field">
+        When
+        <span className="cc-select">
+          <select
+            className="cc-select__control"
+            data-testid="schedule-form-timing"
+            value={draft.timing}
+            onChange={(event) => change({ timing: event.target.value as ConsoleScheduleTimingKind })}
+          >
+            {schedule ? (
+              <option value="keep">{`Keep: ${describeScheduleTrigger(schedule.trigger, formatTime)}`}</option>
+            ) : null}
+            <option value="once">Once</option>
+            <option value="interval">Repeating</option>
+            <option value="daily">Daily</option>
+          </select>
+          <KitGlyph name="chevron" className="cc-select__chevron" />
+        </span>
+      </label>
+      {draft.timing === "once" ? (
+        <label className="console-schedules__field">
+          At
+          <input
+            className="cc-input"
+            type="datetime-local"
+            data-testid="schedule-form-at"
+            value={draft.at}
+            onChange={(event) => change({ at: event.target.value })}
+          />
+        </label>
+      ) : null}
+      {draft.timing === "interval" ? (
+        <>
+          <div className="console-schedules__inline">
+            <label className="console-schedules__field">
+              Every
+              <input
+                className="cc-input"
+                type="number"
+                min={1}
+                step={1}
+                data-testid="schedule-form-every"
+                value={draft.every}
+                onChange={(event) => change({ every: event.target.value })}
+              />
+            </label>
+            <label className="console-schedules__field">
+              Unit
+              <span className="cc-select">
+                <select
+                  className="cc-select__control"
+                  data-testid="schedule-form-unit"
+                  value={draft.unit}
+                  onChange={(event) => change({ unit: event.target.value as ConsoleScheduleIntervalUnit })}
+                >
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                </select>
+                <KitGlyph name="chevron" className="cc-select__chevron" />
+              </span>
+            </label>
+          </div>
+          <label className="console-schedules__field">
+            First send (optional; one interval from now when blank)
+            <input
+              className="cc-input"
+              type="datetime-local"
+              data-testid="schedule-form-start"
+              value={draft.start}
+              onChange={(event) => change({ start: event.target.value })}
+            />
+          </label>
+        </>
+      ) : null}
+      {draft.timing === "daily" ? (
+        <>
+          <label className="console-schedules__field">
+            At
+            <input
+              className="cc-input"
+              type="time"
+              data-testid="schedule-form-time"
+              value={draft.time}
+              onChange={(event) => change({ time: event.target.value })}
+            />
+          </label>
+          <fieldset className="console-schedules__days">
+            <legend>On (every day when none is picked)</legend>
+            {WEEKDAYS.map(({ day, label }) => (
+              <label key={day}>
+                <input
+                  type="checkbox"
+                  data-testid={`schedule-form-day:${day}`}
+                  checked={draft.weekdays.includes(day)}
+                  onChange={() => onToggleWeekday(day)}
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+          <label className="console-schedules__field">
+            Time zone
+            <input
+              className="cc-input"
+              data-testid="schedule-form-timezone"
+              value={draft.timezone}
+              onChange={(event) => change({ timezone: event.target.value })}
+            />
+          </label>
+        </>
+      ) : null}
+      <p className="console-schedules__hint">
+        Each send goes to {agentName || identity} as you, through the same checks as a message you send now.
+      </p>
+      {error ? (
+        <Notice tone="crit" role="alert" className="console-schedules__error" testId="schedule-form-error">
+          {error}
+        </Notice>
+      ) : null}
+      <div className="cc-btn-row console-schedules__actions">
+        <button type="submit" className="cc-btn cc-btn--primary" data-testid="schedule-form-save" disabled={busy}>
+          {saving ? "Saving..." : schedule ? "Save" : "Create schedule"}
+        </button>
+        <button
+          type="button"
+          className="cc-btn cc-btn--ghost"
+          data-testid="schedule-form-cancel"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** The width of an element, followed as it resizes (a fallback until
+ * measured). The ref is a callback, so an element that mounts later (a
+ * view switched to) is measured too. */
+export function useMeasuredWidth<T extends HTMLElement>(fallback: number): [(node: T | null) => void, number] {
+  const [node, setNode] = React.useState<T | null>(null);
+  const [width, setWidth] = React.useState(fallback);
+  React.useEffect(() => {
+    if (!node) return undefined;
+    const measure = () => {
+      const next = Math.round(node.getBoundingClientRect().width);
+      if (next > 0) setWidth((current) => (current === next ? current : next));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [node]);
+  return [setNode, width];
+}
+
+/** A schedule's planned runs as strip marks: shaped by kind, the next run
+ * in the accent, a paused schedule's runs faint. */
+export function scheduleStripItems(plans: readonly ScheduleRunPlan[]): DotStripItem[] {
+  const items: DotStripItem[] = [];
+  for (const plan of plans) {
+    const name = plan.schedule.name || "Untitled schedule";
+    const paused = plan.schedule.phase !== "active";
+    plan.runs.forEach((run, index) => {
+      items.push({
+        id: `${plan.schedule.scheduleId}:${index}`,
+        t: run,
+        shape: paused ? "hollow" : SCHEDULE_KIND_SHAPE[plan.kind],
+        live: !paused && plan.next === run,
+        faint: paused,
+        label: `${name} · ${formatRunTime(run, plan.schedule)}${paused ? " (paused)" : ""}`,
+      });
+    });
+  }
+  return items;
+}
 
 export interface SchedulesSectionProps {
   /** The agent whose schedules the section lists. */
@@ -60,7 +341,7 @@ export interface SchedulesSectionProps {
   formatTime?: (iso: string) => string;
 }
 
-interface ScheduleForm {
+interface ScheduleFormState {
   /** The schedule being edited; null for a new one. */
   schedule: ConsoleSchedule | null;
   draft: ConsoleScheduleDraft;
@@ -72,6 +353,7 @@ interface ScheduleForm {
  * console sends to the agent as the viewer who defined them. A viewer who
  * may change them creates, edits, pauses, resumes and deletes them here;
  * anyone else sees the list read-only. The gateway judges every change.
+ * Above the list, the next run and a strip of the next seven days.
  */
 export function SchedulesSection({
   identity,
@@ -92,7 +374,8 @@ export function SchedulesSection({
   const directory = useAgentDirectory();
   const senderLabel = (sender: string) => directory.lookup(sender)?.label;
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
-  const [form, setForm] = React.useState<ScheduleForm | null>(null);
+  const [form, setForm] = React.useState<ScheduleFormState | null>(null);
+  const [stripRef, stripWidth] = useMeasuredWidth<HTMLDivElement>(480);
   const runRef = React.useRef(run);
   runRef.current = run;
   const nowRef = React.useRef(now);
@@ -143,6 +426,16 @@ export function SchedulesSection({
     }
   }, [editing.canChange]);
 
+  // The planned runs of the next seven days, from the list as read.
+  const nowMs = now().getTime();
+  const nowMinute = Math.floor(nowMs / 60_000) * 60_000;
+  const plans = React.useMemo(
+    () => schedules.map((schedule) => planScheduleRuns(schedule, nowMinute, SCHEDULE_RUN_WINDOW_MS)),
+    [schedules, nowMinute],
+  );
+  const next = nextPlannedRun(plans);
+  const stripItems = React.useMemo(() => scheduleStripItems(plans), [plans]);
+
   async function write(
     command: ConsoleScheduleCommand,
     params: Record<string, unknown>,
@@ -189,13 +482,7 @@ export function SchedulesSection({
   }
 
   function toggleWeekday(day: number) {
-    setForm((current) => {
-      if (!current) return current;
-      const weekdays = current.draft.weekdays.includes(day)
-        ? current.draft.weekdays.filter((entry) => entry !== day)
-        : [...current.draft.weekdays, day];
-      return { ...current, draft: { ...current.draft, weekdays }, error: null };
-    });
+    setForm((current) => (current ? { ...current, draft: toggleDraftWeekday(current.draft, day), error: null } : current));
   }
 
   function submit(event: React.FormEvent) {
@@ -225,6 +512,7 @@ export function SchedulesSection({
   }
 
   const headingId = `schedules-heading:${identity}`;
+  const agentName = directory.lookup(identity)?.label;
   return (
     <section
       className="console-schedules"
@@ -269,7 +557,51 @@ export function SchedulesSection({
           {actionError}
         </Notice>
       ) : null}
-      {form && editing.canChange ? renderForm(form) : null}
+      {schedules.length > 0 ? (
+        <div className="console-schedules__glance" ref={stripRef}>
+          <p className="console-schedules__next" data-testid={`schedules-next:${identity}`}>
+            {next ? (
+              <>
+                <span className="console-schedules__next-label">Next</span>
+                <span className="console-schedules__next-name">{next.plan.schedule.name || "Untitled schedule"}</span>
+                <Countdown to={next.at} now={nowMs} />
+              </>
+            ) : (
+              <span className="console-schedules__next-label">No run planned</span>
+            )}
+          </p>
+          <div className="console-schedules__strip">
+            <span className="console-schedules__strip-label" aria-hidden="true">Next 7 days</span>
+            <DotStrip
+              items={stripItems}
+              start={nowMinute}
+              end={nowMinute + SCHEDULE_RUN_WINDOW_MS}
+              width={Math.max(160, stripWidth)}
+              height={18}
+              axis
+              label={`Next 7 days: ${stripItems.filter((item) => !item.faint).length} planned runs`}
+              testIdPrefix={`schedule-run:${identity}`}
+              testId={`schedules-strip:${identity}`}
+            />
+          </div>
+        </div>
+      ) : null}
+      {form && editing.canChange ? (
+        <ScheduleForm
+          identity={identity}
+          agentName={agentName}
+          schedule={form.schedule}
+          draft={form.draft}
+          error={form.error}
+          busy={busy !== null}
+          saving={busy === "form"}
+          onChange={change}
+          onToggleWeekday={toggleWeekday}
+          onSubmit={submit}
+          onCancel={() => setForm(null)}
+          formatTime={formatTime}
+        />
+      ) : null}
       {status === "loading" && schedules.length === 0 ? <LoadingState label="Loading schedules" rows={2} /> : null}
       {status === "ready" && schedules.length === 0 ? (
         <EmptyState inline title="No schedules for this agent." testId={`schedules-empty:${identity}`} />
@@ -293,6 +625,7 @@ export function SchedulesSection({
           <Chip
             className="console-schedules__phase"
             tone={schedule.phase === "active" ? "ok" : schedule.phase === "paused" ? "warn" : "neutral"}
+            mark
             testId={`schedule-phase:${id}`}
           >
             {describeSchedulePhase(schedule.phase)}
@@ -389,157 +722,6 @@ export function SchedulesSection({
           </div>
         ) : null}
       </li>
-    );
-  }
-
-  function renderForm(current: ScheduleForm) {
-    const { draft, schedule } = current;
-    const saving = busy === "form";
-    return (
-      <form
-        className="console-schedules__form"
-        data-testid={`schedule-form:${identity}`}
-        aria-label={schedule ? "Edit schedule" : "New schedule"}
-        onSubmit={submit}
-      >
-        <label className="console-schedules__field">
-          Name (optional)
-          <input
-            data-testid="schedule-form-name"
-            value={draft.name}
-            onChange={(event) => change({ name: event.target.value })}
-          />
-        </label>
-        <label className="console-schedules__field">
-          Message
-          <textarea
-            data-testid="schedule-form-content"
-            rows={3}
-            value={draft.content}
-            onChange={(event) => change({ content: event.target.value })}
-          />
-        </label>
-        <label className="console-schedules__field">
-          When
-          <select
-            data-testid="schedule-form-timing"
-            value={draft.timing}
-            onChange={(event) => change({ timing: event.target.value as ConsoleScheduleTimingKind })}
-          >
-            {schedule ? (
-              <option value="keep">{`Keep: ${describeScheduleTrigger(schedule.trigger, formatTime)}`}</option>
-            ) : null}
-            <option value="once">Once</option>
-            <option value="interval">Repeating</option>
-            <option value="daily">Daily</option>
-          </select>
-        </label>
-        {draft.timing === "once" ? (
-          <label className="console-schedules__field">
-            At
-            <input
-              type="datetime-local"
-              data-testid="schedule-form-at"
-              value={draft.at}
-              onChange={(event) => change({ at: event.target.value })}
-            />
-          </label>
-        ) : null}
-        {draft.timing === "interval" ? (
-          <>
-            <div className="console-schedules__inline">
-              <label className="console-schedules__field">
-                Every
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  data-testid="schedule-form-every"
-                  value={draft.every}
-                  onChange={(event) => change({ every: event.target.value })}
-                />
-              </label>
-              <label className="console-schedules__field">
-                Unit
-                <select
-                  data-testid="schedule-form-unit"
-                  value={draft.unit}
-                  onChange={(event) => change({ unit: event.target.value as ConsoleScheduleIntervalUnit })}
-                >
-                  <option value="minutes">minutes</option>
-                  <option value="hours">hours</option>
-                  <option value="days">days</option>
-                </select>
-              </label>
-            </div>
-            <label className="console-schedules__field">
-              First send (optional; one interval from now when blank)
-              <input
-                type="datetime-local"
-                data-testid="schedule-form-start"
-                value={draft.start}
-                onChange={(event) => change({ start: event.target.value })}
-              />
-            </label>
-          </>
-        ) : null}
-        {draft.timing === "daily" ? (
-          <>
-            <label className="console-schedules__field">
-              At
-              <input
-                type="time"
-                data-testid="schedule-form-time"
-                value={draft.time}
-                onChange={(event) => change({ time: event.target.value })}
-              />
-            </label>
-            <fieldset className="console-schedules__days">
-              <legend>On (every day when none is picked)</legend>
-              {WEEKDAYS.map(({ day, label }) => (
-                <label key={day}>
-                  <input
-                    type="checkbox"
-                    data-testid={`schedule-form-day:${day}`}
-                    checked={draft.weekdays.includes(day)}
-                    onChange={() => toggleWeekday(day)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </fieldset>
-            <label className="console-schedules__field">
-              Time zone
-              <input
-                data-testid="schedule-form-timezone"
-                value={draft.timezone}
-                onChange={(event) => change({ timezone: event.target.value })}
-              />
-            </label>
-          </>
-        ) : null}
-        <p className="console-schedules__hint">
-          Each send goes to {identity} as you, through the same checks as a message you send now.
-        </p>
-        {current.error ? (
-          <Notice tone="crit" role="alert" className="console-schedules__error" testId="schedule-form-error">
-            {current.error}
-          </Notice>
-        ) : null}
-        <div className="cc-btn-row console-schedules__actions">
-          <button type="submit" className="cc-btn cc-btn--primary" data-testid="schedule-form-save" disabled={busy !== null}>
-            {saving ? "Saving..." : schedule ? "Save" : "Create schedule"}
-          </button>
-          <button
-            type="button"
-            className="cc-btn cc-btn--ghost"
-            data-testid="schedule-form-cancel"
-            onClick={() => setForm(null)}
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
     );
   }
 }

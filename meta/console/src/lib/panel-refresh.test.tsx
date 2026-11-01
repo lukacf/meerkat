@@ -331,7 +331,16 @@ describe("manual memory detail refresh", () => {
         detailParams.push(input.params);
         if (delayDetail) await new Promise<void>((resolve) => { releaseDetail = resolve; });
         if (detailError) throw new Error("record refresh unavailable");
-        result = { realm: "fixture-realm", record: { ...record(), body: "Synthetic fixture." }, chain: [], injections: [] };
+        // Memory given counts the record's ledger rows (the server's wire
+        // shape), so each refresh brings one more row as the counters grow.
+        const injections = Array.from({ length: count }, (_, index) => ({
+          record_id: "refresh-record",
+          identity: "router",
+          session_key: `sess-${index}`,
+          surface: "turn",
+          at_ms: Date.now() - (index + 1) * 60_000,
+        }));
+        result = { realm: "fixture-realm", record: { ...record(), body: "Synthetic fixture." }, chain: [], injections };
       }
       return { command: input.command, accepted: true, result } as never;
     };

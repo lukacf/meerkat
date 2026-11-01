@@ -77,6 +77,7 @@ export type {
   ConversationTone,
   ConversationWorkGraphAttentionRow,
   ConversationWorkGraphEntry,
+  ConversationWorkGraphEventDetail,
   ConversationWorkGraphItemRow,
   CouncilCardStatus,
   FlowRunStatus,

@@ -285,7 +285,7 @@ test("console and kit inline styles use only custom properties a stylesheet defi
   const sources = [...sourceFiles(consoleSrc), ...sourceFiles(componentsSrc)]
     .filter((file) => !/\.(test|bench)\./.test(path.basename(file)));
   assert.ok(sources.includes(stockConsoleAppSource), "the guard reads ConsoleApp");
-  assert.ok(sources.some((file) => file.includes(`${path.sep}panels${path.sep}topology${path.sep}`)), "the guard reads nested panel files");
+  assert.ok(sources.some((file) => file.includes(`${path.sep}panels${path.sep}memory${path.sep}`)), "the guard reads nested panel files");
   const used = new Set<string>();
   for (const file of sources) {
     for (const match of fs.readFileSync(file, "utf8").matchAll(/var\((--[A-Za-z0-9_-]+)/g)) used.add(match[1]);

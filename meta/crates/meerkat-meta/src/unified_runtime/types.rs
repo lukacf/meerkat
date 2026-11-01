@@ -794,16 +794,16 @@ impl From<meerkat_core::event::CompactionPreservedHistoryFit> for CompactionPres
 ///   (`GatewayHostComposition::identity_member_retired`) answered an error
 ///   for a retired incarnation, or, for an incarnation Core ended, timed out
 ///   attempt after attempt; the retirement stands
+/// - `MobAnnouncementEscalated` - the mob announcement owner's escalation
+///   pass raised an escalation, or notified it again while it stays open
+/// - `MobAnnouncementEscalationResolved` - the same pass resolved it; the
+///   resolution half, correlated by `escalation_id`
 /// - `LifecycleEffectFailed` - `identity_first/runtime/lifecycle_projection.rs`:
 ///   a lifecycle side effect other than the retirement hook (`after_create`,
 ///   an exit interview's write, a distillation) failed every attempt it was
 ///   allowed; it is recorded and not run again
 /// - `LifecycleProjectionOff` - the same projection, once: the session
 ///   bridge cannot read what it reads, so no lifecycle side effect runs
-/// - `MobAnnouncementEscalated` - the mob announcement owner's escalation
-///   pass raised an escalation, or notified it again while it stays open
-/// - `MobAnnouncementEscalationResolved` - the same pass resolved it; the
-///   resolution half, correlated by `escalation_id`
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "snake_case")]
@@ -949,6 +949,27 @@ pub enum ErrorEvent {
         cause: String,
         error: String,
     },
+    /// A mob announcement escalation was raised, or notified again while it
+    /// stays open: `escalation` is the durable record, `event` "raised" or
+    /// "renotified", and `cursor` its event cursor, from which
+    /// `meta/mob_announcements/escalations/list` reads on after a
+    /// reconnect.
+    MobAnnouncementEscalated {
+        escalation: crate::mob_announcements::Escalation,
+        event: crate::mob_announcements::EscalationEventKind,
+        renotify_count: u32,
+        cursor: u64,
+    },
+    /// The [`Self::MobAnnouncementEscalated`] with the same
+    /// `escalation_id` resolved: a receiver that opened an incident on it
+    /// closes it here.
+    MobAnnouncementEscalationResolved {
+        escalation_id: String,
+        cause: crate::mob_announcements::EscalationCause,
+        subject: crate::mob_announcements::EscalationSubject,
+        resolved_at_ms: u64,
+        cursor: u64,
+    },
     /// A lifecycle side effect Core's journal owed an identity's
     /// incarnation failed: `effect` (`after_create`, `exit_interview` or
     /// `distillation`) answered an error, or did not answer or land within
@@ -975,27 +996,6 @@ pub enum ErrorEvent {
     /// lasts. `detail` says which read failed and what to implement.
     LifecycleProjectionOff {
         detail: String,
-    },
-    /// A mob announcement escalation was raised, or notified again while it
-    /// stays open: `escalation` is the durable record, `event` "raised" or
-    /// "renotified", and `cursor` its event cursor, from which
-    /// `meta/mob_announcements/escalations/list` reads on after a
-    /// reconnect.
-    MobAnnouncementEscalated {
-        escalation: crate::mob_announcements::Escalation,
-        event: crate::mob_announcements::EscalationEventKind,
-        renotify_count: u32,
-        cursor: u64,
-    },
-    /// The [`Self::MobAnnouncementEscalated`] with the same
-    /// `escalation_id` resolved: a receiver that opened an incident on it
-    /// closes it here.
-    MobAnnouncementEscalationResolved {
-        escalation_id: String,
-        cause: crate::mob_announcements::EscalationCause,
-        subject: crate::mob_announcements::EscalationSubject,
-        resolved_at_ms: u64,
-        cursor: u64,
     },
 }
 

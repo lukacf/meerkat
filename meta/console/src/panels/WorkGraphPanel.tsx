@@ -1059,20 +1059,10 @@ export function WorkGraphPanel({
           value: viewMode,
           onChange: setViewMode,
           options: [
-            {
-              id: "graph",
-              label: <><KitGlyph name="graph" className="workgraph__view-glyph" /><span className="workgraph__view-label">Graph</span></>,
-              ariaLabel: "Graph",
-              title: "Graph",
-              testId: "workgraph-view-toggle:graph",
-            },
-            {
-              id: "tree",
-              label: <><KitGlyph name="tree" className="workgraph__view-glyph" /><span className="workgraph__view-label">Outline</span></>,
-              ariaLabel: "Outline",
-              title: "Outline",
-              testId: "workgraph-view-toggle:tree",
-            },
+            // The kit shows the glyph alone in a narrow header; the words
+            // stay the accessible name and the tooltip.
+            { id: "graph", label: "Graph", glyph: "graph", ariaLabel: "Graph", testId: "workgraph-view-toggle:graph" },
+            { id: "tree", label: "Outline", glyph: "tree", ariaLabel: "Outline", testId: "workgraph-view-toggle:tree" },
           ],
         }}
         tools={(

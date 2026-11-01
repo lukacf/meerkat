@@ -6,12 +6,6 @@
 
 /* === Header and glance strip ======================================== */
 
-.workgraph__view-glyph {
-  width: 14px;
-  height: 14px;
-  margin-right: 6px;
-  flex: none;
-}
 /* The team picker sits next to the title as a quiet chip; the native
    select keeps its name ("Work Graph team"), its visible label is for
    assistive tech only. */
@@ -79,23 +73,6 @@
 .workgraph__body.is-state > .cc-panel-empty {
   margin-block: auto;
   padding-bottom: max(40px, 8%);
-}
-
-/* The view switch stays in the header at every width (the 098 contract's
-   browser scenario workgraph-header-click-across-refresh presses it in a
-   180 px pane); under 480 px the kit would fold a header's view into its
-   menu. Its labels already drop to glyphs there. */
-@container cc-panel (max-width: 479px) {
-  .workgraph__head .cc-panel-head__view { display: inline-flex; }
-  .workgraph__head .workgraph__view-label { display: none; }
-  .workgraph__head .workgraph__view-glyph { margin-right: 0; }
-  /* The switch, Refresh and the menu take their own row under the title. */
-  .workgraph__head.cc-panel-head--v2 { flex-wrap: wrap; row-gap: 8px; }
-  .workgraph__head.cc-panel-head--v2 .cc-panel-head__actions {
-    flex-basis: 100%;
-    justify-content: flex-start;
-    margin-left: 0;
-  }
 }
 
 /* === Graph view ====================================================== */
@@ -606,6 +583,13 @@ button.workgraph-drawer__link-title:focus-visible {
   .workgraph-strip {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
+  }
+}
+/* A 330 px pane: the strip's label, bars and key stack. */
+@container cc-panel (max-width: 359px) {
+  .workgraph-strip__chart {
+    grid-template-columns: auto;
+    grid-template-areas: "label" "bars" "legend";
   }
 }
 /* Five figures need about 720 px in one row: between the kit's 2 x 2 fold

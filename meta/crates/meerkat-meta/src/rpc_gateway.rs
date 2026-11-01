@@ -26532,9 +26532,15 @@ model = "gpt-5.5"
             std::fs::read_to_string(&stderr_path).unwrap_or_default()
         );
         let stdout = std::fs::read_to_string(&stdout_path).expect("the child's stdout");
+        // With one test thread, the child's libtest prints this test's name
+        // on the line the gateway's first response starts: parse each line
+        // from its first `{`.
         let response = stdout
             .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|line| {
+                line.find('{')
+                    .and_then(|start| serde_json::from_str::<Value>(&line[start..]).ok())
+            })
             .find(|line| line["id"] == "init")
             .expect("an init response");
         assert_eq!(response["error"]["code"], -32602, "{response}");

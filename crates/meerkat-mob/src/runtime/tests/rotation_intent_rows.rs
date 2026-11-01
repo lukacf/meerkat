@@ -2153,6 +2153,129 @@ async fn same_session_role_move_rows_replay_under_097() {
     handle.shutdown().await.expect("shut the fixture mob down");
 }
 
+/// Rollback of an interrupted same-session role move, lane-run leg: needs the
+/// published Core 0.9.7 (`meerkat-mob` 0.9.7; 0.9.8 changed no file of
+/// `meerkat-mob` or `meerkat-machine-schema`, so it resumes the store the
+/// same way).
+///
+/// This build writes the fixture: a persistent mob store (SQLite) at
+/// `$MEERKAT_ROLLBACK_FIXTURE_DIR/interrupted-role-move/mob.sqlite`, whose
+/// definition wires `lead` to `worker` (`role_wiring`), holding a worker
+/// wired to a peer worker whose move to `lead` on its own session
+/// (`respawn_member` naming `lead`) a crash interrupted at the kept session's
+/// release: its preserving retirement start row with the rotation record
+/// (the member's own key under the `lead` comms name), and no end of that
+/// retirement and no successor. The build checks that shape after the crash.
+///
+/// 0.9.7 reads that start row as a plain one: its stored event decode takes
+/// the fields it knows and its event kinds skip the rest, the rotation
+/// record among them. Its replay restores the member Retiring under its old
+/// role, with its old endpoint, on its kept binding, and its start re-drives
+/// the retirement of every Retiring member as a plain one, whose end retires
+/// the member and archives its session. The lane resumes the store with
+/// Core 0.9.7 and checks: the resume succeeds; the re-drive settles
+/// `Retired`; the member is no longer listed, and the journal ends its
+/// generation 0 with one `MemberRetired` row and holds no `MemberSpawned` row
+/// of its generation 1; no member is listed under `lead`; and the peer is
+/// listed unwired from it. Nothing runs under the new role's comms name: the
+/// identity ends whole, never split across two names.
+///
+/// RED: a start row 0.9.7 replays as anything but the plain retirement of
+/// the old incarnation (a member kept under the new role's name, a successor
+/// seated, an edge kept for it) fails those checks, and a record or key it
+/// refuses fails the resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 resumes"]
+async fn an_interrupted_role_move_ends_as_a_plain_retirement_under_097() {
+    let dir = rollback_fixture_dir("interrupted-role-move");
+    let (handle, _service, storage) = open_rotation_fixture_with_storage(
+        &dir,
+        "rollback-interrupted-role-move",
+        sample_definition_with_cross_role_wiring(),
+    )
+    .await;
+    for name in ["moving", "moving-peer"] {
+        handle
+            .spawn_spec(worker_spec(name))
+            .await
+            .expect("spawn the member");
+    }
+    handle
+        .wire(id("moving"), id("moving-peer"))
+        .await
+        .expect("wire the members");
+    let dsl_identity = dsl::AgentIdentity::from_domain(&id("moving"));
+    let peer_id = handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_peer_ids
+        .get(&dsl_identity)
+        .cloned()
+        .expect("the member's endpoint");
+    let lead_name =
+        crate::runtime::actor::render_member_comms_name(handle.mob_id().as_str(), "lead", "moving")
+            .expect("a member comms name");
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("moving"),
+        "retire-session-release",
+    );
+    let moving = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .respawn_member(id("moving"), MemberRespawn::new().with_profile("lead"))
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the move's retirement reaches the kept session's release");
+    assert_eq!(
+        handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_rotation_profile_names
+            .get(&dsl_identity)
+            .map(String::as_str),
+        Some("lead"),
+        "MobMachine holds the role the move started with"
+    );
+    crash_stop_and_release_routes(handle).await;
+    hold.release();
+    let _ = tokio::time::timeout(STEP, moving).await;
+
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the fixture's journal");
+    let record = recorded_rotation(&journal, "moving", Generation::new(0))
+        .expect("the start row records the move");
+    assert_eq!(record.target(), crate::runtime::RotationTarget::SameSession);
+    assert_eq!(record.successor_profile(), &ProfileName::from("lead"));
+    assert_eq!(
+        record
+            .machine_peer_endpoint()
+            .map(|endpoint| (endpoint.name.0, endpoint.peer_id)),
+        Some((lead_name, peer_id)),
+        "the record names the member's own key under the lead comms name"
+    );
+    assert_eq!(
+        retirements_of(&journal, "moving"),
+        0,
+        "the move's retirement has no end"
+    );
+    assert!(
+        !journal.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::MemberSpawned(spawned)
+                if spawned.agent_identity.as_str() == "moving"
+                    && spawned.generation == Generation::new(1)
+        )),
+        "no successor is seated"
+    );
+}
+
 fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
@@ -2176,19 +2299,29 @@ async fn open_rotation_fixture(
 async fn open_rotation_fixture_of(
     dir: &std::path::Path,
     mob_id: &str,
-    mut definition: MobDefinition,
+    definition: MobDefinition,
 ) -> (MobHandle, Arc<MockSessionService>) {
+    let (handle, service, _storage) =
+        open_rotation_fixture_with_storage(dir, mob_id, definition).await;
+    (handle, service)
+}
+
+/// [`open_rotation_fixture_of`], with the fixture's storage, which a build
+/// reads the fixture's rows from after a crash.
+async fn open_rotation_fixture_with_storage(
+    dir: &std::path::Path,
+    mob_id: &str,
+    mut definition: MobDefinition,
+) -> (MobHandle, Arc<MockSessionService>, MobStorage) {
     let service = Arc::new(MockSessionService::new());
     let _adapter = service.enable_runtime_adapter();
     definition.id = MobId::from(mob_id);
-    let handle = MobBuilder::new(
-        definition,
-        MobStorage::persistent(dir.join("mob.sqlite")).expect("open the fixture store"),
-    )
-    .with_session_service(service.clone())
-    .with_member_comms_identity_root(dir.join("comms-keys"))
-    .create()
-    .await
-    .expect("create the fixture mob");
-    (handle, service)
+    let storage = MobStorage::persistent(dir.join("mob.sqlite")).expect("open the fixture store");
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service.clone())
+        .with_member_comms_identity_root(dir.join("comms-keys"))
+        .create()
+        .await
+        .expect("create the fixture mob");
+    (handle, service, storage)
 }

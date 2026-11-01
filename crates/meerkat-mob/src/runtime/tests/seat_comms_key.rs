@@ -3,8 +3,11 @@
 //! pair is missing and whose endpoint no row of this mob recorded (one
 //! imported without its key pair) gets a fresh key pair, as its first build
 //! would; one whose endpoint this mob recorded is refused, typed, because
-//! its peers trust the key that is gone. These rows run on the combined
-//! candidate: the machine, the wake path and the boot path together.
+//! its peers trust the key that is gone. A resume seat of an archived
+//! session that is no identity entry's archived record reads no key pair:
+//! MobMachine refuses it, and it is answered `SessionArchived`. These rows
+//! run on the combined candidate: the machine, the wake path and the boot
+//! path together.
 //!
 //! Where the key pair lives: under the root the mob's session service
 //! reports for its agent builds, unless the host declares one, which wins.
@@ -198,6 +201,115 @@ async fn a_resume_seat_of_a_session_whose_recorded_key_pair_is_missing_is_refuse
     assert!(
         !key_pair_path(keys.path(), &session).exists(),
         "no key pair was minted for a session whose peers trust another"
+    );
+}
+
+/// A resume seat of a session whose endpoint this mob recorded, archived
+/// since by its member's retirement, and whose key pair is missing (a store
+/// an earlier release wrote keeps its comms identities outside its state
+/// directory, and its host revives a member it retires onto the same
+/// session) is answered `SessionArchived`: the session is no identity
+/// entry's archived record, so MobMachine refuses the seat, and the host
+/// revives the identity through the spawn path, whose build gives the
+/// session a key pair. The seat reads and mints no key pair and writes
+/// nothing.
+///
+/// RED: read the key pair of every archived session a seat names, as the
+/// preparation did once the declared apply's revival handed archived
+/// sessions to MobMachine: the missing key pair refuses the seat first,
+/// `WiringError` ("no comms identity"), and the host, never told the
+/// session is archived, leaves the identity unseated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_on_an_archived_session_whose_recorded_key_pair_is_missing_is_answered_archived() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "seat-archived-lost-key"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .with_member_comms_identity_root(keys.path())
+    .create()
+    .await
+    .expect("create the mob");
+    // A seat records the member's endpoint, its first wake builds the
+    // session, and its retirement archives it.
+    let member = AgentIdentity::from("archived-owner");
+    let outcomes = handle
+        .seat_dormant_members(vec![turn_driven(&member)])
+        .await
+        .expect("the seat batch answers");
+    let session = match &outcomes[0] {
+        DormantSeatOutcome::Seated { session_id, .. } => session_id.clone(),
+        other => panic!("the fresh spec is seated: {other:?}"),
+    };
+    tokio::time::timeout(STEP, handle.ensure_member_live(&member))
+        .await
+        .expect("the first wake answers")
+        .expect("the first wake builds the session");
+    tokio::time::timeout(STEP, handle.retire(member.clone()))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert!(
+        service.test_is_session_archived(&session).await,
+        "the retirement archived the session"
+    );
+    std::fs::remove_file(key_pair_path(keys.path(), &session)).expect("lose the key pair");
+    let seat_rows = |journal: Vec<MobEvent>| {
+        journal
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == member
+                )
+            })
+            .count()
+    };
+    let rows = seat_rows(
+        storage
+            .events
+            .poll(0, usize::MAX)
+            .await
+            .expect("read the journal"),
+    );
+
+    let outcomes = handle
+        .seat_dormant_members(vec![resume_of(&member, &session)])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            &outcomes[0],
+            DormantSeatOutcome::SessionArchived { session_id, .. } if session_id == &session
+        ),
+        "the seat is answered archived, not refused for the missing key pair: {outcomes:?}"
+    );
+    assert!(
+        !key_pair_path(keys.path(), &session).exists(),
+        "no key pair was minted for the archived session"
+    );
+    assert!(
+        handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the identity is not seated"
+    );
+    assert_eq!(
+        seat_rows(
+            storage
+                .events
+                .poll(0, usize::MAX)
+                .await
+                .expect("read the journal"),
+        ),
+        rows,
+        "the seat wrote no row"
     );
 }
 

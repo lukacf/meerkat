@@ -444,6 +444,12 @@ impl MobActor {
                 "'{agent_identity}' cannot be seated dormant: only a session-backed member is seated"
             )));
         }
+        // Its first wake builds it through the spawn provision path, which a
+        // mob with no runtime cannot serve: a seat there would leave a member
+        // that never wakes. Refused typed, as its spawn is, and nothing of it
+        // is written.
+        #[cfg(feature = "runtime-adapter")]
+        self.refuse_local_session_member_without_runtime(&agent_identity, &binding)?;
         if profile.durable && !self.session_service.keeps_durable_member_sessions() {
             return Err(MobError::NonDurableService {
                 member_id: agent_identity,

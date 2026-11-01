@@ -1648,14 +1648,17 @@ them.
 
 - `meerkat-mob`: a spawn of a local session member in a mob with no
   runtime (a definition whose profiles are all TurnDriven, on a session
-  service that provides no runtime adapter) is refused typed before
-  anything of it exists, with `MobError::MissingMemberCapability`
+  service that provides no runtime adapter), a spawn policy's auto-spawn of
+  one, and its dormant seat (`MobHandle::seat_dormant_members`, a
+  `rotate_member` that seats, an identity entry's seat) are refused typed
+  before anything of them exists, with `MobError::MissingMemberCapability`
   (`outbound_comms_runtime`), the refusal a resume answers for a running
   mob that holds such a member. Before, the spawn staged, installed the
   member's generated operation owner, created its session and then failed
   `Internal` ("mob provisioner received generated operation owner
-  authority without prepared generated bindings"). A placed or externally
-  bound spawn is unaffected.
+  authority without prepared generated bindings"), and the seat committed
+  a member whose first wake failed the same way, so it never woke. A placed
+  or externally bound spawn is unaffected.
 
 - `meerkat-runtime`: the threads of the crate's two process-wide Tokio
   runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take

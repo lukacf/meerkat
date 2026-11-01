@@ -525,11 +525,6 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ApplyToolGrantOpenSetUnchangedRunning",
     "ApplyToolGrantOpenSetUnchangedRetired",
     "ApplyToolGrantOpenSetUnchangedStopped",
-    "SetMobOperatorIdentityCreationInMob",
-    "RebindMobOperatorIdentityCreationInMob",
-    "ResolveMobOperatorIdentityCreationAdmitted",
-    "ResolveMobOperatorIdentityCreationUnbound",
-    "ResolveMobOperatorIdentityCreationTemplateNotInScope",
     // The routing denial of a switch onto a target that cannot carry the
     // session's transcript (0.9.9): declared ahead of its siblings in the
     // catalog for first-match dispatch, emitted here after every published

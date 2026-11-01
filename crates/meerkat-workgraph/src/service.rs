@@ -3151,6 +3151,97 @@ mod tests {
         assert_eq!(snapshot.ready_item_ids, vec![newest_filler.id]);
     }
 
+    /// One page of a read through its tool, with the page fields.
+    async fn tool_page(
+        service: &WorkGraphService,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        crate::handle_unscoped_workgraph_tools_call(service, tool, &arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{tool} {arguments}: {error:?}"))
+    }
+
+    fn page_ids(page: &serde_json::Value) -> Vec<WorkItemId> {
+        page["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a page lists items: {page}"))
+            .iter()
+            .map(|item| WorkItemId::new(item["id"].as_str().expect("item id")).expect("id"))
+            .collect()
+    }
+
+    /// The cursor a truncated page hands back for its continuation.
+    fn next_cursor(page: &serde_json::Value) -> String {
+        page["next_cursor"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a truncated page names its next cursor: {page}"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_list_walk_returns_each_unchanged_item_exactly_once() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..25 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        let first = tool_page(&service, "workgraph_list", json!({ "limit": 10 })).await;
+        let mut seen = page_ids(&first);
+        assert_eq!(seen.len(), 10);
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        let mut cursor = next_cursor(&first);
+        // Between the pages an item already returned changes, an item not
+        // yet returned changes, and a new item appears.
+        let returned = created
+            .iter()
+            .find(|item| item.id == seen[3])
+            .expect("a returned item")
+            .clone();
+        touch(&service, &returned).await;
+        let unreturned = created[2].clone();
+        touch(&service, &unreturned).await;
+        service.create(create_req("new")).await.expect("new item");
+
+        let mut pages = 1;
+        loop {
+            let page = tool_page(
+                &service,
+                "workgraph_list",
+                json!({ "limit": 10, "cursor": cursor }),
+            )
+            .await;
+            pages += 1;
+            assert!(pages <= 4, "the walk ends: {page}");
+            seen.extend(page_ids(&page));
+            if page["truncated"] == json!(true) {
+                cursor = next_cursor(&page);
+            } else {
+                assert!(page.get("next_cursor").is_none(), "{page}");
+                break;
+            }
+        }
+        for item in &created {
+            let count = seen.iter().filter(|id| **id == item.id).count();
+            if item.id == unreturned.id {
+                // Changed after the walk began: at most once.
+                assert!(count <= 1, "{} appears {count} times", item.id);
+            } else {
+                assert_eq!(count, 1, "{} appears {count} times", item.id);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(

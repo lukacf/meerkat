@@ -217,7 +217,8 @@ describe("topology view model", () => {
     });
     // A roster channel's routes reach every member: not counted as connections.
     assert.equal(topologyConnectionCount(view.counts), 6);
-    assert.equal(topologyConnectionWords(view.counts), "3 wired · 1 to other teams · 1 route · 1 helper · 2 not wired");
+    // What the figure counts; the declared pairs are problems, not connections.
+    assert.equal(topologyConnectionWords(view.counts), "3 wired · 1 route · 1 helper · 1 other team");
     assert.deepEqual(view.problems.map((problem) => [problem.tone, problem.text]), [
       ["crit", "Gate is broken"],
       ["crit", "1 delivery to Billing failed"],

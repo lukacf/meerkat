@@ -589,13 +589,17 @@ export function topologySummaryFacts(view: Pick<TopologyViewModel, "counts" | "p
 }
 
 /** "7 wired · 3 routes · 1 helper", or "none". */
+/**
+ * The connections figure's words: what it counts, kind by kind ("7 wired ·
+ * 3 routes · 1 helper"). A declared pair that is not wired is not a
+ * connection; the problems figure names it.
+ */
 export function topologyConnectionWords(counts: TopologyCounts): string {
   const parts = [
     counts.wired ? `${counts.wired} wired` : "",
-    counts.cross ? `${counts.cross} to other teams` : "",
     counts.routes ? plural(counts.routes, "route") : "",
     counts.lineage ? plural(counts.lineage, "helper") : "",
-    counts.declared ? `${counts.declared} not wired` : "",
+    counts.cross ? plural(counts.cross, "other team", "other teams") : "",
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "none";
 }

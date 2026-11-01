@@ -810,12 +810,12 @@ async fn a_first_build_does_not_warn() {
 /// build the runtime provisioned for its session carries the runtime's
 /// receiver for that session, to which the session service bound the default
 /// authority the runtime composed for the profile: spawn scope over every
-/// profile of the mob. The host's hook then narrows that authority to the
-/// worker profile, and the build runs through the real agent factory, which
-/// binds the narrowed authority to the session's external tools, the receiver
-/// among them: the runtime's read finds the worker profile in the session's
-/// spawn grant and no longer the lead profile. A session the runtime did not
-/// build holds none.
+/// profile of the mob, and no manage scope. The host's hook then narrows that
+/// authority to the worker profile, and the build runs through the real agent
+/// factory, which binds the narrowed authority to the session's external
+/// tools, the receiver among them: the runtime's read finds the worker
+/// profile in the session's spawn grant and no longer the lead profile. A
+/// session the runtime did not build holds none.
 ///
 /// RED on the old tree: the runtime's read asked the session's identity
 /// creation scope for a template, which no spawn grant fills, so the
@@ -826,8 +826,12 @@ async fn a_member_spawn_grant_is_read_through_the_runtime_receiver() {
     let (handle, service, session_id) = mob_with_spawned_worker().await;
     let tools = recorded_member_tools(&service, &session_id).await;
     assert!(
-        handle.admit_member_identity_creation(&session_id, "lead"),
+        handle.member_spawn_profile_scope_contains(&session_id, "lead"),
         "the session's default authority spawns every profile of the mob"
+    );
+    assert!(
+        !handle.member_manage_scope_contains(&session_id),
+        "the session's default authority holds no manage scope"
     );
 
     let mob_id = handle.definition().id.to_string();
@@ -835,13 +839,13 @@ async fn a_member_spawn_grant_is_read_through_the_runtime_receiver() {
     narrow_to_worker(&mut config, &mob_id);
     let (_dir, _agent) = build_through_factory(config, None).await;
 
-    assert!(handle.admit_member_identity_creation(&session_id, "worker"));
+    assert!(handle.member_spawn_profile_scope_contains(&session_id, "worker"));
     assert!(
-        !handle.admit_member_identity_creation(&session_id, "lead"),
+        !handle.member_spawn_profile_scope_contains(&session_id, "lead"),
         "the read follows the session's final authority, which spawns the worker profile only"
     );
     assert!(
-        !handle.admit_member_identity_creation(&SessionId::new(), "worker"),
+        !handle.member_spawn_profile_scope_contains(&SessionId::new(), "worker"),
         "a session the runtime did not build"
     );
 }
@@ -946,24 +950,27 @@ async fn a_receiver_that_wraps_no_tools_leaves_the_member_surface_unchanged() {
     );
 }
 
-/// Row (RED): the runtime's read of a member's spawn grant reads only that
-/// member session's own live authority. Two members of one mob hold different
-/// spawn grants, each narrowed to one profile by the host's member build hook
-/// from the default authority the runtime composed for their profile. The
-/// second member's sealed authority, which a caller could hold, spawns the
-/// lead profile in this mob; the runtime's read for the first member still
-/// finds no lead profile, since it takes no authority from its caller and
-/// reads the first member's own. Each member's read finds its own profile.
+/// Row (RED): the runtime's reads of a member's grant read only that member
+/// session's own live authority. Two members of one mob hold different
+/// grants: the host's member build hook narrows each one's spawn grant to one
+/// profile, from the default authority the runtime composed for their
+/// profile, and grants the second manage scope over the mob with the witness
+/// its build carries. The second member's sealed authority, which a caller
+/// could hold, manages the mob and spawns the lead profile in it; the
+/// runtime's reads for the first member still find neither, since they take
+/// no authority from their caller and read the first member's own. Each
+/// member's reads find its own grant.
 ///
 /// RED on the old tree: the runtime's read asked the session's identity
 /// creation scope for a template, which no spawn grant fills, so neither
-/// member's spawn grant was read (the read takes a template and answers a
-/// refusal there, so the row does not compile).
+/// member's grant was read, and no manage-scope read existed (the row does
+/// not compile there).
 #[tokio::test]
 async fn a_caller_supplied_authority_is_never_used_for_the_spawn_grant_read() {
     let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
     // The host's member build hook narrows each member's spawn grant to one
-    // profile.
+    // profile, and grants the second member manage scope over the mob with
+    // the witness its build carries.
     service.set_member_build_hook(Arc::new(|req: &mut CreateSessionRequest| {
         let Some(build) = req.build.as_mut() else {
             return;
@@ -979,14 +986,24 @@ async fn a_caller_supplied_authority_is_never_used_for_the_spawn_grant_read() {
         let Some(authority) = build.mob_tool_authority_context.as_ref() else {
             return;
         };
-        build.mob_tool_authority_context = Some(
-            meerkat_runtime::mob_operator_authority::restrict_spawn_profiles_in_mob(
-                authority,
-                &member.mob_id,
-                [profile],
+        let mut grant = meerkat_runtime::mob_operator_authority::restrict_spawn_profiles_in_mob(
+            authority,
+            &member.mob_id,
+            [profile],
+        )
+        .expect("narrow the member's spawn grant");
+        if member.member == "member-b" {
+            let witness = build
+                .mob_incarnation
+                .expect("the build carries the runtime's witness");
+            grant = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+                &grant,
+                member.mob_id.clone(),
+                witness,
             )
-            .expect("narrow the member's spawn grant"),
-        );
+            .expect("grant the second member manage scope");
+        }
+        build.mob_tool_authority_context = Some(grant);
     }));
     for member in ["member-a", "member-b"] {
         handle
@@ -1005,18 +1022,21 @@ async fn a_caller_supplied_authority_is_never_used_for_the_spawn_grant_read() {
         .await
         .mob_tool_authority_context
         .expect("the second member's sealed authority");
+    let mob_id = handle.definition().id.as_str();
     assert!(
-        wider.spawn_profile_scope_contains(
-            handle.definition().id.as_str(),
-            handle.incarnation(),
-            "lead"
-        ),
-        "the second member's authority spawns the lead profile"
+        wider.spawn_profile_scope_contains(mob_id, handle.incarnation(), "lead")
+            && wider.can_manage_mob(mob_id, handle.incarnation()),
+        "the second member's authority manages the mob and spawns the lead profile"
     );
     assert!(
-        !handle.admit_member_identity_creation(&first, "lead"),
+        !handle.member_spawn_profile_scope_contains(&first, "lead"),
         "the first member's read never reads another session's authority"
     );
-    assert!(handle.admit_member_identity_creation(&first, "worker"));
-    assert!(handle.admit_member_identity_creation(&second, "lead"));
+    assert!(
+        !handle.member_manage_scope_contains(&first),
+        "nor does the first member's manage-scope read"
+    );
+    assert!(handle.member_spawn_profile_scope_contains(&first, "worker"));
+    assert!(handle.member_spawn_profile_scope_contains(&second, "lead"));
+    assert!(handle.member_manage_scope_contains(&second));
 }

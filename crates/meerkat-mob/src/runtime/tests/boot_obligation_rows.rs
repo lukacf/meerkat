@@ -450,10 +450,10 @@ async fn a_member_restored_at_boot_with_pending_work_keeps_its_spawn_grant_in_th
     );
     assert!(!grant.spawn_profile_scope_contains(mob_id.as_str(), handle.incarnation(), "lead"));
     assert!(
-        handle.admit_member_identity_creation(&member, GRANTED_PROFILE),
+        handle.member_spawn_profile_scope_contains(&member, GRANTED_PROFILE),
         "the runtime received the restored member's authority"
     );
-    assert!(!handle.admit_member_identity_creation(&member, "lead"));
+    assert!(!handle.member_spawn_profile_scope_contains(&member, "lead"));
 
     tokio::time::timeout(ROW_STEP, async {
         while !mob.service.has_started_turn_for(&member).await {

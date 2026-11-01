@@ -6453,7 +6453,7 @@ pub struct MobHandle {
     pub(super) boot_set_basis: super::boot_plan::MobBootSetBasisCell,
     /// The live mob operator authority of every local member session this
     /// mob's runtime built, as the runtime received it from each session's
-    /// build; see [`MobHandle::admit_member_identity_creation`].
+    /// build; see [`MobHandle::member_spawn_profile_scope_contains`].
     pub(super) member_session_authorities:
         Arc<super::member_session_authority::MemberSessionAuthorities>,
 }
@@ -10097,7 +10097,9 @@ impl MobHandle {
     /// create an identity is the ordinary spawn grant, so this is the
     /// `profile_scope_contains` fact the spawn tools pass to MobMachine's
     /// spawn admission, read for the requesting session; the admission that
-    /// asks it composes the verdict. It is not an admission conclusion.
+    /// asks it composes the verdict with its sibling manage-scope fact
+    /// ([`Self::member_manage_scope_contains`]). It is not an admission
+    /// conclusion.
     ///
     /// It reads only the live mob operator authority of `origin_session`
     /// itself: every member build this mob's runtime provisions in a local
@@ -10110,7 +10112,7 @@ impl MobHandle {
     /// and one whose tools are gone hold none, and read `false`. The scope is
     /// read at this runtime's own incarnation: a grant minted for an earlier
     /// incarnation of the mob holds nothing here.
-    pub fn admit_member_identity_creation(
+    pub fn member_spawn_profile_scope_contains(
         &self,
         origin_session: &SessionId,
         profile: &str,
@@ -10122,6 +10124,22 @@ impl MobHandle {
                 self.incarnation(),
                 profile,
             )
+    }
+
+    /// Raw, atomic observation, the sibling of
+    /// [`Self::member_spawn_profile_scope_contains`]: whether the live mob
+    /// operator authority of the member session `origin_session` holds
+    /// manage scope over this mob, as it runs now. This is the
+    /// `manage_scope_present` fact the spawn tools pass to MobMachine's spawn
+    /// admission beside `profile_scope_contains`, read for the requesting
+    /// session. It reads that session's own record only, as its sibling
+    /// does, and a session with no record holds none.
+    pub fn member_manage_scope_contains(&self, origin_session: &SessionId) -> bool {
+        self.member_session_authorities.manage_scope_contains(
+            origin_session,
+            self.definition.id.as_str(),
+            self.incarnation(),
+        )
     }
 
     /// Who created this mob ([`crate::MobProvenance`]): the fact its create

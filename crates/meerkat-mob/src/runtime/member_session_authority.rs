@@ -14,16 +14,17 @@
 //! factory binds it, then composes the build as one with no external tools,
 //! so the receiver changes nothing in the session's surface.
 //!
-//! The runtime's read of a member session's live spawn grant
-//! ([`MemberSessionAuthorities::spawn_profile_scope_contains`], reached
-//! through `MobHandle::admit_member_identity_creation`) reads only this
-//! record: it takes no authority from its caller, so a caller holding another
-//! session's sealed authority, a wider one included, cannot lend it. A
-//! session this runtime did not build, one whose build bound no authority,
-//! and one whose tools and agent are gone hold none. A host that edits a
-//! member build's external tools wraps them, as for the runtime's own member
-//! tools; tools it replaces outright leave the session with no recorded
-//! authority.
+//! The runtime's reads of a member session's live grant
+//! ([`MemberSessionAuthorities::spawn_profile_scope_contains`] and
+//! [`MemberSessionAuthorities::manage_scope_contains`], reached through
+//! `MobHandle::member_spawn_profile_scope_contains` and
+//! `MobHandle::member_manage_scope_contains`) read only this record: they
+//! take no authority from their caller, so a caller holding another session's
+//! sealed authority, a wider one included, cannot lend it. A session this
+//! runtime did not build, one whose build bound no authority, and one whose
+//! tools and agent are gone hold none. A host that edits a member build's
+//! external tools wraps them, as for the runtime's own member tools; tools it
+//! replaces outright leave the session with no recorded authority.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -123,6 +124,21 @@ impl MemberSessionAuthorities {
         self.snapshot(origin_session).is_some_and(|authority| {
             authority.spawn_profile_scope_contains(mob_id, mob_incarnation, profile)
         })
+    }
+
+    /// Whether the live authority the latest build of `origin_session` bound
+    /// holds manage scope over the mob `mob_id` at `mob_incarnation`: the raw
+    /// `manage_scope_present` fact the spawn tools pass to MobMachine's spawn
+    /// admission, read from that session's own record only. A session with no
+    /// record holds none.
+    pub(crate) fn manage_scope_contains(
+        &self,
+        origin_session: &SessionId,
+        mob_id: &str,
+        mob_incarnation: MobIncarnationId,
+    ) -> bool {
+        self.snapshot(origin_session)
+            .is_some_and(|authority| authority.can_manage_mob(mob_id, mob_incarnation))
     }
 }
 

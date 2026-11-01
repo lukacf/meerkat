@@ -1596,15 +1596,17 @@ them.
   authority of every member session it builds locally: each member build
   carries its external tools inside the runtime's receiver for the session,
   which forwards everything to them and records the authority the agent
-  factory binds. `MobHandle::admit_member_identity_creation` (an origin
-  session and a profile) reads that session's live spawn grant: whether its
-  authority holds spawn-profile scope for the profile in the mob as it runs,
-  the raw fact the spawn tools pass to MobMachine's spawn admission, so the
-  right to create an identity is the ordinary spawn grant. It reads only that
-  session's own authority, takes no authority from its caller, and finds none
-  for a session the runtime did not build or whose build bound none. A host
-  hook that edits a member build's external tools wraps them; tools it
-  replaces outright leave the session with no recorded authority.
+  factory binds. `MobHandle::member_spawn_profile_scope_contains` (an origin
+  session and a profile) and `MobHandle::member_manage_scope_contains` (an
+  origin session) read that session's live grant: whether its authority
+  holds spawn-profile scope for the profile, and manage scope, in the mob as
+  it runs, the two raw facts the spawn tools pass to MobMachine's spawn
+  admission, so the right to create an identity is the ordinary spawn grant.
+  Each reads only that session's own authority, takes no authority from its
+  caller, and finds none for a session the runtime did not build or whose
+  build bound none. A host hook that edits a member build's external tools
+  wraps them; tools it replaces outright leave the session with no recorded
+  authority.
 
 - `meerkat-core`, `meerkat-session`, `meerkat-contracts`, `meerkat-store`:
   operator instructions, standing instructions a host gives a session by

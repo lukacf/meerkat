@@ -311,6 +311,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_entry_origins`: `Map<AgentIdentity, IdentityEntryOrigin>`
 - `spawn_exec_entry_custody`: `Set<AgentIdentity>`
 - `member_rotation_targets`: `Map<AgentIdentity, RotationTarget>`
+- `member_rotation_profile_names`: `Map<AgentIdentity, String>`
 - `identity_entry_unseated`: `Map<AgentIdentity, UnseatedEntryCause>`
 - `identity_entry_retiring`: `Set<AgentIdentity>`
 - `identity_entry_archived_sessions`: `Map<AgentIdentity, SessionId>`
@@ -1010,6 +1011,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `rotation_intent_is_a_retiring_member`
 - `rotation_target_recorded_with_its_intent`
 - `same_session_rotation_keeps_its_binding`
+- `rotation_started_role_is_a_same_session_rotations`
 - `archive_only_retirement_is_retiring`
 - `seat_session_unborn_is_seated`
 - `seat_session_unborn_is_never_bound`
@@ -16814,7 +16816,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
-  - `rotation_endpoint_only_for_another_role`
+  - `grant_takes_the_started_role`
   - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
 - To: `Running`
@@ -16846,7 +16848,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
-  - `rotation_endpoint_only_for_another_role`
+  - `grant_takes_the_started_role`
   - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
 - To: `Stopped`
@@ -16878,7 +16880,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
-  - `rotation_endpoint_only_for_another_role`
+  - `grant_takes_the_started_role`
   - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Running`
@@ -16910,7 +16912,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
-  - `rotation_endpoint_only_for_another_role`
+  - `grant_takes_the_started_role`
   - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Stopped`

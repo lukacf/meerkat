@@ -5733,6 +5733,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `same_session_rotation_keeps_its_binding`
   - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
+- `rotation_started_role_is_a_same_session_rotations`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `archive_only_retirement_is_retiring`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

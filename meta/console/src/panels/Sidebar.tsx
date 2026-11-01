@@ -2008,13 +2008,16 @@ function renderAgentRow({
             {badges.length > 0 || agent.side_chat_of ? (
               <span className="agent__badges">
                 {agent.side_chat_of ? (
+                  // A chat glyph in a small pill; the words are its tooltip
+                  // and its text for assistive tech, so the name keeps the room.
                   <span
-                    className="agent__badge"
+                    className="agent__badge agent__badge--icon"
                     data-tone="neutral"
                     data-testid={`sidebar-side-chat:${agent.member_id}`}
                     title={`Side chat of ${agent.side_chat_of}`}
                   >
-                    <span>Side chat</span>
+                    <Icon name="i-chat" className="agent__badge-icon" />
+                    <span className="cc-visually-hidden">Side chat</span>
                   </span>
                 ) : null}
                 {badges.map((badge) => (

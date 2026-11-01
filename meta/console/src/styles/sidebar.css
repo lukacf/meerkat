@@ -751,6 +751,16 @@
   line-height: 1;
   white-space: nowrap;
 }
+.agent__badge--icon { padding: 0 4px; }
+.agent__badge-icon {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .agent__badge strong {
   color: var(--_cc-foreground-muted);
   font-weight: 600;

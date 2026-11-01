@@ -24,7 +24,6 @@ import {
   Notice,
   RelativeTime,
   RowList,
-  Sparkline,
   StatusPill,
   TechnicalId,
   TrustLadder,
@@ -40,6 +39,7 @@ import {
   type MemoryRecordDetail,
 } from "./model";
 import {
+  FluidSparkline,
   KindMark,
   QuarantineNoticeText,
   statusMarkTone,
@@ -84,6 +84,9 @@ function evidenceKey(evidence: MemoryEvidenceRef, index: number): string {
 
 /// How many days the USE bars cover.
 const USE_DAYS = 14;
+/// The ledger rows a record's read carries at most (the server's
+/// MEMORY_PANEL_INJECTIONS_MAX): at the cap, the count reads "50+".
+const INJECTION_ROWS_MAX = 50;
 
 /// The decision block on a quarantined record's Biography. The body and
 /// provenance above it are what the reviewer decides on; the request binds
@@ -259,6 +262,12 @@ export function Biography({
     [injections, now],
   );
   const givenRecently = useBins.reduce((sum, count) => sum + count, 0);
+  // USE counts what it lists: the ledger rows the server sends with the
+  // record (its newest INJECTION_ROWS_MAX), never a separate counter that
+  // can disagree with them. Recalls and useful verdicts have no rows here,
+  // so they stay the record's own counters.
+  const givenText = injections.length >= INJECTION_ROWS_MAX ? `${INJECTION_ROWS_MAX}+` : String(injections.length);
+  const lastGivenAt = injections.reduce((latest, injection) => Math.max(latest, injection.at_ms || 0), 0) || undefined;
 
   async function openEvidence(ref: MemoryEvidenceRef, index: number): Promise<void> {
     if (!onLoadEvidence) return;
@@ -548,14 +557,12 @@ export function Biography({
           step="use"
           label="Use"
           testId="memory-detail-life"
-          meta={
-            usage?.last_injected_at_ms ? <RelativeTime value={usage.last_injected_at_ms} prefix="Last given" /> : undefined
-          }
+          meta={lastGivenAt ? <RelativeTime value={lastGivenAt} prefix="Last given" /> : undefined}
         >
           <div className="memory-use">
             <div className="memory-use__figures">
               <span className="memory-use__figure">
-                <span className="memory-use__value">{usage?.injected_count ?? 0}</span>
+                <span className="memory-use__value">{givenText}</span>
                 <span className="memory-use__unit">given</span>
               </span>
               <span className="memory-use__figure">
@@ -568,10 +575,10 @@ export function Biography({
               </span>
             </div>
             <div className="memory-use__chart">
-              <Sparkline
+              <FluidSparkline
                 values={useBins}
                 kind="bars"
-                width={176}
+                maxWidth={176}
                 height={32}
                 label={`Given to agents ${plural(givenRecently, "time")} in the last ${USE_DAYS} days`}
               />
@@ -582,14 +589,14 @@ export function Biography({
             </div>
           </div>
           <p className="memory-usage">
-            {usage ? (
+            {usage || injections.length > 0 ? (
               <>
-                given to agents {usage.injected_count ?? 0} · recalled {usage.explicit_recall_count ?? 0} ·
-                judged useful {usage.judged_useful_count ?? 0}
-                {usage.last_injected_at_ms ? (
+                given to agents {givenText} · recalled {usage?.explicit_recall_count ?? 0} ·
+                judged useful {usage?.judged_useful_count ?? 0}
+                {lastGivenAt ? (
                   <>
                     {" · last given "}
-                    <RelativeTime value={usage.last_injected_at_ms} />
+                    <RelativeTime value={lastGivenAt} />
                   </>
                 ) : null}
               </>
@@ -603,6 +610,7 @@ export function Biography({
                 <ListRow
                   key={`inj-${index}`}
                   dense
+                  testId={`memory-detail-injection:${index}`}
                   lead={<span className="memory-given" data-surface={injection.surface} aria-hidden="true" />}
                   title={
                     <>

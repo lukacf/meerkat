@@ -75,7 +75,10 @@ module.exports = {
   // Biography sections:
   DETAIL_BORN: "memory-detail-born", // "Where it came from": author and evidence
   DETAIL_LINEAGE: "memory-detail-lineage", // "Versions": the versions graph and rows, oldest first
-  DETAIL_LIFE: "memory-detail-life", // "Usage": counters and injections
+  DETAIL_LIFE: "memory-detail-life", // "Use": memory given (counted from the listed ledger rows), recalls, useful verdicts
+  // One row per ledger row of the record: "Given to <agent> at startup" or
+  // "during a turn", with when. The agent's name is a link.
+  detailInjection: (index) => `memory-detail-injection:${index}`,
   DETAIL_DREAMS: "memory-detail-dreams", // lossy memory_ids join
   // `memory-chain:${memoryId}`: history rows (buttons; clicking a
   // non-current version loads that Biography in place; data-current /

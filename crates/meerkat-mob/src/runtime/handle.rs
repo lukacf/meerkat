@@ -14499,11 +14499,18 @@ impl MobHandle {
     /// host record.
     ///
     /// The next incarnation keeps the member's conversation (its session),
-    /// comms identity and endpoint, wiring edges, labels, spawner, wiring
-    /// exemption and continuity, and the profile and runtime mode the member
-    /// has unless `request` names others (a declared role migration, a
-    /// runtime-mode restamp). The member's own profile and model overrides
-    /// apply to its own profile only. Its in-flight turn is cancelled. Its
+    /// comms key, labels, spawner, wiring exemption and continuity, and the
+    /// profile and runtime mode the member has unless `request` names others
+    /// (a declared role migration, a runtime-mode restamp). Under the
+    /// member's own profile it keeps the member's endpoint and wiring edges
+    /// too. Under another profile it runs under that role's comms name, so
+    /// it keeps neither: its endpoint is the member's key under the new name
+    /// (with network comms its first wake registers one), the retirement
+    /// unwires the member's peers' trust as a plain retirement does, the
+    /// member's edges end, and the next incarnation is wired to the edges the
+    /// definition declares for its role, as a rotation's next incarnation
+    /// is. The member's own profile and model overrides apply to its own
+    /// profile only. Its in-flight turn is cancelled. Its
     /// session's queued inputs are handed to the next incarnation: when the
     /// session commits each round, the eligible ones (durable prompts not
     /// bound to an objective) are kept and run on the next incarnation's
@@ -14528,11 +14535,18 @@ impl MobHandle {
     /// continuity or (for a role migration) last role cannot be read. A
     /// member whose retirement is in flight is refused retryable
     /// ([`MobError::LifecycleOperationPending`]); a call that finds this
-    /// rotation itself stuck re-drives it. A stuck one whose successor cannot
-    /// be planned again (its profile left the definition) is ended by a call
-    /// naming a profile the definition has ([`super::MemberRespawn`]'s
-    /// profile), or by the mob's destroy: [`Self::rotate_member`] cannot end
-    /// it.
+    /// rotation itself stuck re-drives it. The rotation seats the profile it
+    /// started with, for which its retirement prepared the member's topology:
+    /// while it stands, a call naming that profile ([`super::MemberRespawn`]'s
+    /// profile; none names the member's own), or
+    /// [`Self::redrive_retirement`], re-drives it, and a call naming any other
+    /// profile is refused retryable. A stuck one whose successor cannot be
+    /// planned again (its profile left the definition) is finished by
+    /// restoring that profile: update the mob's definition while its process
+    /// is down ([`crate::MobStorage::update_definition`], which a pending
+    /// rotation does not hold back) and resume the mob, whose start re-drives
+    /// the rotation from its record. [`Self::rotate_member`] does not end it;
+    /// the mob's destroy is the last resort.
     ///
     /// A host-pending member ([`super::MobBuilder::with_host_pending_members`])
     /// keeps its mark through its respawn, whoever finishes it: the successor

@@ -244,10 +244,25 @@ actor's own step: host-pending and a FreshSession target. A same-session
 terminal keeps a host's first-boot preparation
 (`member_host_preparation_causes`, cause `FirstBootRow`): only the host's seat
 step ends it, so the successor of a host-pending member is seated Dormant and
-every wake of it is refused until then. The same-session terminal keeps the
-member's wiring and external peer edges, which the replay of its
-`MemberRetired` row ends, so
-its journal batch records them again after the next incarnation's row. The
+every wake of it is refused until then. Under the member's own role the
+same-session terminal keeps the member's endpoint and its wiring and external
+peer edges, which the replay of its `MemberRetired` row ends, so its journal
+batch records them again after the next incarnation's row. Every same-session
+start records the role it starts with (`profile_name`, held in
+`member_rotation_profile_names` while the rotation stands, recorded again by
+the replay and dropped with the rest of the intent), and both same-session
+terminals refuse a grant of any other role (`grant_takes_the_started_role`)
+and take the role change from it: the start's retirement prepared the member's
+topology for that role. A same-session successor under another role runs under
+that role's comms name: the start records an endpoint only for another role,
+under the member's own peer id (`endpoint_only_for_another_role`,
+`endpoint_keeps_the_members_peer_id`, and the same guards on the replay), the
+shell's retirement unwires the member's peers' trust as a plain retirement
+does, and the terminal ends the member's edges and installs the recorded
+endpoint (or, with none recorded, owes one until the successor's first wake
+registers it). The invariants `same_session_rotation_keeps_its_binding` and
+`rotation_started_role_is_a_same_session_rotations` hold the started role
+exactly while a same-session rotation is pending. The
 release verdict (`ClassifyMemberRelease`) takes the incarnation a scoped
 release names and answers `Stale` for any other. The hand-written
 `specs/machines/mob_machine/member_residency_audit.sh` drives these arms in

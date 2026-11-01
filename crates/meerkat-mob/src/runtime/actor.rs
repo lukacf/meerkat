@@ -37944,7 +37944,7 @@ impl MobActor {
                 .await
             {
                 Ok(event) => {
-                    self.roster.write().await.record_creation_event(&event);
+                    self.roster.write().await.record_spawn_row(&event);
                     return Ok(());
                 }
                 Err(error) => {
@@ -37958,7 +37958,7 @@ impl MobActor {
                     .await
                     {
                         Ok(Some(event)) => {
-                            self.roster.write().await.record_creation_event(&event);
+                            self.roster.write().await.record_spawn_row(&event);
                             return Ok(());
                         }
                         Ok(None) if attempt < 2 => tokio::task::yield_now().await,
@@ -40431,7 +40431,7 @@ impl MobActor {
                 })
                 .await
                 .map_err(MobError::from)?;
-            self.roster.write().await.record_creation_event(&committed);
+            self.roster.write().await.record_spawn_row(&committed);
             return Ok(());
         };
         let Some(store) = self.identity_member.as_ref() else {
@@ -40461,7 +40461,7 @@ impl MobActor {
             .await?
         {
             IdentityMemberEventCommitOutcome::Applied { event } => {
-                self.roster.write().await.record_creation_event(&event);
+                self.roster.write().await.record_spawn_row(&event);
                 #[cfg(any(test, feature = "test-support"))]
                 super::trigger_identity_recovery_fail_stop(
                     super::IdentityRecoveryFailStopPoint::MemberEventApplied,
@@ -40469,7 +40469,7 @@ impl MobActor {
                 Ok(())
             }
             IdentityMemberEventCommitOutcome::AlreadyExact { event } => {
-                self.roster.write().await.record_creation_event(&event);
+                self.roster.write().await.record_spawn_row(&event);
                 Ok(())
             }
             IdentityMemberEventCommitOutcome::Conflict { detail, .. } => {

@@ -686,8 +686,10 @@ fi
 # again, with the ASSUME over the wake refusal helper. It runs with TLC
 # coverage and requires every listed arm to fire and a floor of distinct
 # states per run, and requires its forty-four witnesses reached. Its
-# --mutants mode (run by hand, outside the shards' budget) refuses sixty-five
-# seeded defects, one per residency invariant and property. The lane runs it
+# --mutants mode (run by hand, outside the shards' budget) refuses
+# sixty-eight seeded defects, one per residency invariant and property (a
+# same-session start or replay that records no started role, and a terminal
+# that keeps it, among them). The lane runs it
 # in two parts: its whole-space runs in shard audits-g (--part spaces) and
 # its witness runs in shard audits-i (--part witnesses).
 member_residency_audit="${workspace_root}/specs/machines/mob_machine/member_residency_audit.sh"
@@ -758,10 +760,13 @@ fi
 # start row (stale or not), Stop, Resume and Complete, and the mob's reset
 # from each phase it leaves (its preflight with a member seated, its commit
 # on an empty roster). --part roles (shard audits-n): a seated entry
-# declared under another role or mode, a first-boot preparation and every
-# WakeMember cause; and a role-held member's declared migration, its
-# same-session and fresh-session rotations under another role or its own,
-# and a first-boot Resume request. --part hosted (shard audits-o): held
+# declared under another role or mode, a first-boot preparation, every
+# WakeMember cause and a same-session rotation under another role that
+# names the member's key under the new role's comms name or no endpoint,
+# its terminal seating the role it started with whatever its grant; and a
+# role-held member's declared migration, its same-session and fresh-session
+# rotations under another role or its own, and a first-boot Resume request.
+# --part hosted (shard audits-o): held
 # creation, the held spawn and entries hosted on their first use, with
 # Stop, Resume and Complete, and the declared apply's open fact; one bound
 # host and the placed spawn ladder, its remote commit, its retirement and
@@ -772,8 +777,8 @@ fi
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
 # names them); they require every listed arm to fire, a floor of distinct
-# states and their fifty-four witnesses reached, and --mutants refuses
-# fifty-four seeded defects: one per declared apply invariant and property,
+# states and their fifty-six witnesses reached, and --mutants refuses
+# fifty-seven seeded defects: one per declared apply invariant and property,
 # and one per guard of the declared apply that a reachable state needs.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then

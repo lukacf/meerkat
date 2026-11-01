@@ -110,7 +110,11 @@
 # session (AuditScopedReleaseFenced). The recover-rotation run checks that a
 # replayed rotation, once its grant is recorded and its ingress detach
 # closed, can always be finished by its own terminal while the plain archive
-# waits (AuditRecoveredRotationFinishable). The replay-same run checks that a
+# waits (AuditRecoveredRotationFinishable). Its mutants and the rotate-same
+# run's also seed a same-session start or replay that records no started
+# role, and a terminal that keeps it: the generated invariants that hold the
+# started role exactly while a same-session rotation is pending refuse them.
+# The replay-same run checks that a
 # step that keeps member 1's incarnation and member 2 seated keeps their edge
 # and member 1's external edge (AuditReplayKeepsKeptTopology), and that before
 # the seal the replay of those edges' rows is accepted by exactly one arm
@@ -1267,6 +1271,20 @@ add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readines
     "Error: Invariant AuditScopedReleaseFenced is violated" \
     'drop_guard("ClassifyMemberReleaseRunning", "scope_fence_token")
 add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ ((agent_identity \\in DOMAIN identity_to_runtime) /\\ (Some(identity_to_runtime[agent_identity]) = scope_agent_runtime_id) /\\ (agent_identity \\in DOMAIN member_session_bindings) /\\ (Some(member_session_bindings[agent_identity]) = scope_session_id)))")' "$@"
+  # A same-session start that records no started role: its terminal would
+  # take the role from the grant again.
+  mutate rotate-same same_session_start_pins_no_role \
+    "Error: Invariant same_session_rotation_keeps_its_binding is violated" \
+    'keep_var("BeginMemberRotationSameSessionRunning", "member_rotation_profile_names")' "$@"
+  # A same-session terminal that keeps the started role once the rotation
+  # ended.
+  mutate rotate-same same_session_commit_keeps_started_role \
+    "Error: Invariant rotation_started_role_is_a_same_session_rotations is violated" \
+    'keep_var("CommitMemberRotationSameSessionRunning", "member_rotation_profile_names")' "$@"
+  # The replay of a same-session rotation that records no started role.
+  mutate recover-rotation recovered_same_session_pins_no_role \
+    "Error: Invariant same_session_rotation_keeps_its_binding is violated" \
+    'keep_var("RecoverMemberRotationIntentSameSessionRunning", "member_rotation_profile_names")' "$@"
   # The replay of a same-session rotation recorded for a runtime that is not
   # Retiring.
   mutate recover-rotation recovered_intent_not_retiring \

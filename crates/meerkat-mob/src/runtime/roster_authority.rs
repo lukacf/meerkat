@@ -68,8 +68,14 @@ impl RosterAuthority {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub(crate) fn record_creation_event(&mut self, event: &MobEvent) {
-        self.roster.creation_history.observe(event);
+    /// Record what a live spawn's durable `MemberSpawned` row projects
+    /// besides its entry ([`Roster::record_spawn_row`]), as a replay of the
+    /// row records it. What it records for the spawned incarnation (its
+    /// continuity, for one) is read only once the entry holds that
+    /// incarnation, which the spawn's membership commit adds
+    /// ([`RosterMutator::add_member`]).
+    pub(crate) fn record_spawn_row(&mut self, event: &MobEvent) {
+        let _ = self.roster.record_spawn_row(event);
     }
 
     pub(crate) fn member_creation_for_session(

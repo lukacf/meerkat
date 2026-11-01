@@ -78,10 +78,22 @@ impl RotationReply {
 
 impl RetirementState {
     /// Whether this retirement is a same-session rotation's: it keeps the
-    /// member's session, and with it the member's endpoint, its wiring edges
-    /// and its peers' trust, for the next incarnation.
+    /// member's session for the next incarnation, and hands its queued
+    /// inputs to it.
     fn keeps_session(&self) -> bool {
         matches!(&self.reply, RetirementReply::Rotate { rotation, .. } if rotation.keeps_session())
+    }
+
+    /// Whether this retirement keeps the member's topology for the next
+    /// incarnation: a same-session successor under the member's own role
+    /// keeps the member's endpoint, its wiring edges and its peers' trust,
+    /// so no peer is observed, notified or unwired. A same-session successor
+    /// under another role runs under the new role's comms name: its
+    /// retirement unwires its peers' trust as a plain retirement's does,
+    /// and keeps only the session.
+    fn keeps_topology(&self) -> bool {
+        matches!(&self.reply, RetirementReply::Rotate { rotation, .. }
+            if rotation.keeps_topology(&self.entry.role))
     }
 }
 
@@ -2934,9 +2946,9 @@ impl MobActor {
             }
             let identity = mob_dsl::AgentIdentity::from_domain(&continuation.entry.agent_identity);
             let state = self.dsl_authority.state();
-            // A same-session rotation unwires no edge: the next incarnation
-            // keeps them.
-            if continuation.keeps_session() {
+            // A same-session successor under the member's own role unwires
+            // no edge: the next incarnation keeps them.
+            if continuation.keeps_topology() {
                 return Ok(());
             }
             continuation.placed_peers = state
@@ -3019,10 +3031,11 @@ impl MobActor {
                 return;
             }
         }
-        if continuation.keeps_session() {
-            // A same-session rotation observes no peer: it keeps the
-            // member's endpoint, edges and peers' trust for the next
-            // incarnation, so its disposal carries no trust cleanup.
+        if continuation.keeps_topology() {
+            // A same-session successor under the member's own role observes
+            // no peer: it keeps the member's endpoint, edges and peers' trust
+            // for the next incarnation, so its disposal carries no trust
+            // cleanup.
             let mut ctx = Self::disposal_context_from_entry(
                 &continuation.entry.agent_identity,
                 &continuation.entry,
@@ -3373,6 +3386,12 @@ impl MobActor {
                             "the same-session rotation of '{identity}' found no session to keep"
                         )));
                     };
+                    #[cfg(test)]
+                    if retirement_stage_test_hooks::take_kept_session_release_failure(&session) {
+                        return Err(MobError::Internal(
+                            "injected kept-session release failure".to_string(),
+                        ));
+                    }
                     if unborn {
                         return Ok(mob_dsl::MemberSessionDisposal::KeptForSuccessor);
                     }
@@ -4519,19 +4538,25 @@ impl MobActor {
         reply: RetirementReply,
         redriven: bool,
     ) -> Option<RetirementReply> {
-        let standing = {
+        let (standing, started_role) = {
             let state = self.dsl_authority.state();
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-            state
-                .member_rotation_targets
-                .get(&dsl_identity)
-                .copied()
-                .zip(
-                    state
-                        .member_rotation_session_ids
-                        .get(&dsl_identity)
-                        .cloned(),
-                )
+            (
+                state
+                    .member_rotation_targets
+                    .get(&dsl_identity)
+                    .copied()
+                    .zip(
+                        state
+                            .member_rotation_session_ids
+                            .get(&dsl_identity)
+                            .cloned(),
+                    ),
+                state
+                    .member_rotation_profile_names
+                    .get(&dsl_identity)
+                    .cloned(),
+            )
         };
         let Some((standing_target, standing_session)) = standing else {
             // No rotation stands: a record left from one is spent.
@@ -4555,17 +4580,31 @@ impl MobActor {
         };
         let reply = match reply {
             RetirementReply::Rotate { rotation, reply } => {
+                // A standing same-session rotation seats the role it started
+                // with (MobMachine's started role, which its terminal requires
+                // of the grant): its start's retirement prepared the member's
+                // topology for that role, so a re-issue under another role is
+                // another rotation.
+                let same_role = standing_target != mob_dsl::RotationTarget::SameSession
+                    || started_role.as_deref() == Some(rotation.candidate.profile_name.as_str());
                 if rotation.target.to_machine() == standing_target
                     && mob_dsl::SessionId::from_domain(&rotation.candidate.session_id)
                         == standing_session
+                    && same_role
                 {
                     return Some(RetirementReply::Rotate { rotation, reply });
                 }
                 // Another rotation waits for the standing one: a same-session
-                // rotation the mob finishes itself, or a FreshSession one its
-                // re-issue or `redrive_retirement` finishes.
+                // rotation the mob finishes itself (re-issued only under the
+                // role it started with), or a FreshSession one its re-issue or
+                // `redrive_retirement` finishes.
                 let intent = if standing_target == mob_dsl::RotationTarget::SameSession {
-                    format!("same-session rotation of member {identity}")
+                    match started_role.as_deref() {
+                        Some(role) => {
+                            format!("same-session rotation of member {identity} under role {role}")
+                        }
+                        None => format!("same-session rotation of member {identity}"),
+                    }
                 } else {
                     format!("rotation of member {identity}")
                 };
@@ -5031,10 +5070,13 @@ impl MobActor {
                                 } => Some(Self::kickoff_notice_intent(intent)),
                                 _ => None,
                             }));
-                        // A same-session rotation keeps the member's endpoint,
-                        // edges and peers' trust: no peer is notified or
-                        // unwired, and the session is released, not archived.
-                        if continuation.keeps_session() {
+                        // A same-session successor under the member's own
+                        // role keeps the member's endpoint, edges and peers'
+                        // trust: no peer is notified or unwired, and the
+                        // session is released, not archived. One under
+                        // another role notifies and unwires its peers as a
+                        // plain retirement does; its session is released too.
+                        if continuation.keeps_topology() {
                             self.retirement_prepare_archive(continuation).await;
                         } else {
                             self.retirement_observe_endpoints(continuation, true).await;
@@ -6953,6 +6995,30 @@ pub(crate) mod retirement_stage_test_hooks {
     static DEGRADE_BEFORE_INGRESS_DETACH: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static REFUSED_INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+    static FAILING_KEPT_SESSION_RELEASES: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+
+    /// The next kept-session release stage of a same-session rotation's
+    /// retirement of `session` fails, once: the retirement settles stuck at
+    /// that stage.
+    pub(crate) fn fail_next_kept_session_release(session: &SessionId) {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    /// Whether the kept-session release failure armed for `session` has not
+    /// fired yet.
+    pub(crate) fn kept_session_release_failure_armed(session: &SessionId) -> bool {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(session)
+    }
+
+    pub(super) fn take_kept_session_release_failure(session: &SessionId) -> bool {
+        take_armed(&FAILING_KEPT_SESSION_RELEASES, session)
+    }
 
     /// The reason of the refusal [`refuse_next_ingress_stage_reload`] arms.
     pub(crate) const INJECTED_RELOAD_REFUSAL: &str =

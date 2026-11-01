@@ -248,8 +248,8 @@ pub enum AccessConfigError {
 
 impl AccessConfigError {
     /// A stable name for the failure. The Console's refusal of an invalid
-    /// configuration reports it as `data.reason.kind`, next to the error's
-    /// text.
+    /// configuration reports it as the flat token `data.reason`, beside
+    /// `data.detail`, the text that says what is at fault.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::EnabledWithoutAdmins => "enabled_without_admins",

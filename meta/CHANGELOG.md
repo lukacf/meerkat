@@ -899,6 +899,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was wrong with a save. An approver id with leading or trailing whitespace
   is now refused as `padded_approver_id`, with a text that names the id;
   before, it was refused as an empty id (see Breaking).
+- The Console's Access editor says why an invalid access save was refused:
+  a reason it knows reads in its own words, followed by the owner's detail
+  when that names the rule, action, group or approver at fault, and a reason
+  it does not know reads through the detail. A group delete refused because
+  a rule or an approver still uses the group says so. Before, the editor said
+  only that the resulting configuration was not valid, and a refused delete
+  or enforcement change also said a draft was retained, though it keeps none.
 - On a shared Console the memory panel reads judge each identity under the
   name the Console gives it, `<namespace>/<identity>`, after recording the
   access attributes of its runtimes, as its send route does. Before, every

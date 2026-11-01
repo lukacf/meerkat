@@ -59587,22 +59587,61 @@ function accessSaveFailure(error48) {
   if (rpc2?.code === -32009 && rpc2.data?.kind === "access_revision_conflict") return { kind: "revision_conflict" };
   if (rpc2?.code === -32009 && rpc2.data?.kind === "access_owner_changed") return { kind: "owner_changed" };
   if (rpc2?.code === -32004 && rpc2.data?.kind === "access_mutation_unavailable") return { kind: "unavailable" };
-  if (rpc2?.code === -32602 && rpc2.data?.kind === "invalid_access_config") return { kind: "invalid" };
+  if (rpc2?.code === -32602 && rpc2.data?.kind === "invalid_access_config") {
+    const { reason, detail } = rpc2.data;
+    return {
+      kind: "invalid",
+      ...typeof reason === "string" && reason ? { reason } : {},
+      ...typeof detail === "string" && detail.trim() ? { detail: detail.trim() } : {}
+    };
+  }
   if (rpc2?.code === -32602 || rpc2?.code === -32601) return { kind: "unavailable" };
   return { kind: "failed" };
 }
-function accessSaveNotice(failure) {
+var INVALID_ACCESS_REASONS = {
+  enabled_without_admins: { words: "Enforcement needs at least one admin", showDetail: false },
+  empty_rule_id: { words: "A rule needs an ID", showDetail: false },
+  duplicate_rule_id: { words: "Two rules have the same ID", showDetail: true },
+  empty_actions: { words: "A rule needs at least one permission", showDetail: true },
+  unknown_action: { words: "A rule names a permission this runtime does not list", showDetail: true },
+  unknown_group: { words: "A rule names a group that does not exist", showDetail: true },
+  empty_approver_id: { words: "An approver needs an ID", showDetail: false },
+  padded_approver_id: { words: "An approver ID starts or ends with a space", showDetail: true },
+  approver_without_holders: { words: "An approver needs a person, service or group to hold it", showDetail: true },
+  unknown_approver_group: { words: "An approver names a group that does not exist", showDetail: true },
+  unknown_rule: { words: "The rule to delete does not exist", showDetail: true },
+  invalid_toml: { words: "The access configuration file cannot hold this configuration", showDetail: false }
+};
+function isKnownInvalidAccessReason(reason) {
+  return reason !== void 0 && Object.hasOwn(INVALID_ACCESS_REASONS, reason);
+}
+function keepsDraft(edit) {
+  return edit === "admins" || edit === "rule" || edit === "group";
+}
+var GROUP_DELETE_WORDS = {
+  unknown_group: "The group is still used by a rule",
+  unknown_approver_group: "The group is still used by an approver"
+};
+function invalidAccessNotice({ reason, detail }, edit) {
+  const token = isKnownInvalidAccessReason(reason) ? reason : null;
+  const known = token ? INVALID_ACCESS_REASONS[token] : null;
+  const words2 = (token && edit === "group-delete" ? GROUP_DELETE_WORDS[token] : void 0) ?? known?.words ?? "The resulting access configuration is not valid";
+  const shown = detail && (known === null || known.showDetail) ? " (".concat(detail, ")") : "";
+  return keepsDraft(edit) ? "Changes were not saved. ".concat(words2).concat(shown, "; your draft is retained for correction.") : "Changes were not saved. ".concat(words2).concat(shown, ".");
+}
+function accessSaveNotice(failure, edit) {
+  const draft = keepsDraft(edit);
   switch (failure.kind) {
     case "revision_conflict":
       return "Access configuration changed. Review the latest settings before saving again.";
     case "owner_changed":
       return "The access configuration owner changed. Review the latest settings before saving again.";
     case "unavailable":
-      return "Changes were not saved. Checked access saves are unavailable; your draft is retained.";
+      return draft ? "Changes were not saved. Checked access saves are unavailable; your draft is retained." : "Changes were not saved. Checked access saves are unavailable.";
     case "invalid":
-      return "Changes were not saved. The resulting access configuration is not valid; your draft is retained for correction.";
+      return invalidAccessNotice(failure, edit);
     case "failed":
-      return "Changes were not saved. Your draft is retained; refresh Console access before trying again.";
+      return draft ? "Changes were not saved. Your draft is retained; refresh Console access before trying again." : "Changes were not saved. Refresh Console access before trying again.";
   }
 }
 
@@ -68343,7 +68382,7 @@ function AccessPanel({
     testId: "access-summary-standing"
   });
   const reviewNeeded = requiresReview && canReview;
-  const alertText = error48 || (saveFailure ? accessSaveNotice(saveFailure) : null);
+  const alertText = error48 || (saveFailure ? accessSaveNotice(saveFailure, saveFailure.edit) : null);
   const groupFormShown = canEdit || groupBase !== null;
   const groupEditedInPlace = editingGroup !== null && groups.some(([name2]) => name2 === editingGroup);
   const ruleEditedInPlace = ruleDraft !== null && editingRuleId !== null && rules.some((rule) => rule.id === editingRuleId);
@@ -68568,7 +68607,7 @@ function AccessPanel({
               Button,
               {
                 "data-testid": "access-toggle-enabled",
-                onClick: () => void mutate("immediate", captureBase(), (base) => onSetEnabled(!enabled, base)),
+                onClick: () => void mutate("toggle", captureBase(), (base) => onSetEnabled(!enabled, base)),
                 children: enabled ? "Disable enforcement" : "Enable enforcement"
               }
             ) : null,
@@ -68681,7 +68720,7 @@ function AccessPanel({
                     "data-testid": "access-group-delete:".concat(name2),
                     onClick: () => {
                       if (window.confirm('Delete group "'.concat(name2, '"?'))) {
-                        void mutate("immediate", captureBase(), (base) => onDeleteGroup(name2, base));
+                        void mutate("group-delete", captureBase(), (base) => onDeleteGroup(name2, base));
                       }
                     },
                     children: "Delete"
@@ -68765,7 +68804,7 @@ function AccessPanel({
                       "data-testid": "access-rule-delete:".concat(rule.id),
                       onClick: () => {
                         if (window.confirm(ruleDeleteConfirmText(rule))) {
-                          void mutate("immediate", captureBase(), (base) => onDeleteRule(rule.id, base));
+                          void mutate("rule-delete", captureBase(), (base) => onDeleteRule(rule.id, base));
                         }
                       },
                       children: "Delete"
@@ -73078,7 +73117,6 @@ function RecordsTab(props) {
       )
     ] }),
     sortMode === "utility" ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(Notice, { testId: "memory-utility-note", children: "Least useful first: records given to agents at least ".concat(DEAD_INJECTION_THRESHOLD, " times and never judged useful lead, marked Never useful. Space spent is estimated from how often each was given and its size.") }) : null,
-    multiRealm && !filter.realm?.trim() ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(Notice, { testId: "memory-multi-realm-note", children: "This page combines records from several spaces. Pick a space to page through its records." }) : null,
     !loaded2 || pageLoading ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(LoadingState, { label: "Loading records", rows: 4 }) : null,
     empty3 ? recordsDenied || listView.denied ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(
       EmptyState,

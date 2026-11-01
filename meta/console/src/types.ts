@@ -435,6 +435,10 @@ export interface ConsoleAccessEditBase {
 
 export interface ConsoleAccessSaveFailure {
   kind: "revision_conflict" | "owner_changed" | "unavailable" | "invalid" | "failed";
+  /** An invalid configuration's reason token, when the owner sent one. */
+  reason?: string;
+  /** The owner's text that says what is wrong, when it sent one. */
+  detail?: string;
 }
 
 export type ConsoleAccessSaveResult = void | boolean | ConsoleAccessSaveFailure;

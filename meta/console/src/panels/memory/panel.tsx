@@ -119,7 +119,7 @@ export interface MemoryPanelProps {
   /// over the placeholder would settle a verdict before the records arrive,
   /// and their arrival would then walk the same store again.
   loaded?: boolean;
-  /// Cursor from the initial records page (single-realm only, keyset).
+  /// Keyset cursor from the initial records page.
   nextCursor?: string | null;
   /// Per-section -32030 outcomes: the section data is empty because the
   /// principal lacks the grant, not because the store is empty. Tiles whose

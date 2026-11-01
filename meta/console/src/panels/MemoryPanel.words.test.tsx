@@ -238,7 +238,7 @@ describe("Memory panel words", () => {
       title: "Lab runs start at noon",
       scope: { scope: "identity", realm: "lab", identity: "identity:coordinator" },
     });
-    const view = renderPanel({ records: [current, lab], realms: ["ops", "lab"] });
+    const view = renderPanel({ records: [current, lab], realms: ["ops", "lab"], nextCursor: `${NOW - HOUR}:mem-lab` });
     const panel = text(view, "memory-panel");
     expect(panel.includes("2 spaces")).toBe(true);
     expect(/realm/i.test(panel)).toBe(false);
@@ -250,9 +250,10 @@ describe("Memory panel words", () => {
     const realmFilter = view.getByTestId("memory-filter:realm");
     expect(realmFilter.querySelector("option")?.textContent).toBe("All spaces");
     expect(view.getByLabelText("Space").getAttribute("data-testid")).toBe("memory-filter:realm");
-    expect(text(view, "memory-multi-realm-note")).toBe(
-      "This page combines records from several spaces. Pick a space to page through its records.",
-    );
+    // A page of several spaces carries a cursor like a page of one, so the
+    // tab offers more records without sending anyone to pick a space first.
+    expect(view.queryByTestId("memory-multi-realm-note") === null).toBe(true);
+    expect(text(view, "memory-load-more").includes("Load more records")).toBe(true);
     const group = "memory-group:identity:lab:identity:coordinator";
     expect(text(view, group).includes("lab space")).toBe(true);
     expect(hasTitle(view, group, "Realm lab")).toBe(true);

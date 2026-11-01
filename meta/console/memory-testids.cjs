@@ -47,9 +47,7 @@ module.exports = {
   FILTER_CLEAR: "memory-filter-clear", // "Clear filters", renders only while a filter is active
   SORT: "memory-sort", // <select> recency|utility, labelled Recent and Least useful
   UTILITY_NOTE: "memory-utility-note", // explains the least-useful order and the estimate
-  LOAD_MORE: "memory-load-more", // renders only while a keyset cursor exists (per realm)
-  // Multi-realm without a realm picked: merged single page, no paging.
-  MULTI_REALM_NOTE: "memory-multi-realm-note",
+  LOAD_MORE: "memory-load-more", // renders only while a keyset cursor exists
   RECORDS_EMPTY: "memory-records-empty", // says "no access" for denied queries, never "empty"
   RECORDS_DENIED_NOTE: "memory-records-denied-note", // denied load-more continuation
   // Refining the loaded records in the browser (no server query): the text

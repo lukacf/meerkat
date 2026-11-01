@@ -41,8 +41,7 @@ export interface MemoryRecordsFilter {
   /// Identity name when scope is identity; scope key for mob/operator.
   key?: string;
   status?: "active" | "quarantined" | "superseded" | "tombstoned";
-  /// Realm name. Keyset cursors are single-realm on the server, so picking a
-  /// realm is what makes load-more honest on multi-realm gateways.
+  /// Realm name: the listing reads that realm's records only.
   realm?: string;
 }
 
@@ -496,8 +495,10 @@ export const LATTICE_WALK_PAGE_LIMIT = 200;
 /// Pages the walk may read beyond the ones the cap needs, for short pages.
 export const LATTICE_WALK_EXTRA_PAGES = 10;
 /// Empty pages that still carry a cursor that one "Load more" (or one
-/// filter) follows before it stops and shows what it has: a restricted
-/// caller can read empty pages while the store holds more rows past them.
+/// filter) follows before it stops and shows what it has. The record listing
+/// cuts each page from the rows the caller may read and gives a cursor only
+/// when more of them follow, so it sends no such page; an older server,
+/// which paged before it filtered, could.
 export const EMPTY_PAGE_HOPS = 4;
 
 /// Follow the cursor past empty pages, up to EMPTY_PAGE_HOPS more reads.
@@ -621,11 +622,13 @@ export function latticeFingerprint(
 }
 
 /// Walk the store page by page. Single-realm gateways follow the keyset
-/// cursor directly; multi-realm gateways walk EACH realm independently via
-/// the server-supported `realm` param (merged multi-realm pages never carry
-/// a cursor and are truncated, so an unscoped walk can neither continue nor
-/// honestly claim completeness). `complete` = every realm exhausted its
-/// cursor within the shared cap.
+/// cursor directly; multi-realm gateways walk each realm in turn through the
+/// server-supported `realm` param. The current server gives a merged
+/// multi-realm page a cursor as well (one position in the order every realm
+/// shares, which resumes them all); an older server cut a merged page without
+/// one, so for it the per-realm walk is what lets `complete` mean every realm
+/// was read. `complete` = every realm exhausted its cursor within the shared
+/// cap.
 export async function runLatticeWalk(
   fetchPage: (params: Record<string, unknown>) => Promise<MemoryPanelRecordsResult | null>,
   options: {
@@ -643,9 +646,12 @@ export async function runLatticeWalk(
     options.realms.length > 1 ? options.realms : [undefined];
   const all: MemoryPanelRecord[] = [];
   let exhaustedEverywhere = true;
-  // Pages a restricted caller reads can come back short or empty while
-  // still carrying a cursor (the server pages before it filters rows), so
-  // the walk also stops after a bounded number of pages, as incomplete.
+  // The record listing fills each page from the rows the caller may read and
+  // gives a cursor only when more of them follow, so a page comes back short
+  // only when nothing follows it. An older server paged before it filtered,
+  // so a restricted caller's pages could come back short or empty with a
+  // cursor; for that the walk also stops after a bounded number of pages, as
+  // incomplete.
   const maxPages = Math.ceil(max / LATTICE_WALK_PAGE_LIMIT) + LATTICE_WALK_EXTRA_PAGES;
   let pages = 0;
   for (const realm of realmParams) {

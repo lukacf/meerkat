@@ -101,7 +101,9 @@
 #   only the record that names its session, a moved resume role seated only
 #   with its migration, the listing of a marked member unmarking it, the
 #   dormant seat and a role move keeping a role hold, a rotation terminal
-#   ending it exactly when it commits another role, a seated member's
+#   ending it exactly when it commits another role, a same-session
+#   successor under another role taking the endpoint its rotation recorded
+#   (the member's key under the new role's comms name), a seated member's
 #   first-boot Resume writing the role hold it masked, the replay recording
 #   an archived session only when its row archived it and keeping a hosted
 #   incarnation's entry hosted on its first use, the reset committing only

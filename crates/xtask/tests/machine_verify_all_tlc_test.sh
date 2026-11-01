@@ -758,10 +758,12 @@ fi
 # start row (stale or not), Stop, Resume and Complete, and the mob's reset
 # from each phase it leaves (its preflight with a member seated, its commit
 # on an empty roster). --part roles (shard audits-n): a seated entry
-# declared under another role or mode, a first-boot preparation and every
-# WakeMember cause; and a role-held member's declared migration, its
-# same-session and fresh-session rotations under another role or its own,
-# and a first-boot Resume request. --part hosted (shard audits-o): held
+# declared under another role or mode, a first-boot preparation, every
+# WakeMember cause and a same-session rotation under another role that
+# names the member's key under the new role's comms name; and a role-held
+# member's declared migration, its same-session and fresh-session rotations
+# under another role or its own, and a first-boot Resume request. --part
+# hosted (shard audits-o): held
 # creation, the held spawn and entries hosted on their first use, with
 # Stop, Resume and Complete, and the declared apply's open fact; one bound
 # host and the placed spawn ladder, its remote commit, its retirement and
@@ -772,8 +774,8 @@ fi
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
 # names them); they require every listed arm to fire, a floor of distinct
-# states and their fifty-four witnesses reached, and --mutants refuses
-# fifty-four seeded defects: one per declared apply invariant and property,
+# states and their fifty-five witnesses reached, and --mutants refuses
+# fifty-six seeded defects: one per declared apply invariant and property,
 # and one per guard of the declared apply that a reachable state needs.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then

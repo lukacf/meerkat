@@ -1053,20 +1053,17 @@ async fn seal_during_a_spawn_rollback(name: &str, restart: bool) {
 
     let resume_held =
         crate::runtime::actor::retirement_stage_hold::install(&id(name), "spawn-rollback");
-    let spawned = tokio::time::timeout(
-        STEP,
-        mob.handle.spawn_spec(
-            worker_spec(name)
-                .with_entry_custody(true)
-                .with_resume_bridge_session_id(session),
-        ),
-    )
-    .await
-    .expect("the spawn answers");
-    assert!(
-        spawned.is_err(),
-        "the resumed spawn fails after its membership step: {spawned:?}"
-    );
+    // The spawn's answer waits for its rollback: the actor keeps the failed
+    // spawn's reply with the rollback it retained and sends it when the
+    // rollback attempt settles. The row holds that rollback, so it reads the
+    // answer only once the rollback has ended.
+    let spawning = {
+        let handle = mob.handle.clone();
+        let spec = worker_spec(name)
+            .with_entry_custody(true)
+            .with_resume_bridge_session_id(session);
+        tokio::spawn(async move { handle.spawn_spec(spec).await })
+    };
     tokio::time::timeout(STEP, resume_held.entered())
         .await
         .expect("the spawn's rollback starts");
@@ -1138,6 +1135,17 @@ async fn seal_during_a_spawn_rollback(name: &str, restart: bool) {
         retired(&records, name, G0).and_then(|(_, facts)| facts.cause),
         None,
         "the end of {name}'s rollback names no cause"
+    );
+    // The rollback has ended, so the spawn has its answer: the failure after
+    // its membership step, or, when the mob restarted in the window, the
+    // crashed mob's.
+    let spawned = tokio::time::timeout(STEP, spawning)
+        .await
+        .expect("the spawn answers once its rollback has ended")
+        .expect("the spawn task ends");
+    assert!(
+        spawned.is_err(),
+        "the resumed spawn fails after its membership step: {spawned:?}"
     );
     let mut state = mob.handle.machine_state_watch_rx.clone();
     tokio::time::timeout(

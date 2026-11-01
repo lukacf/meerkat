@@ -242,7 +242,8 @@ test("filter bar builds the server's scope/identity/scope_key/status params", ()
     buildRecordsQueryParams({ status: "quarantined" }, { cursor: "123:m-1", limit: 200 }),
     { status: "quarantined", limit: 200, cursor: "123:m-1" },
   );
-  // Realm names the single realm whose keyset cursor makes paging honest.
+  // Realm narrows the listing to one realm. An older server paged several
+  // realms only this way: its merged page carried no cursor.
   assert.deepEqual(buildRecordsQueryParams({ realm: "example" }), { realm: "example" });
   assert.deepEqual(
     buildRecordsQueryParams({ scope: "mob", key: "research", realm: "example" }),
@@ -420,8 +421,10 @@ test("lattice walk pages a single realm with the keyset cursor", async () => {
 });
 
 test("lattice walk on multi-realm gateways walks each realm to exhaustion", async () => {
-  // Server-real shapes: an unscoped multi-realm merge NEVER carries a
-  // cursor; realm-scoped pages do. The walk must never call unscoped here.
+  // An older server's shapes: an unscoped multi-realm merge carries no
+  // cursor; realm-scoped pages do. The current server gives the merge a
+  // cursor too, but the walk reads realm by realm for both, so it must never
+  // call unscoped here.
   const realmPages: Record<string, MemoryPanelRecordsResult[]> = {
     alpha: [
       {
@@ -2021,7 +2024,9 @@ test("proposals and promotions of a scope kind the probes denied never show", ()
 });
 
 test("load more follows a few empty pages that still carry a cursor, then stops", async () => {
-  // A restricted caller can read empty pages while more rows lie past them.
+  // An older server, which paged before it filtered, could give a restricted
+  // caller empty pages while more rows lay past them. The current server
+  // fills each page from the rows the caller may read and sends no such page.
   const pages: Record<string, MemoryPanelRecordsResult> = {
     first: { records: [], next_cursor: "c2", realms: ["default"] },
     c2: { records: [], next_cursor: "c3", realms: ["default"] },

@@ -623,10 +623,12 @@ export function latticeFingerprint(
 
 /// Walk the store page by page. Single-realm gateways follow the keyset
 /// cursor directly; multi-realm gateways walk each realm in turn through the
-/// server-supported `realm` param. A merged multi-realm page carries a cursor
-/// as well (one position in the order every realm shares, which resumes them
-/// all), so the per-realm walk is a choice of order, not a need. `complete` =
-/// every realm exhausted its cursor within the shared cap.
+/// server-supported `realm` param. The current server gives a merged
+/// multi-realm page a cursor as well (one position in the order every realm
+/// shares, which resumes them all); an older server cut a merged page without
+/// one, so for it the per-realm walk is what lets `complete` mean every realm
+/// was read. `complete` = every realm exhausted its cursor within the shared
+/// cap.
 export async function runLatticeWalk(
   fetchPage: (params: Record<string, unknown>) => Promise<MemoryPanelRecordsResult | null>,
   options: {

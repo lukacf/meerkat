@@ -6324,11 +6324,12 @@ mod checked_v1_acceptance {
     }
 
     /// An invalid save says what is wrong with it: `invalid_access_config`
-    /// carries `reason`, a stable `kind` and a `message` that names the
-    /// rule, action, group or approver at fault, on the checked and the
+    /// carries `reason`, a stable token, and `detail`, the text that names
+    /// the rule, action, group or approver at fault, on the checked and the
     /// unchecked write of each method that can leave the configuration
-    /// invalid. The code and the fixed message stay, nothing is written, and
-    /// the refusal names nothing private.
+    /// invalid (`set`, `rules/upsert`, `rules/delete` and `groups/delete`).
+    /// The code and the fixed message stay, nothing is written, and the
+    /// refusal names nothing private.
     #[tokio::test]
     async fn invalid_saves_name_their_reason_on_checked_and_unchecked_writes() {
         fn strings(values: &[&str]) -> Vec<String> {
@@ -6361,6 +6362,17 @@ mod checked_v1_acceptance {
         }
 
         let fixture = fixture();
+        // A rule that names the ops group, so deleting the group leaves the
+        // configuration invalid.
+        fixture
+            .controller
+            .upsert_rule(AccessRule {
+                id: "ops-senders".to_string(),
+                groups: strings(&["ops"]),
+                actions: strings(&["agent.send"]),
+                ..AccessRule::default()
+            })
+            .expect("a rule that names the ops group");
         let base = read_edit_base(&fixture.app, ADMIN_A).await;
         let initial = checkpoint(&fixture);
         let cases = [
@@ -6398,6 +6410,16 @@ mod checked_v1_acceptance {
                 }),
                 "empty_approver_id",
                 "approver id must not be empty",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config
+                        .approvers
+                        .insert(" ops-lead".to_string(), approver(&["ops-lead"], &[]));
+                }),
+                "padded_approver_id",
+                "approver \" ops-lead\": id must not have leading or trailing whitespace",
             ),
             (
                 "meta/access/set",
@@ -6443,8 +6465,14 @@ mod checked_v1_acceptance {
                 "unknown_rule",
                 "unknown access rule id: missing-rule",
             ),
+            (
+                "meta/access/groups/delete",
+                json!({ "name": "ops" }),
+                "unknown_group",
+                "access rule ops-senders: unknown group \"ops\"",
+            ),
         ];
-        for (method, payload, kind, message) in cases {
+        for (method, payload, reason, detail) in cases {
             for (form, params) in [
                 (
                     "checked",
@@ -6467,7 +6495,8 @@ mod checked_v1_acceptance {
                     response["error"]["data"],
                     json!({
                         "kind": "invalid_access_config",
-                        "reason": { "kind": kind, "message": message },
+                        "reason": reason,
+                        "detail": detail,
                     }),
                     "{method}, {form}: {response:#?}"
                 );

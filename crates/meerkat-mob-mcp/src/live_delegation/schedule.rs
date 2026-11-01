@@ -773,6 +773,47 @@ mod tests {
             .id
     }
 
+    /// `count` voice items on the test channel, each closed as completed.
+    async fn closed_voice_items(workgraph: &VoiceWorkGraph, count: usize) {
+        for index in 0..count {
+            let item = voice_item(workgraph, &format!("finished request {index}")).await;
+            workgraph
+                .close(&item, WorkStatus::Completed, None)
+                .await
+                .expect("close the voice item");
+        }
+    }
+
+    /// A new voice item is offered after a long voice history. The
+    /// scheduling snapshot read the 100 least recently updated voice items,
+    /// all of them closed, so the new item never became ready and the queue
+    /// stalled.
+    #[tokio::test]
+    async fn a_new_voice_item_is_ready_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(readiness.ready.contains(&item), "{readiness:?}");
+    }
+
+    /// A new voice item is classified after a long voice history. The
+    /// classification snapshot read the 100 least recently updated voice
+    /// items and reported the worker's item missing from its namespace.
+    #[tokio::test]
+    async fn a_new_voice_item_is_classified_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&item).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
+    }
+
     /// #1820 follow-up: the four simple statuses come from the item alone. A
     /// terminal or running item is classified with no namespace snapshot,
     /// even when a stale Blocks edge still points at it; only Open and

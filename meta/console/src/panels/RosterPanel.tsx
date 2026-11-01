@@ -680,7 +680,7 @@ function RosterCard({
         kind: "bars",
       }}
       figures={[countWords(turns, "turn") + " today"]}
-      time={activity.lastActivityMs ? <RelativeTime value={activity.lastActivityMs} /> : undefined}
+      // The live line already says since when; no second time on the card.
       relations={entry.peers.length ? <PeerNames peers={entry.peers} agents={agents} /> : undefined}
       technical={showIds ? [{ label: "Identity", value: identity }] : undefined}
       actions={
@@ -805,7 +805,6 @@ function RosterDrawer({
   const identity = agent.identity || agent.member_id;
   const [confirming, setConfirming] = React.useState<ConfirmedLifecycleAction | null>(null);
   const change = lastChange(agent);
-  const activityWords = rosterActivity(agent);
   const inFlight = agent.progress?.in_flight_work ?? 0;
   const showRespawn = actionVisibility?.respawn !== false && agent.affordances?.can_respawn && restartOffered(agent);
   const showReset = actionVisibility?.reset !== false && canResetLifecycle && restartOffered(agent);
@@ -909,7 +908,7 @@ function RosterDrawer({
         </p>
         <KeyValueList
           items={[
-            { label: "Status", value: activityWords ? activityWords.charAt(0).toUpperCase() + activityWords.slice(1) : humanizeEnum(agent.state || "unknown") },
+            // The status is the header's pill and the line above; no Status row.
             agent.progress ? { label: "In flight", value: inFlight === 0 ? "Nothing" : plural(inFlight, "task") } : null,
             change.words
               ? {

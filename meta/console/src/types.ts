@@ -634,6 +634,10 @@ export interface MemoryPanelQuarantineResult {
 export interface MemoryPanelDreamsResult {
   runs: MemoryDreamRun[];
   realms: string[];
+  /// Access withheld at least one realm's runs (the caller lacks a memory
+  /// scope of the realm, or the quarantine review grant while the realm
+  /// holds quarantined records). Missing on older servers: read as false.
+  withheld_by_access?: boolean;
 }
 
 // ── Memory panel Phase-2 read surfaces ────────────────────────────────────
@@ -733,6 +737,8 @@ export interface MemoryDreamRunSheet {
 export interface MemoryPanelDreamRunsResult {
   runs: MemoryDreamRunSheet[];
   realms: string[];
+  /// As MemoryPanelDreamsResult.withheld_by_access.
+  withheld_by_access?: boolean;
 }
 
 /// An open usage-audit verdict: a dead-weight/correction call awaiting

@@ -247,6 +247,8 @@ import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContex
 import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
 import { ActivityLedgerProvider, createActivityLedger, createAgentResolver, type ActivityLedger } from "./lib/activity-ledger";
 import { consoleNavControls } from "./lib/nav-controls";
+import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-components";
+import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -944,10 +946,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
-  // Display names for every key an agent is known by (identity, member,
-  // agent and session ids): panels show names, with the key in a tooltip.
-  // Panels name agents the way the sidebar does.
-  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
@@ -3768,10 +3766,30 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }
   const timelineScope = timelineScopeRef.current;
   const bufferScopeRef = React.useRef(timelineScope);
-  // The ledger names peers the way the roster does.
+  // The ledger names peers the way the roster does, and links open the agent a name resolves to.
+  const agentResolver = React.useMemo(() => createAgentResolver(agents), [agents]);
   React.useEffect(() => {
-    timelineScope.ledger.setResolver(createAgentResolver(agents));
-  }, [agents, timelineScope]);
+    timelineScope.ledger.setResolver(agentResolver);
+  }, [agentResolver, timelineScope]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids, and the comms peer ids the ledger has seen: a
+  // send names its recipient by peer id only): panels show names, with the
+  // key in a tooltip. Panels name agents the way the sidebar does.
+  const ledgerPeersVersion = React.useSyncExternalStore(
+    timelineScope.ledger.subscribe,
+    timelineScope.ledger.getPeersVersion,
+    timelineScope.ledger.getPeersVersion,
+  );
+  const agentDirectory = React.useMemo(() => {
+    const peerIds = timelineScope.ledger.peerIds();
+    return createAgentDirectory(agents.map((agent) => {
+      const entry = agentDirectoryEntry(agent);
+      const ids = peerIds.get(agent.identity || agent.member_id || agent.agent_id) ?? [];
+      return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
+    }));
+    // Read again whenever the ledger learns a peer id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, timelineScope, ledgerPeersVersion]);
 
   React.useEffect(() => {
     const scope = timelineScope;
@@ -5118,6 +5136,42 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const pivot = memoryFramePivot(frame);
     if (pivot) void loadMemoryRecordDetailRef.current(pivot.realm, pivot.recordId);
   }, []);
+  // Cross-panel navigation (spec A4.7): an entity's name in any panel opens
+  // the entity. The openers read the console through a ref, so they stay one
+  // object until the offered views change.
+  const navigationFocus = useNavigationFocusSource();
+  const navigationHostRef = React.useRef<ConsoleNavigationHost<MetaDockTarget> | null>(null);
+  navigationHostRef.current = {
+    dockState: () => dockRef.current.state,
+    dispatch: (action) => dockRef.current.dispatch(action),
+    findAgent: (reference) => {
+      const identity = agentResolver(reference);
+      return identity
+        ? agents.find((agent) => (agent.identity || agent.member_id || agent.agent_id) === identity) ?? null
+        : null;
+    },
+    chatTarget: buildDockTarget,
+    detailsTarget: buildInspectTarget,
+    viewTarget: (kind) => buildControlTarget(kind),
+    onAgentDetails: (agent) => {
+      setSelectedRosterMemberId(agent.member_id);
+      void refreshInspectIdentity(buildInspectTarget(agent).identity).catch(() => {});
+    },
+    onAgentChat: (agent) => {
+      const target = buildDockTarget(agent);
+      void refreshIdentityTimelineNow(target.identity || target.memberId).catch(() => {});
+    },
+    selectApproval: (id) => {
+      setSelectedApprovalId(id);
+      setApprovalOpens((count) => count + 1);
+    },
+    loadMemoryRecord: (realm, id) => void loadMemoryRecordDetailRef.current(realm, id),
+    focus: navigationFocus.focus,
+  };
+  const consoleNavigation = React.useMemo(
+    () => buildConsoleNavigation(() => navigationHostRef.current!, visibleControls),
+    [visibleControls],
+  );
   const watchedIdentities = React.useMemo(
     () =>
       new Set(
@@ -5909,6 +5963,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ConsolePanelsProvider value={panelProvider}>
     <AgentDirectoryProvider directory={agentDirectory}>
     <ActivityLedgerProvider ledger={timelineScope.ledger}>
+    <ConsoleNavigationProvider value={consoleNavigation}>
+    <NavigationFocusProvider value={navigationFocus.value}>
+    <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
       className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
@@ -6046,6 +6103,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       </div>
     </div>
     </HostDecideSourcesProvider>
+    </PanelPreferencesProvider>
+    </NavigationFocusProvider>
+    </ConsoleNavigationProvider>
     </ActivityLedgerProvider>
     </AgentDirectoryProvider>
     </ConsolePanelsProvider>

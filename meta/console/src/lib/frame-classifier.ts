@@ -7,7 +7,7 @@
 // (no React).
 
 import { normalizeStatusWord, type Tone } from "../../../packages/console-components/src/panel-kit/tone";
-import type { AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { agentDisplayName, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import { memberKickoffNotice, memberKickoffPhaseLabel } from "../../../packages/console-core/src/member-kickoff";
 import { stripPeerTransportScaffold } from "./adapters";
@@ -178,14 +178,115 @@ function textOf(value: unknown): string {
   return "";
 }
 
+/**
+ * Model markdown as plain words for a one-line snippet: no ** or __
+ * emphasis marks, code ticks or fences, heading or quote marks, list
+ * bullets, rules or table pipes. Single * and _ stay (snake_case names).
+ */
+export function plainSnippetText(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => {
+      // Code fences, rules and a table's separator row carry no words.
+      if (/^\s*(?:`{3,}|~{3,})/.test(line)) return "";
+      if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) return "";
+      if (/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/.test(line)) return "";
+      let text = line.replace(/^\s*(?:>\s?)+/, "").replace(/^\s*#{1,6}\s+/, "").replace(/^\s*(?:[-*+\u2022]|\d{1,3}[.)])\s+/, "");
+      if (/^\s*\|/.test(text)) text = text.replace(/\|/g, " ");
+      return text;
+    })
+    .join("\n")
+    .replace(/\*\*|__|`/g, "");
+}
+
 function snippetOf(value: string): string | undefined {
-  const text = stripPeerTransportScaffold(value).replace(/\s+/g, " ").trim();
+  const text = plainSnippetText(stripPeerTransportScaffold(value)).replace(/\s+/g, " ").trim();
   if (!text || /^You have been spawned as\b/i.test(text)) return undefined;
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX - 3).trimEnd()}...` : text;
 }
 
 function lastPathSegment(value: string): string {
   return value.split("/").filter(Boolean).pop() || value;
+}
+
+/** Model providers by the name a failure gives them. */
+const PROVIDER_WORDS: Readonly<Record<string, string>> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+  google: "Google",
+  copilot: "Copilot",
+};
+
+/** The kinds of model error that lead a provider's own words. */
+const LLM_ERROR_KIND_RE = /^(Invalid request|Request too large|Invalid input shape|Invalid provider config|Authentication failed|Authorization route changed|Content filtered|Provider quota exhausted|Unknown error|Stream parsing error|Server error):\s*/;
+
+/**
+ * A runtime failure without its wrappers, the provider as context:
+ * "Terminal failure: Failed (LlmFailure): LLM failure terminal turn: LLM
+ * error (anthropic): Invalid request: The model provider rejected ..."
+ * reads "Invalid request (Anthropic): The model provider rejected ...".
+ */
+export function failureWords(message: string): string {
+  let rest = message.trim();
+  let provider = "";
+  for (let guard = 0; guard < 8; guard += 1) {
+    const before = rest;
+    rest = rest.replace(/^Terminal failure: \w+ \(\w+\):\s*/, "").replace(/^[A-Za-z ]+ terminal turn:\s*/, "");
+    const llm = /^LLM error \(([^)]+)\):\s*/.exec(rest);
+    if (llm) {
+      provider = llm[1]!.trim();
+      rest = rest.slice(llm[0].length);
+    }
+    if (rest === before) break;
+  }
+  if (!provider) return rest;
+  const providerWords = PROVIDER_WORDS[provider.toLowerCase()] ?? humanizeEnum(provider);
+  const kind = LLM_ERROR_KIND_RE.exec(rest);
+  return kind ? `${kind[1]} (${providerWords}): ${rest.slice(kind[0].length)}` : `${providerWords}: ${rest}`;
+}
+
+/** A failure's snippet: the human part of its message, else its reason. */
+function failureSnippet(data: Data): string | undefined {
+  const { message } = summarizeFailureData(data);
+  return snippetOf(message ? failureWords(message) : describeFailure(data, ""));
+}
+
+/**
+ * A tool's failure in words: a JSON error result reads as its kind and its
+ * message, {"error":"access_denied","message":"Tool 'x' is not allowed by
+ * policy"} as "Access denied: Tool 'x' is not allowed by policy".
+ */
+export function toolFailureWords(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return trimmed;
+  try {
+    const parsed = recordOf(JSON.parse(trimmed));
+    const error = recordOf(parsed.error);
+    const kind = humanizeEnum(textValue(parsed.error) || textValue(error.kind) || textValue(error.code));
+    const message = textValue(parsed.message) || textValue(error.message) || textValue(parsed.detail);
+    if (!kind && !message) return trimmed;
+    return kind && message ? `${kind}: ${message}` : kind || message;
+  } catch {
+    return trimmed;
+  }
+}
+
+/** A budget in words, for "its token budget". */
+const BUDGET_WORDS: Readonly<Record<string, string>> = { tokens: "token", time: "time", tool_calls: "tool call" };
+
+/** Who wrote a memory write, from the event's author: an agent by key
+ * (`agent shipping`, `Agent { identity: "shipping" }`), else the writer in words. */
+function memoryAuthorSegment(author: string): FrameSegment | null {
+  const trimmed = author.trim();
+  if (!trimmed) return null;
+  const agent = /^agent\s*\{\s*identity:\s*"([^"]+)"\s*\}$/i.exec(trimmed) ?? /^agent\s+(\S.*)$/i.exec(trimmed);
+  if (agent) return { agent: agent[1]!.trim() };
+  if (/^operator\b/i.test(trimmed)) return "the operator";
+  if (/^application\b/i.test(trimmed)) return "the application";
+  if (/^steward\b/i.test(trimmed)) return "the memory steward";
+  if (/^distiller\b/i.test(trimmed)) return "the summarizer";
+  return trimmed;
 }
 
 /** A peer reference as the directory knows it: its canonical key when known. */
@@ -330,7 +431,7 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
     const runId = runIdOf(frame, data);
     const word = RUN_CANCELLED_EVENTS.has(event) ? "cancelled" : failureWord(data);
     const eventKey = `turn-end:${agent ?? ""}:${runId || interactionIdOf(frame, data) || frame.id}`;
-    const reason = snippetOf(describeFailure(data, ""));
+    const reason = failureSnippet(data);
     if (QUIET_FAILURES.has(word)) {
       // Stopped by someone, replaced by a later turn, or ended by a
       // lifecycle action: nothing went wrong.
@@ -438,15 +539,19 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
     };
   }
   if (event === "budget_warning") {
-    const used = numberValue(data.percent);
-    const budget = humanizeEnum(textValue(data.budget_type)).toLowerCase();
+    // `percent` is the share used (0.85 reads 85%), else `used` of `limit`.
+    const used = numberValue(data.used);
+    const limit = numberValue(data.limit);
+    const share = numberValue(data.percent) ?? (used !== undefined && limit ? used / limit : undefined);
+    const type = textValue(data.budget_type);
+    const budget = BUDGET_WORDS[type] ?? humanizeEnum(type).toLowerCase();
     return {
       family: "turn",
       tone: "warn",
       title: "Budget nearly used",
       verb: budget ? `has used most of its ${budget} budget` : "has used most of its budget",
       segments: [who, budget ? ` has used most of its ${budget} budget` : " has used most of its budget"],
-      snippet: used !== undefined ? `${Math.round(used)}% used` : undefined,
+      snippet: share !== undefined ? `${Math.round(share * 100)}% used` : undefined,
     };
   }
   if (event === "compaction_started" || event === "compaction_completed" || event === "compaction_failed") {
@@ -534,7 +639,7 @@ function classifyTool(frame: ConsoleFrame, data: Data, who: FrameSegment, direct
       title: failed ? "Tool failed" : "Tool finished",
       verb: failed ? `${toolPossessive} failed` : `finished ${toolWords}`,
       segments: failed ? [who, `'s ${toolPossessive} failed`] : [who, ` finished ${toolWords}`],
-      snippet: failed ? snippetOf(textOf(data.content ?? data.result) || describeFailure(data, "")) : undefined,
+      snippet: failed ? snippetOf(toolFailureWords(textOf(data.content ?? data.result)) || describeFailure(data, "")) : undefined,
       ...(event === "tool_execution_completed" ? { span: toolSpan("end", failed ? "failed" : "ok") } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),
       // One copy of a failure lists: both events report it, under one key.
@@ -578,7 +683,9 @@ function peerTargetOf(args: Data): string {
 function classifyPeerTool(frame: ConsoleFrame, data: Data, who: FrameSegment, name: string, directory: AgentDirectory | undefined): Parts {
   const args = recordOf(data.args);
   const reference = peerTargetOf(args);
-  const target = reference ? peerKey(reference, directory) : "";
+  // A send that names its recipient by peer id only: the directory knows
+  // the id once the console has seen that peer's name for it.
+  const target = reference ? peerKey(reference, directory) : directory?.lookup(textValue(args.peer_id))?.id ?? "";
   const verb = name === "send_request" ? "asked" : name === "send_response" || name === "reply_to_peer" ? "replied to" : "messaged";
   const agent = frameAgent(frame);
   return {
@@ -664,7 +771,10 @@ function classifySystemNotice(frame: ConsoleFrame, data: Data, who: FrameSegment
       segments: [{ agent: member }, `'s kickoff ${phase}`],
       actor: member,
       snippet: kickoff.role ? humanizeEnum(kickoff.role) : undefined,
-      eventKey: `kickoff:${member}:${kickoff.phase}:${frame.id}`,
+      // Every peer of the member gets its own copy of one kickoff notice, and
+      // the copies share no id: the member, the phase, the member's comms
+      // peer id and the minute name the kickoff, so it lists once.
+      eventKey: `kickoff:${member}:${kickoff.phase}:${kickoff.peerIdentity ?? ""}:${frame.timestampMs ? Math.floor(frame.timestampMs / 60_000) : frame.id}`,
     };
   }
   const block = blocks.find((candidate) => textValue(candidate.kind) !== "lifecycle" && textValue(candidate.kind) !== "response_progress");
@@ -687,7 +797,8 @@ function classifySystemNotice(frame: ConsoleFrame, data: Data, who: FrameSegment
   const recipient = outgoing ? peerAgent : receiver ?? "";
   const kind = textValue(block.kind);
   const verb = kind === "request" ? "asked" : kind === "response_terminal" ? "replied to" : "messaged";
-  const content = stripPeerTransportScaffold(textOf(block.content));
+  // The notice's text opens with an envelope line naming its peer: drop it.
+  const content = stripPeerTransportScaffold(textOf(block.content), [textValue(peer.display_name), textValue(peer.id)]);
   const detail = content || textValue(block.summary) || textValue(block.intent) || textOf(block.payload);
   return {
     family: "message",
@@ -800,40 +911,66 @@ function memoryScopeSegments(data: Data): FrameSegment[] {
 function classifyMemory(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts {
   const event = frame.event;
   const reason = snippetOf(textOf(data.reason));
-  const parts = (tone: Tone, title: string, segments: FrameSegment[], verb: string, snippet?: string): Parts =>
-    ({ family: "memory", tone, title, verb, segments, ...(snippet ? { snippet } : {}) });
+  // The memory system reports most of these (as "_system"): its sentences
+  // name what the payload says (the author, the scope, the subject), never
+  // "System".
+  const agent = frameAgent(frame);
+  const by = (withAgent: FrameSegment[], alone: FrameSegment[]): FrameSegment[] => (agent ? withAgent : alone);
+  const parts = (tone: Tone, title: string, segments: FrameSegment[], verb: string, snippet?: string, actor?: string | null): Parts =>
+    ({ family: "memory", tone, title, verb, segments, ...(snippet ? { snippet } : {}), ...(actor !== undefined ? { actor } : {}) });
   switch (event) {
-    case "memory.dream.completed": return parts("ok", "Memory dream completed", [who, " finished a memory dream"], "finished a memory dream");
-    case "memory.dream.started": return parts("neutral", "Memory dream started", [who, " started a memory dream"], "started a memory dream");
-    case "memory.dream.skipped": return parts("neutral", "Memory dream skipped", [who, " skipped a memory dream"], "skipped a memory dream", reason);
-    case "memory.record.promoted": return parts("ok", "Memory record moved", [who, " moved a memory record"], "moved a memory record");
-    case "memory.write.quarantined":
-      return parts("warn", "Memory write quarantined", ["A memory write from ", who, " was quarantined"], "had a memory write quarantined", reason);
+    case "memory.dream.completed": {
+      const ops = numberValue(data.ops_committed);
+      const changes = ops !== undefined ? `${ops} ${ops === 1 ? "change" : "changes"}` : "";
+      return parts("ok", "Memory dream completed", by([who, " finished a memory dream"], ["A memory dream finished"]), "finished a memory dream",
+        snippetOf([changes, textValue(data.detail)].filter(Boolean).join(" \u00b7 ")));
+    }
+    case "memory.dream.started": return parts("neutral", "Memory dream started", by([who, " started a memory dream"], ["A memory dream started"]), "started a memory dream");
+    case "memory.dream.skipped": return parts("neutral", "Memory dream skipped", by([who, " skipped a memory dream"], ["A memory dream was skipped"]), "skipped a memory dream", reason);
+    case "memory.record.promoted": {
+      const owner = textValue(data.scope_kind) === "identity" ? textValue(data.scope_key) || null : null;
+      const moved: FrameSegment[] = textValue(data.scope_kind) ? ["A memory record moved to ", ...memoryScopeSegments(data)] : ["A memory record was moved"];
+      return parts("ok", "Memory record moved", by([who, " moved a memory record"], data.gated === true ? [...moved, " after approval"] : moved), "moved a memory record", undefined, agent ?? owner);
+    }
+    case "memory.write.quarantined": {
+      const author = memoryAuthorSegment(textValue(data.author));
+      const from = author ?? (agent ? who : null);
+      const actor = author && typeof author !== "string" ? author.agent : agent;
+      return parts("warn", "Memory write quarantined", from ? ["A memory write from ", from, " was quarantined"] : ["A memory write was quarantined"], "had a memory write quarantined", reason, actor);
+    }
     case "memory.quarantine.verdict": {
       // The steward's open-loop nudge rides the verdict event; nobody
       // reviewed anything.
       if (isOpenLoopNudge(event, data)) return parts("neutral", "Open loop needs follow-up", ["An open loop needs follow-up"], "flagged an open loop");
       const verdict = textOf(data.verdict);
-      return parts("neutral", "Quarantine verdict", [who, " reviewed a quarantined record"], "reviewed a quarantined record", verdict ? quarantineVerdictWords(verdict) : undefined);
+      return parts("neutral", "Quarantine verdict", by([who, " reviewed a quarantined record"], ["A quarantined record was reviewed"]), "reviewed a quarantined record", verdict ? quarantineVerdictWords(verdict) : undefined);
     }
     case "memory.quarantine.release_blocked":
-      return parts("warn", "Quarantine release blocked", ["A quarantine release by ", who, " was blocked"], "had a quarantine release blocked");
-    case "memory.conflict.signal": return parts("warn", "Conflicting memories", [who, " flagged a memory conflict"], "flagged a memory conflict", reason);
-    case "memory.budget.denied": return parts("warn", "Memory budget reached", [who, " reached the memory budget"], "reached the memory budget");
-    case "memory.hygiene.blocked": return parts("warn", "Memory tidy-up blocked", [who, "'s memory tidy-up was blocked"], "had a memory tidy-up blocked", reason);
-    case "memory.distill.timed_out": return parts("warn", "Summarizing timed out", [who, "'s conversation summary timed out"], "had a conversation summary time out");
-    case "memory.taint.transition":
+      return parts("warn", "Quarantine release blocked", by(["A quarantine release by ", who, " was blocked"], ["A quarantine release was blocked"]), "had a quarantine release blocked");
+    case "memory.conflict.signal": {
+      const subject = [textValue(data.entity), textValue(data.topic)].filter(Boolean).join(", ");
+      return parts("warn", "Conflicting memories", by([who, " flagged a memory conflict"], [subject ? `Conflicting memories about ${subject}` : "Conflicting memories"]), "flagged a memory conflict", reason);
+    }
+    case "memory.budget.denied": return parts("warn", "Memory budget reached", by([who, " reached the memory budget"], ["The memory budget was reached"]), "reached the memory budget");
+    case "memory.hygiene.blocked": return parts("warn", "Memory tidy-up blocked", by([who, "'s memory tidy-up was blocked"], ["A memory tidy-up was blocked"]), "had a memory tidy-up blocked", reason);
+    case "memory.distill.timed_out": return parts("warn", "Summarizing timed out", by([who, "'s conversation summary timed out"], ["A conversation summary timed out"]), "had a conversation summary time out");
+    case "memory.taint.transition": {
+      const owner = textValue(data.identity) || agent;
+      const session: FrameSegment[] = owner ? [{ agent: owner }, "'s session"] : ["A session"];
       return data.kind === "tainted"
-        ? parts("warn", "Session became untrusted", [who, "'s session became untrusted"], "had its session become untrusted")
-        : parts("neutral", "Session trust changed", [who, `'s session memory: ${humanizeEnum(textOf(data.kind) || "changed").toLowerCase()}`], "had its session trust change");
+        ? parts("warn", "Session became untrusted", [...session, " became untrusted"], "had its session become untrusted", undefined, owner)
+        : parts("neutral", "Session trust changed", [...session, ` memory: ${humanizeEnum(textOf(data.kind) || "changed").toLowerCase()}`], "had its session trust change", undefined, owner);
+    }
     case "memory.harvest.completed": {
       const retired = textValue(data.identity);
       return parts("info", "Retired agent's memory summarized", retired ? [{ agent: retired }, "'s memory was summarized"] : ["A retired agent's memory was summarized"], "had its memory summarized");
     }
     case "memory.promotion.pending_gate":
       return parts("info", "Memory record waiting to move", ["A record waits for approval to move to ", ...memoryScopeSegments(data)], "has a record waiting to move");
-    default:
-      return parts("neutral", humanizeEnum(event), [who, `: memory ${humanizeEnum(event.slice("memory.".length)).toLowerCase()}`], `memory ${humanizeEnum(event.slice("memory.".length)).toLowerCase()}`);
+    default: {
+      const words = humanizeEnum(event.slice("memory.".length)).toLowerCase();
+      return parts("neutral", humanizeEnum(event), by([who, `: memory ${words}`], [`Memory ${words}`]), `memory ${words}`);
+    }
   }
 }
 
@@ -916,8 +1053,23 @@ function classifySystem(frame: ConsoleFrame, data: Data, who: FrameSegment): Par
     title: humanizeEnum(event) || "Event",
     verb: humanizeEnum(event).toLowerCase(),
     segments: [who, `: ${humanizeEnum(event).toLowerCase()}`],
-    snippet: failed ? snippetOf(message) : undefined,
+    snippet: failed ? snippetOf(failureWords(message)) : undefined,
   };
+}
+
+/** "Accounts' kickoff", "Billing's kickoff": an agent whose name ends in s
+ * takes the bare apostrophe, by the name the directory gives it. */
+function possessives(segments: FrameSegment[], directory: AgentDirectory | undefined): FrameSegment[] {
+  let changed = false;
+  const out = segments.map((segment, index) => {
+    const previous = segments[index - 1];
+    if (typeof segment !== "string" || !/^'s(?![\p{L}\p{N}])/u.test(segment)) return segment;
+    if (!previous || typeof previous === "string" || previous.agent === null) return segment;
+    if (!/s$/i.test(agentDisplayName(previous.agent, directory))) return segment;
+    changed = true;
+    return `'${segment.slice(2)}`;
+  });
+  return changed ? out : segments;
 }
 
 function classifyUncached(frame: ConsoleFrame, directory: AgentDirectory | undefined): ClassifiedFrame {
@@ -942,7 +1094,7 @@ function classifyUncached(frame: ConsoleFrame, directory: AgentDirectory | undef
     tone: parts.tone,
     title: parts.title,
     verb: parts.verb,
-    segments: parts.segments,
+    segments: possessives(parts.segments, directory),
     actor: parts.actor !== undefined ? parts.actor : agent,
     ...(parts.target ? { target: parts.target } : {}),
     ...(parts.snippet ? { snippet: parts.snippet } : {}),

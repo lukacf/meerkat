@@ -1,6 +1,7 @@
 import React from "react";
 import { QuoteContextChips } from "../../../packages/console-components/src/conversation/context-chips";
-import { describeConsolePendingRow, type ConsoleSendAttempt } from "../../../packages/console-core/src/send-attempt";
+import { RelativeTime, StatusMark, type Tone } from "../../../packages/console-components/src/panel-kit";
+import { describeConsolePendingRow, type ConsoleSendAttempt, type ConsoleSendAttemptState } from "../../../packages/console-core/src/send-attempt";
 import { Icon } from "../icon";
 
 /// One row in the per-identity pending-message stack. Lives entirely
@@ -27,6 +28,19 @@ export interface PendingDeliveredNotice {
 }
 
 type DropWhere = "above" | "below";
+
+/// The mark a queued message's state wears (spec A2.4): queued is quiet,
+/// sending is happening now, delivered is done, not sent failed, and an
+/// unconfirmed send needs a look.
+export function pendingStateTone(state: ConsoleSendAttemptState): Tone {
+  switch (state) {
+    case "attempting": return "live";
+    case "accepted": return "ok";
+    case "definitely-rejected": return "crit";
+    case "outcome-unknown": return "warn";
+    default: return "neutral";
+  }
+}
 
 /// How long a normal send may stay in flight before its row appears.
 /// A send moves its row to `attempting` and, on the acceptance receipt, to
@@ -127,31 +141,31 @@ function StackHead({
   onClear,
 }: StackHeadProps): React.JSX.Element {
   return (
-    <div className="stack__head">
+    <div className="stack__head cc-reveal-host">
       <button
         type="button"
-        className="stack__head-btn"
+        className="stack__head-btn stack__toggle"
         onClick={onToggleCollapsed}
         aria-expanded={!collapsed}
         aria-label={collapsed ? "Expand pending queue" : "Collapse pending queue"}
         title={collapsed ? "Expand queue" : "Collapse queue"}
       >
-        <span className="stack__head-chev">{collapsed ? "▸" : "▾"}</span>
+        <span className="stack__head-chev" aria-hidden="true"><Icon name="i-chevron" /></span>
       </button>
-      <span>Queue</span>
+      <span className="stack__head-title">Queue</span>
       <span className="stack__head-count">{count}</span>
       {!collapsed && count > 1 && (
-        <span className="stack__head-hint">· drains top → bottom</span>
+        <span className="stack__head-hint">· sends top to bottom</span>
       )}
       <span className="stack__head-spacer" />
       <span className={`stack__head-phase ${agentBusy ? "" : "is-idle"}`}>
-        <b />
+        <StatusMark tone={agentBusy ? "live" : "neutral"} />
         {agentBusy ? "Agent busy" : "Agent idle"}
       </span>
       {count > 0 && (
         <button
           type="button"
-          className="stack__head-btn"
+          className="stack__head-btn stack__clear cc-reveal"
           onClick={onClear}
           aria-label="Clear all queued messages"
           title="Clear all"
@@ -188,15 +202,6 @@ interface StackItemProps {
   onDragLeave: (e: React.DragEvent<HTMLLIElement>, id: string) => void;
   onDrop: (e: React.DragEvent<HTMLLIElement>, id: string) => void;
   onDragEnd: () => void;
-}
-
-function timeAgo(ts: number): string {
-  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (s < 5) return "just now";
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h`;
 }
 
 function StackItem({
@@ -266,9 +271,12 @@ function StackItem({
   const checking = check?.phase === "checking";
   const previewId = React.useId();
 
+  const tone = pendingStateTone(item.state);
   const cls = [
     "stk-item",
+    "cc-reveal-host",
     !isDraft ? "is-frozen" : "",
+    settledFailure ? "needs-attention" : "",
     needsAcceptance ? "needs-acceptance" : "",
     isHead ? "is-head" : "",
     item.editing ? "is-editing" : "",
@@ -289,6 +297,7 @@ function StackItem({
       role="listitem"
       tabIndex={0}
       data-id={item.id}
+      data-state={item.state}
       data-testid={`pending-item:${item.id}`}
       draggable={!item.editing && item.state === "draft"}
       onDragStart={(e) => onDragStart(e, item.id)}
@@ -308,7 +317,7 @@ function StackItem({
         {isDraft && <span className="stk-item__grip" aria-label="Drag to reorder" title="Drag to reorder">
           <span /><span /><span /><span /><span /><span />
         </span>}
-        <span className="stk-item__queue-glyph" aria-hidden="true"><Icon name={settledFailure ? "i-info" : "i-clock"} /></span>
+        <StatusMark tone={tone} size="md" className="stk-item__mark" />
       </div>
 
       {item.editing ? (
@@ -349,11 +358,11 @@ function StackItem({
       ) : (
         <div className="stk-item__body">
           <div className="stk-item__meta">
+            <span className="stk-item__state" data-tone={tone} role={needsAcceptance ? "status" : undefined}>{copy.label}</span>
             {isHead && isDraft && <span className="stk-item__head-tag">Next</span>}
-            <span className="stk-item__state" role={needsAcceptance ? "status" : undefined}>{copy.label}</span>
-            {item.contexts.length > 0 && <span>{item.contexts.length} {item.contexts.length === 1 ? "quote" : "quotes"}</span>}
-            <span className="stk-item__age">{timeAgo(item.addedAt)}</span>
+            {item.contexts.length > 0 && <span className="stk-item__quotes">{item.contexts.length} {item.contexts.length === 1 ? "quote" : "quotes"}</span>}
             {item.status === "promoting" && <span className="stk-item__sending">Sending...</span>}
+            <RelativeTime value={item.addedAt} className="stk-item__age" />
           </div>
           <div
             id={previewId}
@@ -375,7 +384,9 @@ function StackItem({
       )}
 
       {!item.editing && (
-        <div className="stk-item__actions">
+        // A row that needs a decision keeps its recovery actions in view; the
+        // others show theirs on hover and focus (and always without hover).
+        <div className={settledFailure ? "stk-item__actions" : "stk-item__actions cc-reveal"}>
           {needsAcceptance && <button type="button" className="stk-btn stk-btn--primary" disabled={checking} onClick={() => onReconcile(item.id)}>Check</button>}
           {canResend && <button type="button" className="stk-btn" disabled={checking} onClick={() => onRetry(item.id)}>Send again</button>}
           {longText && <button type="button" className="stk-btn stk-btn--expand" aria-expanded={Boolean(item.expanded)} aria-controls={previewId} onClick={() => onToggleExpand(item.id)}>{item.expanded ? "Hide saved message" : "Show saved message"}</button>}
@@ -446,14 +457,6 @@ export function PendingStack({
   onClearAll,
   onToggleExpand,
 }: PendingStackProps): React.JSX.Element | null {
-  // Tick once a minute so "X seconds ago" labels stay fresh without
-  // forcing the parent to re-render on every tick.
-  const [, setTick] = React.useState(0);
-  React.useEffect(() => {
-    const t = window.setInterval(() => setTick((n) => n + 1), 10_000);
-    return () => window.clearInterval(t);
-  }, []);
-
   const [dragId, setDragId] = React.useState<string | null>(null);
   const [dropTarget, setDropTarget] = React.useState<DropTarget>({ id: null, where: null });
   const [collapsed, setCollapsed] = React.useState(false);
@@ -531,7 +534,8 @@ export function PendingStack({
       />}
       {notices.length > 0 && <ul className="stack__delivered" aria-label="Delivered messages">
         {notices.map((notice) => <li key={notice.id} className="stack__delivered-item" role="status" data-testid={`pending-delivered:${notice.id}`}>
-          {notice.text}
+          <StatusMark tone="ok" size="md" className="stk-item__mark" />
+          <span className="stack__delivered-text">{notice.text}</span>
           {onDismissDelivered && <button type="button" className="stk-btn stk-btn--icon" aria-label="Dismiss" onClick={() => onDismissDelivered(notice.id)}>
             <span className="stk-btn__glyph" aria-hidden="true"><Icon name="i-close" /></span>
           </button>}

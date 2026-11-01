@@ -2,6 +2,7 @@ import { render, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalAttention, ApprovalCard, HostAttentionCard, HostDecideSourcesProvider } from "./approval-card";
 import { ConversationApprovals } from "./conversation-approvals";
+import { ConsoleNavigationProvider } from "../panel-kit";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 
 afterEach(cleanup);
@@ -13,7 +14,9 @@ describe("ApprovalCard", () => {
       approval_recipient: "review-queue", approval_channel: "notification",
       approval_route_id: "route:1", approval_delivery_id: "delivery:1" })!;
     const view = render(<ApprovalCard request={routed} resourceStatus="ready" onDecide={() => {}} />);
-    expect(view.getByText("Actor").nextElementSibling?.textContent).toBe("Release bot");
+    // Who asked reads as a sentence above the details: "Release bot asked".
+    expect(view.getByTestId("gating-asked:request:1").textContent?.includes("Release bot asked")).toBe(true);
+    expect(view.queryByText("Actor") === null).toBe(true);
     expect(view.getByText("Requested approver").nextElementSibling?.textContent).toBe("human:reviewer");
     expect(view.getByText("Notification recipient").nextElementSibling?.textContent).toBe("review-queue");
     expect(view.getByText("Notification channel").nextElementSibling?.textContent).toBe("notification");
@@ -174,6 +177,57 @@ describe("ApprovalCard", () => {
     view.rerender(<ApprovalCard request={{ ...request, status: "expired" }} resourceStatus="ready" onDecide={() => {}} />);
     expect(view.getByText("Expired")).toBeTruthy();
     expect(view.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+  it("counts down to the deadline in its tone and fills the time used", () => {
+    const now = Date.now();
+    const timed = { ...request, createdAtMs: now - 12 * 60_000 - 50_000, deadlineAtMs: now + 2 * 60_000 + 10_000 };
+    const view = render(<ApprovalCard request={timed} resourceStatus="ready" onDecide={() => {}} />);
+    const chip = view.getByTestId("gating-countdown:request:1");
+    expect(chip.textContent).toBe("in 2m");
+    expect(chip.getAttribute("data-tone")).toBe("warn");
+    const bar = view.getByTestId("gating-time-used:request:1");
+    expect(bar.getAttribute("data-tone")).toBe("warn");
+    expect(bar.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("2 min left of 15 min to decide");
+    view.rerender(<ApprovalCard request={{ ...timed, deadlineAtMs: now - 5_000 }} resourceStatus="ready" onDecide={() => {}} />);
+    expect(view.getByTestId("gating-countdown:request:1").textContent).toBe("Expired, waiting for refresh");
+    expect(view.getByTestId("gating-countdown:request:1").getAttribute("data-tone")).toBe("crit");
+    // The owner decides expiry: the request stays decidable until it says so.
+    expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("offers Escalate disabled with its reason when the request has no escalation route", () => {
+    const decide = vi.fn();
+    const routeless = normalizePendingApproval({ ...request.raw, supported_actions: ["approve", "reject"] })!;
+    expect(routeless.escalation).toBe("unavailable");
+    const view = render(<ApprovalCard request={routeless} resourceStatus="ready" onDecide={decide} />);
+    const escalate = view.getByTestId("gating-action:request:1:escalate") as HTMLButtonElement;
+    expect(escalate.disabled).toBe(true);
+    expect(view.getByTestId("gating-no-escalation:request:1").textContent).toBe("No escalation route");
+    fireEvent.click(escalate);
+    expect(decide).not.toHaveBeenCalled();
+    expect(normalizePendingApproval(request.raw)!.escalation).toBe("unknown");
+  });
+  it("says why the owner refused a decision, in words, and keeps the request decidable", () => {
+    const words = "No escalation route is set up for this request, so it can't be escalated. It is still waiting for a decision.";
+    const view = render(<ApprovalCard request={request} resourceStatus="ready" onDecide={() => {}}
+      decision={{ phase: "refused", action: "escalate", error: words, refusal: { kind: "no_escalation_route", words } }} />);
+    expect(view.getByRole("status").textContent).toBe("Decision refused");
+    expect(view.getByText(words).closest(".cc-notice")?.getAttribute("data-tone")).toBe("warn");
+    expect((view.getByTestId("gating-action:request:1:escalate") as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByTestId("gating-action:request:1:approve") as HTMLButtonElement).disabled).toBe(false);
+    expect(view.queryByText("Decision unconfirmed")).toBeNull();
+  });
+  it("opens the chat the request came from when the host can open agents", () => {
+    const openAgent = vi.fn();
+    const scoped = { ...request, origin: { identity: "router:main" } };
+    const view = render(
+      <ConsoleNavigationProvider value={{ openAgent }}>
+        <ApprovalCard request={scoped} resourceStatus="ready" onDecide={() => {}} />
+      </ConsoleNavigationProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Open Router main's chat" }));
+    expect(openAgent).toHaveBeenCalledWith("router:main", "chat");
+    fireEvent.click(view.getByRole("button", { name: "Release bot" }));
+    expect(openAgent).toHaveBeenLastCalledWith("release-bot", "details");
   });
   it("attention has unavailable states instead of a false zero count and opens the request in the inbox", () => {
     const onOpen = vi.fn();

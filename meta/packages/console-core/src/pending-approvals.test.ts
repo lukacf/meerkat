@@ -212,6 +212,48 @@ test("a competing resolution removes the request on refresh without inventing ou
   assert.equal(resource.getSnapshot().decisions.p1.result, undefined); resource.dispose();
 });
 
+test("a typed owner refusal is a refused decision in words, not an uncertain one", async () => {
+  const c = clock();
+  const resource = createPendingApprovalResource({ scopeKey: "a", environment: c.environment,
+    load: async () => ({ pending: [row()] }),
+    decide: async () => { throw Object.assign(new Error("Invalid params: gating decision failed"), { rpcError: { code: -32602, message: "Invalid params", data: { kind: "no_escalation_route" } } }); },
+  });
+  await tick(); await resource.decide("p1", "escalate");
+  const decision = resource.getSnapshot().decisions.p1;
+  assert.equal(decision.phase, "refused");
+  assert.equal(decision.refusal?.kind, "no_escalation_route");
+  assert.match(decision.error ?? "", /^No escalation route is set up for this request/);
+  assert.equal(resource.getSnapshot().requests.length, 1, "a refused request stays pending");
+  resource.dispose();
+  // The owner's existing typed infrastructure error names its kind in data.error.
+  const busy = createPendingApprovalResource({ scopeKey: "b", environment: c.environment,
+    load: async () => ({ pending: [row()] }),
+    decide: async () => { throw Object.assign(new Error("Internal error"), { rpcError: { code: -32603, data: { error: "gating_ids_unavailable" } } }); },
+  });
+  await tick(); await busy.decide("p1", "approve");
+  assert.equal(busy.getSnapshot().decisions.p1.phase, "refused");
+  busy.dispose();
+  // Today's owner refuses every decision it will not apply with a plain
+  // invalid params error: still a refusal, never an uncertain decision.
+  const plain = createPendingApprovalResource({ scopeKey: "c", environment: c.environment,
+    load: async () => ({ pending: [row()] }),
+    decide: async () => { throw Object.assign(new Error("meta/gating/decide RPC error -32602: gating decision failed"), { rpcError: { code: -32602, message: "gating decision failed" } }); },
+  });
+  await tick(); await plain.decide("p1", "approve");
+  assert.deepEqual(plain.getSnapshot().decisions.p1, { phase: "refused", action: "approve",
+    refusal: { kind: "refused", words: "The runtime refused this decision, so nothing was decided." },
+    error: "The runtime refused this decision, so nothing was decided." });
+  plain.dispose();
+});
+
+test("a request knows whether it can be escalated only when the owner says so", () => {
+  assert.equal(normalizePendingApproval(row())!.escalation, "unknown");
+  assert.equal(normalizePendingApproval({ ...row(), supported_actions: ["approve", "reject", "escalate"] })!.escalation, "available");
+  const routeless = normalizePendingApproval({ ...row(), supported_actions: ["approve", "reject"] })!;
+  assert.equal(routeless.escalation, "unavailable");
+  assert.deepEqual(routeless.actions, ["approve", "reject"]);
+});
+
 for (const [name, create] of [["shared", sharedController], ["stock", stockController]] as const) {
   test(`${name}: fresh capability removal clears unreadable pending but preserves a readable read-only inbox`, async () => {
     const c = clock(); let methods = [CONSOLE_RPC_METHODS.gatingPending, CONSOLE_RPC_METHODS.gatingDecide] as string[];

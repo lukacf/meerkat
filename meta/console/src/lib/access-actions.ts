@@ -40,12 +40,43 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "extension.manage": "Manage extension state",
 };
 
-/** The words for a permission key; unknown keys come back unchanged. */
+const FAMILY_WORDS: Readonly<Record<string, string>> = {
+  agent: "agent",
+  "agent.memory": "agent memory",
+  operator: "operator",
+  "operator.memory": "operator memory",
+  mob: "team",
+  "mob.memory": "team memory",
+  memory: "memory",
+  "memory.quarantine": "quarantine",
+  gating: "approval",
+  workgraph: "work item",
+  runtime: "routing and wiring",
+  topology: "topology",
+  mobpack: "team package",
+  access: "console access",
+  extension: "extension",
+};
+
+/** The words for a permission key, or for a pattern a rule may hold ("*"
+ * reads "All actions", "agent.*" "All agent actions"); unknown keys come
+ * back unchanged. */
 export function accessActionLabel(action: string): string {
+  if (action === "*") return "All actions";
+  if (action.endsWith(".*")) {
+    const prefix = action.slice(0, -2);
+    const words = FAMILY_WORDS[prefix];
+    return words ? `All ${words} actions` : `All ${prefix} actions`;
+  }
   return ACCESS_ACTION_WORDS[action] ?? action;
 }
 
-/** Whether the console has words for a permission key. */
+/** Whether a rule's action entry is a pattern ("*", "agent.*"). */
+export function isAccessActionPattern(action: string): boolean {
+  return action === "*" || action.endsWith(".*");
+}
+
+/** Whether the console has words for a permission key or pattern. */
 export function isKnownAccessAction(action: string): boolean {
-  return Object.prototype.hasOwnProperty.call(ACCESS_ACTION_WORDS, action);
+  return isAccessActionPattern(action) || Object.prototype.hasOwnProperty.call(ACCESS_ACTION_WORDS, action);
 }

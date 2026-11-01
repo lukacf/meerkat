@@ -66,3 +66,95 @@
   color: var(--ink-meta);
 }
 
+
+/* ── Approvals v2 (spec B7) ───────────────────────────────────────── */
+/* The glance strip: waiting, the next deadline (its countdown in its tone),
+   decisions today and the risk mix of the recorded window. */
+.gating-glance__deadline .cc-figure__value { font-variant-numeric: tabular-nums; }
+.gating-glance__deadline[data-tone="crit"] .cc-figure__value,
+.gating-glance__deadline[data-tone="warn"] .cc-figure__value { color: var(--_cc-tone-ink); }
+.gating-glance .cc-figure__foot-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The risk mix: an ordinal ink ramp, R0 lightest to R2 darkest, R3 in the
+   negative tone; segments 2 px apart. */
+.gating-risk { display: inline-flex; align-items: center; min-width: 0; }
+.gating-risk__bar {
+  display: inline-flex;
+  gap: 2px;
+  width: 96px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--_cc-radius-xs);
+  background: var(--_cc-viz-grid);
+}
+.gating-risk__seg { flex: 1 1 0; min-width: 3px; height: 100%; }
+.gating-risk__seg[data-tier="r0"] { background: var(--_cc-viz-seq-2); }
+.gating-risk__seg[data-tier="r1"] { background: var(--_cc-viz-seq-4); }
+.gating-risk__seg[data-tier="r2"] { background: var(--_cc-viz-seq-6); }
+.gating-risk__seg[data-tier="r3"] { background: var(--_cc-negative); }
+
+/* Pending cards: a little more air between them. */
+.gating-inbox__cards { gap: 12px; padding-top: 12px; }
+
+/* Auto and Audit: the decisions on the last day's axis, then the records by
+   day, newest first. */
+.gating-strip {
+  margin: 12px var(--_cc-panel-pad-x) 4px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+}
+.gating-strip__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-bottom: 6px;
+}
+.gating-strip__label {
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.gating-strip__legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+.gating-strip__legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.gating-strip__plot { min-width: 0; overflow: hidden; }
+.gating-inbox__window {
+  margin: 6px var(--_cc-panel-pad-x) 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.gating-day { margin-top: 10px; }
+.gating-day__label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px var(--_cc-panel-pad-x) 4px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.gating-inbox__content > .gating-day > .cc-rows { margin-top: 0; }
+/* The risk bar shrinks with its tile, then drops under the figure. */
+.gating-glance__risk .cc-figure__fig { flex-wrap: wrap; row-gap: 4px; }
+.gating-glance__risk .cc-figure__meter { flex: 1 1 64px; min-width: 0; max-width: 96px; }
+.gating-glance__risk .gating-risk,
+.gating-glance__risk .gating-risk__bar { width: 100%; }
+.gating-glance .cc-figure { min-width: 0; overflow: hidden; }

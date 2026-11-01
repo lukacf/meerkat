@@ -1,5 +1,8 @@
-/* Approval card: a kit card (1 px rule, medium radius), the status as a tone
-   chip, decisions as kit buttons. Tokens only, so every variant applies. */
+/* Approval card (spec B7): a kit card (1 px rule, medium radius). The title
+   with its risk in words, the deadline as a countdown chip and a bar of the
+   time used, who asked and from where, the rationale, the decision status
+   and the decisions as kit buttons, the complete request in a disclosure.
+   Tokens only, so every variant applies. */
 .cc-approval {
   container-type: inline-size;
   container-name: cc-approval;
@@ -22,8 +25,9 @@
 }
 .cc-approval__heading {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
   flex: 1 1 24ch;
   min-width: 0;
 }
@@ -34,15 +38,65 @@
   color: var(--_cc-foreground);
   overflow-wrap: anywhere;
 }
+.cc-approval__risk { flex: none; }
+.cc-approval__deadline { flex: none; margin-top: 1px; }
+.cc-approval__deadline[data-past="true"] { font-weight: 500; }
+
+/* The time used of the request's time to decide. */
+.cc-approval__time-used { display: flex; margin-top: 10px; }
+.cc-approval__time-used .cc-minibar__fill { transition: width var(--_cc-dur-base) linear; }
+
+/* Who asked, from which chat, and for how long the request has waited. */
+.cc-approval__asked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin: 10px 0 0;
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-muted);
+}
+.cc-approval__asked > * + *::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-approval__asker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-approval__actor { font-weight: 500; color: var(--_cc-foreground); }
+.cc-approval__origin { min-width: 0; }
+.cc-approval__origin-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--_cc-border-strong);
+  text-underline-offset: 2px;
+}
+.cc-approval__origin-link:hover { color: var(--_cc-foreground); text-decoration-color: currentColor; }
+.cc-approval__origin-link:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
 .cc-approval__waiting {
   font-size: var(--_cc-text-xs);
   color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
 }
-.cc-approval__status { display: inline-flex; flex: none; }
 .cc-approval__rationale {
   margin: 10px 0 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--_cc-border-strong);
   line-height: 1.55;
+  color: var(--_cc-foreground);
   overflow-wrap: anywhere;
 }
 .cc-approval__scope.cc-kv { margin-top: 12px; }
@@ -84,12 +138,30 @@
   color: var(--_cc-foreground-muted);
 }
 .cc-approval > .cc-notice { margin-top: 10px; }
+
+/* The decision row: its status, the decisions, and the request details at
+   the far end; the details open full width below. */
+.cc-approval__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+.cc-approval__status { display: inline-flex; flex: none; }
 .cc-approval__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  margin-top: 14px;
+  flex: 1 1 auto;
 }
+.cc-approval__hint {
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-meta);
+}
+.cc-approval__footer > .cc-approval__details { flex: 0 1 auto; margin-left: auto; }
+.cc-approval__footer > .cc-approval__details[open] { flex-basis: 100%; margin-left: 0; }
 /* A request opened from elsewhere (a deep link) is selected: accent outline. */
 [data-approval-id][data-selected="true"] > .cc-approval {
   outline: 2px solid var(--_cc-member-accent);
@@ -108,6 +180,7 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.cc-host-attention .cc-approval__actions { margin-top: 14px; }
 /* A host link (Open, or Decide in a source's label) is a kit button whose
    label can be long: it wraps inside the card instead of overflowing it, and
    keeps the button's height on one line. */

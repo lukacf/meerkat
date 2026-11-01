@@ -173,6 +173,12 @@ fn work_items_response(id: Option<RpcId>, page: &meerkat::WorkGraphItemsResponse
         total_items: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         truncated: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        anchor_event_seq: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed_since_anchor: Option<bool>,
     }
 
     RpcResponse::success(
@@ -181,6 +187,9 @@ fn work_items_response(id: Option<RpcId>, page: &meerkat::WorkGraphItemsResponse
             items: &page.items,
             total_items: page.total_items,
             truncated: page.truncated,
+            next_cursor: page.next_cursor.as_deref(),
+            anchor_event_seq: page.anchor_event_seq,
+            changed_since_anchor: page.changed_since_anchor,
         },
     )
 }
@@ -275,14 +284,8 @@ pub async fn handle_events(
         Ok(service) => service,
         Err(response) => return response,
     };
-    match service.events(filter).await {
-        Ok(events) => {
-            #[derive(serde::Serialize)]
-            struct WorkEventsResultRef<'a, T> {
-                events: &'a [T],
-            }
-            RpcResponse::success(id, WorkEventsResultRef { events: &events })
-        }
+    match service.events_page(filter).await {
+        Ok(page) => RpcResponse::success(id, page),
         Err(error) => map_workgraph_error(id, error),
     }
 }
@@ -365,6 +368,13 @@ mod tests {
         );
         assert_eq!(result["total_items"], json!(2), "{result}");
         assert_eq!(result["truncated"], json!(true), "{result}");
+        assert_eq!(result["next_cursor"], json!(page.next_cursor), "{result}");
+        assert_eq!(result["changed_since_anchor"], json!(false), "{result}");
+        assert_eq!(
+            result["anchor_event_seq"],
+            json!(page.anchor_event_seq),
+            "{result}"
+        );
 
         let bare = meerkat::WorkGraphItemsResponse {
             items: page.items,
@@ -377,8 +387,15 @@ mod tests {
         let result = result_json(&work_items_response(Some(RpcId::Num(2)), &bare));
         let keys = result.as_object().expect("result object");
         assert!(keys.contains_key("items"), "{result}");
-        assert!(!keys.contains_key("total_items"), "{result}");
-        assert!(!keys.contains_key("truncated"), "{result}");
+        for absent in [
+            "total_items",
+            "truncated",
+            "next_cursor",
+            "anchor_event_seq",
+            "changed_since_anchor",
+        ] {
+            assert!(!keys.contains_key(absent), "{absent}: {result}");
+        }
     }
 
     /// `workgraph/list` and `workgraph/snapshot` continue a walk from the

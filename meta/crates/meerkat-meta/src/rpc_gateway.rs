@@ -26260,6 +26260,49 @@ mod identity_creation_launch_tests {
         })
     }
 
+    /// The policy a launch of the fixture mob uses.
+    fn launch(
+        host: Option<&Arc<dyn GatewayHostComposition>>,
+        option: RuntimeOptionPolicy,
+        persistent: bool,
+    ) -> Result<Option<Arc<IdentityCreationPolicy>>, String> {
+        launch_identity_creation_policy(host, option, persistent)
+    }
+
+    /// `runtime_options.identity_creation` is a known option, validated as it
+    /// is parsed: a refusal names the policy path, and a reserved context
+    /// key, which no policy has, is refused as unknown.
+    #[test]
+    fn runtime_options_identity_creation_is_parsed_and_refused_typed() {
+        let parsed = parse_gateway_runtime_options(
+            &json!({ "runtime_options": { "identity_creation": policy_value() } }),
+            None,
+        )
+        .expect("a valid policy");
+        assert!(matches!(
+            parsed.identity_creation,
+            RuntimeOptionPolicy::Enabled(_)
+        ));
+        let quiet = parse_gateway_runtime_options(&json!({ "runtime_options": {} }), None)
+            .expect("no option");
+        assert_eq!(quiet.identity_creation, RuntimeOptionPolicy::Absent);
+
+        let error = parse_gateway_runtime_options(
+            &json!({ "runtime_options": { "identity_creation": {
+                "enabled": true,
+                "reserved_keys": {"labels": [], "context": ["project"]}
+            } } }),
+            None,
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(
+            error.starts_with("runtime_options.identity_creation.reserved_keys"),
+            "{error}"
+        );
+        assert!(error.contains("context"), "{error}");
+    }
+
     /// The identity records and decisions a policy governs are durable: a
     /// launch without persistence refuses an `identity_creation` option at
     /// init, a disabled one included, and a policy from the native host,
@@ -26272,9 +26315,7 @@ mod identity_creation_launch_tests {
             RuntimeOptionPolicy::parse(&policy_value()).expect("a policy"),
             RuntimeOptionPolicy::parse(&disabled).expect("a disabled policy"),
         ] {
-            let refused = launch_identity_creation_policy(None, option, false)
-                .err()
-                .unwrap_or_default();
+            let refused = launch(None, option, false).err().unwrap_or_default();
             assert!(
                 refused.starts_with("identity_creation: identity records are durable"),
                 "{refused}"
@@ -26285,7 +26326,7 @@ mod identity_creation_launch_tests {
         else {
             panic!("an enabled policy");
         };
-        let refused = launch_identity_creation_policy(
+        let refused = launch(
             Some(&host(Ok(Some(*policy)))),
             RuntimeOptionPolicy::Absent,
             false,
@@ -26295,13 +26336,9 @@ mod identity_creation_launch_tests {
         assert!(refused.contains("persistent launch"), "{refused}");
         for host_answer in [None, Some(host(Ok(None)))] {
             assert!(
-                launch_identity_creation_policy(
-                    host_answer.as_ref(),
-                    RuntimeOptionPolicy::Absent,
-                    false
-                )
-                .expect("no policy, no refusal")
-                .is_none()
+                launch(host_answer.as_ref(), RuntimeOptionPolicy::Absent, false)
+                    .expect("no policy, no refusal")
+                    .is_none()
             );
         }
     }

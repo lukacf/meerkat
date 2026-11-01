@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use meerkat_contracts::WireHostRef;
 use meerkat_core::{ContentBlock, ContentInput};
@@ -482,6 +483,16 @@ fn remove_identity(
     remove_identity_with(&policy(), requester, entry)
 }
 
+/// The policy a launch of the fixture mob uses, from the native host's
+/// answer (`None`: no native host) and the init option.
+fn resolve(
+    host_policy: Option<Result<Option<IdentityCreationPolicy>, PolicyRefusal>>,
+    option: RuntimeOptionPolicy,
+    persistent: bool,
+) -> Result<Option<Arc<IdentityCreationPolicy>>, PolicyRefusal> {
+    resolve_launch_policy(host_policy, option, persistent)
+}
+
 // ---------------------------------------------------------------------------
 // Policy validation rows
 // ---------------------------------------------------------------------------
@@ -807,25 +818,81 @@ fn a_launch_without_persistence_refuses_a_policy_from_either_source() {
         (Some(Ok(None)), RuntimeOptionPolicy::Disabled),
         (Some(Ok(Some(policy.clone()))), RuntimeOptionPolicy::Absent),
     ] {
-        let refusal =
-            resolve_launch_policy(host_policy, option, false).expect_err("no persistence");
+        let refusal = resolve(host_policy, option, false).expect_err("no persistence");
         assert_eq!(refusal.kind, PolicyRefusalKind::NeedsPersistentLaunch);
         assert_eq!(refusal.path, "");
     }
     for host_policy in [None, Some(Ok(None))] {
         assert!(
-            resolve_launch_policy(host_policy, RuntimeOptionPolicy::Absent, false)
+            resolve(host_policy, RuntimeOptionPolicy::Absent, false)
                 .expect("nothing given, nothing refused")
                 .is_none()
         );
     }
-    let both = resolve_launch_policy(
+    let both = resolve(
         Some(Ok(Some(policy.clone()))),
         RuntimeOptionPolicy::Enabled(Box::new(policy)),
         false,
     )
     .expect_err("two sources");
     assert_eq!(both.kind, PolicyRefusalKind::TwoSources);
+}
+
+#[test]
+fn the_policy_comes_from_the_option_or_the_host_never_both() {
+    let policy = policy();
+    let from_option = resolve(
+        None,
+        RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
+        true,
+    )
+    .unwrap();
+    assert_eq!(from_option.as_deref(), Some(&policy));
+    let from_host = resolve(
+        Some(Ok(Some(policy.clone()))),
+        RuntimeOptionPolicy::Absent,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        from_host.as_deref(),
+        Some(&policy),
+        "the native host's policy is used when the option is absent"
+    );
+    let host_without_one = resolve(
+        Some(Ok(None)),
+        RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
+        true,
+    )
+    .unwrap();
+    assert_eq!(host_without_one.as_deref(), Some(&policy));
+    for option in [
+        RuntimeOptionPolicy::Disabled,
+        RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
+    ] {
+        let both = resolve(Some(Ok(Some(policy.clone()))), option, true)
+            .expect_err("two sources, a disabled option included");
+        assert_eq!(both.kind, PolicyRefusalKind::TwoSources);
+        assert_eq!(both.path, "");
+    }
+    let host_refusal = PolicyRefusal::new("approval.rules[0].change", PolicyRefusalKind::Empty);
+    assert_eq!(
+        resolve(
+            Some(Err(host_refusal.clone())),
+            RuntimeOptionPolicy::Absent,
+            true
+        )
+        .unwrap_err(),
+        host_refusal,
+        "the native host's refusal refuses the launch unchanged"
+    );
+    for option in [RuntimeOptionPolicy::Absent, RuntimeOptionPolicy::Disabled] {
+        assert!(
+            resolve(None, option, true)
+                .expect("no policy, no refusal")
+                .is_none()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

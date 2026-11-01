@@ -800,6 +800,8 @@ impl VoiceWorkGraph {
     reason = "focused template tests use explicit assertion messages"
 )]
 mod tests {
+    use meerkat::WorkGraphStore as _;
+
     use super::*;
 
     async fn voice_workgraph() -> VoiceWorkGraph {
@@ -903,6 +905,165 @@ mod tests {
             }),
             "the old blocker is named"
         );
+    }
+
+    /// A memory store that counts the namespace snapshots it serves.
+    struct CountingSnapshotStore {
+        inner: meerkat::MemoryWorkGraphStore,
+        snapshots: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::WorkGraphStore for CountingSnapshotStore {
+        fn kind(&self) -> meerkat::WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(
+            &self,
+        ) -> Result<chrono::DateTime<chrono::Utc>, meerkat::WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: meerkat::WorkItem,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            item_event: meerkat::WorkGraphEvent,
+            attention_updates: Vec<(meerkat::WorkAttentionBinding, u64, meerkat::WorkGraphEvent)>,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+            id: &meerkat::WorkItemId,
+        ) -> Result<Option<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: meerkat::WorkItemFilter,
+        ) -> Result<Vec<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.list_items(filter).await
+        }
+
+        async fn read_namespace_snapshot(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<meerkat::WorkGraphNamespaceRead, meerkat::WorkGraphError> {
+            self.snapshots
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .read_namespace_snapshot(realm_id, namespace)
+                .await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: meerkat::AttentionListRequest,
+            observed_at: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> Result<Vec<meerkat::WorkAttentionBinding>, meerkat::WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: meerkat::WorkEdge,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkEdge, meerkat::WorkGraphError> {
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<Vec<meerkat::WorkEdge>, meerkat::WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Vec<meerkat::WorkGraphEvent>, meerkat::WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Option<i64>, meerkat::WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// A scheduling pass reads every voice item, however many, in one
+    /// namespace observation: past 1000 voice items readiness and
+    /// classification each read the namespace once, and the oldest item is
+    /// seen by both.
+    #[tokio::test]
+    async fn a_voice_scheduling_pass_reads_every_voice_item_in_one_observation() {
+        let store = std::sync::Arc::new(CountingSnapshotStore {
+            inner: meerkat::MemoryWorkGraphStore::new(),
+            snapshots: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let workgraph = VoiceWorkGraph::new(WorkGraphService::new(store.clone()));
+        let oldest = voice_item(&workgraph, "the oldest request").await;
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let reads = || store.snapshots.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reads(), 0);
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&oldest),
+            "the oldest of 1001 voice items is offered"
+        );
+        assert_eq!(reads(), 1, "readiness reads the namespace once");
+
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&oldest).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
+        assert_eq!(reads(), 2, "classification reads the namespace once");
     }
 
     /// #1820 follow-up: the four simple statuses come from the item alone. A

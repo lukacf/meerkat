@@ -376,6 +376,24 @@ impl ApplyMob {
         }
     }
 
+    /// Wait, within one step, until `name`'s retirement ended: MobMachine
+    /// seats no incarnation of it, a retiring one included. (The roster's
+    /// member list leaves a retiring member out as soon as its retirement
+    /// starts.)
+    async fn retirement_ended(&self, name: &str) {
+        let key = dsl_id(name);
+        let mut state = self.handle.machine_state_watch_rx.clone();
+        let ended = tokio::time::timeout(
+            STEP,
+            state.wait_for(|state| !state.identity_to_runtime.contains_key(&key)),
+        )
+        .await;
+        assert!(
+            matches!(ended, Ok(Ok(_))),
+            "{name}'s retirement never ended"
+        );
+    }
+
     /// Every member lifecycle fact of the journal, from its first event.
     async fn lifecycle(&self) -> Vec<MemberLifecycleEvent> {
         let mut records = Vec::new();
@@ -1437,7 +1455,10 @@ async fn an_interrupted_unlisted_retirement_ends_its_entry_after_a_restart() {
     hold.release();
     let _ = tokio::time::timeout(STEP, sealing).await;
 
-    mob.left("unlisted").await;
+    // The restart re-drives the retirement in the background: wait for its
+    // end, not only for the member to leave the listing, which a retiring
+    // member does at once.
+    mob.retirement_ended("unlisted").await;
     assert_eq!(
         mob.standing("unlisted"),
         None,

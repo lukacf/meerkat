@@ -82,6 +82,23 @@ function FilteringStrip() {
   );
 }
 
+// WorkGraph's five figures (or four), as a pane between 480 and 720 px wraps them.
+function WorkStrip({ width, four }: { width: number; four?: boolean }) {
+  return (
+    <div className="kg-pane" style={{ width, flex: "none" }} data-testid={`kit-glance-pane:${width}${four ? ":four" : ""}`}>
+      <PanelShell>
+        <GlanceStrip ariaLabel="Work at a glance">
+          <FigureTile hero label="Done" value={1} of={9} meter={<ProgressRing done={1} inProgress={1} blocked={1} total={9} size={24} />} foot="none today" />
+          <FigureTile label="In progress" tone="live" live value={1} foot="1 agent on them" />
+          <FigureTile label="Blocked" tone="warn" value={1} foot="Publish to all regions" />
+          <FigureTile label="Ready" tone="ok" value={2} foot="can start now" />
+          {four ? null : <FigureTile label="To finish" value={3} unit="steps" foot="Critical path" />}
+        </GlanceStrip>
+      </PanelShell>
+    </div>
+  );
+}
+
 export const gallerySections: GallerySection[] = [
   {
     id: "figures",
@@ -113,6 +130,14 @@ export const gallerySections: GallerySection[] = [
             </PanelShell>
           </Specimen>
         </SpecimenRow>
+        <Specimen title="Figures at mid widths" note="from 480 to 719 px five wrap three and two (520, 680 px), four two and two (600 px); 760 px keeps one row">
+          <div className="kg-stack">
+            {[520, 680, 760].map((width) => (
+              <WorkStrip key={width} width={width} />
+            ))}
+            <WorkStrip width={600} four />
+          </div>
+        </Specimen>
       </>
     ),
   },

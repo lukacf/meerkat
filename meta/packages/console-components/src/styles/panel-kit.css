@@ -2769,6 +2769,21 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   .cc-panel > * { --_cc-panel-pad-x: 16px; }
 }
 
+/* 480-719 px: four or more figures do not fit one row. Four wrap two and
+   two, five or more three to a row; the rules run between the figures of a
+   row and between the rows. */
+@container cc-panel (min-width: 480px) and (max-width: 719px) {
+  .cc-glance:has(> :nth-child(4)) {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cc-glance:has(> :nth-child(5)) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cc-glance:has(> :nth-child(4)):not(:has(> :nth-child(5))) > :nth-child(2n + 1) { border-left: 0; }
+  .cc-glance:has(> :nth-child(4)):not(:has(> :nth-child(5))) > :nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
+  .cc-glance:has(> :nth-child(5)) > :nth-child(3n + 1) { border-left: 0; }
+  .cc-glance:has(> :nth-child(5)) > :nth-child(n + 4) { border-top: 1px solid var(--_cc-border-soft); }
+}
+
 @container cc-panel (max-width: 479px) {
   .cc-filterbar__search { display: none; }
   .cc-filterbar__search-toggle { display: inline-flex; }

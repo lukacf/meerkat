@@ -59587,9 +59587,39 @@ function accessSaveFailure(error48) {
   if (rpc2?.code === -32009 && rpc2.data?.kind === "access_revision_conflict") return { kind: "revision_conflict" };
   if (rpc2?.code === -32009 && rpc2.data?.kind === "access_owner_changed") return { kind: "owner_changed" };
   if (rpc2?.code === -32004 && rpc2.data?.kind === "access_mutation_unavailable") return { kind: "unavailable" };
-  if (rpc2?.code === -32602 && rpc2.data?.kind === "invalid_access_config") return { kind: "invalid" };
+  if (rpc2?.code === -32602 && rpc2.data?.kind === "invalid_access_config") {
+    const { reason, detail } = rpc2.data;
+    return {
+      kind: "invalid",
+      ...typeof reason === "string" && reason ? { reason } : {},
+      ...typeof detail === "string" && detail.trim() ? { detail: detail.trim() } : {}
+    };
+  }
   if (rpc2?.code === -32602 || rpc2?.code === -32601) return { kind: "unavailable" };
   return { kind: "failed" };
+}
+var INVALID_ACCESS_REASONS = {
+  enabled_without_admins: { words: "Enforcement needs at least one admin", showDetail: false },
+  empty_rule_id: { words: "A rule needs an ID", showDetail: false },
+  duplicate_rule_id: { words: "Two rules have the same ID", showDetail: true },
+  empty_actions: { words: "A rule needs at least one permission", showDetail: true },
+  unknown_action: { words: "A rule names a permission this runtime does not list", showDetail: true },
+  unknown_group: { words: "A rule names a group that does not exist", showDetail: true },
+  empty_approver_id: { words: "An approver needs an ID", showDetail: false },
+  padded_approver_id: { words: "An approver ID starts or ends with a space", showDetail: true },
+  approver_without_holders: { words: "An approver needs a person, service or group to hold it", showDetail: true },
+  unknown_approver_group: { words: "An approver names a group that does not exist", showDetail: true },
+  unknown_rule: { words: "The rule to delete does not exist", showDetail: true },
+  invalid_toml: { words: "The access configuration file cannot hold this configuration", showDetail: false }
+};
+function isKnownInvalidAccessReason(reason) {
+  return reason !== void 0 && Object.hasOwn(INVALID_ACCESS_REASONS, reason);
+}
+function invalidAccessNotice({ reason, detail }) {
+  const known = isKnownInvalidAccessReason(reason) ? INVALID_ACCESS_REASONS[reason] : null;
+  const words2 = known?.words ?? "The resulting access configuration is not valid";
+  const shown = detail && (known === null || known.showDetail) ? " (".concat(detail, ")") : "";
+  return "Changes were not saved. ".concat(words2).concat(shown, "; your draft is retained for correction.");
 }
 function accessSaveNotice(failure) {
   switch (failure.kind) {
@@ -59600,7 +59630,7 @@ function accessSaveNotice(failure) {
     case "unavailable":
       return "Changes were not saved. Checked access saves are unavailable; your draft is retained.";
     case "invalid":
-      return "Changes were not saved. The resulting access configuration is not valid; your draft is retained for correction.";
+      return invalidAccessNotice(failure);
     case "failed":
       return "Changes were not saved. Your draft is retained; refresh Console access before trying again.";
   }

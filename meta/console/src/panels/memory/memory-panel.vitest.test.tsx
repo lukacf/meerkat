@@ -225,6 +225,46 @@ describe("Memory panel v2", () => {
     expect(cleared.length).toBe(1);
   });
 
+  it("counts memory given from the ledger rows it lists, in the server's wire shape", async () => {
+    // The record read's injections as the server serializes them
+    // (InjectionLogEntry): no session key on a build row, at_ms in epoch ms.
+    // The record's own counter disagrees, as on a store whose rows were
+    // written without it; USE follows the rows it lists.
+    const wire = JSON.parse(
+      JSON.stringify({
+        realm: "ops",
+        record: { ...tip, body: "Refunds above 250 EUR need a team lead's sign-off.", usage: { injected_count: 0, explicit_recall_count: 2 } },
+        chain: [tip],
+        injections: [
+          { record_id: tip.id, identity: "billing", surface: "build", at_ms: NOW - 2 * HOUR },
+          { record_id: tip.id, identity: "shipping", session_key: "sess-7", surface: "turn", at_ms: NOW - 5 * HOUR },
+        ],
+      }),
+    );
+    const view = renderPanel({ detail: wire });
+    await act(async () => undefined);
+    const life = text(view, "memory-detail-life");
+    expect(life.includes("given to agents 2 · recalled 2")).toBe(true);
+    expect(life.includes("1970")).toBe(false);
+    const row = text(view, "memory-detail-injection:0");
+    expect(row.startsWith("Given to Billing at startup")).toBe(true);
+    expect(row.includes("2h ago")).toBe(true);
+    expect(text(view, "memory-detail-injection:1").startsWith("Given to Shipping during a turn")).toBe(true);
+  });
+
+  it("reads 50+ given when the record read carries the server's 50 ledger rows", async () => {
+    const injections = Array.from({ length: 50 }, (_, index) => ({
+      record_id: tip.id,
+      identity: "billing",
+      surface: "turn",
+      session_key: `sess-${index}`,
+      at_ms: NOW - (index + 1) * HOUR,
+    }));
+    const view = renderPanel({ detail: { realm: "ops", record: { ...tip, body: "Body.", usage: { injected_count: 120 } } as MemoryFullRecord, chain: [tip], injections } });
+    await act(async () => undefined);
+    expect(text(view, "memory-detail-life").includes("given to agents 50+")).toBe(true);
+  });
+
   it("leaves out proposals of a scope kind the probes denied", () => {
     const proposals: MemoryProposalEntry[] = [
       { realm: "ops", proposal_id: "p-op", scope_kind: "operator", scope_key: "lead@example.test", title: "Operator note", kind: "fact" },

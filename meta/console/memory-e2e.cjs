@@ -327,8 +327,15 @@ const openAccessFlows = [
 
       // Life: the seeded build-surface injection, as a sentence naming the
       // agent; the raw identity is the name's tooltip.
-      const life = await page.getByTestId(T.DETAIL_LIFE).innerText();
-      assert(/Given to .+ at startup/.test(life), `life section injection line: ${life}`);
+      // The agent's name is a link, laid out as its own box, so innerText
+      // breaks the sentence around it: match each row's sentence with its
+      // whitespace normalized, one row at a time.
+      const lifeRows = (await page.locator(`[data-testid="${T.DETAIL_LIFE}"] [data-testid^="memory-detail-injection:"]`).allInnerTexts())
+        .map((row) => row.replace(/\s+/g, " ").trim());
+      assert(
+        lifeRows.some((row) => /^Given to .+ at startup\b/.test(row)),
+        `life section injection line: ${JSON.stringify(lifeRows)}`,
+      );
       assert(
         (await page.getByTestId(T.DETAIL_LIFE).locator('[title="router"]').count()) > 0,
         "the injection names identity router (in the agent name's tooltip)",

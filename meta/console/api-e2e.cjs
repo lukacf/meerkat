@@ -143,7 +143,7 @@ async function restartIngress(mode) {
     const original = await eventually(async () => {
       const page = await (await fetch(fixture.baseUrl + "/console/timeline?identity=router%3Amain&mode=recent&limit=500")).json();
       const receipt = page.frames.find(frame => frame.id === first.body.result.input_frame_id);
-      return receipt?.status === "delivered" && page.frames.some(frame => frame.kind === "interaction_complete" && JSON.stringify(frame.payload).includes("Restart proof accepted once.")) && receipt;
+      return receipt?.status === "delivered" && page.frames.some(frame => frame.kind === "interaction_complete" && frame.interaction_id === first.body.result.interaction_id) && receipt;
     }, "original durable receipt and completion");
     await fixture.close();
     fixture = await startFixture({ mode, stateDir });
@@ -156,8 +156,10 @@ async function restartIngress(mode) {
     assert.equal(frames.filter(frame => frame.id === original.id).length, 1);
     const requests = await (await fetch(fixture.backendUrl + "/__fixture/requests")).json();
     const replayedTurns = requests.filter(request => {
-      const users = request.messages.filter(message => message.role === "user");
-      return users.length && JSON.stringify(users.at(-1)).includes(envelope.content);
+      // A resubmission asks the model to answer the operator turn again: the
+      // last user message with its text has no assistant reply after it.
+      const at = request.messages.findLastIndex(m => m.role === "user" && JSON.stringify(m).includes(envelope.content));
+      return at >= 0 && !request.messages.slice(at + 1).some(m => /assistant/.test(m.role));
     });
     assert.equal(replayedTurns.length, 0, "receipt replay never resubmits the operator turn to the model");
     const evidence = path.join(__dirname, "../output/playwright/console-acceptance");

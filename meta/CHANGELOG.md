@@ -703,7 +703,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and snapshot return the most recently updated items first, so a cut keeps
   those, and ready and snapshot read a namespace of any size: they no longer
   refuse one with more than 1,000 live items, edges or attention bindings.
-  The Console's WorkGraph panel reads both fields for its notice.
+  The Console's WorkGraph panel reads both fields for its notice and takes
+  the server's `truncated` as given: a page of exactly 1,000 items that the
+  server reports complete no longer shows "the runtime holds more", which
+  the panel now says only for a runtime that sends no `truncated`.
 
 ### Fixed
 

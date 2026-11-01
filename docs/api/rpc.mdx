@@ -2444,9 +2444,11 @@ cut as in `workgraph/list`. `edges` contains only edges whose both endpoints
 are among the returned items, `attention` only bindings on those items, and
 `ready_item_ids` the subset of returned items that is ready at `captured_at`.
 A snapshot therefore omits an edge to a terminal item unless
-`include_terminal` is true. Readiness is classified against the whole
-namespace, however many items, edges and attention bindings it holds: a
-returned item is not ready while a blocker the cut left out is unresolved.
+`include_terminal` is true. `limit` bounds the items only: `edges` and
+`attention` follow the returned items and are neither counted nor cut on
+their own. Readiness is classified against the whole namespace, however many
+items, edges and attention bindings it holds: a returned item is not ready
+while a blocker the cut left out is unresolved.
 
 ### workgraph/events
 

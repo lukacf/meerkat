@@ -357,10 +357,11 @@ same everywhere:
 | `all_namespaces` | list, snapshot, events | Present on the wire, rejected by the standard single-grant services |
 
 **Results report their cut.** The list, ready, and snapshot results of the
-tools, RPC methods, and REST routes carry `total_items`, the items that
-matched before `limit` cut them (for ready, the ready items), and `truncated`,
-true when matching items exist after the last one returned. A result without
-these fields comes from an older server and may still have been cut.
+tools, RPC methods, REST routes, and `rkat workgraph` with `--json` carry
+`total_items`, the items that matched before `limit` cut them (for ready, the
+ready items), and `truncated`, true when matching items exist after the last
+one returned. A result without these fields comes from an older server and
+may still have been cut.
 
 `ready` and `snapshot` read one observation of the whole namespace and classify
 readiness against all of it, however many items, edges, and attention bindings

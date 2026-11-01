@@ -963,7 +963,10 @@ them.
   (`InvalidInput`: `invalid_arguments` from the tools, `INVALID_PARAMS` on
   RPC, 400 on REST): they read the whole namespace and `limit` cuts the
   result. `list` now reads every matching item of the namespace to order and
-  count them.
+  count them. `MemoryWorkGraphStore` and `SqliteWorkGraphStore` now order
+  `WorkGraphStore::list_items` most recently updated first as well, so a
+  `filter.limit` keeps the newest rows; they kept the least recently
+  updated.
 
 - `meerkat-core`, `meerkat-contracts`: a compaction retires superseded
   instruction activation bodies in place (see Added). `SystemMessage` gains
@@ -1894,9 +1897,10 @@ them.
   on `WorkGraphSnapshot`. `list` and `ready` keep their signatures and return
   the page's items. The `workgraph_list` and `workgraph_ready` tool results,
   `workgraph/list` and `workgraph/ready` (`WorkItemsResult`),
-  `workgraph/snapshot`, and REST `GET /workgraph/items`, `/workgraph/ready`
-  and `/workgraph/snapshot` carry them. A result without them comes from an
-  older server and may still have been cut.
+  `workgraph/snapshot`, REST `GET /workgraph/items`, `/workgraph/ready` and
+  `/workgraph/snapshot`, and `rkat workgraph list`, `ready` and `snapshot`
+  with `--json` carry them. A result without them comes from an older server
+  and may still have been cut.
 
 - `meerkat-core`: a compaction retires the body of every instruction
   activation row that a later activation row of its key follows.
@@ -2091,7 +2095,8 @@ them.
   edges. The machine classifies readiness from the same counts. The SQLite
   store reads the items of the requested realm and namespace only
   (`idx_workgraph_items_realm_namespace_updated`), where it decoded every
-  item of the file and filtered them in Rust.
+  item of the file and filtered them in Rust; the namespace read inside
+  every SQLite item write uses the same pushdown.
 
 ### Fixed
 
@@ -2431,8 +2436,8 @@ them.
   included, least recently updated first, so past 100 voice items a new item
   was never offered (the channel's queue stalled) and a worker's item failed
   classification as missing from its namespace. They now read the 1,000 most
-  recently updated voice items and log a warning when a cut left older voice
-  items out.
+  recently updated voice items and log one warning per voice graph, with the
+  voice item count, when a cut left older voice items out.
 
 ### Upgrade notes
 

@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { describeTodayFrame } from "../panels/TimelinePanel";
+import { createActivityLedger, createAgentResolver } from "./activity-ledger";
+import { stripPeerTransportScaffold } from "./adapters";
 import { rememberOwnSend } from "./turn-origin";
 import type { ConsoleFrame } from "../types";
-import { classifyFrame, frameSentence, isProblemFrame } from "./frame-classifier";
+import { classifyFrame, failureWords, frameSentence, isProblemFrame, toolFailureWords } from "./frame-classifier";
 
 let serial = 0;
 function frame(event: string, data: Record<string, unknown> = {}, extra: Partial<ConsoleFrame> = {}): ConsoleFrame {
@@ -225,6 +227,137 @@ describe("messages between agents", () => {
       blocks: [{ type: "comms", kind: "lifecycle", direction: "incoming", intent: "mob.kickoff_failed", peer: { id: "p-3", display_name: "team/delivery" }, payload: { peer: "delivery", role: "delivery_lead" } }],
     }));
     expect([kickoff.family, kickoff.severity, kickoff.actor, kickoff.snippet]).toEqual(["lifecycle", "warn", "delivery", "Delivery lead"]);
+  });
+});
+
+describe("words for seeded frames", () => {
+  const names = createAgentDirectory([
+    { id: "billing", label: "Billing" },
+    { id: "shipping", label: "Shipping" },
+    { id: "intake", label: "Intake" },
+  ]);
+  const named = (f: ConsoleFrame) => frameSentence(classifyFrame(f, names), (key) => names.lookup(key)?.label ?? key);
+
+  it("reads a budget warning's share as a percentage of its token budget", () => {
+    const warning = classifyFrame(frame("budget_warning", { budget_type: "tokens", used: 1_690_423, limit: 2_000_000, percent: 0.8452115058898926 }));
+    expect([sentence(frame("budget_warning", { budget_type: "tokens", percent: 0.8452 })), warning.snippet]).toEqual([
+      "domain:billing has used most of its token budget",
+      "85% used",
+    ]);
+    // Without a share: used of limit.
+    const calls = classifyFrame(frame("budget_warning", { budget_type: "tool_calls", used: 45, limit: 50 }));
+    expect([frameSentence(calls, asKeys), calls.snippet]).toEqual(["domain:billing has used most of its tool call budget", "90% used"]);
+  });
+
+  it("names the recipient of a send that names it by peer id, once the console saw that id", () => {
+    const agents = [
+      { identity: "domain:billing", member_id: "billing-member", label: "Billing" },
+      { identity: "domain:support", member_id: "support-member", label: "Support" },
+    ];
+    const ledger = createActivityLedger({ notifyMs: 0 });
+    ledger.setResolver(createAgentResolver(agents));
+    const directoryNow = () => {
+      const ids = ledger.peerIds();
+      return createAgentDirectory(agents.map((agent) => ({ id: agent.identity, label: agent.label, aliases: [agent.member_id, ...(ids.get(agent.identity) ?? [])] })));
+    };
+    const send = frame("tool_call_requested", { id: "demo-call-1", name: "send_message", args: { body: "Status?", handling_mode: "queue", peer_id: "0799c446-313b" } });
+    const before = directoryNow();
+    expect(frameSentence(classifyFrame(send, before), (key) => before.lookup(key)?.label ?? key)).toBe("Billing messaged a peer");
+    // A notice from Support names its peer id and its comms name.
+    const version = ledger.getPeersVersion();
+    ledger.ingest(frame("system_notice", {
+      blocks: [{ type: "comms", kind: "message", direction: "incoming", delivery_id: "env-1", peer: { id: "0799c446-313b", display_name: "customer-ops/specialist/support-member" } }],
+    }, { identity: "domain:billing" }));
+    expect(ledger.getPeersVersion()).toBeGreaterThan(version);
+    expect(ledger.peerIds().get("domain:support")).toEqual(["0799c446-313b"]);
+    const after = directoryNow();
+    const sent = classifyFrame(send, after);
+    expect([sent.target, frameSentence(sent, (key) => after.lookup(key)?.label ?? key)]).toEqual(["domain:support", "Billing messaged Support"]);
+  });
+
+  it("names a memory event by its payload, never \"System\"", () => {
+    const system = { identity: "_system" };
+    const dream = classifyFrame(frame("memory.dream.completed", { detail: { phase: "consolidate" }, ops_committed: 2, realm: "default" }, system));
+    expect([named(frame("memory.dream.completed", { ops_committed: 2 }, system)), dream.snippet]).toEqual(["A memory dream finished", "2 changes"]);
+    expect(named(frame("memory.dream.started", { realm: "default" }, system))).toBe("A memory dream started");
+    const quarantined = classifyFrame(frame("memory.write.quarantined", { author: "agent shipping", realm: "default", reason: "matches the 'credential-assignment' secret pattern class" }, system), names);
+    expect([named(frame("memory.write.quarantined", { author: "agent shipping" }, system)), quarantined.actor, quarantined.snippet]).toEqual([
+      "A memory write from Shipping was quarantined",
+      "shipping",
+      "matches the 'credential-assignment' secret pattern class",
+    ]);
+    // The runtime's own author form.
+    expect(named(frame("memory.write.quarantined", { author: "Agent { identity: \"shipping\" }" }, system))).toBe("A memory write from Shipping was quarantined");
+    expect(named(frame("memory.write.quarantined", { author: "Operator" }, system))).toBe("A memory write from the operator was quarantined");
+    const conflict = classifyFrame(frame("memory.conflict.signal", { entity: "billing", realm: "default", reason: "a 200 EUR threshold is still quoted next to the 250 EUR policy", topic: "refund approval threshold" }, system));
+    expect([frameSentence(conflict, asKeys), conflict.snippet]).toEqual([
+      "Conflicting memories about billing, refund approval threshold",
+      "a 200 EUR threshold is still quoted next to the 250 EUR policy",
+    ]);
+    const moved = classifyFrame(frame("memory.record.promoted", { gated: false, realm: "default", scope_key: "billing", scope_kind: "identity" }, system), names);
+    expect([named(frame("memory.record.promoted", { scope_key: "billing", scope_kind: "identity" }, system)), moved.actor]).toEqual([
+      "A memory record moved to Billing's memory",
+      "billing",
+    ]);
+    expect(named(frame("memory.quarantine.verdict", { verdict: "unverifiable" }, system))).toBe("A quarantined record was reviewed");
+    for (const event of ["memory.dream.skipped", "memory.quarantine.release_blocked", "memory.budget.denied", "memory.hygiene.blocked", "memory.distill.timed_out", "memory.something_new"]) {
+      expect(named(frame(event, {}, system)), event).not.toContain("System");
+    }
+  });
+
+  it("reads a tool's JSON error as its kind and its message", () => {
+    const denied = classifyFrame(frame("tool_result_received", {
+      id: "demo-call-9-tool", name: "workgraph_ready", is_error: true,
+      content: [{ type: "text", text: "{\"error\":\"access_denied\",\"message\":\"Tool 'workgraph_ready' is not allowed by policy\"}" }],
+    }));
+    expect(denied.snippet).toBe("Access denied: Tool 'workgraph_ready' is not allowed by policy");
+    expect(toolFailureWords("{\"error\":\"timeout\",\"message\":\"Tool 'query_carrier' timed out after 4000ms\"}")).toBe("Timeout: Tool 'query_carrier' timed out after 4000ms");
+    expect(toolFailureWords("rate limited")).toBe("rate limited");
+  });
+
+  it("reads a model failure as its human part, the provider as context", () => {
+    const chain = "Terminal failure: Failed (LlmFailure): LLM failure terminal turn: LLM error (anthropic): Invalid request: The model provider rejected the request: the input is 412,880 tokens and exceeds the 200,000 token context window (the full carrier rate export was attached).";
+    expect(failureWords(chain)).toBe("Invalid request (Anthropic): The model provider rejected the request: the input is 412,880 tokens and exceeds the 200,000 token context window (the full carrier rate export was attached).");
+    expect(failureWords("Terminal failure: Failed (ToolFailure): tool failure terminal turn: payment API unreachable")).toBe("payment API unreachable");
+    expect(failureWords("LLM error (openai): Rate limited")).toBe("OpenAI: Rate limited");
+    const failed = classifyFrame(frame("interaction_failed", {
+      error: chain,
+      error_report: { class: "llm", message: chain, reason: { cause_kind: "llm_failure", outcome: "failed", reason_type: "turn_terminal_cause" } },
+      reason: "turn_terminal_cause",
+      terminal_cause_kind: "llm_failure",
+    }, { identity: "shipping" }));
+    expect(failed.snippet?.startsWith("Invalid request (Anthropic): The model provider rejected the request: the input is 412,880 tokens")).toBe(true);
+    expect([failed.severity, failed.snippet?.includes("Terminal failure"), failed.snippet?.includes("turn_terminal_cause")]).toEqual(["crit", false, false]);
+  });
+
+  it("drops the envelope line of a peer message notice", () => {
+    const peer = { display_name: "customer-ops/coordinator/intake", id: "512386b1-2cda-526f-94ef-3d3388ef8ceb" };
+    const text = "Peer message from customer-ops/coordinator/intake:\nTicket 88101 for Billing: payment failed twice on enterprise order 77310.";
+    const notice = classifyFrame(frame("system_notice", {
+      blocks: [{ type: "comms", kind: "message", direction: "incoming", delivery_id: "cbfb673c", peer, summary: "Peer message", content: [{ type: "text", text }] }],
+    }, { identity: "billing", sourceKind: "session_history" }), names);
+    expect([frameSentence(notice, (key) => names.lookup(key)?.label ?? key), notice.snippet]).toEqual([
+      "Intake messaged Billing",
+      "Ticket 88101 for Billing: payment failed twice on enterprise order 77310.",
+    ]);
+    // Only an envelope that names the notice's own peer goes; without the
+    // peer's names, text that merely starts that way stays.
+    expect(stripPeerTransportScaffold("Peer message from customer-ops/coordinator/dispatch: Morning. Status?", ["customer-ops/coordinator/dispatch"])).toBe("Morning. Status?");
+    expect(stripPeerTransportScaffold("[COMMS REQUEST from dispatch] Carrier status?", ["dispatch"])).toBe("Carrier status?");
+    expect(stripPeerTransportScaffold("Peer message from someone-else:\nHi", ["customer-ops/coordinator/dispatch"])).toBe("Peer message from someone-else:\nHi");
+    expect(stripPeerTransportScaffold("Peer request from fugue/peer-a:\nDone.")).toBe("Peer request from fugue/peer-a:\nDone.");
+  });
+
+  it("lists one kickoff once, whichever of the member's peers got a copy", () => {
+    const kickoff = (receiver: string, atMs: number, peerId = "0799c446-313b") => frame("system_notice", {
+      blocks: [{ type: "comms", kind: "lifecycle", direction: "incoming", intent: "mob.kickoff_started", summary: "Peer lifecycle: mob.kickoff_started", peer: { display_name: "customer-ops/specialist/shipping", id: peerId }, payload: { peer: "shipping", role: "specialist" } }],
+    }, { identity: receiver, sourceKind: "session_history", timestampMs: atMs });
+    const at = Date.UTC(2026, 10, 1, 8, 0, 30);
+    const keys = [kickoff("incident", at + 3), kickoff("dispatch", at), kickoff("orders", at + 7)].map((f) => classifyFrame(f).eventKey);
+    expect(new Set(keys).size).toBe(1);
+    expect(sentence(kickoff("orders", at))).toBe("shipping's kickoff started");
+    // The member started again (a new comms peer id): another kickoff.
+    expect(classifyFrame(kickoff("incident", at + 600_000, "5a1d9e07-77aa")).eventKey).not.toBe(keys[0]);
   });
 });
 

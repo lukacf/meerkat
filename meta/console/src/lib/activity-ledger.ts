@@ -134,6 +134,10 @@ export interface ActivityLedger extends ActivityLedgerReader {
   /** Listen for changes, at most once per notify interval. */
   subscribe(listener: () => void): () => void;
   getVersion(): number;
+  /** Changes when the ledger learns which agent a comms peer id names, or resolves names anew. */
+  getPeersVersion(): number;
+  /** The comms peer ids the ledger has seen, by the agent each names (agents the resolver knows only). */
+  peerIds(): Map<string, string[]>;
 }
 
 export interface ActivityLedgerOptions {
@@ -350,6 +354,7 @@ class Ledger implements ActivityLedger {
   private callResults = new Map<string, "receipted" | "refused">();
   /** Peer ids to the names (or identities) they stand for. */
   private peerNames = new Map<string, string>();
+  private peersVersion = 0;
   private seen = new Set<string>();
   private resolver: LedgerResolver | null = null;
   private listeners = new Set<() => void>();
@@ -368,6 +373,8 @@ class Ledger implements ActivityLedger {
 
   getVersion = (): number => this.publishedVersion;
 
+  getPeersVersion = (): number => this.peersVersion;
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -375,6 +382,7 @@ class Ledger implements ActivityLedger {
 
   setResolver(resolver: LedgerResolver | null): void {
     this.resolver = resolver;
+    this.peersVersion += 1;
     this.changed();
   }
 
@@ -384,6 +392,7 @@ class Ledger implements ActivityLedger {
     this.messageAliases.clear();
     this.callResults.clear();
     this.peerNames.clear();
+    this.peersVersion += 1;
     this.seen.clear();
     this.changed();
   }
@@ -402,16 +411,17 @@ class Ledger implements ActivityLedger {
   }
 
   private ingestOne(frame: ConsoleFrame): boolean {
+    const data = recordOf(frame.data);
+    // What a peer id stands for holds however old the frame that says so.
+    let changed = this.capturePeers(frame, data);
     const atMs = frame.timestampMs;
-    if (typeof atMs !== "number" || !Number.isFinite(atMs)) return false;
+    if (typeof atMs !== "number" || !Number.isFinite(atMs)) return changed;
     const nowMs = this.now();
-    if (atMs < nowMs - LEDGER_WINDOW_MS) return false;
+    if (atMs < nowMs - LEDGER_WINDOW_MS) return changed;
     if (++this.ingestsSincePrune >= 500) {
       this.ingestsSincePrune = 0;
       this.prune(nowMs);
     }
-    const data = recordOf(frame.data);
-    let changed = this.capturePeers(frame, data);
     const classified = classifyFrame(frame);
     const identity = this.canonical(frame.identity);
     changed = this.applySpan(classified, identity, atMs, frame.event) || changed;
@@ -488,12 +498,16 @@ class Ledger implements ActivityLedger {
       }
     }
     let changed = false;
-    for (const [id, name] of learned) {
-      if (this.peerNames.get(id) === name) continue;
-      this.peerNames.set(id, name);
-      changed = true;
-    }
+    for (const [id, name] of learned) changed = this.learnPeer(id, name) || changed;
     return changed;
+  }
+
+  /** Remember what a peer reference stands for: a name, or an agent's identity. */
+  private learnPeer(reference: string, name: string): boolean {
+    if (this.peerNames.get(reference) === name) return false;
+    this.peerNames.set(reference, name);
+    this.peersVersion += 1;
+    return true;
   }
 
   private count(identity: string, classified: ClassifiedFrame, frame: ConsoleFrame, atMs: number): boolean {
@@ -741,13 +755,13 @@ class Ledger implements ActivityLedger {
   private mergeMessage(kept: MessageRecord, other: MessageRecord): boolean {
     let changed = false;
     if (!kept.toResolved && other.toResolved) {
-      if (kept.to !== other.to) this.peerNames.set(kept.to, other.to);
+      if (kept.to !== other.to) this.learnPeer(kept.to, other.to);
       kept.to = other.to;
       kept.toResolved = true;
       changed = true;
     }
     if (!kept.fromResolved && other.fromResolved) {
-      if (kept.from !== other.from) this.peerNames.set(kept.from, other.from);
+      if (kept.from !== other.from) this.learnPeer(kept.from, other.from);
       kept.from = other.from;
       kept.fromResolved = true;
       changed = true;
@@ -875,6 +889,18 @@ class Ledger implements ActivityLedger {
   }
 
   // ── Reads ──────────────────────────────────────────────────────────
+
+  peerIds(): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    for (const [reference, name] of this.peerNames) {
+      const identity = this.resolver?.(name) ?? this.resolver?.(lastPathSegment(name));
+      if (!identity || identity === reference) continue;
+      const ids = out.get(identity);
+      if (ids) ids.push(reference);
+      else out.set(identity, [reference]);
+    }
+    return out;
+  }
 
   identities(): string[] {
     return [...this.identityRecords.entries()]

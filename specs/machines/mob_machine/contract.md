@@ -556,7 +556,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyPeerNotice`(recipient: AgentIdentity, sender: AgentIdentity, notice_class: PeerInputClass)
 - `CommitDormantSeat`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, kickoff_owed: Bool, session_unborn: Bool, fresh_launch: Bool, definition_wiring_exempt: Bool)
 - `ResolveMemberHostPreparation`(agent_identity: AgentIdentity)
-- `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, target: RotationTarget)
+- `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, target: RotationTarget, profile_name: String)
 - `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String, definition_wiring_exempt: Bool)
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId>)
 - `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: Bool)
@@ -657,7 +657,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberSeatSession`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: Bool)
 - `ExemptMemberFromDefinitionWiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverIdentityEntry`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: IdentityEntryOrigin)
-- `RecoverMemberRotationIntent`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: RotationTarget, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>)
+- `RecoverMemberRotationIntent`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: RotationTarget, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, profile_name: String)
 - `RecoverIdentityEntryRetiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 
 ## Effects
@@ -16045,7 +16045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginMemberRotationRunning`
 - From: `Running`
-- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target)
+- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name)
 - Guards:
   - `fresh_session_target`
   - `composition_authoritative`
@@ -16064,7 +16064,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginMemberRotationSameSessionRunning`
 - From: `Running`
-- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target)
+- On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name)
 - Guards:
   - `same_session_target`
   - `composition_authoritative`
@@ -16078,7 +16078,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `rotation_not_pending`
   - `same_session`
   - `session_not_archived`
-  - `member_keeps_its_endpoint`
+  - `endpoint_only_for_another_role`
+  - `endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
 - To: `Running`
 
@@ -16813,6 +16814,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
+  - `rotation_endpoint_only_for_another_role`
+  - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
 - To: `Running`
 
@@ -16843,6 +16846,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
+  - `rotation_endpoint_only_for_another_role`
+  - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`
 - To: `Stopped`
 
@@ -16873,6 +16878,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
+  - `rotation_endpoint_only_for_another_role`
+  - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Running`
 
@@ -16903,12 +16910,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `next_runtime_fresh`
   - `spawn_profile_name_authorized`
   - `spawn_profile_addressability_authorized`
+  - `rotation_endpoint_only_for_another_role`
+  - `rotation_endpoint_keeps_the_members_peer_id`
 - Emits: `AppendLifecycleJournal`, `AppendLifecycleJournal`, `WiringGraphChanged`, `EmitMemberLifecycleNotice`, `EmitMemberLifecycleNotice`, `PublishWakeRoute`, `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Stopped`
 
 ### `RecoverMemberRotationIntentFreshSessionRunning`
 - From: `Running`
-- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name)
 - Guards:
   - `fresh_session_target`
   - `destroy_not_admitted`
@@ -16921,7 +16930,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverMemberRotationIntentSameSessionRunning`
 - From: `Running`
-- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name)
 - Guards:
   - `same_session_target`
   - `destroy_not_admitted`
@@ -16930,12 +16939,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_not_placed`
   - `rotation_not_recorded`
   - `same_session`
-  - `member_keeps_its_endpoint`
+  - `endpoint_only_for_another_role`
+  - `endpoint_keeps_the_members_peer_id`
 - To: `Running`
 
 ### `RecoverMemberRotationIntentDestroyingRunning`
 - From: `Running`
-- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint)
+- On: `RecoverMemberRotationIntent`(agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name)
 - Guards:
   - `destroy_admitted`
 - To: `Running`

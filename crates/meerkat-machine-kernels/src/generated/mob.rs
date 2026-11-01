@@ -10257,6 +10257,7 @@ pub mod inputs {
         pub peer_endpoint: Option<MemberPeerEndpoint>,
         pub session_archived: bool,
         pub target: RotationTarget,
+        pub profile_name: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitMemberRotation {
@@ -11633,6 +11634,7 @@ pub mod signals {
         pub target: RotationTarget,
         pub session_id: SessionId,
         pub peer_endpoint: Option<MemberPeerEndpoint>,
+        pub profile_name: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverIdentityEntryRetiring {

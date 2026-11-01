@@ -7551,40 +7551,48 @@ impl SessionDocumentMachineAuthority {
                     matches.push(SessionDocumentTransition::ResolveRunStartInstructionsApply);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (((run_start != InstructionRunStart::FreshRun)
-                        || ((((((self
+                    && (((!(self
+                        .state
+                        .session_instruction_entry_sequence
+                        .contains_key(&session_id)))
+                        || ((run_start != InstructionRunStart::FreshRun)
+                            || ((((((self
+                                .state
+                                .session_instruction_target_revision
+                                .contains_key(&session_id))
+                                && (self
+                                    .state
+                                    .session_instruction_target_effect
+                                    .contains_key(&session_id)))
+                                && (self
+                                    .state
+                                    .session_instruction_target_digest
+                                    .contains_key(&session_id)))
+                                && (self
+                                    .state
+                                    .session_instruction_effective_revision
+                                    .contains_key(&session_id)))
+                                && (self
+                                    .state
+                                    .session_instruction_effective_effect
+                                    .contains_key(&session_id)))
+                                && (self
+                                    .state
+                                    .session_instruction_effective_digest
+                                    .contains_key(&session_id)))))
+                        && ((self
                             .state
-                            .session_instruction_target_revision
+                            .session_instruction_entry_sequence
                             .contains_key(&session_id))
-                            && (self
-                                .state
-                                .session_instruction_target_effect
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_target_digest
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_revision
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_effect
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_digest
-                                .contains_key(&session_id))))
-                        && ((run_start != InstructionRunStart::FreshRun)
-                            || (instruction_change_pending(
-                                self.session_instruction_target_revision_value(&session_id)?,
-                                self.session_instruction_target_effect_value(&session_id)?,
-                                self.session_instruction_target_digest_value(&session_id)?,
-                                self.session_instruction_effective_revision_value(&session_id)?,
-                                self.session_instruction_effective_effect_value(&session_id)?,
-                                self.session_instruction_effective_digest_value(&session_id)?,
-                            ) == false)))
+                            && ((run_start != InstructionRunStart::FreshRun)
+                                || (instruction_change_pending(
+                                    self.session_instruction_target_revision_value(&session_id)?,
+                                    self.session_instruction_target_effect_value(&session_id)?,
+                                    self.session_instruction_target_digest_value(&session_id)?,
+                                    self.session_instruction_effective_revision_value(&session_id)?,
+                                    self.session_instruction_effective_effect_value(&session_id)?,
+                                    self.session_instruction_effective_digest_value(&session_id)?,
+                                ) == false))))
                 {
                     matches.push(SessionDocumentTransition::ResolveRunStartInstructionsNoChange);
                 }

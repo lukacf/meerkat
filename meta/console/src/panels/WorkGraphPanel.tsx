@@ -1,5 +1,6 @@
 import React from "react";
 import type {
+  WorkGraphSnapshotResult,
   WorkGraphWireBinding,
   WorkGraphWireEdge,
   WorkGraphWireEvent,
@@ -235,6 +236,19 @@ export function workGraphEventsNewestFirst(events: WorkGraphWireEvent[]): WorkGr
   return [...events].reverse();
 }
 
+/// The cut one snapshot read reports, for the panel's notice: whether more
+/// items match than the page holds, and how many match when the runtime
+/// reports it.
+export function workGraphSnapshotCut(
+  snapshot: Pick<WorkGraphSnapshotResult, "truncated" | "total_items"> | null | undefined,
+  itemCount: number,
+): { truncated: boolean; total: number | null } {
+  return {
+    truncated: snapshot?.truncated === true || itemCount >= WORKGRAPH_SNAPSHOT_LIMIT,
+    total: typeof snapshot?.total_items === "number" ? snapshot.total_items : null,
+  };
+}
+
 /// Sequences overlapping refreshes: `begin()` returns an `isCurrent` probe
 /// that goes false the moment a newer refresh begins, so a stale resolution
 /// never overwrites a fresher snapshot.
@@ -355,6 +369,7 @@ export const __workGraphPanelTest = {
   workGraphGoalRevisionOf,
   workGraphEventsParams,
   workGraphEventsNewestFirst,
+  workGraphSnapshotCut,
   createWorkGraphRefreshSequencer,
   workGraphModeWord,
   workGraphBindingStateText,

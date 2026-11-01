@@ -235,6 +235,7 @@ import {
   createWorkGraphRefreshSequencer,
   workGraphEventsNewestFirst,
   workGraphEventsParams,
+  workGraphSnapshotCut,
   type WorkGraphPanelData,
 } from "./panels/WorkGraphPanel";
 import { RoutingPanel, deliverySummaries } from "./panels/RoutingPanel";
@@ -3391,6 +3392,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (!isCurrent() || panelRuntimeKeyRef.current !== panelRuntimeKey) return;
       setWorkGraphDataRuntimeKey(panelRuntimeKey);
       const items = snapshot?.items || [];
+      const cut = workGraphSnapshotCut(snapshot, items.length);
       setWorkGraphData({
         items,
         edges: snapshot?.edges || [],
@@ -3402,8 +3404,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         readyItemIds: Array.isArray(snapshot?.ready_item_ids) ? snapshot.ready_item_ids : null,
         // Today's snapshot carries no total, so a full page may have more
         // behind it; a runtime that reports the total (S4) says so exactly.
-        truncated: snapshot?.truncated === true || items.length >= WORKGRAPH_SNAPSHOT_LIMIT,
-        total: typeof snapshot?.total_items === "number" ? snapshot.total_items : null,
+        truncated: cut.truncated,
+        total: cut.total,
         unavailable: false,
         denied,
         error: null,

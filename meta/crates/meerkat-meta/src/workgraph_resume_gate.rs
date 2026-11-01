@@ -952,6 +952,31 @@ mod tests {
         assert!(kept.claim.is_some(), "a live claim is left alone");
     }
 
+    /// A lapsed claim on an item past the first page of the claim scan still
+    /// supersedes the run: the scan reads every page.
+    #[tokio::test]
+    async fn resume_gate_checks_claims_past_the_first_page() {
+        let service = service();
+        let worker = Worker::named(WORKER);
+        let lapsed = plain_item(&service).await;
+        claim(&service, &lapsed, member_key(WORKER), lapsing_soon()).await;
+        // A full page of newer open items (the WorkGraph maximum, 1000) puts
+        // the claimed item on the second page.
+        for _ in 0..1000 {
+            plain_item(&service).await;
+        }
+        let_the_lease_lapse().await;
+
+        let gate = WorkGraphResumeGate::new(service.clone());
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert!(superseded_reason(&check).contains("lapsed"), "{check:?}");
+        let after = service
+            .get(None, None, lapsed.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.claim, None, "the lapsed claim is observed");
+    }
+
     #[tokio::test]
     async fn a_workgraph_read_fault_is_unavailable() {
         let disabled = WorkGraphService::with_scope(

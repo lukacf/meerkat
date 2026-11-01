@@ -3243,6 +3243,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_walk_flags_changes_after_its_anchor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..5 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        let first = tool_page(&service, "workgraph_list", json!({ "limit": 2 })).await;
+        let anchor = first["anchor_event_seq"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("a page names its walk's anchor: {first}"));
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        // The oldest item, not yet returned, changes after the anchor.
+        let changed = touch(&service, &created[0]).await;
+
+        let second = tool_page(
+            &service,
+            "workgraph_list",
+            json!({ "limit": 2, "cursor": next_cursor(&first) }),
+        )
+        .await;
+        assert_eq!(second["anchor_event_seq"], json!(anchor), "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+        // The events after the anchor name the changed item.
+        let events = tool_page(&service, "workgraph_events", json!({ "after_seq": anchor })).await;
+        assert!(
+            events["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .any(|event| event["item_id"] == json!(changed.id.as_str())),
+            "{events}"
+        );
+    }
+
+    #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),

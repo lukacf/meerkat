@@ -4853,6 +4853,12 @@ fn parse_memory_panel_cursor(raw: &str) -> Option<(u64, String)> {
     (!id.is_empty()).then(|| (ms, id.to_string()))
 }
 
+/// A record's place in the panel listing's order, the position a cursor
+/// names: its update time, then its memory id.
+fn memory_panel_record_position(record: &crate::memory::records::MemoryRecord) -> (u64, &str) {
+    (record.updated_at_ms, record.id.as_str())
+}
+
 /// The read action guarding a record of this scope on the panel (§10.3).
 /// Realm-scope reads ride an *unscoped* `agent.memory.read` grant (a rule
 /// with no resource selector); operator scope (live since P4's provisional
@@ -5243,38 +5249,71 @@ async fn handle_memory_panel_records(
         Ok(realms) => realms,
         Err(err) => return memory_panel_store_error(response_id, err),
     };
-    // Keyset continuation is per-realm: honored only when the query names
-    // one realm. Multi-realm listings merge one bounded page per realm.
-    let single_realm = realms.len() == 1;
+    // The cursor is a position in the listing's order (newest updated first,
+    // then by memory id), which every realm shares, so it resumes a read
+    // across realms as it resumes one realm. Each realm gives its first rows
+    // past the cursor that the caller may read: `limit` and one more for
+    // each realm read, enough to cut this page, keep the rows that share its
+    // last position together, and tell whether a readable row follows it.
+    let wanted = limit + realms.len();
     let mut records = Vec::new();
-    let mut next_cursor = None;
     for realm in &realms {
-        let page = match store
-            .records_page(
-                realm,
-                scope_kind.as_deref(),
-                scope_key.as_deref(),
-                status.as_deref(),
-                limit,
-                if single_realm { cursor.clone() } else { None },
-            )
-            .await
-        {
-            Ok(page) => page,
-            Err(err) => return memory_panel_store_error(response_id, err),
-        };
-        if single_realm {
-            next_cursor = page.next_cursor.as_ref().map(encode_memory_panel_cursor);
+        let mut realm_cursor = cursor.clone();
+        let mut batch = wanted;
+        let mut readable = Vec::new();
+        loop {
+            let page = match store
+                .records_page(
+                    realm,
+                    scope_kind.as_deref(),
+                    scope_key.as_deref(),
+                    status.as_deref(),
+                    batch,
+                    realm_cursor,
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => return memory_panel_store_error(response_id, err),
+            };
+            readable.extend(
+                page.records
+                    .into_iter()
+                    .filter(|record| memory_panel_record_visible(caller, record)),
+            );
+            if readable.len() >= wanted || page.next_cursor.is_none() {
+                break;
+            }
+            // The store pages every row, the ones the caller may not read
+            // included: read on past those in the largest panel page.
+            realm_cursor = page.next_cursor;
+            batch = wanted.max(MEMORY_PANEL_MAX_LIMIT);
         }
-        records.extend(page.records);
+        readable.truncate(wanted);
+        records.extend(readable);
     }
-    records.retain(|record| memory_panel_record_visible(caller, record));
     records.sort_by(|a, b| {
-        b.updated_at_ms
-            .cmp(&a.updated_at_ms)
-            .then_with(|| b.id.cmp(&a.id))
+        memory_panel_record_position(b)
+            .cmp(&memory_panel_record_position(a))
+            .then_with(|| a.scope.realm().cmp(b.scope.realm()))
     });
-    records.truncate(limit);
+    // Two realms can hold one memory id at one update time, and the cursor
+    // names only the position, so a page never ends between rows at one
+    // position: the next page starts past all of them.
+    let mut cut = limit.min(records.len());
+    while cut > 0
+        && records.get(cut).is_some_and(|next| {
+            memory_panel_record_position(next) == memory_panel_record_position(&records[cut - 1])
+        })
+    {
+        cut += 1;
+    }
+    let more = cut < records.len();
+    records.truncate(cut);
+    let next_cursor = records
+        .last()
+        .filter(|_| more)
+        .map(|last| encode_memory_panel_cursor(&(last.updated_at_ms, last.id.clone())));
     let rows: Vec<Value> = records
         .iter()
         .map(|record| memory_panel_record_json(record, false))

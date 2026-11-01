@@ -375,6 +375,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`meta/memory/panel/record`) likewise lists only the injections into
   identities the caller may read. Before, the Console hid some of these rows
   in the browser after they had arrived.
+- The Console Memory panel's record listing (`meta/memory/panel/records`)
+  cuts each page from the rows the caller may read and returns
+  `next_cursor` exactly when more of them follow. Before, it cut the page
+  and took the cursor before it dropped the rows the caller may not read,
+  so a restricted caller received short or empty pages that still carried
+  a cursor, and "Load more" could step through empty pages. A read that
+  names no `realm` lists every realm as one listing, newest updated first,
+  and a page cut from it now carries a cursor that resumes every realm;
+  before, such a page was cut with no cursor, so the rows past it could not
+  be listed. A page holds `limit` rows, or more only to keep together the
+  rows two realms hold under one memory id and update time.
 - On a shared Console the memory panel reads judge each identity under the
   name the Console gives it, `<namespace>/<identity>`, after recording the
   access attributes of its runtimes, as its send route does. Before, every

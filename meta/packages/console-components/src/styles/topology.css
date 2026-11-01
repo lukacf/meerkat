@@ -188,6 +188,7 @@
   list-style: none;
 }
 .topo-drawer__connection {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--_cc-sp-4);
@@ -231,6 +232,16 @@
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The row's action takes no room while hidden: it covers the end of the
+   words on hover or focus, on the drawer's own surface. */
+.topo-drawer__row-action {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  background: var(--_cc-surface-card);
+  box-shadow: -12px 0 10px -2px var(--_cc-surface-card);
 }
 .topo-drawer__connection:hover .topo-drawer__row-action,
 .topo-drawer__connection:focus-within .topo-drawer__row-action { opacity: 1; }

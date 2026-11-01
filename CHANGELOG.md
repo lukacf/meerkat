@@ -1628,6 +1628,17 @@ them.
   admitted and pending in the cold successor, and a resubmission with the
   same idempotency key is deduplicated against it.
 
+- `meerkat-mob`: a spawn of a local session member in a mob with no
+  runtime (a definition whose profiles are all TurnDriven, on a session
+  service that provides no runtime adapter) is refused typed before
+  anything of it exists, with `MobError::MissingMemberCapability`
+  (`outbound_comms_runtime`), the refusal a resume answers for a running
+  mob that holds such a member. Before, the spawn staged, installed the
+  member's generated operation owner, created its session and then failed
+  `Internal` ("mob provisioner received generated operation owner
+  authority without prepared generated bindings"). A placed or externally
+  bound spawn is unaffected.
+
 - `meerkat-runtime`: the threads of the crate's two process-wide Tokio
   runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
   16 MiB again when `RKAT_WORKER_STACK_BYTES` is unset, or `RUST_MIN_STACK`

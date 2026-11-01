@@ -17661,6 +17661,43 @@ impl MobActor {
         )
     }
 
+    /// Refuse, typed, a spawn that seats a local session member (its binding
+    /// resolves to [`crate::RuntimeBinding::Session`], as [`resolve_binding`]
+    /// resolves it) in a mob with no runtime. Such a member is materialized
+    /// and served by the mob's runtime: its session-owned bindings (the
+    /// operation registry its generated owner binds) and its outbound comms
+    /// drain are the runtime's, and a resume refuses a running mob that holds
+    /// one without it. The spawn answers that same refusal
+    /// ([`MobError::MissingMemberCapability`], `OutboundCommsRuntime`) before
+    /// anything of it exists: no profile authority, no staged spawn and its
+    /// owner, no session, no row.
+    #[cfg(feature = "runtime-adapter")]
+    fn refuse_local_session_member_without_runtime(
+        &self,
+        agent_identity: &AgentIdentity,
+        binding: Option<&crate::RuntimeBinding>,
+        backend: Option<crate::MobBackendKind>,
+        profile_backend: Option<crate::MobBackendKind>,
+    ) -> Result<(), MobError> {
+        let local_session = match binding {
+            Some(binding) => matches!(binding, crate::RuntimeBinding::Session),
+            None => {
+                backend
+                    .or(profile_backend)
+                    .unwrap_or(self.definition.backend.default)
+                    == crate::MobBackendKind::Session
+            }
+        };
+        if local_session && self.runtime_adapter.is_none() {
+            return Err(MobError::MissingMemberCapability {
+                member_id: agent_identity.clone(),
+                capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                context: "local member comms-drain runtime adapter",
+            });
+        }
+        Ok(())
+    }
+
     fn apply_generated_self_owned_operation_owner(
         provision_request: &mut ProvisionMemberRequest,
         generated_owner: &AuthorizedMobSpawnStart,
@@ -36152,6 +36189,16 @@ impl MobActor {
                 profile = %profile_name,
                 "MobActor::enqueue_spawn profile resolved"
             );
+            // A local session member needs the mob's runtime: a mob with none
+            // refuses its spawn here, before its profile authority, its
+            // staging, its owner or its session exist.
+            #[cfg(feature = "runtime-adapter")]
+            self.refuse_local_session_member_without_runtime(
+                &agent_identity,
+                binding.as_ref(),
+                backend,
+                profile.backend,
+            )?;
             // ADJ-6: the workgraph observation is the EXPLICIT resolved
             // profile fact, captured BEFORE the inherited-open mutation.
             let explicit_workgraph = profile.tools.workgraph;
@@ -40032,6 +40079,15 @@ impl MobActor {
                 profile: profile_name.clone(),
             });
         }
+        // So is a local session member in a mob with no runtime, before its
+        // profile authority, its staging or its owner exist.
+        #[cfg(feature = "runtime-adapter")]
+        self.refuse_local_session_member_without_runtime(
+            agent_identity,
+            binding.as_ref(),
+            backend,
+            profile.backend,
+        )?;
         let continuity_intent = continuity_intent.for_profile(&profile, agent_identity);
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         // ADJ-6: explicit fact captured before the inherited-open mutation.

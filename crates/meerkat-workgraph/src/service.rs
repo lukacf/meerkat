@@ -3429,6 +3429,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_report_truncated_and_next_after_seq() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..5 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+
+        // Five created events, read two at a time.
+        let first = tool_page(&service, "workgraph_events", json!({ "limit": 2 })).await;
+        let events = first["events"].as_array().expect("events");
+        assert_eq!(events.len(), 2, "{first}");
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        assert_eq!(first["next_after_seq"], events[1]["seq"], "{first}");
+        let high_water = first["event_high_water_mark"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("an events page names the high-water mark: {first}"));
+
+        let rest = tool_page(
+            &service,
+            "workgraph_events",
+            json!({ "after_seq": first["next_after_seq"], "limit": 10 }),
+        )
+        .await;
+        assert_eq!(rest["events"].as_array().map(Vec::len), Some(3), "{rest}");
+        assert_eq!(rest["truncated"], json!(false), "{rest}");
+        assert!(rest.get("next_after_seq").is_none(), "{rest}");
+        assert_eq!(rest["event_high_water_mark"], json!(high_water), "{rest}");
+        assert_eq!(rest["events"][2]["seq"], json!(high_water), "{rest}");
+    }
+
+    #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
